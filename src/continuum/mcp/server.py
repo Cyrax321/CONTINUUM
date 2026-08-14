@@ -287,13 +287,10 @@ def build_server(
         # is intact yet unprojectable would be poisoned permanently. The
         # `Progress` model enforces this at projection time; checking here keeps
         # the bad value out of the event log in the first place.
-        if total is not None:
-            if completed < 0 or failed < 0:
-                raise ValueError("progress counters must be non-negative")
-            if completed + failed > total:
-                raise ValueError(
-                    f"completed ({completed}) + failed ({failed}) exceeds total ({total})"
-                )
+        if completed < 0 or failed < 0:
+            raise ValueError("progress counters must be non-negative")
+        if total is not None and completed + failed > total:
+            raise ValueError(f"completed ({completed}) + failed ({failed}) exceeds total ({total})")
         ctx.storage.append_event(run_id, EventType.TASK_UPDATED, payload, source=AGENT_SOURCE)
 
         state = project(run_id, ctx.storage.read_events(run_id))

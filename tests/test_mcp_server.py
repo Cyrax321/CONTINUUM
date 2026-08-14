@@ -185,6 +185,36 @@ async def test_over_total_progress_is_rejected_before_being_written(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "negative_update",
+    [
+        {"completed": -5},
+        {"completed": 0, "failed": -1},
+    ],
+)
+async def test_negative_progress_is_rejected_before_being_written_without_total(
+    server_ctx: tuple[Any, Any],
+    negative_update: dict[str, int],
+) -> None:
+    """Negative counters must be rejected even when `total` is omitted, or the
+    bad event is written and every later projection/checkpoint/resume fails
+    permanently (issue #38)."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, ctx = server_ctx
+    ctx.storage.create_run(Run(run_id="run_1", goal="g"))
+    arguments = {"run_id": "run_1", "goal": "g", **negative_update}
+    with pytest.raises(ToolError, match="must be non-negative"):
+        await server.call_tool(
+            "continuum_record_progress",
+            arguments,
+            context=_ctx(TEST_CLIENT),
+        )
+    # Nothing beyond the start event was written: the log is not poisoned.
+    assert [e.type.value for e in ctx.storage.read_events("run_1")] == ["RUN_STARTED"]
+
+
+@pytest.mark.asyncio
 async def test_recording_progress_for_an_unknown_run_without_a_goal_fails(
     server_ctx: tuple[Any, Any],
 ) -> None:
