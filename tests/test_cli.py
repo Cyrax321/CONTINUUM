@@ -23,7 +23,7 @@ from continuum.cli import ExitCode, main
 from continuum.cli.exitcodes import exit_code_for
 from continuum.environment import StaticProvider, capture
 from continuum.events import EventType
-from continuum.models import RecoveryMode, Run
+from continuum.models import Finding, RecoveryMode, Run
 from continuum.storage import SQLiteStorage
 
 
@@ -491,3 +491,104 @@ def test_report_and_hint_appear_in_the_right_order(db: str) -> None:
     result = _cli(db, "resume", "run_1", "--env", "dataset=v4")
     assert "Next permitted action" in result.stdout
     assert "--repair" in result.stderr
+
+
+# --- replay actually verifies (issue #31) ---------------------------------- #
+
+
+def test_replay_confirms_the_state_matches_the_stored_version(db: str) -> None:
+    """The docstring's promise, now enforced: replay re-derives and compares."""
+    code, out, _ = run("--db", db, "replay", "run_1")
+    assert code == ExitCode.OK
+    assert "Verification: matches stored version" in out
+
+
+def test_replay_reports_verification_in_json(db: str) -> None:
+    code, out, _ = run("--db", db, "--json", "replay", "run_1")
+    payload = json.loads(out)
+    assert code == ExitCode.OK
+    assert payload["verified"] is True
+    assert "matches stored version" in payload["verification"]
+
+
+def test_replay_still_verifies_after_more_work_than_the_last_version(db: str) -> None:
+    """Events after the last checkpoint are normal, not corruption.
+
+    The stored version projects a prefix; the log keeps growing. Comparing a
+    full replay against it would flag every healthy run mid-flight.
+    """
+    with SQLiteStorage(db) as store:
+        for i in range(60, 70):
+            store.append_event("run_1", EventType.WORK_COMPLETED, {"doc": i})
+
+    code, out, _ = run("--db", db, "replay", "run_1")
+    assert code == ExitCode.OK
+    assert "matches stored version" in out
+
+
+def test_replay_detects_a_tampered_stored_version(db: str) -> None:
+    """A stored version the events do not project to must not exit 0."""
+    with SQLiteStorage(db) as store:
+        stored = store.latest_version("run_1")
+        assert stored is not None
+        # A phantom finding: structurally valid, so the storage layer's own
+        # integrity check still passes and only the replay comparison can
+        # catch it. (Nudging progress instead trips a model validator, which
+        # would be testing SemanticState rather than replay.)
+        tampered = stored.model_copy(
+            update={
+                "findings": [
+                    *stored.findings,
+                    Finding(finding_id="ghost", claim="never happened"),
+                ]
+            }
+        )
+        store.put_version(tampered, reason="tampered")
+
+    code, out, err = run("--db", db, "replay", "run_1")
+    assert code == ExitCode.CORRUPTED
+    assert "DOES NOT match stored version" in out
+    assert "run_1" in err
+
+
+def test_replay_reports_a_mismatch_in_json(db: str) -> None:
+    with SQLiteStorage(db) as store:
+        stored = store.latest_version("run_1")
+        assert stored is not None
+        # A phantom finding: structurally valid, so the storage layer's own
+        # integrity check still passes and only the replay comparison can
+        # catch it. (Nudging progress instead trips a model validator, which
+        # would be testing SemanticState rather than replay.)
+        tampered = stored.model_copy(
+            update={
+                "findings": [
+                    *stored.findings,
+                    Finding(finding_id="ghost", claim="never happened"),
+                ]
+            }
+        )
+        store.put_version(tampered, reason="tampered")
+
+    code, out, _ = run("--db", db, "--json", "replay", "run_1")
+    payload = json.loads(out)
+    assert code == ExitCode.CORRUPTED
+    assert payload["verified"] is False
+
+
+def test_replay_says_so_when_there_is_no_stored_version(tmp_path: Path) -> None:
+    """Unverified must be reported, not silently counted as verified."""
+    path = str(tmp_path / "bare.db")
+    with SQLiteStorage(path) as store:
+        store.create_run(Run(run_id="bare", goal="G"))
+        store.append_event("bare", EventType.RUN_STARTED, {"goal": "G", "total": 1})
+
+    code, out, _ = run("--db", path, "replay", "bare")
+    assert code == ExitCode.OK
+    assert "skipped (no stored version" in out
+
+
+def test_replay_verification_is_independent_of_upto(db: str) -> None:
+    """--upto narrows what is displayed, not what is verified."""
+    code, out, _ = run("--db", db, "replay", "run_1", "--upto", "3")
+    assert code == ExitCode.OK
+    assert "matches stored version" in out

@@ -37,6 +37,7 @@ from continuum.models import ActionStatus, EnvironmentSnapshot, EnvResource, Ori
 from continuum.recovery import RecoveryEngine, render_contract
 from continuum.state.diff import diff_states, render_diff
 from continuum.state.semantic import ProjectionError, project
+from continuum.state.versioning import state_fingerprint
 from continuum.storage import (
     CheckpointNotFound,
     CorruptedRecord,
@@ -554,18 +555,58 @@ def cmd_replay(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     storage.get_run(args.run_id)
     events = storage.read_events(args.run_id, upto=args.upto)
     state = project(args.run_id, events)
+
+    verified, verification = _verify_against_stored(args.run_id, storage)
+
     payload = {
         "run_id": args.run_id,
         "events_replayed": len(events),
         "completed": state.progress.completed,
         "source_sequence": state.source_sequence,
+        "verified": verified,
+        "verification": verification,
     }
     text = (
         f"Replayed {len(events)} events -> {state.progress.completed} completed, "
-        f"{len(state.decisions)} decision(s), {len(state.findings)} finding(s)"
+        f"{len(state.decisions)} decision(s), {len(state.findings)} finding(s)\n"
+        f"Verification: {verification}"
     )
     _emit(payload, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
+    if verified is False:
+        print(
+            f"replayed state does not match the stored version for run {args.run_id}",
+            file=err,
+        )
+        return ExitCode.CORRUPTED
     return ExitCode.OK
+
+
+def _verify_against_stored(run_id: str, storage: Storage) -> tuple[bool | None, str]:
+    """Re-derive the stored version's own prefix and check it still projects to it.
+
+    Returns (verified, human description). ``None`` means the comparison was not
+    attempted, which is reported rather than quietly counted as a pass — a
+    silent no-op that looks like a check is the bug this replaces.
+
+    The prefix matters. A stored version is the projection of events up to its
+    ``source_sequence``, and the log has usually grown since it was written, so
+    comparing it against a replay of the *whole* log would report corruption for
+    any run that simply did more work after its last checkpoint. Re-folding the
+    same prefix is the invariant SemanticState actually promises: "folding the
+    same prefix again must yield an equal state".
+
+    This is why verification does not depend on ``--upto``: the prefix is chosen
+    from the stored version, not from what the caller asked to display.
+    """
+    stored = storage.latest_version(run_id)
+    if stored is None:
+        return None, "skipped (no stored version to compare against)"
+    prefix = storage.read_events(run_id, upto=stored.source_sequence)
+    replayed = project(run_id, prefix)
+    where = f"version {stored.version} at sequence {stored.source_sequence}"
+    if state_fingerprint(replayed) == state_fingerprint(stored):
+        return True, f"matches stored {where}"
+    return False, f"DOES NOT match stored {where}"
 
 
 def cmd_benchmark(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
