@@ -300,6 +300,16 @@ def test_replay_rederives_state_from_events(db: str) -> None:
     assert "60 completed" in out
 
 
+def test_replay_upto_excluding_run_started_fails_cleanly(db: str) -> None:
+    code, _, err = run("--db", db, "replay", "run_1", "--upto", "0")
+    assert code == ExitCode.ERROR
+    # The whole diagnostic matters: the boundary that failed *and* the way out.
+    assert (
+        "--upto 0 excludes the RUN_STARTED event for run 'run_1'; "
+        "increase --upto or omit it to replay from the beginning"
+    ) in err
+
+
 def test_runs_lists_what_exists(db: str) -> None:
     _, out, _ = run("--db", db, "runs")
     assert "run_1" in out

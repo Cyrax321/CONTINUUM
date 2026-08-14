@@ -554,6 +554,14 @@ def cmd_replay(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     # RUN_STARTED", which diagnoses the wrong problem entirely.
     storage.get_run(args.run_id)
     events = storage.read_events(args.run_id, upto=args.upto)
+
+    if args.upto is not None and not any(e.type == EventType.RUN_STARTED for e in events):
+        raise ValueError(
+            f"--upto {args.upto} excludes the RUN_STARTED event for run "
+            f"{args.run_id!r}; increase --upto or omit it to replay from the "
+            f"beginning"
+        )
+
     state = project(args.run_id, events)
 
     verified, verification = _verify_against_stored(args.run_id, storage)
