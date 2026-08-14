@@ -35,13 +35,14 @@ dev = [
     "pytest-cov>=5.0",
     "pytest-asyncio>=0.23",
     "hypothesis>=6.0",
-    "ruff>=0.9",
+    "ruff==0.16.2",
     "mypy>=1.13",
     "mcp>=2.0",
     # The adapter packages are optional runtime dependencies (see [project.optional-dependencies])
     # but installed in dev so mypy can type-check the adapter modules in CI.
     "langgraph>=0.2",
     "openai-agents>=0.2",
+    "langchain>=0.3",
 ]
 # The MCP server is optional: the core library and CLI never import it, so
 # installing CONTINUUM does not pull in a server stack you may not want.
@@ -52,6 +53,9 @@ langgraph = ["langgraph>=0.2"]
 # The OpenAI Agents SDK adapter is optional: it wraps function_tool and RunHooks
 # with CONTINUUM's action ledger and checkpointing.
 openai = ["openai-agents>=0.2"]
+# The LangChain adapter is optional: it wraps LCEL runnable pipelines and the
+# langchain.agents.create_agent tool-calling loop with CONTINUUM's durability layer.
+langchain = ["langchain>=0.3"]
 # The CLI uses only the standard library: a recovery tool must not fail to
 # import when you most need it. No extra is required.
 

@@ -345,22 +345,46 @@ def wrapped_tool(ctx: ToolContext, {", ".join(f"{p.name}: Any = None" for p in p
         )
 
     def _ensure_run_exists(self, run_id: str, agent: Any) -> None:
-        """Create the run record if it doesn't already exist.
+        """Create the run record and its ``RUN_STARTED`` event if absent.
 
         ``get_run`` raises ``RunNotFound`` for an absent run (it does not
         return ``None``), so the missing-run case is caught here rather than
         checked with an ``is not None`` guard. This is what lets a fresh
         OpenAI agent run auto-provision instead of failing on first contact
         (see issue #21).
-        """
-        from continuum.models import Run, RunStatus
 
+        The run row and the ``RUN_STARTED`` event are separate facts: projection
+        needs the event, and without it ``restore``/``project``/``replay`` fail
+        with "the log never recorded RUN_STARTED". So, mirroring
+        ``ContinuumMCP.ensure_run``, the event is backfilled only when the log
+        is empty, and a non-empty log whose first event is not ``RUN_STARTED``
+        is refused rather than silently misordered.
+        """
+        from continuum.events import EventType
+        from continuum.models import Origin, Run, RunStatus
+
+        goal = getattr(agent, "name", "OpenAI agent task")
         try:
-            self.storage.get_run(run_id)
+            run = self.storage.get_run(run_id)
         except RunNotFound:
-            goal = getattr(agent, "name", "OpenAI agent task")
             run = Run(run_id=run_id, goal=goal, status=RunStatus.STARTED)
             self.storage.create_run(run)
+
+        first = self.storage.read_events(run_id, upto=1)
+        if not first:
+            self.storage.append_event(
+                run_id,
+                EventType.RUN_STARTED,
+                {"goal": run.goal},
+                source=Origin.EXTERNAL_AGENT,
+            )
+        elif first[0].type is not EventType.RUN_STARTED:
+            raise ValueError(
+                f"run {run_id!r} does not begin with RUN_STARTED "
+                f"(first event is {first[0].type.value}). CONTINUUM cannot backfill it "
+                f"after the fact without misordering the run's history; recreate the "
+                f"run, or record RUN_STARTED before any other event."
+            )
 
     def _checkpoint_from_context(
         self,

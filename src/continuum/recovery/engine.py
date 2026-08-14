@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from continuum.actions.ledger import ActionLedger
 from continuum.checkpoint.manager import CheckpointManager, RestoredRun
 from continuum.environment.diff import EnvironmentDiff
+from continuum.events import EventType
 from continuum.models import (
     Action,
     ActionStatus,
@@ -182,12 +183,20 @@ class RecoveryEngine:
         checkpoint_environment = restored.checkpoint.environment if restored.checkpoint else None
         checkpoint_version = restored.checkpoint.version if restored.checkpoint else 0
 
+        # A human confirmation (REVIEW_CONFIRMED event) clears the self_certified
+        # REQUIRES_REVIEW on goal/progress, unblocking an otherwise permanent
+        # request_human for externally-driven runs. See issue #35.
+        has_confirmation = any(
+            e.type is EventType.REVIEW_CONFIRMED for e in self.storage.read_events(run_id)
+        )
+
         validation = self.validator.validate(
             restored.state,
             current_environment=current_environment,
             checkpoint_environment=checkpoint_environment,
             checkpoint_version=checkpoint_version,
             expected_model=expected_model,
+            confirmed=has_confirmation,
         )
 
         ledger = ActionLedger(self.storage, run_id)

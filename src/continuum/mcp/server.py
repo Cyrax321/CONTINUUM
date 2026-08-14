@@ -451,6 +451,43 @@ def build_server(
             }
         )
 
+    @server.tool(
+        name="continuum_confirm",
+        description=(
+            "Confirm a run's self-reported goal and progress so it can resume. "
+            "MCP/agent-reported runs are self_certified and would otherwise be "
+            "stuck at request_human forever. Call this (as the human operator) to "
+            "record a REVIEW_CONFIRMED event, then call continuum_resume again. "
+            "Mutates the run."
+        ),
+        annotations=mutating,
+    )
+    @guard
+    def continuum_confirm(
+        run_id: str,
+        expected_model: str | None = None,
+    ) -> str:
+        """Record a human confirmation of self-reported state."""
+        ctx.storage.append_event(
+            run_id,
+            EventType.REVIEW_CONFIRMED,
+            {"components": ["goal", "progress"]},
+            source=Origin.HUMAN,
+        )
+        decision = ctx.adapter.resume(
+            run_id,
+            expected_model=expected_model,
+        )
+        return _json(
+            {
+                "run_id": run_id,
+                "mode": decision.mode.value,
+                "safe": decision.safe,
+                "next_allowed_action": decision.next_allowed_action,
+                "report": decision.render(),
+            }
+        )
+
     # -- side effects ----------------------------------------------------- #
 
     @server.tool(

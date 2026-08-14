@@ -1,8 +1,10 @@
 # Project status
 
-**As of 2026-08-12** (commit `d32f7a2` was the last tagged state; subsequent
-entries added the framework adapters, Inspector CLI verification, and CI
-Node 24 migration).
+**As of 2026-08-14** (commit `a539948`). On 2026-08-14 a repository-wide bug
+audit ran: every behavioural module was read and exercised, surfacing 20
+evidence-backed issues (#29-"#49, excluding the externally-filed #39). They are
+labelled `good first issue` or `help wanted` (plus `adapter`/`detector` where
+relevant) and form the contributor backlog; none are fixed in this tree yet.
 
 A factual snapshot for whoever picks this up next, human or otherwise, with no
 memory of how any of it was found. It records what is verified, what is
@@ -12,7 +14,7 @@ believed, and what is neither.
 
 ## Verified
 
-662 tests pass, 4 skipped, on Python 3.13 with `mcp 2.0.0` installed. The MCP
+677 tests pass, 4 skipped, on Python 3.13 with `mcp 2.0.0` installed. The MCP
 server tests are no longer excluded: they load and pass against `mcp>=2.0` (the
 version pinned in `pyproject.toml`). An earlier note recorded them as failing to
 load; that incompatibility is gone with the newer SDK. CI was green on Python
@@ -171,7 +173,7 @@ MCP server at all.
 Also out of scope: rate limiting, audit of failed attempts beyond the error
 response, and scoping callers to particular runs.
 
-### Naming (`d32f7a2`)
+### Naming (`a539948`)
 
 `CONTINUUM_MCP_MUTATING_CLIENTS` is accepted as an alias for
 `CONTINUUM_MCP_ALLOW`, occupying the same precedence position rather than adding
@@ -240,6 +242,50 @@ A module-by-module audit filed seven issues, each reproduced against clean
 | Orphaned-WAL startup crash | **MCP server fails to connect after a hard-kill.** A killed server leaves `<db>-wal`/`<db>-shm` sidecars that make `PRAGMA journal_mode=WAL` throw `disk I/O error` on the next launch. | Medium | Resolved: `_open_server_storage` in `src/continuum/mcp/server.py` clears orphaned sidecars and retries the open once on `OperationalError` (re-raising when there was nothing to clear), with two regression tests in `tests/test_mcp_server.py`. See the MCP server section. |
 | Issue #6 e2e dedup defect | **`continuum_intercept_action` deduplicated on raw argument formatting, not resource identity.** Three real Claude Code e2e runs showed session 2 getting `proceed: true` for invoices session 1 already sent, because relative-path vs absolute-path arguments hashed to different idempotency keys. Correctness survived only because the agents cross-checked the outbox and refused the flag. | High | Resolved twice over: the tool accepts a stable `key` (e.g. `invoice:INV-001`) that is what makes two attempts the same action, and a defensive layer now covers the no-key and argument-drift cases (path canonicalization plus a token-based identity fallback in `ActionLedger.claim`). Regression tests: `test_a_stable_key_deduplicates_across_argument_shape_changes` plus the identity-match and canonicalization tests in `tests/test_action_ledger.py`. |
 | Stale editable metadata | `pip show continuum-agent` reports its editable location as `Desktop/untitled folder 2` (the pre-move path); imports still resolve correctly, so it is cosmetic. A clean `pip install -e ".[mcp]"` from the current project root fixes it. | Low | Open |
+
+### Launch audit (2026-08-14)
+
+A second module-by-module audit filed 20 issues (#29-#49, minus external #39).
+The three launch-critical defects were fixed and closed in `e8271bd`:
+
+- **#35** — MCP self-certified progress: added `REVIEW_CONFIRMED` event,
+  `continuum confirm` CLI, and `continuum_confirm` MCP tool; `StateValidator`
+  and `RecoveryEngine.assess` clear self-certified `REQUIRES_REVIEW` once a
+  confirmation event exists.
+- **#46** — LangGraph synthetic state: `checkpoint_node` now projects real
+  state from the event log when events exist, instead of emitting an empty dict.
+- **#47** — OpenAI adapter `RUN_STARTED` backfill: `_ensure_run_exists` now
+  backfills `RUN_STARTED` like `ContinuumMCP.ensure_run`.
+
+The remaining **17 are real but non-launch-critical and are left open as
+contributor work** (labeled `good first issue` / `help wanted`):
+
+#29, #30, #31, #32, #33, #34, #36, #37, #38, #40, #41, #42, #43, #44, #45, #48, #49.
+
+#### Known issues at launch
+
+| Issue | One-line impact | Disposition |
+|:--|:--|:--|
+| [#29](https://github.com/Cyrax321/CONTINUUM/issues/29) | `ActionLedger.reconcile(occurred=False)` leaves stale `external_id`/`result` on the action | Open (contributor work) |
+| [#30](https://github.com/Cyrax321/CONTINUUM/issues/30) | `FileProvider` reports a missing file as `version=None`, so diff marks it `changed` not `removed` | Open (contributor work) |
+| [#31](https://github.com/Cyrax321/CONTINUUM/issues/31) | `continuum replay` claims to confirm state matches the stored version but never compares | Open (contributor work) |
+| [#32](https://github.com/Cyrax321/CONTINUUM/issues/32) | `continuum replay --upto N` crashes with `ProjectionError` when the prefix excludes `RUN_STARTED` | Open (contributor work) |
+| [#33](https://github.com/Cyrax321/CONTINUUM/issues/33) | `identity_tokens` drops plain-word resource ids (`invoice`) because `_is_strong_token` requires a digit/`@`/`.` | Open (contributor work) |
+| [#34](https://github.com/Cyrax321/CONTINUUM/issues/34) | `ActionLedger scoped_to_run=False` does not enforce global uniqueness across runs as documented | Open (contributor work) |
+| [#36](https://github.com/Cyrax321/CONTINUUM/issues/36) | `identity_tokens` drops purely-numeric resource ids, so cross-session fallback fails on numeric ids | Open (contributor work) |
+| [#37](https://github.com/Cyrax321/CONTINUUM/issues/37) | OpenAI adapter: tool arguments misbound and idempotency bypassed because `__signature__` drops `ctx` | Open (contributor work) |
+| [#38](https://github.com/Cyrax321/CONTINUUM/issues/38) | `continuum_record_progress` accepts negative `completed`/`failed` when `total` is omitted, poisoning the event log | Open (contributor work) |
+| [#40](https://github.com/Cyrax321/CONTINUUM/issues/40) | `LLMExtractor`: malformed LLM proposal crashes `extract()` instead of falling back | Open (contributor work) |
+| [#41](https://github.com/Cyrax321/CONTINUUM/issues/41) | `LLMExtractor._merge` double-adds duplicate ids within a single proposal | Open (contributor work) |
+| [#42](https://github.com/Cyrax321/CONTINUUM/issues/42) | Strict mode: uncertain side effect yields `REQUEST_HUMAN` but an auto-reconcile step silently ignores `strict_unknown` | Open (contributor work) |
+| [#43](https://github.com/Cyrax321/CONTINUUM/issues/43) | Two checkpoints at the same state version collapse to one in `continuum history` | Open (contributor work) |
+| [#44](https://github.com/Cyrax321/CONTINUUM/issues/44) | `intercept_action` returns a divergent value on cache hit when the result dict holds reserved key `__return_value__` | Open (contributor work) |
+| [#45](https://github.com/Cyrax321/CONTINUUM/issues/45) | `claim(on_unknown=)` resolution is not persisted, so the ledger stays uncertain after call-time resolution | Open (contributor work) |
+| [#48](https://github.com/Cyrax321/CONTINUUM/issues/48) | `StateValidator._check_progress` relabels self-certified progress as `UNKNOWN`, so `--tolerate-unknown` silently unblocks it | Open (contributor work) |
+| [#49](https://github.com/Cyrax321/CONTINUUM/issues/49) | `StateValidator._check_model` reports model-specific assumptions `VALID` when `expected_model` is `None` (fail-open) | Open (contributor work) |
+
+None of these block the v0.1.0 launch; they are tracked for post-launch
+contributor work.
 
 ## The CI Node 24 migration (2026-08-12)
 
@@ -736,3 +782,37 @@ The commit history on `main` is dominated by website and logo iteration: roughly
   paths.
 - `demo_report.md` — artifact from third-party client testing.
 - `kilo.jsonc` — Kilo's own MCP config, written by Kilo.
+
+---
+
+## Security Extension (in progress, not part of v0.1.0 launch)
+
+Two additive extensions are being prototyped on top of the existing
+recovery/checkpoint substrate. Both are additive: they do not change resume,
+replay, or the existing crash-time revalidation path. Deliberately scoped to
+avoid scope creep (no adversarial training, no new policy language).
+
+- `docs/PROBLEM.md` — the problem statement each extension addresses, with the
+  paper, the date, the unmet claim, and our honest "does not solve" framing.
+- `src/continuum/security/provenance.py` — `ObservationProvenance` and
+  `PlanBranch` (frozen pydantic v2, matching `models.py` conventions).
+- `src/continuum/security/trust_gate.py` — `verify_observation` (two-signal
+  trust: `verified` / `unverified` / `contested`), `record_observation`,
+  `resolve_branch` (risk-tiered escalation to `REQUIRES_REVIEW` for high-risk
+  unverified/contested, and contested environment observations), `ReviewGate`.
+- `src/continuum/security/revalidation.py` — `RevalidationTrigger`,
+  `RevalidationPolicy`, `RevalidationResult`, `maybe_revalidate` (fires on a
+  step interval and on app switch, reusing `RecoveryEngine.assess`).
+- `src/continuum/security/prompts/secure_planning.md` — the planner prompt
+  contract for Extension 1.
+- `docs/RESULTS.md` — numbers; the mini-benchmark is still PENDING (runs after
+  the core mechanism is proven).
+
+Tests: `tests/test_trust_gate.py`, `tests/test_revalidation_schedule.py`,
+`tests/test_toy_task_banner_attack.py` (a cookie-consent banner before/after
+pair). All 700 tests pass; `ruff` and `mypy --strict` are clean.
+
+What this does NOT claim: Extension 1 does not defeat an optimized pixel-patch
+attack (still open per CaMeLs), it adds an audit trail and escalation.
+Extension 2 does not improve long-horizon reasoning, it re-checks ground truth
+on a schedule. Neither claims to have "solved" its source paper.

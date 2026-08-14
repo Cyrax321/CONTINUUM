@@ -105,8 +105,13 @@ class StateValidator:
     starts; a caller who genuinely tolerates uncertainty can opt out.
     """
 
-    def __init__(self, *, strict_unknown: bool = True) -> None:
+    def __init__(self, *, strict_unknown: bool = True, confirmed: bool = False) -> None:
         self.strict_unknown = strict_unknown
+        # Set when a human has explicitly confirmed the run's self-reported
+        # goal/progress (via a REVIEW_CONFIRMED event). Confirmation clears the
+        # REQUIRES_REVIEW that self-certified origins would otherwise force, so
+        # an externally-driven run can be resumed after a human has eyeballed it.
+        self.confirmed = confirmed
 
     def validate(
         self,
@@ -116,7 +121,9 @@ class StateValidator:
         checkpoint_environment: EnvironmentSnapshot | None = None,
         checkpoint_version: int = 0,
         expected_model: str | None = None,
+        confirmed: bool = False,
     ) -> ValidationOutcome:
+        self.confirmed = confirmed
         environment_diff = diff_environments(checkpoint_environment, current_environment)
         entries: list[ComponentValidationEntry] = []
 
@@ -292,10 +299,9 @@ class StateValidator:
 
     # -- per-component checks --------------------------------------------- #
 
-    @staticmethod
-    def _check_goal(state: SemanticState, entries: list[ComponentValidationEntry]) -> None:
+    def _check_goal(self, state: SemanticState, entries: list[ComponentValidationEntry]) -> None:
         origin = state.goal.provenance.origin
-        if origin.self_certified:
+        if origin.self_certified and not self.confirmed:
             entries.append(
                 ComponentValidationEntry(
                     component=Component.GOAL,
@@ -312,8 +318,9 @@ class StateValidator:
             )
         )
 
-    @staticmethod
-    def _check_progress(state: SemanticState, entries: list[ComponentValidationEntry]) -> None:
+    def _check_progress(
+        self, state: SemanticState, entries: list[ComponentValidationEntry]
+    ) -> None:
         # Counter arithmetic (completed + pending + failed <= total) is enforced
         # by the Progress model on construction *and* on deserialization, so a
         # state that reaches here cannot violate it. Re-checking would be dead
@@ -323,9 +330,10 @@ class StateValidator:
 
         # An agent reporting its own progress has not verified anything. The
         # figure may be perfectly accurate, but nothing independent supports
-        # it, so it cannot count as verified state.
+        # it, so it cannot count as verified state. A human confirmation
+        # (REVIEW_CONFIRMED) clears this so the run can resume.
         origin = progress.provenance.origin
-        if origin.self_certified:
+        if origin.self_certified and not self.confirmed:
             status = StateStatus.REQUIRES_REVIEW
             detail = (
                 f"{progress.completed} completed, self-reported by {origin.value} "
@@ -433,12 +441,14 @@ def validate_state(
     checkpoint_version: int = 0,
     expected_model: str | None = None,
     strict_unknown: bool = True,
+    confirmed: bool = False,
 ) -> ValidationOutcome:
     """Validate a state against the current environment."""
-    return StateValidator(strict_unknown=strict_unknown).validate(
+    return StateValidator(strict_unknown=strict_unknown, confirmed=confirmed).validate(
         state,
         current_environment=current_environment,
         checkpoint_environment=checkpoint_environment,
         checkpoint_version=checkpoint_version,
         expected_model=expected_model,
+        confirmed=confirmed,
     )

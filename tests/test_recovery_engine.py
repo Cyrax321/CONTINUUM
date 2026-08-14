@@ -11,9 +11,11 @@ from continuum.checkpoint import CheckpointManager
 from continuum.environment import CallableProvider, StaticProvider, capture
 from continuum.events import EventType
 from continuum.models import (
+    Origin,
     RecoveryMode,
     RecoverySafety,
     Run,
+    StateStatus,
     utcnow,
 )
 from continuum.recovery import (
@@ -474,3 +476,31 @@ def test_a_decision_survives_a_process_restart(tmp_path: Path) -> None:
         assert decision.mode is RecoveryMode.REQUEST_HUMAN
         assert decision.state.progress.completed == 40
         assert verify_contract(decision.contract)
+
+
+def test_self_certified_runs_are_confirmable(store: SQLiteStorage) -> None:
+    """Issue #35: an MCP/agent-reported run must be resumable after a human
+    confirms its self-reported goal and progress."""
+    store.create_run(Run(run_id="r1", goal="do X"))
+    store.append_event("r1", EventType.RUN_STARTED, {"goal": "do X"}, source=Origin.EXTERNAL_AGENT)
+    store.append_event(
+        "r1", EventType.TASK_UPDATED, {"completed": 1, "failed": 0}, source=Origin.EXTERNAL_AGENT
+    )
+
+    blocked = RecoveryEngine(store).assess("r1")
+    assert blocked.mode is RecoveryMode.REQUEST_HUMAN
+    assert blocked.next_allowed_action == "human_review:goal"
+
+    store.append_event(
+        "r1",
+        EventType.REVIEW_CONFIRMED,
+        {"components": ["goal", "progress"]},
+        source=Origin.HUMAN,
+    )
+
+    confirmed = RecoveryEngine(store).assess("r1")
+    assert confirmed.mode is RecoveryMode.RESUME
+    assert confirmed.safe
+    assert all(
+        e.status is not StateStatus.REQUIRES_REVIEW for e in confirmed.validation.report.statuses
+    )

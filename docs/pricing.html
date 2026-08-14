@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CONTINUUM — Pricing</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&family=Anton&family=Caveat:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    .pricing-page {
+      background: #62AFE0;
+      min-height: 100vh;
+      position: relative;
+      overflow-x: hidden;
+    }
+
+    .pricing-clouds {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .pricing-cloud {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(18px);
+      opacity: 0.7;
+    }
+
+    .pc-1 {
+      width: 350px; height: 200px;
+      background: radial-gradient(ellipse, rgba(255,255,255,0.85), rgba(255,255,255,0.3) 70%);
+      top: 15%; left: 5%;
+    }
+
+    .pc-2 {
+      width: 450px; height: 220px;
+      background: radial-gradient(ellipse, rgba(255,255,255,0.9), rgba(255,255,255,0.2) 70%);
+      top: 25%; right: 8%;
+    }
+
+    .pc-3 {
+      width: 250px; height: 140px;
+      background: radial-gradient(ellipse, rgba(255,255,255,0.7), rgba(255,255,255,0.2) 70%);
+      bottom: 30%; left: 10%;
+    }
+
+    .pc-4 {
+      width: 200px; height: 110px;
+      background: radial-gradient(ellipse, rgba(255,255,255,0.5), transparent 70%);
+      bottom: 15%; left: 45%;
+    }
+
+    .pricing-top-bar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: 28px;
+      background: rgba(255,255,255,0.35);
+      backdrop-filter: blur(4px);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      z-index: 100;
+    }
+
+    .pricing-top-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .pricing-logo-dot {
+      width: 12px; height: 12px;
+      border-radius: 3px;
+      background: #07131E;
+    }
+
+    .pricing-top-brand {
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 1.5px;
+      color: #07131E;
+    }
+
+    .pricing-top-badge {
+      font-size: 9px;
+      font-weight: 700;
+      background: #FF5017;
+      color: #fff;
+      padding: 2px 6px;
+      border-radius: 4px;
+      min-width: 22px;
+      text-align: center;
+    }
+
+    .pricing-ruler {
+      flex: 1;
+      height: 100%;
+      margin: 0 20px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .pricing-ruler-inner {
+      display: flex;
+      height: 100%;
+      align-items: flex-end;
+      padding-bottom: 4px;
+    }
+
+    .pricing-ruler::before {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 1px;
+      background: rgba(7, 19, 30, 0.15);
+    }
+
+    .pricing-top-right {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .pricing-live-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: #22C55E;
+      animation: pulse 2s infinite;
+    }
+
+    .pricing-live-text {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      font-weight: 600;
+      color: #1a3a52;
+      letter-spacing: 0.5px;
+    }
+
+    .pricing-nav {
+      position: absolute;
+      top: 44px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      background: #fff;
+      border-radius: 999px;
+      padding: 6px 8px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+      z-index: 10;
+    }
+
+    .pricing-nav a {
+      font-size: 13px;
+      font-weight: 600;
+      color: #1a3a52;
+      text-decoration: none;
+      padding: 8px 16px;
+      border-radius: 999px;
+      transition: all 0.2s;
+    }
+
+    .pricing-nav a:hover { color: #FF5017; }
+
+    .pricing-nav a.active {
+      color: #FF5017;
+    }
+
+    .pricing-nav a.nav-contact {
+      background: #07131E;
+      color: #fff;
+    }
+
+    .pricing-nav a.nav-contact:hover {
+      color: #fff;
+      background: #1a3a52;
+    }
+
+    .pricing-status-pill {
+      position: absolute;
+      top: 100px;
+      left: 24px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: #fff;
+      border-radius: 999px;
+      padding: 8px 16px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+      z-index: 10;
+      font-size: 12px;
+      font-weight: 700;
+      color: #07131E;
+    }
+
+    .pricing-status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #2BD878;
+      animation: pulse 2s infinite;
+    }
+
+    .pricing-email-pill {
+      position: absolute;
+      top: 100px;
+      right: 24px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: #fff;
+      border-radius: 999px;
+      padding: 8px 16px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+      z-index: 10;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 500;
+      color: #1a3a52;
+      text-decoration: none;
+    }
+
+    .pricing-section-1 {
+      position: relative;
+      z-index: 5;
+      padding: 180px 40px 80px;
+      text-align: center;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    .pricing-handwritten {
+      font-family: 'Caveat', cursive;
+      font-size: 20px;
+      font-weight: 600;
+      color: #FF5017;
+      margin-bottom: 20px;
+    }
+
+    .pricing-headline {
+      font-family: 'Inter', sans-serif;
+      font-size: clamp(48px, 6vw, 70px);
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      line-height: 1.1;
+      margin-bottom: 24px;
+    }
+
+    .pricing-headline .navy {
+      color: #071827;
+    }
+
+    .pricing-headline .orange {
+      color: #FF5017;
+    }
+
+    .pricing-paper-note {
+      display: inline-block;
+      background: #F8E8CC;
+      padding: 10px 20px;
+      border-radius: 6px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 600;
+      color: #071827;
+      transform: rotate(1.5deg);
+      margin-bottom: 32px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+      position: relative;
+    }
+
+    .pricing-paper-note::after {
+      content: '';
+      position: absolute;
+      bottom: 0; right: 0;
+      width: 12px; height: 12px;
+      background: linear-gradient(135deg, transparent 50%, rgba(0,0,0,0.06) 50%);
+      border-radius: 0 0 6px 0;
+    }
+
+    .pricing-sunset {
+      margin: 0 auto 32px;
+      width: 120px;
+      text-align: center;
+    }
+
+    .pricing-sunset-sun {
+      width: 60px;
+      height: 30px;
+      background: #FF5017;
+      border-radius: 60px 60px 0 0;
+      margin: 0 auto;
+      position: relative;
+    }
+
+    .pricing-sunset-sun::before {
+      content: '';
+      position: absolute;
+      top: -6px; left: 50%;
+      transform: translateX(-50%);
+      width: 80px; height: 40px;
+      background: repeating-conic-gradient(
+        from 0deg,
+        transparent 0deg 12deg,
+        #FF5017 12deg 14deg
+      );
+      border-radius: 50%;
+      opacity: 0.6;
+    }
+
+    .pricing-sunset-line {
+      width: 100%;
+      height: 2px;
+      background: #071827;
+      margin-top: -1px;
+    }
+
+    .pricing-sunset-base {
+      width: 80px;
+      height: 16px;
+      background: #A8D4F0;
+      margin: 0 auto;
+      border-radius: 0 0 4px 4px;
+    }
+
+    .pricing-time-msg {
+      font-size: 17px;
+      color: #071827;
+      line-height: 1.4;
+      max-width: 450px;
+      margin: 0 auto 28px;
+      font-weight: 500;
+    }
+
+    .pricing-time {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 600;
+    }
+
+    .pricing-cta-primary {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: #FF5017;
+      color: #fff;
+      font-weight: 700;
+      font-size: 14px;
+      padding: 12px 24px;
+      border-radius: 10px;
+      text-decoration: none;
+      box-shadow: 0 4px 16px rgba(255, 80, 23, 0.3);
+      transition: all 0.2s;
+      margin-bottom: 16px;
+    }
+
+    .pricing-cta-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 24px rgba(255, 80, 23, 0.4);
+    }
+
+    .pricing-cta-secondary {
+      display: block;
+      font-size: 14px;
+      color: #071827;
+      text-decoration: underline;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+
+    .pricing-cta-secondary:hover {
+      color: #FF5017;
+    }
+
+    .pricing-gap {
+      height: 400px;
+    }
+
+    .pricing-section-2 {
+      position: relative;
+      z-index: 5;
+      padding: 80px 40px 120px;
+      text-align: center;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    .pricing-paper-note-2 {
+      display: inline-block;
+      background: #F8E8CC;
+      padding: 10px 24px;
+      border-radius: 6px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 600;
+      color: #071827;
+      transform: rotate(-1deg);
+      margin-top: 32px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+      position: relative;
+    }
+
+    .pricing-paper-note-2::after {
+      content: '';
+      position: absolute;
+      bottom: 0; right: 0;
+      width: 12px; height: 12px;
+      background: linear-gradient(135deg, transparent 50%, rgba(0,0,0,0.06) 50%);
+      border-radius: 0 0 6px 0;
+    }
+
+    .pricing-cursor {
+      position: absolute;
+      bottom: 20%;
+      right: 18%;
+      z-index: 10;
+      display: flex;
+      align-items: flex-start;
+      gap: 4px;
+      animation: cursorFloat 4s ease-in-out infinite alternate;
+    }
+
+    .pricing-cursor span {
+      background: #3B82F6;
+      color: #fff;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    @keyframes cursorFloat {
+      0% { transform: translate(0, 0); }
+      100% { transform: translate(8px, -6px); }
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    @media (max-width: 640px) {
+      .pricing-nav { width: calc(100% - 48px); top: 36px; padding: 4px 6px; }
+      .pricing-nav a { font-size: 11px; padding: 6px 10px; }
+      .pricing-status-pill, .pricing-email-pill { display: none; }
+      .pricing-ruler { display: none; }
+      .pricing-section-1 { padding: 140px 20px 60px; }
+      .pricing-section-2 { padding: 60px 20px 80px; }
+      .pricing-gap { height: 250px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="pricing-page">
+    <div class="pricing-clouds">
+      <div class="pricing-cloud pc-1"></div>
+      <div class="pricing-cloud pc-2"></div>
+      <div class="pricing-cloud pc-3"></div>
+      <div class="pricing-cloud pc-4"></div>
+    </div>
+
+    <div class="pricing-top-bar">
+      <div class="pricing-top-left">
+        <div class="pricing-logo-dot"></div>
+        <span class="pricing-top-brand">CONTINUUM</span>
+        <span class="pricing-top-badge">75%</span>
+      </div>
+      <div class="pricing-ruler" id="pricingRuler"></div>
+      <div class="pricing-top-right">
+        <span class="pricing-live-dot"></span>
+        <span class="pricing-live-text">LIVE &middot; <span id="pricingTime">--:--:--</span></span>
+      </div>
+    </div>
+
+    <nav class="pricing-nav">
+      <a href="index.html">Home</a>
+      <a href="index.html#features">Features</a>
+      <a href="index.html#mcp">MCP</a>
+      <a href="index.html#simulator">Simulator</a>
+      <a href="index.html#quickstart">Docs</a>
+      <a href="#" class="active">Pricing</a>
+      <a href="mailto:hello@continuum.dev" class="nav-contact">Contact</a>
+    </nav>
+
+    <div class="pricing-status-pill">
+      <span class="pricing-status-dot"></span>
+      <span>open source &amp; free</span>
+    </div>
+
+    <a href="mailto:hello@continuum.dev" class="pricing-email-pill">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#FF5017" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 6L12 13 2 6"/></svg>
+      <span>hello@continuum.dev</span>
+    </a>
+
+    <section class="pricing-section-1">
+      <p class="pricing-handwritten">got an idea?</p>
+      <h1 class="pricing-headline">
+        <span class="navy">STILL</span><br>
+        <span class="orange">BUILDING.</span>
+      </h1>
+
+      <div class="pricing-paper-note">golden hour in india</div>
+
+      <div class="pricing-sunset">
+        <div class="pricing-sunset-sun"></div>
+        <div class="pricing-sunset-line"></div>
+        <div class="pricing-sunset-base"></div>
+      </div>
+
+      <p class="pricing-time-msg">
+        It's <span class="pricing-time" id="studioTime">17:47</span> at the studio. The best ideas always seem to land about now.
+      </p>
+
+      <a href="mailto:hello@continuum.dev" class="pricing-cta-primary">Talk with us</a>
+      <br>
+      <a href="mailto:hello@continuum.dev" class="pricing-cta-secondary">or book a call</a>
+    </section>
+
+    <div class="pricing-gap"></div>
+
+    <section class="pricing-section-2">
+      <p class="pricing-handwritten">cheaper than hiring</p>
+      <h2 class="pricing-headline">
+        <span class="navy">PICK YOUR</span><br>
+        <span class="orange">PLAN.</span>
+      </h2>
+
+      <div class="pricing-paper-note-2">one flat price. pause or cancel whenever.</div>
+    </section>
+
+    <div class="pricing-cursor">
+      <svg width="12" height="16" viewBox="0 0 12 16" fill="#3B82F6"><path d="M0 0L12 10L6 10L4 16L0 0Z"/></svg>
+      <span>You</span>
+    </div>
+  </div>
+
+  <script>
+    function updatePricingTime() {
+      const el = document.getElementById('pricingTime');
+      const studioEl = document.getElementById('studioTime');
+      if (el) {
+        const now = new Date();
+        el.textContent = now.toLocaleTimeString('en-US', { hour12: true });
+      }
+      if (studioEl) {
+        const now = new Date();
+        const hh = now.getHours().toString().padStart(2, '0');
+        const mm = now.getMinutes().toString().padStart(2, '0');
+        studioEl.textContent = `${hh}:${mm}`;
+      }
+    }
+    updatePricingTime();
+    setInterval(updatePricingTime, 1000);
+
+    function initPricingRuler() {
+      const ruler = document.getElementById('pricingRuler');
+      if (!ruler) return;
+      const width = ruler.offsetWidth || 800;
+      const spacing = 30;
+      let html = '<div class="pricing-ruler-inner">';
+      for (let i = 0; i < width; i += spacing) {
+        const isMajor = i % 100 === 0;
+        html += `<div style="position:absolute;bottom:0;left:${i}px;width:1px;height:${isMajor ? '10px' : '6px'};background:rgba(7,19,30,0.2)"></div>`;
+        if (isMajor && i > 0) {
+          html += `<div style="position:absolute;bottom:12px;left:${i}px;font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(7,19,30,0.4);transform:translateX(-50%)">${i}</div>`;
+        }
+      }
+      html += '</div>';
+      ruler.innerHTML = html;
+    }
+    initPricingRuler();
+  </script>
+</body>
+</html>

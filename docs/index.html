@@ -503,10 +503,10 @@
             <span class="qs-num">01</span>
             <h3 class="qs-heading">Install</h3>
           </div>
-          <pre class="qs-code"><code>git clone https://github.com/Cyrax321/CONTINUUM
+          <div class="qs-code-wrap"><button class="qs-copy" type="button" aria-label="Copy code">Copy</button><pre class="qs-code"><code>git clone https://github.com/Cyrax321/CONTINUUM
 cd CONTINUUM
 uv venv
-uv pip install -e ".[dev]"</code></pre>
+uv pip install -e ".[dev]"</code></pre></div>
           <p class="qs-text">Two entrypoints land on your PATH: <code>continuum</code> (the CLI) and <code>continuum-mcp</code> (the MCP server).</p>
         </div>
 
@@ -515,11 +515,11 @@ uv pip install -e ".[dev]"</code></pre>
             <span class="qs-num">02</span>
             <h3 class="qs-heading">Record a run</h3>
           </div>
-          <pre class="qs-code"><code>from continuum import EventType, Run, SQLiteStorage
+          <div class="qs-code-wrap"><button class="qs-copy" type="button" aria-label="Copy code">Copy</button><pre class="qs-code"><code>from continuum import EventType, Run, SQLiteStorage
 
 store = SQLiteStorage("agent.db")
 store.create_run(Run(run_id="run_4821", goal="Analyze docs"))
-store.append_event("run_4821", EventType.RUN_STARTED, {"total": 10_000})</code></pre>
+store.append_event("run_4821", EventType.RUN_STARTED, {"total": 10_000})</code></pre></div>
           <p class="qs-text">Append events as the agent works. The chain is hash linked and verifiable after a crash.</p>
         </div>
 
@@ -528,8 +528,8 @@ store.append_event("run_4821", EventType.RUN_STARTED, {"total": 10_000})</code><
             <span class="qs-num">03</span>
             <h3 class="qs-heading">Resume</h3>
           </div>
-          <pre class="qs-code"><code>continuum resume run_4821
-continuum validate run_4821</code></pre>
+          <div class="qs-code-wrap"><button class="qs-copy" type="button" aria-label="Copy code">Copy</button><pre class="qs-code"><code>continuum resume run_4821
+continuum validate run_4821</code></pre></div>
           <p class="qs-text">Decide how a run may safely resume, or validate state against the live environment. See <code>python examples/crash_recovery_agent.py</code>.</p>
         </div>
       </div>
@@ -746,6 +746,6 @@ continuum validate run_4821</code></pre>
     </div>
   </footer>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=2"></script>
 </body>
 </html>

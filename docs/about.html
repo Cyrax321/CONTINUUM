@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CONTINUUM — About</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&family=Caveat:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #62AFE0;
+      font-family: 'Inter', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+
+    .about-page {
+      position: relative;
+      min-height: 100vh;
+      padding: 60px 40px 80px;
+    }
+
+    .about-clouds {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .about-cloud {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(18px);
+    }
+
+    .ac-1 {
+      width: 280px; height: 160px;
+      background: radial-gradient(ellipse, rgba(255,255,255,0.8), transparent 70%);
+      top: 8%; right: 12%;
+    }
+
+    .ac-2 {
+      width: 400px; height: 200px;
+      background: radial-gradient(ellipse, rgba(255,255,255,0.85), transparent 70%);
+      top: 30%; right: 25%;
+    }
+
+    .ac-3 {
+      width: 250px; height: 140px;
+      background: radial-gradient(ellipse, rgba(255,255,255,0.6), transparent 70%);
+      bottom: 20%; left: -50px;
+    }
+
+    .top-bar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: 28px;
+      background: rgba(255,255,255,0.35);
+      backdrop-filter: blur(4px);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      z-index: 100;
+    }
+
+    .top-bar-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .top-logo {
+      width: 12px; height: 12px;
+      border-radius: 3px;
+      background: #07131E;
+    }
+
+    .top-brand {
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 1.5px;
+      color: #07131E;
+    }
+
+    .top-badge {
+      font-size: 9px;
+      font-weight: 700;
+      background: #FF5017;
+      color: #fff;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    .top-ruler {
+      flex: 1;
+      height: 100%;
+      margin: 0 20px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .top-ruler::before {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 1px;
+      background: rgba(7, 19, 30, 0.15);
+    }
+
+    .top-bar-right {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .live-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: #22C55E;
+      animation: pulse 2s infinite;
+    }
+
+    .live-text {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      font-weight: 600;
+      color: #1a3a52;
+      letter-spacing: 0.5px;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    .about-content {
+      position: relative;
+      z-index: 5;
+      max-width: 1110px;
+      margin: 0 auto;
+    }
+
+    .about-intro {
+      text-align: center;
+      padding: 100px 0 60px;
+      position: relative;
+    }
+
+    .handwritten-label {
+      font-family: 'Caveat', cursive;
+      font-size: 20px;
+      font-weight: 600;
+      color: #FF5017;
+      margin-bottom: 20px;
+    }
+
+    .about-title {
+      font-size: clamp(48px, 6vw, 65px);
+      font-weight: 900;
+      color: #071827;
+      letter-spacing: -0.03em;
+      line-height: 1.1;
+    }
+
+    .designer-cursor {
+      position: absolute;
+      top: 45%;
+      left: 15%;
+      display: flex;
+      align-items: flex-start;
+      gap: 4px;
+      animation: cursorFloat 4s ease-in-out infinite alternate;
+    }
+
+    .designer-cursor span {
+      background: #3B82F6;
+      color: #fff;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    @keyframes cursorFloat {
+      0% { transform: translate(0, 0); }
+      100% { transform: translate(8px, -6px); }
+    }
+
+    .about-grid {
+      display: grid;
+      grid-template-columns: 640px 450px;
+      gap: 20px;
+      margin-bottom: 20px;
+      justify-content: center;
+    }
+
+    .card {
+      border-radius: 18px;
+      padding: 32px;
+      position: relative;
+      transition: all 0.3s ease;
+    }
+
+    .card-white {
+      background: #fff;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.06);
+    }
+
+    .card-white:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 8px 25px rgba(0,0,0,0.1);
+    }
+
+    .card-dark {
+      background: #101D29;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+    }
+
+    .statement-card {
+      height: 390px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .card-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      font-weight: 600;
+      color: #7A9DB5;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      text-align: right;
+      margin-bottom: 8px;
+    }
+
+    .quote-mark {
+      font-size: 80px;
+      font-weight: 900;
+      color: #FF5017;
+      line-height: 0.5;
+      margin-bottom: 16px;
+    }
+
+    .statement-headline {
+      font-size: 38px;
+      font-weight: 800;
+      line-height: 1.1;
+      margin-bottom: 20px;
+    }
+
+    .statement-headline .navy {
+      color: #071827;
+    }
+
+    .statement-headline .orange {
+      color: #FF5017;
+    }
+
+    .statement-body {
+      font-size: 17px;
+      color: #4a5568;
+      line-height: 1.5;
+      flex: 1;
+    }
+
+    .statement-body strong {
+      color: #071827;
+      font-weight: 700;
+    }
+
+    .card-divider {
+      border-top: 1px solid rgba(0,0,0,0.08);
+      margin-top: 20px;
+      padding-top: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .card-status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #29D978;
+      animation: pulse 2s infinite;
+    }
+
+    .card-meta {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+
+    .card-meta.muted {
+      color: #7A9DB5;
+    }
+
+    .card-meta.green {
+      color: #29D978;
+    }
+
+    .right-col {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .metrics-card {
+      height: 240px;
+    }
+
+    .metrics-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .metric-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+
+    .metric-row:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+    }
+
+    .metric-value {
+      font-size: 32px;
+      font-weight: 800;
+      color: #fff;
+      display: flex;
+      align-items: baseline;
+      gap: 2px;
+    }
+
+    .metric-value .plus {
+      color: #FF5017;
+    }
+
+    .metric-value .star {
+      color: #FF5017;
+      font-size: 24px;
+    }
+
+    .metric-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      font-weight: 600;
+      color: rgba(255,255,255,0.5);
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      text-align: right;
+    }
+
+    .capabilities-card {
+      height: 140px;
+    }
+
+    .capabilities-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    .cap-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 14px;
+      border: 1px solid #e2e8f0;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #071827;
+      transition: all 0.2s;
+    }
+
+    .cap-pill:hover {
+      border-color: #FF5017;
+      color: #FF5017;
+    }
+
+    .cap-pill svg {
+      width: 12px;
+      height: 12px;
+    }
+
+    .bottom-grid {
+      display: grid;
+      grid-template-columns: 360px 360px 360px;
+      gap: 16px;
+      justify-content: center;
+    }
+
+    .project-preview {
+      height: 175px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .project-mini-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      color: #3B82F6;
+      font-weight: 600;
+    }
+
+    .project-mini-ui {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 12px;
+      padding: 16px 0;
+    }
+
+    .mini-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .mini-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #FF5017;
+    }
+
+    .mini-brand {
+      font-size: 11px;
+      color: rgba(255,255,255,0.6);
+      font-weight: 600;
+    }
+
+    .mini-headline {
+      font-size: 20px;
+      font-weight: 800;
+      color: #fff;
+      line-height: 1;
+    }
+
+    .mini-headline .orange {
+      color: #FF5017;
+    }
+
+    .mini-cta {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: #FF5017;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 6px 14px;
+      border-radius: 6px;
+      width: fit-content;
+    }
+
+    .mini-tag {
+      display: inline-flex;
+      align-items: center;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      color: #FF5017;
+      border: 1px solid #FF5017;
+      padding: 3px 8px;
+      border-radius: 4px;
+      width: fit-content;
+    }
+
+    .project-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .project-footer-left {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      color: rgba(255,255,255,0.4);
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+
+    .project-footer-right {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      color: #3B82F6;
+      background: rgba(59,130,246,0.15);
+      padding: 3px 8px;
+      border-radius: 4px;
+    }
+
+    .current-project {
+      height: 175px;
+    }
+
+    .current-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      font-weight: 600;
+      color: #7A9DB5;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+
+    .current-title {
+      font-size: 24px;
+      font-weight: 800;
+      color: #071827;
+      margin-bottom: 16px;
+    }
+
+    .current-tags {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 20px;
+    }
+
+    .current-tag {
+      padding: 5px 12px;
+      border: 1px solid #e2e8f0;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #071827;
+    }
+
+    .current-bars {
+      display: flex;
+      align-items: flex-end;
+      gap: 4px;
+      height: 24px;
+    }
+
+    .current-bar {
+      width: 6px;
+      background: #FF5017;
+      border-radius: 2px;
+    }
+
+    .testimonial-card {
+      height: 175px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .testimonial-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 12px;
+    }
+
+    .testimonial-stars {
+      color: #FF5017;
+      font-size: 14px;
+      letter-spacing: 2px;
+    }
+
+    .testimonial-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      font-weight: 600;
+      color: #7A9DB5;
+    }
+
+    .testimonial-text {
+      font-size: 15px;
+      color: #071827;
+      line-height: 1.35;
+      font-weight: 600;
+      flex: 1;
+    }
+
+    .testimonial-author {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .testimonial-avatar {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: #e2e8f0;
+      overflow: hidden;
+    }
+
+    .testimonial-avatar img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .testimonial-name {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      font-weight: 600;
+      color: #4a5568;
+      letter-spacing: 0.5px;
+    }
+
+    @media (max-width: 1024px) {
+      .about-grid {
+        grid-template-columns: 1fr;
+      }
+      .right-col {
+        flex-direction: row;
+      }
+      .bottom-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .about-page { padding: 60px 16px 60px; }
+      .about-grid { grid-template-columns: 1fr; }
+      .right-col { flex-direction: column; }
+      .bottom-grid { grid-template-columns: 1fr; }
+      .about-title { font-size: 36px; }
+      .statement-headline { font-size: 28px; }
+      .top-ruler { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="top-bar">
+    <div class="top-bar-left">
+      <div class="top-logo"></div>
+      <span class="top-brand">CONTINUUM</span>
+      <span class="top-badge">15%</span>
+    </div>
+    <div class="top-ruler" id="aboutRuler"></div>
+    <div class="top-bar-right">
+      <span class="live-dot"></span>
+      <span class="live-text">LIVE &middot; <span id="aboutTime">--:--:--</span></span>
+    </div>
+  </div>
+
+  <div class="about-page">
+    <div class="about-clouds">
+      <div class="about-cloud ac-1"></div>
+      <div class="about-cloud ac-2"></div>
+      <div class="about-cloud ac-3"></div>
+    </div>
+
+    <div class="about-content">
+      <div class="about-intro">
+        <p class="handwritten-label">a little about us</p>
+        <h1 class="about-title">WHAT'S UP</h1>
+        <div class="designer-cursor">
+          <svg width="12" height="16" viewBox="0 0 12 16" fill="#3B82F6"><path d="M0 0L12 10L6 10L4 16L0 0Z"/></svg>
+          <span>You</span>
+        </div>
+      </div>
+
+      <div class="about-grid">
+        <div class="card card-white statement-card">
+          <div class="card-label">STATEMENT.TXT</div>
+          <div class="quote-mark">&ldquo;</div>
+          <h2 class="statement-headline">
+            <span class="navy">We make people stop and ask,</span><br>
+            <span class="orange">who made that?</span>
+          </h2>
+          <p class="statement-body">
+            That reaction is the whole job. <strong>Two people</strong> doing <strong>strategy, design, and code</strong> for startups that refuse to look ordinary. No templates, ever.
+          </p>
+          <div class="card-divider">
+            <span class="card-meta muted">CONTINUUM, SINCE 2024</span>
+            <div class="card-status">
+              <span class="status-dot"></span>
+              <span class="card-meta green">AVAILABLE NOW</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="right-col">
+          <div class="card card-dark metrics-card">
+            <div class="card-label" style="color:rgba(255,255,255,0.4)">METRICS</div>
+            <div class="metrics-grid">
+              <div class="metric-row">
+                <span class="metric-value">607<span class="plus">+</span></span>
+                <span class="metric-label">TESTS PASSING</span>
+              </div>
+              <div class="metric-row">
+                <span class="metric-value"><span class="star">&#9733;</span> 5.0</span>
+                <span class="metric-label">CODE QUALITY</span>
+              </div>
+              <div class="metric-row">
+                <span class="metric-value">48<span class="plus">+</span></span>
+                <span class="metric-label">HR AVG RECOVERY</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="card card-white capabilities-card">
+            <div class="card-label">CAPABILITIES</div>
+            <div class="capabilities-pills">
+              <span class="cap-pill">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                Semantic Recovery
+              </span>
+              <span class="cap-pill">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+                MCP Server
+              </span>
+              <span class="cap-pill">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                State Validation
+              </span>
+              <span class="cap-pill">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                Action Ledger
+              </span>
+              <span class="cap-pill">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+                Checkpointing
+              </span>
+              <span class="cap-pill">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01l-3-3"/></svg>
+                Hash-Chained Audit
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="bottom-grid">
+        <div class="card card-dark project-preview">
+          <span class="project-mini-label">hero.frame</span>
+          <div class="project-mini-ui">
+            <div class="mini-header">
+              <span class="mini-dot"></span>
+              <span class="mini-brand">your-brand</span>
+            </div>
+            <div class="mini-headline">
+              Build<br>
+              <span class="orange">bold.</span>
+            </div>
+            <span class="mini-cta">Start &#8594;</span>
+            <span class="mini-tag">CONTINUUM</span>
+          </div>
+          <div class="project-footer">
+            <span class="project-footer-left">DESIGNED LIVE</span>
+            <span class="project-footer-right">360 &times; 240</span>
+          </div>
+        </div>
+
+        <div class="card card-white current-project">
+          <div class="current-label">CURRENTLY BUILDING IN</div>
+          <div class="current-title">Python &amp; SQLite</div>
+          <div class="current-tags">
+            <span class="current-tag">Pydantic</span>
+            <span class="current-tag">MCP</span>
+            <span class="current-tag">CLI</span>
+          </div>
+          <div class="current-bars">
+            <div class="current-bar" style="height:12px"></div>
+            <div class="current-bar" style="height:18px"></div>
+            <div class="current-bar" style="height:8px"></div>
+            <div class="current-bar" style="height:24px"></div>
+          </div>
+        </div>
+
+        <div class="card card-white testimonial-card">
+          <div class="testimonial-header">
+            <span class="testimonial-stars">&#9733;&#9733;&#9733;&#9733;&#9733;</span>
+            <span class="testimonial-label">REVIEW_07</span>
+          </div>
+          <p class="testimonial-text">
+            "I'd put my agent projects off for years because nothing ever felt reliable. CONTINUUM nailed the recovery story instead of a framework's idea of it."
+          </p>
+          <div class="testimonial-author">
+            <div class="testimonial-avatar">
+              <img src="https://i.pravatar.cc/100?img=12" alt="Avatar">
+            </div>
+            <span class="testimonial-name">ALEX RIVERA &#183; AI ENGINEER</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function updateAboutTime() {
+      const el = document.getElementById('aboutTime');
+      if (el) el.textContent = new Date().toLocaleTimeString('en-US', { hour12: true });
+    }
+    updateAboutTime();
+    setInterval(updateAboutTime, 1000);
+
+    function initAboutRuler() {
+      const ruler = document.getElementById('aboutRuler');
+      if (!ruler) return;
+      const width = ruler.offsetWidth || 800;
+      const spacing = 30;
+      let html = '';
+      for (let i = 0; i < width; i += spacing) {
+        const isMajor = i % 100 === 0;
+        html += `<div style="position:absolute;bottom:0;left:${i}px;width:1px;height:${isMajor ? '10px' : '6px'};background:rgba(7,19,30,0.2)"></div>`;
+        if (isMajor && i > 0) {
+          html += `<div style="position:absolute;bottom:12px;left:${i}px;font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(7,19,30,0.4);transform:translateX(-50%)">${i}</div>`;
+        }
+      }
+      ruler.innerHTML = html;
+    }
+    initAboutRuler();
+  </script>
+</body>
+</html>

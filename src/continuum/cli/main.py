@@ -33,7 +33,7 @@ from continuum.cli.colour import Palette
 from continuum.cli.exitcodes import ExitCode, exit_code_for
 from continuum.environment import StaticProvider, capture
 from continuum.events import EventType
-from continuum.models import ActionStatus, EnvironmentSnapshot, EnvResource, RecoveryMode
+from continuum.models import ActionStatus, EnvironmentSnapshot, EnvResource, Origin, RecoveryMode
 from continuum.recovery import RecoveryEngine, render_contract
 from continuum.state.diff import diff_states, render_diff
 from continuum.state.semantic import ProjectionError, project
@@ -407,6 +407,46 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     return exit_code_for(decision.mode)
 
 
+def cmd_confirm(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Confirm an externally-driven run's self-reported state so it may resume.
+
+    Appends a REVIEW_CONFIRMED event (sourced from Origin.HUMAN) which clears the
+    REQUIRES_REVIEW that self_certified goal/progress would otherwise force, then
+    re-assesses the run. This is the escape hatch for MCP/agent-reported runs
+    that would otherwise be stuck at request_human with no way to proceed. See
+    issue #35.
+    """
+    storage.append_event(
+        args.run_id,
+        EventType.REVIEW_CONFIRMED,
+        {"components": ["goal", "progress"]},
+        source=Origin.HUMAN,
+    )
+
+    engine = RecoveryEngine(storage, strict_unknown=not args.tolerate_unknown)
+    decision = engine.assess(
+        args.run_id,
+        current_environment=_environment(args, args.run_id),
+        expected_model=args.model,
+    )
+
+    payload = {
+        "run_id": decision.run_id,
+        "mode": decision.mode.value,
+        "safe": decision.safe,
+        "next_allowed_action": decision.next_allowed_action,
+    }
+    _emit(
+        payload,
+        decision.render(),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    print("\nRun `continuum resume` to continue.", file=err)
+    return exit_code_for(decision.mode)
+
+
 def cmd_checkpoint(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Force a checkpoint. Mutates the run."""
     manager = CheckpointManager(storage)
@@ -616,6 +656,12 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--model", help="model that will run the resumed agent")
     resume.add_argument("--tolerate-unknown", action="store_true")
     resume.add_argument("--repair", action="store_true", help="record the repair plan")
+
+    confirm = with_env(
+        with_run(add("confirm", cmd_confirm, "Confirm self-reported state so the run may resume."))
+    )
+    confirm.add_argument("--model", help="model that will run the resumed agent")
+    confirm.add_argument("--tolerate-unknown", action="store_true")
 
     checkpoint = with_env(with_run(add("checkpoint", cmd_checkpoint, "Force a checkpoint.")))
     checkpoint.add_argument("--trigger", default="manual")

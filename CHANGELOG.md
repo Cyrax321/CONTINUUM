@@ -6,6 +6,37 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Security Extension (additive).** New `continuum.security` package on the
+  existing recovery and checkpoint substrate, without changing resume, replay,
+  or the crash-time revalidation path:
+  - *Secure Planning Loop* (`provenance.py`, `trust_gate.py`): observations carry
+    provenance and are verified by two independent signals (`verified` /
+    `unverified` / `contested`); a plan branch gated on an observation is
+    escalated to `REQUIRES_REVIEW` when it is high risk and the observation is
+    not fully verified, or when an environment observation is contested.
+    Verification and branch resolution are recorded as `PERCEPTION_OBSERVED` and
+    `BRANCH_RESOLVED` events.
+  - *Periodic Revalidation* (`revalidation.py`): reuses `RecoveryEngine.assess`
+    on a step interval (default 25) and on app switch, so mid-run environment
+    drift is caught within one cycle instead of only at the next crash.
+  - Docs: `docs/PROBLEM.md` (problem statement, honest scope) and
+    `docs/RESULTS.md` (results; mini-benchmark pending). Tests:
+    `tests/test_trust_gate.py`, `tests/test_revalidation_schedule.py`,
+    `tests/test_toy_task_banner_attack.py`. All 700 tests pass; `ruff` and
+    `mypy --strict` are clean.
+
+### Changed
+
+- **README.** `Contents` laid out as a horizontal wrapping nav; Security
+  Extension added to the Features table and table of contents; website link
+  points to the live Vercel site; `How it works` diagram
+  (`docs/assets/architecture.svg`) replaced with a complete view that includes
+  the Security Extension.
+- **CI.** `ruff` pinned to `0.16.2` and `ruff format` applied, so the lint
+  job's format-check is reproducible (it had been failing on unpinned ruff).
+
 ### Fixed
 
 - **`StateValidator._check_progress` no longer downgrades self-certified

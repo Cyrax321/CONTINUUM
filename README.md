@@ -14,29 +14,18 @@
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue?style=flat-square" alt="License" /></a>
   <a href="https://pydantic.dev"><img src="https://img.shields.io/badge/pydantic-v2-E92063?style=flat-square&logo=pydantic&logoColor=white" alt="Pydantic v2" /></a>
-  <a href="https://cyrax321.github.io/CONTINUUM/"><img src="https://img.shields.io/badge/website-live_demo-E06D53?style=flat-square" alt="Website Demo" /></a>
+  <a href="https://continuum-nu-six.vercel.app/"><img src="https://img.shields.io/badge/website-live_demo-E06D53?style=flat-square" alt="Website Demo" /></a>
+</p>
+
+<p align="center">
+  <a href="https://continuum-nu-six.vercel.app/"><strong>Visit the CONTINUUM website</strong></a>
 </p>
 
 ---
 
 ## Contents
 
-- [Why](#why)
-- [Quick Start](#quick-start)
-- [How it works](#how-it-works)
-- [Features](#features)
-- [Empirical Verification](#empirical-verification)
-- [MCP Integration](#mcp-integration)
-- [Framework Integration](#framework-integration)
-- [Core Concepts](#core-concepts)
-- [Architecture](#architecture)
-- [API and CLI](#api-and-cli)
-- [Roadmap](#roadmap)
-- [What CONTINUUM Is Not](#what-continuum-is-not)
-- [Related work](#related-work)
-- [Status and limitations](#status-and-limitations)
-- [Contributing](#contributing)
-- [License](#license)
+[Why](#why) · [Quick Start](#quick-start) · [How it works](#how-it-works) · [Features](#features) · [Security Extension](#security-extension) · [Empirical Verification](#empirical-verification) · [MCP Integration](#mcp-integration) · [Framework Integration](#framework-integration) · [Core Concepts](#core-concepts) · [Architecture](#architecture) · [API and CLI](#api-and-cli) · [Roadmap](#roadmap) · [What CONTINUUM Is Not](#what-continuum-is-not) · [Related work](#related-work) · [Status and limitations](#status-and-limitations) · [Contributing](#contributing) · [License](#license)
 
 ---
 
@@ -96,7 +85,7 @@ The `e2e-autonomy-test/` kit scripts a real invoice-batch task, a hard-kill mid-
 
 CONTINUUM separates **LLM context** (temporary) from **durable task state** (permanent). Instead of saving conversation history, it constructs a semantic checkpoint, the minimum verified information required to continue.
 
-![CONTINUUM architecture](docs/assets/architecture.svg)
+![CONTINUUM how it works](docs/assets/architecture.svg)
 
 The detailed explanation, the projection model, and the recovery context are in [references/architecture.md](references/architecture.md).
 
@@ -110,8 +99,31 @@ The detailed explanation, the projection model, and the recovery context are in 
 | Provenance-aware state | Agent-reported progress is marked `REQUIRES_REVIEW`, never self-certifying |
 | Recovery engine | Seven recovery modes with a deterministic, sealed next-action contract |
 | Deny-by-default MCP server | Nine tools, read-only/mutating split, caller allowlist |
-| Framework adapters | Generic Python, OpenAI Agents SDK, and LangGraph integrations |
-| Tamper-evident log | Hash-chained event log (29 event types) with integrity verification |
+| Framework adapters | Generic Python, OpenAI Agents SDK, LangGraph, and LangChain integrations |
+| Secure planning loop | Two-signal observation verification escalates high-risk branches to REQUIRES_REVIEW |
+| Periodic revalidation | Environment re-checked on a schedule, catching mid-run drift within one cycle |
+| Tamper-evident log | Hash-chained event log (32 event types) with integrity verification |
+
+## Security Extension
+
+CONTINUUM adds two additive security extensions on top of the existing recovery
+and checkpoint substrate. They do not change resume, replay, or the existing
+crash-time revalidation path.
+
+- **Secure Planning Loop**: observations (for example a perception of a UI
+  element) carry provenance and are verified by two independent signals
+  (`verified` / `unverified` / `contested`). A plan branch gated on an
+  observation is escalated to `REQUIRES_REVIEW` when it is high risk and the
+  observation is not fully verified, or when an environment observation is
+  contested. Verification decisions and branch resolutions are appended to the
+  ledger as `PERCEPTION_OBSERVED` and `BRANCH_RESOLVED` events.
+- **Periodic Revalidation**: reuses the recovery engine on a step interval
+  (default 25) and on app switch, so mid-run environment drift is caught within
+  one cycle instead of only at the next crash.
+
+See [docs/PROBLEM.md](docs/PROBLEM.md) for the problem statement and honest
+scope, [docs/RESULTS.md](docs/RESULTS.md) for results, and
+[STATUS.md](STATUS.md) for the implementation status.
 
 ## Empirical Verification
 
@@ -135,7 +147,7 @@ CONTINUUM is verified not just with mock unit tests, but against real LLM agents
 
 ### Automated Test Suite and Benchmarks
 
-- **672 tests passing** on Python 3.11, 3.12, and 3.13 (including unit, `hypothesis` property-based, and concurrency tests).
+- **700 tests passing** on Python 3.11, 3.12, and 3.13 (including unit, `hypothesis` property-based, and concurrency tests).
 - **CONTINUUM-Bench**: `continuum benchmark` executes in-process recovery benchmarks across three scenarios (`process_crash`, `dataset_change`, `unknown_side_effect`), proving 0 duplicate work, 0 duplicate side effects, and automatic detection of stale environment dependencies.
 
 ## MCP Integration
@@ -156,10 +168,26 @@ CONTINUUM plugs into agent frameworks without becoming one. Three adapters ship 
 | Adapter | Class | Notes |
 |:--|:--|:--|
 | Generic Python agent | `GenericAgentAdapter` | In-process facade; writes trusted (`Origin.DETERMINISTIC`) state. |
-| OpenAI Agents SDK | `OpenAIAgentAdapter` | Hooks `ToolContext` / `RunHooks`; optional `openai-agents`. |
-| LangGraph | `LangGraphAgentAdapter` | Wraps a `StateGraph`; optional `langgraph`. |
+| OpenAI Agents SDK | `OpenAIAgentAdapter` | Experimental. Hooks `ToolContext` / `RunHooks`; optional `openai-agents`. |
+| LangGraph | `LangGraphAgentAdapter` | Experimental. Wraps a `StateGraph`; optional `langgraph`. |
+| LangChain | `LangChainAgentAdapter` | Experimental. Drops `checkpoint_node` into an LCEL `Runnable` pipeline and the `create_agent` tool-calling loop; optional `langchain`. |
 
-Each adapter records progress and side effects through the ledger and routes external effects through the two-phase intercept/complete protocol.
+Each adapter records progress and side effects through the ledger and routes external effects through the two-phase intercept/complete protocol. The framework adapters are newer than the generic facade, but each now has end-to-end integration tests (`tests/test_integration_langgraph.py`, `tests/test_integration_langchain.py`, and `tests/test_integration_langchain_agent.py` for a real `create_agent` tool-calling loop) covering checkpoint durability, exactly-once side effects, and crash-after-checkpoint resume. Treat them as experimental until their adapter-specific tests cover the full crash and resume matrix. Full usage, with runnable examples for every adapter, is in [references/adapters.md](references/adapters.md).
+
+### Resuming agent- or MCP-reported runs
+
+State reported over MCP, or through the OpenAI adapter, is recorded with `Origin.EXTERNAL_AGENT` provenance, which the validator marks `REQUIRES_REVIEW`. That is intentional: an agent must not validate its own unverified work. The consequence is that such runs resolve to `request_human` on `continuum resume` until a human has eyeballed them.
+
+Runs started through the LangGraph or LangChain adapter use `Origin.DETERMINISTIC` provenance (the adapter is the orchestrator starting the run on CONTINUUM's behalf), so a consistent run resumes (`RESUME`) without a human in the loop.
+
+To clear that review and resume, confirm the run as the operator:
+
+```bash
+continuum confirm <run_id>   # records REVIEW_CONFIRMED, then re-assesses
+continuum resume <run_id>    # now reports RESUME
+```
+
+Over MCP the equivalent is the `continuum_confirm` tool followed by `continuum_resume`. Confirmation is a one-time, human-attested event; it is the escape hatch for the self-certification safety so an externally-driven run is never permanently stuck.
 
 ## Core Concepts
 
@@ -239,10 +267,12 @@ Recent preprints that measure or model the same reliability gaps CONTINUUM targe
 
 ## Status and limitations
 
-- **Tested**: 672 tests passing, 7 skipped (see [STATUS.md](STATUS.md)).
+- **Tested**: 700 tests passing, 4 skipped (see [STATUS.md](STATUS.md)).
 - **Not on PyPI.** Install from a clone (see Quick Start).
 - **MCP caller authentication is not implemented.** `clientInfo` is asserted by the client and never verified, so authorization is by declared identity, not authentication. Tracked as [#1](https://github.com/Cyrax321/CONTINUUM/issues/1).
 - **Unbuilt components**: Cloud API (Phase 13) and Dashboard (Phase 14).
+- **Framework adapters are experimental.** The OpenAI Agents SDK and LangGraph adapters are newer than the generic facade and do not yet carry the same crash-and-resume verification coverage. Prefer `GenericAgentAdapter` for production recovery until their adapter-specific tests cover the full recovery matrix.
+- **Agent/MCP runs need an explicit confirm before auto-resume.** Because externally-reported state is `REQUIRES_REVIEW`, `continuum resume` returns `request_human` until a human runs `continuum confirm <run_id>` (or the MCP `continuum_confirm` tool). This is by design, not a bug; see [Framework Integration](#framework-integration).
 - **e2e autonomy test series** (issue [#6](https://github.com/Cyrax321/CONTINUUM/issues/6)): Three full Claude Code runs scored 7/7 mechanics with unprompted recovery behavior observed. Defensive token-based fallback and path normalization bridge argument drift. Further test iterations across diverse prompt styles remain open.
 
 For a full account of what is verified, believed, and neither, see [STATUS.md](STATUS.md). The current set of open correctness bugs (a 2026-08-12 code audit) is tracked there.
@@ -264,6 +294,7 @@ Deep reference material:
 - [references/concepts.md](references/concepts.md) - semantic checkpoints, validation, ledger, recovery modes, contract
 - [references/architecture.md](references/architecture.md) - data model, event log, projection, storage, checkpointing, recovery engine, security, project structure
 - [references/api.md](references/api.md) - Python and adapter API
+- [references/adapters.md](references/adapters.md) - framework adapter usage (Generic, OpenAI, LangGraph, LangChain) with runnable examples
 - [references/cli.md](references/cli.md) - full CLI command list, exit codes, state diff
 - [references/quickstart.md](references/quickstart.md) - install, examples, the proof scripts
 - [references/e2e.md](references/e2e.md) - end to end autonomy test walkthrough

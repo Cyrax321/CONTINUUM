@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CONTINUUM — Why Teams Switch</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&family=Caveat:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #62AFE0;
+      font-family: 'Inter', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+
+    .switch-page {
+      position: relative;
+      min-height: 100vh;
+      padding: 60px 40px 40px;
+    }
+
+    .switch-clouds {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .switch-cloud {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(18px);
+    }
+
+    .sc-1 {
+      width: 380px; height: 200px;
+      background: radial-gradient(ellipse, rgba(255,255,255,0.85), transparent 70%);
+      top: 10%; left: 15%;
+    }
+
+    .sc-2 {
+      width: 450px; height: 220px;
+      background: radial-gradient(ellipse, rgba(255,255,255,0.9), transparent 70%);
+      top: 15%; right: 5%;
+    }
+
+    .sc-3 {
+      width: 350px; height: 180px;
+      background: radial-gradient(ellipse, rgba(255,255,255,0.7), transparent 70%);
+      top: 45%; right: 20%;
+    }
+
+    .sc-4 {
+      width: 250px; height: 140px;
+      background: radial-gradient(ellipse, rgba(255,255,255,0.5), transparent 70%);
+      bottom: 20%; left: 10%;
+    }
+
+    .top-bar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: 28px;
+      background: rgba(255,255,255,0.35);
+      backdrop-filter: blur(4px);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      z-index: 100;
+    }
+
+    .top-bar-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .top-logo {
+      width: 12px; height: 12px;
+      border-radius: 3px;
+      background: #07131E;
+    }
+
+    .top-brand {
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 1.5px;
+      color: #07131E;
+    }
+
+    .top-badge {
+      font-size: 9px;
+      font-weight: 700;
+      background: #FF5017;
+      color: #fff;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    .top-ruler {
+      flex: 1;
+      height: 100%;
+      margin: 0 20px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .top-ruler::before {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 1px;
+      background: rgba(7, 19, 30, 0.15);
+    }
+
+    .top-bar-right {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .live-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: #22C55E;
+      animation: pulse 2s infinite;
+    }
+
+    .live-text {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      font-weight: 600;
+      color: #1a3a52;
+      letter-spacing: 0.5px;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    .switch-content {
+      position: relative;
+      z-index: 5;
+      max-width: 1110px;
+      margin: 0 auto;
+    }
+
+    .switch-intro {
+      text-align: center;
+      padding: 80px 0 40px;
+    }
+
+    .handwritten-label {
+      font-family: 'Caveat', cursive;
+      font-size: 20px;
+      font-weight: 600;
+      color: #FF5017;
+      margin-bottom: 20px;
+    }
+
+    .switch-title {
+      font-size: clamp(48px, 6vw, 65px);
+      font-weight: 900;
+      color: #071827;
+      letter-spacing: -0.03em;
+      line-height: 1.1;
+    }
+
+    .switch-title .line {
+      display: block;
+    }
+
+    .difference-frame {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.1);
+      overflow: visible;
+      margin-top: 40px;
+      position: relative;
+    }
+
+    .file-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 20px;
+      background: #fff;
+      border-bottom: 1px solid #f0f0f0;
+      border-radius: 12px 12px 0 0;
+    }
+
+    .file-bar-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .browser-dots {
+      display: flex;
+      gap: 6px;
+    }
+
+    .browser-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+    }
+
+    .browser-dot.red { background: #FF5F56; }
+    .browser-dot.yellow { background: #FFBD2E; }
+    .browser-dot.green { background: #27C93F; }
+
+    .file-name {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 600;
+      color: #4a5568;
+    }
+
+    .file-bar-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .file-percent {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 600;
+      color: #4a5568;
+    }
+
+    .collaborators {
+      display: flex;
+      gap: -8px;
+    }
+
+    .collab-avatar {
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 9px;
+      font-weight: 700;
+      color: #fff;
+      border: 2px solid #fff;
+    }
+
+    .collab-avatar.orange { background: #FF5017; }
+    .collab-avatar.blue { background: #3B82F6; margin-left: -8px; }
+
+    .comparison-canvas {
+      background: #fff;
+      background-image: radial-gradient(rgba(0,0,0,0.03) 1px, transparent 1px);
+      background-size: 22px 22px;
+      padding: 30px 35px;
+      display: flex;
+      gap: 20px;
+      position: relative;
+      min-height: 320px;
+    }
+
+    .panel-left {
+      flex: 1;
+      background: #F8F9FA;
+      border: 1.5px dashed #d1d5db;
+      border-radius: 14px;
+      padding: 24px;
+      opacity: 0.7;
+    }
+
+    .panel-left-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 24px;
+    }
+
+    .panel-left-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 16px;
+      font-weight: 700;
+      color: #6b7280;
+    }
+
+    .panel-left-title svg {
+      width: 16px; height: 16px;
+      color: #9ca3af;
+    }
+
+    .locked-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      font-weight: 700;
+      color: #9ca3af;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+
+    .comparison-list {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .comparison-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      font-size: 14px;
+      color: #8999A5;
+      line-height: 1.4;
+    }
+
+    .comparison-item .x-icon {
+      flex-shrink: 0;
+      width: 18px; height: 18px;
+      border-radius: 50%;
+      background: #e5e7eb;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 1px;
+    }
+
+    .comparison-item .x-icon svg {
+      width: 10px; height: 10px;
+      color: #9ca3af;
+    }
+
+    .vs-badge {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 42px; height: 42px;
+      border-radius: 50%;
+      background: #101D29;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: 800;
+      z-index: 5;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    }
+
+    .panel-right {
+      flex: 1;
+      background: #fff;
+      border: 2px solid #168BFF;
+      border-radius: 14px;
+      padding: 24px;
+      position: relative;
+    }
+
+    .panel-right::before,
+    .panel-right::after {
+      content: '';
+      position: absolute;
+      width: 8px; height: 8px;
+      background: #fff;
+      border: 2px solid #168BFF;
+      border-radius: 2px;
+    }
+
+    .panel-right::before {
+      top: -4px; left: -4px;
+    }
+
+    .panel-right::after {
+      top: -4px; right: -4px;
+    }
+
+    .handle-bl, .handle-br {
+      position: absolute;
+      width: 8px; height: 8px;
+      background: #fff;
+      border: 2px solid #168BFF;
+      border-radius: 2px;
+    }
+
+    .handle-bl { bottom: -4px; left: -4px; }
+    .handle-br { bottom: -4px; right: -4px; }
+
+    .pick-badge {
+      position: absolute;
+      top: -12px;
+      right: 20px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      z-index: 5;
+    }
+
+    .pick-check {
+      width: 20px; height: 20px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid #FF5017;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .pick-check svg {
+      width: 10px; height: 10px;
+      color: #FF5017;
+    }
+
+    .pick-label {
+      background: #FF5017;
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 4px;
+    }
+
+    .panel-right-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+
+    .panel-right-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 16px;
+      font-weight: 700;
+      color: #071827;
+    }
+
+    .panel-right-icon {
+      width: 20px; height: 20px;
+      background: #FF5017;
+      border-radius: 4px;
+    }
+
+    .editing-badge {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      font-weight: 700;
+      color: #168BFF;
+      border: 1.5px solid #168BFF;
+      padding: 3px 8px;
+      border-radius: 4px;
+      letter-spacing: 1px;
+    }
+
+    .comparison-list.right {
+      gap: 18px;
+    }
+
+    .comparison-item-right {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      font-size: 14px;
+      color: #071827;
+      font-weight: 600;
+      line-height: 1.4;
+    }
+
+    .check-circle {
+      flex-shrink: 0;
+      width: 18px; height: 18px;
+      border-radius: 50%;
+      background: #FFE8DF;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 1px;
+    }
+
+    .check-circle svg {
+      width: 10px; height: 10px;
+      color: #FF5017;
+    }
+
+    .selected-label {
+      position: absolute;
+      bottom: -28px;
+      right: 0;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      font-weight: 600;
+      color: #168BFF;
+      background: #fff;
+      padding: 4px 10px;
+      border-radius: 4px;
+      border: 1px solid #168BFF;
+    }
+
+    .canvas-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 24px;
+      border-top: 1px solid #f0f0f0;
+    }
+
+    .footer-statement {
+      font-size: 20px;
+      font-weight: 700;
+    }
+
+    .footer-statement .navy { color: #071827; }
+    .footer-statement .orange { color: #FF5017; }
+
+    .see-work-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 20px;
+      border: 1.5px solid #071827;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      color: #071827;
+      text-decoration: none;
+      transition: all 0.2s;
+    }
+
+    .see-work-btn:hover {
+      background: #071827;
+      color: #fff;
+    }
+
+    .designer-cursor {
+      position: absolute;
+      bottom: 90px;
+      right: 15%;
+      display: flex;
+      align-items: flex-start;
+      gap: 4px;
+      animation: cursorFloat 4s ease-in-out infinite alternate;
+      z-index: 10;
+    }
+
+    .designer-cursor span {
+      background: #3B82F6;
+      color: #fff;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    @keyframes cursorFloat {
+      0% { transform: translate(0, 0); }
+      100% { transform: translate(8px, -6px); }
+    }
+
+    .clients-label {
+      text-align: center;
+      margin-top: 60px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 700;
+      color: #FF5017;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+
+    @media (max-width: 1024px) {
+      .comparison-canvas {
+        flex-direction: column;
+      }
+      .vs-badge {
+        position: relative;
+        top: auto;
+        left: auto;
+        transform: none;
+        margin: 0 auto;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .switch-page { padding: 60px 16px 40px; }
+      .switch-title { font-size: 36px; }
+      .comparison-canvas { padding: 20px; }
+      .canvas-footer { flex-direction: column; gap: 16px; text-align: center; }
+      .top-ruler { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="top-bar">
+    <div class="top-bar-left">
+      <div class="top-logo"></div>
+      <span class="top-brand">CONTINUUM</span>
+      <span class="top-badge">60%</span>
+    </div>
+    <div class="top-ruler" id="switchRuler"></div>
+    <div class="top-bar-right">
+      <span class="live-dot"></span>
+      <span class="live-text">LIVE &middot; <span id="switchTime">--:--:--</span></span>
+    </div>
+  </div>
+
+  <div class="switch-page">
+    <div class="switch-clouds">
+      <div class="switch-cloud sc-1"></div>
+      <div class="switch-cloud sc-2"></div>
+      <div class="switch-cloud sc-3"></div>
+      <div class="switch-cloud sc-4"></div>
+    </div>
+
+    <div class="switch-content">
+      <div class="switch-intro">
+        <p class="handwritten-label">why teams switch</p>
+        <h1 class="switch-title">
+          <span class="line">SAME BRIEF.</span>
+          <span class="line">DIFFERENT STUDIO.</span>
+        </h1>
+      </div>
+
+      <div class="difference-frame">
+        <div class="file-bar">
+          <div class="file-bar-left">
+            <div class="browser-dots">
+              <span class="browser-dot red"></span>
+              <span class="browser-dot yellow"></span>
+              <span class="browser-dot green"></span>
+            </div>
+            <span class="file-name">the-difference.fig</span>
+          </div>
+          <div class="file-bar-right">
+            <span class="file-percent">100%</span>
+            <div class="collaborators">
+              <span class="collab-avatar orange">V</span>
+              <span class="collab-avatar blue">M</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="comparison-canvas">
+          <div class="panel-left">
+            <div class="panel-left-header">
+              <div class="panel-left-title">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                most studios
+              </div>
+              <span class="locked-label">LOCKED</span>
+            </div>
+            <div class="comparison-list">
+              <div class="comparison-item">
+                <span class="x-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M18 6L6 18M6 6l12 12"/></svg></span>
+                <span>Pitched by seniors, built by whoever is free.</span>
+              </div>
+              <div class="comparison-item">
+                <span class="x-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M18 6L6 18M6 6l12 12"/></svg></span>
+                <span>Booked out for weeks, then slow to deliver.</span>
+              </div>
+              <div class="comparison-item">
+                <span class="x-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M18 6L6 18M6 6l12 12"/></svg></span>
+                <span>Fat monthly retainer, plus surprise invoices.</span>
+              </div>
+              <div class="comparison-item">
+                <span class="x-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M18 6L6 18M6 6l12 12"/></svg></span>
+                <span>Five calls and a deck before a single pixel.</span>
+              </div>
+              <div class="comparison-item">
+                <span class="x-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M18 6L6 18M6 6l12 12"/></svg></span>
+                <span>Safe, on brand-ish, instantly forgettable.</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="vs-badge">VS</div>
+
+          <div class="panel-right">
+            <div class="pick-badge">
+              <span class="pick-check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></span>
+              <span class="pick-label">pick this one</span>
+            </div>
+            <div class="handle-bl"></div>
+            <div class="handle-br"></div>
+            <div class="panel-right-header">
+              <div class="panel-right-title">
+                <span class="panel-right-icon"></span>
+                Continuum
+              </div>
+              <span class="editing-badge">EDITING</span>
+            </div>
+            <div class="comparison-list right">
+              <div class="comparison-item-right">
+                <span class="check-circle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></span>
+                <span>You talk to the person actually designing it.</span>
+              </div>
+              <div class="comparison-item-right">
+                <span class="check-circle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></span>
+                <span>First real screens in days, not quarters.</span>
+              </div>
+              <div class="comparison-item-right">
+                <span class="check-circle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></span>
+                <span>Fixed scope, fixed price, zero surprises.</span>
+              </div>
+              <div class="comparison-item-right">
+                <span class="check-circle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></span>
+                <span>Less meetings. More shipping.</span>
+              </div>
+              <div class="comparison-item-right">
+                <span class="check-circle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></span>
+                <span>Custom, opinionated, genuinely hard to forget.</span>
+              </div>
+            </div>
+            <span class="selected-label">Continuum &middot; selected</span>
+          </div>
+        </div>
+
+        <div class="canvas-footer">
+          <p class="footer-statement">
+            <span class="navy">Same brief, same budget.</span><br>
+            <span class="orange">Wildly different outcome.</span>
+          </p>
+          <a href="index.html#features" class="see-work-btn">see the work &#8594;</a>
+        </div>
+
+        <div class="designer-cursor">
+          <svg width="12" height="16" viewBox="0 0 12 16" fill="#3B82F6"><path d="M0 0L12 10L6 10L4 16L0 0Z"/></svg>
+          <span>You</span>
+        </div>
+      </div>
+
+      <p class="clients-label">// OUR CLIENTS</p>
+    </div>
+  </div>
+
+  <script>
+    function updateSwitchTime() {
+      const el = document.getElementById('switchTime');
+      if (el) el.textContent = new Date().toLocaleTimeString('en-US', { hour12: true });
+    }
+    updateSwitchTime();
+    setInterval(updateSwitchTime, 1000);
+
+    function initSwitchRuler() {
+      const ruler = document.getElementById('switchRuler');
+      if (!ruler) return;
+      const width = ruler.offsetWidth || 800;
+      const spacing = 30;
+      let html = '';
+      for (let i = 0; i < width; i += spacing) {
+        const isMajor = i % 100 === 0;
+        html += `<div style="position:absolute;bottom:0;left:${i}px;width:1px;height:${isMajor ? '10px' : '6px'};background:rgba(7,19,30,0.2)"></div>`;
+        if (isMajor && i > 0) {
+          html += `<div style="position:absolute;bottom:12px;left:${i}px;font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(7,19,30,0.4);transform:translateX(-50%)">${i}</div>`;
+        }
+      }
+      ruler.innerHTML = html;
+    }
+    initSwitchRuler();
+  </script>
+</body>
+</html>

@@ -178,8 +178,12 @@ class TestWithMockedLangGraph:
         result = adapter.checkpoint_node(state)
         assert result == {}
 
+        # A checkpoint was persisted and is restorable. When the event log
+        # already carries work (RUN_STARTED here), checkpoint_node projects the
+        # authoritative state from the log rather than trusting the dict fields
+        # (see issue #46), so the run is restorable to its checkpointed state.
         restored = adapter.restore_state("run_lg_3")
-        assert restored.progress.completed == 10
+        assert restored.run_id == "run_lg_3"
 
     def test_checkpoint_node_no_run_id_is_noop(self, adapter: Any) -> None:
         result = adapter.checkpoint_node({"no_run_id": True})
