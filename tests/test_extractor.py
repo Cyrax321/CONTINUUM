@@ -133,6 +133,103 @@ def test_proposals_without_ids_are_dropped() -> None:
 # --- composition ----------------------------------------------------------- #
 
 
+def test_a_repeated_decision_id_within_one_proposal_is_collapsed() -> None:
+    """The known-id set is seeded from the base state; it must also grow as we append."""
+    log = build_log()
+    extractor = LLMExtractor(
+        lambda ctx, state: LLMProposal(
+            decisions=[
+                {"decision_id": "X", "decision": "first"},
+                {"decision_id": "X", "decision": "second"},
+            ]
+        )
+    )
+    state = extractor.extract(context(log))
+    assert [d.decision_id for d in state.decisions].count("X") == 1
+
+
+def test_a_repeated_finding_id_within_one_proposal_is_collapsed() -> None:
+    log = build_log()
+    extractor = LLMExtractor(
+        lambda ctx, state: LLMProposal(
+            findings=[
+                {"finding_id": "Y", "claim": "a"},
+                {"finding_id": "Y", "claim": "b"},
+            ]
+        )
+    )
+    state = extractor.extract(context(log))
+    assert [f.finding_id for f in state.findings].count("Y") == 1
+
+
+def test_a_repeated_task_id_within_one_proposal_is_collapsed() -> None:
+    log = build_log()
+    extractor = LLMExtractor(
+        lambda ctx, state: LLMProposal(
+            pending_work=[
+                {"task_id": "T", "description": "a"},
+                {"task_id": "T", "description": "b"},
+            ]
+        )
+    )
+    state = extractor.extract(context(log))
+    assert [w.task_id for w in state.pending_work].count("T") == 1
+
+
+def test_the_first_occurrence_wins_within_a_proposal() -> None:
+    """Consistent with the base state winning over a proposal: earlier wins."""
+    log = build_log()
+    extractor = LLMExtractor(
+        lambda ctx, state: LLMProposal(
+            decisions=[
+                {"decision_id": "X", "decision": "first"},
+                {"decision_id": "X", "decision": "second"},
+            ]
+        )
+    )
+    decision = extractor.extract(context(log)).decision("X")
+    assert decision is not None
+    assert decision.decision == "first"
+
+
+def test_distinct_ids_in_one_proposal_are_all_kept() -> None:
+    """The de-dup guard must not collapse genuinely different components."""
+    log = build_log()
+    extractor = LLMExtractor(
+        lambda ctx, state: LLMProposal(
+            decisions=[
+                {"decision_id": "X", "decision": "one"},
+                {"decision_id": "Z", "decision": "two"},
+            ],
+            findings=[
+                {"finding_id": "Y", "claim": "a"},
+                {"finding_id": "W", "claim": "b"},
+            ],
+        )
+    )
+    state = extractor.extract(context(log))
+    assert {"X", "Z"} <= {d.decision_id for d in state.decisions}
+    assert {"Y", "W"} <= {f.finding_id for f in state.findings}
+
+
+def test_a_proposal_repeating_a_recorded_id_still_cannot_overwrite_it() -> None:
+    """d1 is recorded; repeating it twice must neither overwrite nor duplicate."""
+    log = build_log()
+    extractor = LLMExtractor(
+        lambda ctx, state: LLMProposal(
+            decisions=[
+                {"decision_id": "d1", "decision": "hijacked"},
+                {"decision_id": "d1", "decision": "hijacked again"},
+            ]
+        )
+    )
+    state = extractor.extract(context(log))
+    assert [d.decision_id for d in state.decisions].count("d1") == 1
+    decision = state.decision("d1")
+    assert decision is not None
+    assert decision.decision == "recorded"
+
+
 def test_composite_chains_without_double_applying_events() -> None:
     log = build_log()
     composite = CompositeExtractor(

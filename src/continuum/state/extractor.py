@@ -147,6 +147,10 @@ class LLMExtractor:
             decision_id = str(raw.get("decision_id", ""))
             if not decision_id or decision_id in known_decisions:
                 continue  # never overwrite a recorded fact
+            # Also guards against a repeat later in this same proposal: the set is
+            # seeded from the base state, so without this the second copy of an id
+            # the LLM emitted twice would not be recognised as already handled.
+            known_decisions.add(decision_id)
             decisions.append(
                 Decision(
                     decision_id=decision_id,
@@ -164,6 +168,7 @@ class LLMExtractor:
             finding_id = str(raw.get("finding_id", ""))
             if not finding_id or finding_id in known_findings:
                 continue
+            known_findings.add(finding_id)
             confidence = float(raw.get("confidence", 0.5))
             findings.append(
                 Finding(
@@ -182,6 +187,7 @@ class LLMExtractor:
             task_id = str(raw.get("task_id", ""))
             if not task_id or task_id in known_work:
                 continue
+            known_work.add(task_id)
             pending.append(
                 PendingWork(
                     task_id=task_id,
