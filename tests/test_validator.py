@@ -344,6 +344,44 @@ def test_progress_without_source_events_is_unknown() -> None:
     assert status_for(outcome, Component.PROGRESS) is StateStatus.UNKNOWN
 
 
+def test_self_certified_progress_stays_requires_review_without_source() -> None:
+    """Regression for issue #48: a self-certified progress with no source events
+    must keep REQUIRES_REVIEW, not be downgraded to a tolerable UNKNOWN by the
+    source_sequence == 0 branch. REQUIRES_REVIEW is never excepted by
+    strict_unknown, so it must always block the resume."""
+    from continuum.models import Origin, Provenance
+
+    outcome = validate_state(
+        state(
+            source_sequence=0,
+            progress=Progress(
+                total=10_000,
+                completed=3421,
+                pending=6576,
+                failed=3,
+                provenance=Provenance(origin=Origin.EXTERNAL_AGENT),
+            ),
+        )
+    )
+    assert status_for(outcome, Component.PROGRESS) is StateStatus.REQUIRES_REVIEW
+    # Even with --tolerate-unknown the self-report must still block.
+    tolerated = validate_state(
+        state(
+            source_sequence=0,
+            progress=Progress(
+                total=10_000,
+                completed=3421,
+                pending=6576,
+                failed=3,
+                provenance=Provenance(origin=Origin.EXTERNAL_AGENT),
+            ),
+        ),
+        strict_unknown=False,
+    )
+    assert status_for(tolerated, Component.PROGRESS) is StateStatus.REQUIRES_REVIEW
+    assert not tolerated.safe
+
+
 def test_evidence_cited_but_missing_is_reported() -> None:
     outcome = validate_state(
         state(findings=[Finding(finding_id="f1", claim="c", evidence=["paper_404"])])

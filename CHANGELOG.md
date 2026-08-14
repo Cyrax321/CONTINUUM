@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`StateValidator._check_progress` no longer downgrades self-certified
+  progress to `UNKNOWN`.** The "no source events" check (`source_sequence == 0
+  and completed > 0`) ran as a second `if` after the self-certified branch, so a
+  self-reported progress (the shape the OpenAI and LangGraph adapters emit) was
+  relabelled `UNKNOWN` and then silently unblocked by `--tolerate-unknown`
+  (`strict_unknown=False`). `UNKNOWN` is excepted under `strict_unknown=False`,
+  but `REQUIRES_REVIEW` is not, so a self-report must always block a resume. The
+  second check is now an `elif`, so it cannot overwrite a `REQUIRES_REVIEW`.
+  Fixed in issue #48.
+
 - **`continuum_intercept_action` deduplicated on argument formatting, not
   resource identity.** The idempotency key hashes the action type plus the
   caller's raw arguments, so two sessions describing the same operation with

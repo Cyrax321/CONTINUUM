@@ -331,8 +331,10 @@ class StateValidator:
                 f"{progress.completed} completed, self-reported by {origin.value} "
                 f"and not independently verified"
             )
-
-        if state.source_sequence == 0 and progress.completed > 0:
+        elif state.source_sequence == 0 and progress.completed > 0:
+            # Self-certified progress is already REQUIRES_REVIEW above and must
+            # stay that way, so this branch only downgrades independently
+            # recorded progress to UNKNOWN, never a self-report.
             status = StateStatus.UNKNOWN
             detail = "progress recorded but no source events"
 
