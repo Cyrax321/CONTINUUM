@@ -17,7 +17,13 @@ from continuum.models import (
 from continuum.recovery.engine import RecoveryDecision, RecoveryEngine
 from continuum.storage.base import Storage
 
-__all__ = ["GenericAgentAdapter"]
+#: Key under which a non-dict action result is stored, since the ledger records
+#: results as mappings. A caller's own dict is wrapped in the same envelope when
+#: it contains this key, so the presence of the key in a stored result always
+#: means "envelope" and never "caller data".
+RESULT_ENVELOPE_KEY = "__return_value__"
+
+__all__ = ["GenericAgentAdapter", "RESULT_ENVELOPE_KEY"]
 
 
 class GenericAgentAdapter(AgentAdapter):
@@ -115,8 +121,12 @@ class GenericAgentAdapter(AgentAdapter):
 
         if not outcome.fresh:
             res = outcome.result
-            if isinstance(res, dict) and "__return_value__" in res:
-                return res["__return_value__"]
+            # One level of unwrapping, matching the one level the fresh path
+            # below applies. A stored dict that carries the key is always an
+            # envelope, never a caller's own dict, because the fresh path wraps
+            # those too.
+            if isinstance(res, dict) and RESULT_ENVELOPE_KEY in res:
+                return res[RESULT_ENVELOPE_KEY]
             return res
 
         try:
@@ -128,7 +138,13 @@ class GenericAgentAdapter(AgentAdapter):
             ledger.fail(outcome.key, f"{type(exc).__name__}: {exc}", certain=False)
             raise
 
-        result_dict = val if isinstance(val, dict) else {"__return_value__": val}
+        # A non-dict has to be wrapped to be stored. So does a dict that happens
+        # to contain the envelope key: storing that one as-is would make the
+        # cached path unwrap the caller's own dict and return only that member,
+        # so a completed action would return a different value on its second
+        # call than on its first.
+        needs_envelope = not isinstance(val, dict) or RESULT_ENVELOPE_KEY in val
+        result_dict = {RESULT_ENVELOPE_KEY: val} if needs_envelope else val
         ledger.complete(outcome.key, result=result_dict)
         return val
 

@@ -94,6 +94,82 @@ def test_intercept_action_handles_scalar_return_value(store: SQLiteStorage) -> N
     assert call_count == 1  # Deduplicated
 
 
+def test_a_result_dict_holding_the_envelope_key_survives_the_cache(
+    store: SQLiteStorage,
+) -> None:
+    """A completed action must return the same value on every call.
+
+    The cached path unwraps the envelope key; if a caller's own dict carried
+    that key and were stored as-is, the second call would return only that
+    member and silently drop the rest.
+    """
+    adapter = GenericAgentAdapter(store)
+    adapter.start_run(goal="Collide", run_id="run_110")
+
+    call_count = 0
+
+    def action() -> dict[str, object]:
+        nonlocal call_count
+        call_count += 1
+        return {"__return_value__": 42, "other": "payload"}
+
+    first = adapter.intercept_action("run_110", "act.collide", action, arguments={"k": 1})
+    second = adapter.intercept_action("run_110", "act.collide", action, arguments={"k": 1})
+
+    assert call_count == 1  # the second call is a pure cache hit
+    assert first == {"__return_value__": 42, "other": "payload"}
+    assert second == first
+
+
+def test_a_result_dict_that_is_only_the_envelope_key_survives_the_cache(
+    store: SQLiteStorage,
+) -> None:
+    """The degenerate case: the caller's dict is indistinguishable from an envelope."""
+    adapter = GenericAgentAdapter(store)
+    adapter.start_run(goal="Collide", run_id="run_111")
+
+    def action() -> dict[str, object]:
+        return {"__return_value__": "mine"}
+
+    first = adapter.intercept_action("run_111", "act.bare", action, arguments={"k": 1})
+    second = adapter.intercept_action("run_111", "act.bare", action, arguments={"k": 1})
+
+    assert first == {"__return_value__": "mine"}
+    assert second == first
+
+
+def test_a_nested_envelope_key_survives_the_cache(store: SQLiteStorage) -> None:
+    """Only one level is ever wrapped, so only one level is ever unwrapped."""
+    adapter = GenericAgentAdapter(store)
+    adapter.start_run(goal="Collide", run_id="run_112")
+
+    payload = {"__return_value__": {"__return_value__": "deep"}}
+
+    first = adapter.intercept_action("run_112", "act.nested", lambda: payload, arguments={"k": 1})
+    second = adapter.intercept_action("run_112", "act.nested", lambda: payload, arguments={"k": 1})
+
+    assert first == payload
+    assert second == payload
+
+
+def test_an_ordinary_dict_result_is_still_stored_unwrapped(store: SQLiteStorage) -> None:
+    """The envelope must not start wrapping dicts that never needed it."""
+    from continuum.actions.ledger import ActionLedger
+
+    adapter = GenericAgentAdapter(store)
+    adapter.start_run(goal="Plain", run_id="run_113")
+
+    adapter.intercept_action(
+        "run_113",
+        "act.plain",
+        lambda: {"transaction_id": "tx_1"},
+        arguments={"k": 1},
+    )
+
+    stored = ActionLedger(store, "run_113").all()
+    assert stored[-1].result == {"transaction_id": "tx_1"}
+
+
 def test_a_raised_action_leaves_the_side_effect_uncertain(store: SQLiteStorage) -> None:
     """An exception from an external call does not prove nothing happened.
 
