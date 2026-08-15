@@ -165,13 +165,54 @@ agent.invoke(
 ```
 
 When the agent calls the tool more than once in a run, `wrap_tool` collapses
-the calls into a single external side effect.
+the calls into a single external side effect, provided the argument-hash key is
+stable across calls.
+
+### Explicit idempotency key (real-LLM safe)
+
+Argument-hash dedup assumes identical arguments mean the same operation. An LLM
+does not honour that assumption: it can stuff a generated sentence into a
+parameter, rename the parameter, or otherwise render the same logical operation
+with different argument text between calls. When the argument shape drifts, the
+hash differs and dedup silently fails, re-firing the side effect.
+
+Pass an explicit, Stripe-style key to identify the operation by its resource
+identity instead of its argument bytes:
+
+```python
+@adapter.wrap_tool("notify.customer", key="notify:O-9")
+def _notify(order_id: str, *, continuum_run_id: str = "") -> str:
+    return send_email(order_id)
+```
+
+Or derive it per call with `key_fn` when the identity lives in an argument:
+
+```python
+@adapter.wrap_tool(
+    "notify.customer",
+    key_fn=lambda *a, **k: f"notify:{str(k.get('order_id', '')).strip()}",
+)
+def _notify(order_id: str, *, continuum_run_id: str = "") -> str:
+    return send_email(order_id)
+```
+
+Both forward to `ActionLedger.claim(key=...)`, so two calls that share the action
+type and key collapse to one external side effect regardless of argument drift.
+`key` and `key_fn` are mutually exclusive; `key_fn` is called with the tool's
+`(*args, **kwargs)`.
+
+`LangGraphAgentAdapter.wrap_tool` and `OpenAIAgentAdapter.wrap_function_tool`
+expose the same `key` / `key_fn` parameters, so the pattern applies uniformly
+across all three framework adapters.
 
 ## Exactly-once side effects and recovery
 
 - External side effects are claimed in the action ledger before execution and
   completed after. A second call with the same run-scoped arguments returns the
   cached result without re-executing the underlying function.
+- When the caller cannot guarantee stable argument text (an LLM-driven tool),
+  pass an explicit `key` or `key_fn` to `wrap_tool` so dedup keys on resource
+  identity rather than the argument hash.
 - `checkpoint_node` persists a `STATE_CHECKPOINTED` event and a restorable
   semantic state.
 - `assess_graph_recovery` / `assess_langchain_recovery` (or `resume`) validates
@@ -203,6 +244,60 @@ The adapter-specific end-to-end tests live in:
   tool-calling loop (offline, driven by a scripted fake model) proving the
   side effect fires once even when the agent repeats the tool call, and stays
   once across separate agent invocations.
+- `tests/test_integration_langchain.py::TestLangChainArchitecture::test_explicit_key_deduplicates_against_argument_drift`
+  and `test_key_fn_derives_key_from_call_arguments` - prove an explicit
+  `key` / `key_fn` collapses repeated calls even when the argument text drifts
+  between invocations.
 
 Each test imports its framework with `pytest.importorskip`, so it is collected
 but skipped when the optional dependency is not installed.
+
+### Real-LLM harness
+
+`examples/langchain_real_llm.py` drives the LangChain adapter against a live
+OpenAI-compatible model through OpenRouter (`ChatOpenAI` with
+`base_url="https://openrouter.ai/api/v1"`). It runs a real `create_agent`
+tool-calling loop over the same CONTINUUM run twice (a first pass plus a resume)
+and asserts the wrapped external side effect fires exactly once. The model is
+selected via `OPENROUTER_MODEL` (default `openai/gpt-4o-mini`); the key is read
+from `OPENROUTER_API_KEY` and never written to disk. Run it with:
+
+```bash
+OPENROUTER_API_KEY=sk-or-... OPENROUTER_MODEL=openai/gpt-4o-mini \
+  python examples/langchain_real_llm.py
+```
+
+It exercises the exact gap the scripted tests cannot: a live LLM produces
+drifting argument text, and the stable `key` is what keeps the side effect
+idempotent. See STATUS.md (Real-LLM framework adapter test, 2026-08-15) for the
+recorded output and what it establishes.
+
+`examples/openai_real_llm.py` and `examples/langgraph_real_llm.py` run the same
+dual-invocation contract (first pass plus resume, exactly-once side effect) for the
+OpenAI Agents SDK and LangGraph adapters respectively, using the same OpenRouter
+setup. The OpenAI harness must use `OpenAIChatCompletionsModel` over the chat
+completions endpoint, because OpenRouter does not fully support the Agents SDK's
+Responses API. `examples/multitool_real_llm.py` is the richer live demo: a single
+model prompt orchestrates three tools (lookup, notify, open ticket) through the
+LangGraph adapter, each side effect wrapped with a *fixed* idempotency key, proving
+exactly-once survives the model's argument drift across a soft resume.
+
+`examples/langchain_real_llm_crash.py` drives the hard-crash contract with a live
+model: the `crash` subcommand lets the agent call the wrapped tool (which performs a
+real outbox write) and then hard-exits the process (`os._exit(137)`) before the
+ledger records completion; the `resume` subcommand runs a fresh process that calls
+`RecoveryEngine.assess`, which must report `request_human` / `safe=False` with one
+uncertain action and an outbox that still holds exactly one entry. This shows a live
+model's side effect is left uncertain on a mid-side-effect kill and is never
+duplicated on reconciliation. `examples/openai_real_llm_crash.py` and
+`examples/langgraph_real_llm_crash.py` drive the identical contract for the OpenAI
+Agents SDK and LangGraph adapters (the OpenAI one uses `OpenAIChatCompletionsModel`
+over the chat completions endpoint, as its soft-resume sibling does). All three
+adapters' hard-crash paths are now verified against a live model. Same env vars
+apply:
+
+```bash
+OPENROUTER_API_KEY=sk-or-... python examples/langchain_real_llm_crash.py crash
+OPENROUTER_API_KEY=sk-or-... python examples/langchain_real_llm_crash.py resume
+```
+

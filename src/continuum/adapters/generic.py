@@ -81,6 +81,7 @@ class GenericAgentAdapter(AgentAdapter):
         volatile: Sequence[str] = (),
         scoped_to_run: bool = True,
         on_unknown: Callable[[Any], ActionOutcome | None] | None = None,
+        key: str | None = None,
     ) -> Any:
         """Intercept and safely execute an external side effect.
 
@@ -89,6 +90,12 @@ class GenericAgentAdapter(AgentAdapter):
         3. If fresh=True, executes action_fn().
         4. If action_fn() succeeds, completes the ledger claim and returns the result.
         5. If action_fn() raises, records the outcome as *uncertain* and re-raises.
+
+        ``key`` is an explicit, Stripe-style idempotency key (e.g. ``"notify:O-9"``)
+        that identifies the operation independently of its argument text. Prefer it
+        over argument-hash dedup whenever the caller (an LLM especially) may render
+        equivalent operations with drifting argument spellings, since a changed
+        argument string produces a different hash and silently defeats dedup.
 
         Step 5 is deliberately conservative. An exception escaping an external
         call does not prove the side effect failed to occur: a timeout or a
@@ -111,6 +118,7 @@ class GenericAgentAdapter(AgentAdapter):
             volatile=volatile,
             scoped_to_run=scoped_to_run,
             on_unknown=on_unknown,
+            key=key,
         )
 
         if not outcome.fresh:

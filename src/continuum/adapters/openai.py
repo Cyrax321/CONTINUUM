@@ -71,7 +71,7 @@ __all__ = [
 ]
 
 try:
-    from agents import RunHooks, function_tool  # noqa: F401
+    from agents import RunContextWrapper, RunHooks, function_tool  # noqa: F401
     from agents.tool_context import ToolContext  # noqa: F401
 
     openai_agents_available = True
@@ -110,6 +110,22 @@ def _ensure_openai_agents() -> None:
         )
 
 
+def _format_annotation(annotation: Any) -> str:
+    """Render a parameter annotation as source text for the generated wrapper.
+
+    The wrapper is built with ``exec``, so its source must carry the original
+    annotations: typing every parameter as ``Any`` (the previous behaviour)
+    drops the real types, and the OpenAI Agents SDK then emits a tool JSON
+    schema with no ``type`` key, which strict schema validators (OpenRouter)
+    reject. ``inspect.formatannotation`` renders ``str`` as ``'str'`` and
+    ``ToolContext`` as ``'ToolContext'`` (the latter is imported into the
+    generated namespace), so the SDK can derive a valid schema.
+    """
+    if annotation is inspect.Parameter.empty:
+        return "Any"
+    return inspect.formatannotation(annotation)
+
+
 class OpenAIAgentAdapter(GenericAgentAdapter):
     """CONTINUUM adapter for the OpenAI Agents SDK.
 
@@ -145,6 +161,8 @@ class OpenAIAgentAdapter(GenericAgentAdapter):
         scoped_to_run: bool = True,
         name_override: str | None = None,
         description_override: str | None = None,
+        key: str | None = None,
+        key_fn: Callable[..., str] | None = None,
     ) -> Callable[[Callable[..., Any]], Any]:
         """Decorate a function tool with action ledger interception.
 
@@ -165,18 +183,28 @@ class OpenAIAgentAdapter(GenericAgentAdapter):
             Override the tool name registered with the SDK.
         description_override:
             Override the tool description registered with the SDK.
+        key:
+            A fixed explicit idempotency key (e.g. ``"issue:42"``). Use when the
+            operation's identity is known up front and must not depend on the
+            (possibly drifting) argument text an LLM produces.
+        key_fn:
+            Computes the explicit key from the tool call (``ctx`` followed by the
+            tool's positional arguments). Used when the key depends on the call.
+            Mutually exclusive with ``key``.
 
         Example
         -------
         .. code-block:: python
 
-            @adapter.wrap_function_tool("github.create_issue")
+            @adapter.wrap_function_tool("github.create_issue", key="issue:42")
             def create_issue(ctx: ToolContext, title: str, body: str) -> dict:
                 return github_client.create_issue(title=title, body=body)
 
             # If the action already completed, the cached result is returned
             # without calling the external system.
         """
+        if key is not None and key_fn is not None:
+            raise ValueError("wrap_function_tool accepts 'key' or 'key_fn', not both")
         from agents import function_tool
 
         def decorator(fn: Callable[..., Any]) -> Any:
@@ -193,7 +221,21 @@ class OpenAIAgentAdapter(GenericAgentAdapter):
 
             tool_params = params[1:]
 
-            dynamic_params = [
+            # The OpenAI Agents SDK detects a context parameter by inspecting the
+            # function signature: the first parameter must be annotated as
+            # ``RunContextWrapper`` (or ``ToolContext``) for the SDK to pass the
+            # run context and drop it from the tool's JSON schema. If we override
+            # ``__signature__`` without keeping ``ctx`` first, the SDK concludes
+            # the tool takes no context and feeds the raw tool-input string as the
+            # first positional argument instead, which breaks run-id extraction
+            # and silently bypasses interception. So ``ctx`` stays the first
+            # parameter, annotated ``RunContextWrapper``.
+            ctx_param = inspect.Parameter(
+                "ctx",
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                annotation=RunContextWrapper,
+            )
+            dynamic_params = [ctx_param] + [
                 inspect.Parameter(
                     p.name,
                     inspect.Parameter.POSITIONAL_OR_KEYWORD,
@@ -209,13 +251,17 @@ class OpenAIAgentAdapter(GenericAgentAdapter):
             def make_wrapper(params: list[inspect.Parameter]) -> Callable[..., Any]:
                 param_names = [p.name for p in params]
                 param_str = ", ".join(param_names)
+                param_decls = ", ".join(
+                    f"{p.name}: {_format_annotation(p.annotation)} = None" for p in params
+                )
 
                 code = f"""
-def wrapped_tool(ctx: ToolContext, {", ".join(f"{p.name}: Any = None" for p in params)}):
+def wrapped_tool(ctx: RunContextWrapper, {param_decls}):
     arguments = {{{", ".join(f'"{p.name}": {p.name}' for p in params)}}}
     run_id = _extract_run_id_from_tool_context(ctx)
     if run_id is None:
         return _call_original(ctx, {param_str})
+    explicit_key = _key_fn(ctx, {param_str}) if _key_fn is not None else _key
     return _adapter_ref.intercept_action(
         run_id,
         _action_type,
@@ -223,16 +269,19 @@ def wrapped_tool(ctx: ToolContext, {", ".join(f"{p.name}: Any = None" for p in p
         arguments=arguments,
         volatile=_volatile,
         scoped_to_run=_scoped_to_run,
+        key=explicit_key,
     )
 """
                 namespace: dict[str, Any] = {
-                    "ToolContext": ToolContext,
+                    "RunContextWrapper": RunContextWrapper,
                     "_extract_run_id_from_tool_context": _extract_run_id_from_tool_context,
                     "_call_original": fn,
                     "_adapter_ref": self,
                     "_action_type": action_type,
                     "_volatile": volatile,
                     "_scoped_to_run": scoped_to_run,
+                    "_key": key,
+                    "_key_fn": key_fn,
                     "Any": Any,
                 }
                 exec(code, namespace)

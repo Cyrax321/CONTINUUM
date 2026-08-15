@@ -49,9 +49,7 @@ class TestLangChainArchitecture:
             return f"notified {order_id}"
 
         def work(state: dict) -> dict:
-            result = notify(
-                order_id=state["order_id"], continuum_run_id=state["continuum_run_id"]
-            )
+            result = notify(order_id=state["order_id"], continuum_run_id=state["continuum_run_id"])
             return {**state, "notified": result.startswith("notified")}
 
         chain = RunnableLambda(work) | RunnableLambda(adapter.checkpoint_node)
@@ -93,6 +91,59 @@ class TestLangChainArchitecture:
         assert decision.safe is True
         assert decision.mode.value == "resume"
 
+    def test_explicit_key_deduplicates_against_argument_drift(self, store: Storage) -> None:
+        """An explicit idempotency key collapses repeated calls even when the
+        argument text drifts between invocations.
+
+        This is the failure an LLM-driven tool hits in practice: the same logical
+        operation arrives with differently-spelled arguments (e.g. a model stuffs
+        a generated sentence into ``order_id`` instead of the id), which defeats
+        argument-hash dedup. A stable ``key`` must still collapse them to one
+        external side effect.
+        """
+        adapter = LangChainAgentAdapter(store)
+        run_id = "lc_arch_key_1"
+        adapter.start_run(goal="process order", run_id=run_id)
+
+        calls = {"notify": 0}
+
+        @adapter.wrap_tool("notify.customer", key="notify:O-9")
+        def notify(order_id: str, *, continuum_run_id: str = "") -> str:
+            calls["notify"] += 1
+            return f"notified {order_id}"
+
+        # First call: the model passes a clean id.
+        notify(order_id="O-9", continuum_run_id=run_id)
+        assert calls["notify"] == 1
+
+        # Second call "resumes" with a drifted argument spelling of the same op.
+        notify(
+            order_id="Your order O-9 has been processed successfully.",
+            continuum_run_id=run_id,
+        )
+        # The explicit key identifies the operation, so no second side effect.
+        assert calls["notify"] == 1
+
+    def test_key_fn_derives_key_from_call_arguments(self, store: Storage) -> None:
+        adapter = LangChainAgentAdapter(store)
+        run_id = "lc_arch_key_2"
+        adapter.start_run(goal="process order", run_id=run_id)
+
+        calls = {"notify": 0}
+
+        @adapter.wrap_tool(
+            "notify.customer",
+            key_fn=lambda *a, **k: f"notify:{str(k.get('order_id', '')).strip()}",
+        )
+        def notify(order_id: str, *, continuum_run_id: str = "") -> str:
+            calls["notify"] += 1
+            return f"notified {order_id}"
+
+        notify(order_id="O-9", continuum_run_id=run_id)
+        # A second call with equivalent identity but drifted text collapses.
+        notify(order_id="O-9 ", continuum_run_id=run_id)
+        assert calls["notify"] == 1
+
     def test_crash_after_checkpoint_does_not_duplicate_side_effect(self, store: Storage) -> None:
         adapter = LangChainAgentAdapter(store)
         run_id = "lc_arch_3"
@@ -117,14 +168,17 @@ class TestLangChainArchitecture:
             return state
 
         chain = (
-            RunnableLambda(work)
-            | RunnableLambda(adapter.checkpoint_node)
-            | RunnableLambda(crash)
+            RunnableLambda(work) | RunnableLambda(adapter.checkpoint_node) | RunnableLambda(crash)
         )
 
         with pytest.raises(RuntimeError):
             chain.invoke(
-                {"continuum_run_id": run_id, "order_id": "O-3", "notified": False, "recovered": False}
+                {
+                    "continuum_run_id": run_id,
+                    "order_id": "O-3",
+                    "notified": False,
+                    "recovered": False,
+                }
             )
 
         # The checkpoint survived the crash.

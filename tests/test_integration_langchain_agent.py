@@ -52,7 +52,9 @@ class _ScriptedLLM(BaseChatModel):
         self._tools = list(tools)
         return self
 
-    def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any) -> ChatResult:
+    def _generate(
+        self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any
+    ) -> ChatResult:
         msg = self.messages[self._i]
         self._i += 1
         return ChatResult(generations=[ChatGeneration(message=msg)])
@@ -117,8 +119,12 @@ class TestRealLangChainAgent:
         # The model calls the tool twice in one run; CONTINUUM must collapse
         # that into a single external side effect.
         script = [
-            AIMessage(content="", tool_calls=[{"name": "notify", "args": {"order_id": "O-9"}, "id": "c1"}]),
-            AIMessage(content="", tool_calls=[{"name": "notify", "args": {"order_id": "O-9"}, "id": "c2"}]),
+            AIMessage(
+                content="", tool_calls=[{"name": "notify", "args": {"order_id": "O-9"}, "id": "c1"}]
+            ),
+            AIMessage(
+                content="", tool_calls=[{"name": "notify", "args": {"order_id": "O-9"}, "id": "c2"}]
+            ),
             AIMessage(content="All done."),
         ]
         _run_agent(tool, script, handler)
@@ -137,8 +143,12 @@ class TestRealLangChainAgent:
         handler = _CheckpointHandler(adapter, run_id, "process order")
 
         script = [
-            AIMessage(content="", tool_calls=[{"name": "notify", "args": {"order_id": "O-9"}, "id": "c1"}]),
-            AIMessage(content="", tool_calls=[{"name": "notify", "args": {"order_id": "O-9"}, "id": "c2"}]),
+            AIMessage(
+                content="", tool_calls=[{"name": "notify", "args": {"order_id": "O-9"}, "id": "c1"}]
+            ),
+            AIMessage(
+                content="", tool_calls=[{"name": "notify", "args": {"order_id": "O-9"}, "id": "c2"}]
+            ),
             AIMessage(content="All done."),
         ]
         # Two full agent runs over the same CONTINUUM run. The ledger must keep

@@ -749,6 +749,403 @@ not a correctness failure, and are gone with the fix.
 
 ---
 
+## Real-LLM framework adapter test (all adapters) + OpenRouter (2026-08-15)
+
+Every adapter integration test in this tree (`tests/test_integration_langgraph.py`,
+`tests/test_integration_langchain.py`, `tests/test_integration_langchain_agent.py`,
+`tests/test_integration_langchain_agent.py`) drives a real agent *loop* but with a
+**scripted fake model** (`_ScriptedLLM` / offline `create_agent`). They prove the
+adapter mechanics against a genuine framework runtime, but they never touch a real
+LLM. The open question this answers: does each framework adapter behave correctly
+when a live model, not a script, is calling the tools?
+
+### What we did
+
+- Drove all three framework adapters (LangChain, OpenAI Agents SDK, LangGraph)
+  against a live `gpt-4o-mini` through OpenRouter (`base_url="https://openrouter.ai/api/v1"`,
+  key from `OPENROUTER_API_KEY`, never written to disk).
+- Added `key` / `key_fn` forwarding to every adapter (LangChain, LangGraph, OpenAI)
+  so a stable idempotency key collapses a live model's argument drift to exactly-once.
+- Fixed two OpenAI-adapter bugs that only surfaced with a real model: the tool JSON
+  schema was emitted with no `type` key (OpenRouter rejected it), and the context
+  parameter was dropped from the inspectable signature, which bypassed interception
+  and let the side effect fire twice.
+- Built two kinds of live proof per adapter: a *soft-resume* run (exactly-once side
+  effect across a second clean invocation) and a *hard-crash* run (`os._exit(137)`
+  mid-side-effect, then a fresh process asserts the run is blocked as uncertain).
+  Plus a richer multi-step live demo that orchestrates lookup + notify + ticket
+  through the LangGraph adapter.
+
+### Test results (live `gpt-4o-mini` via OpenRouter)
+
+| Adapter    | Soft resume (exactly-once)             | Hard crash (resume blocked)       |
+|------------|----------------------------------------|-----------------------------------|
+| LangChain  | PASS - 1 side effect, `resume` safe    | PASS - `request_human`, 1 uncertain |
+| OpenAI SDK | PASS - 1 side effect, `request_human`* | PASS - `request_human`, 1 uncertain |
+| LangGraph  | PASS - 1 side effect, `resume` safe    | PASS - `request_human`, 1 uncertain |
+
+\* The OpenAI adapter yields `request_human` (not `resume`) even on a clean
+soft-resume because it records `Origin.EXTERNAL_AGENT`; an agent must not
+self-certify its own unverified work. That is expected and safe. LangChain and
+LangGraph use `Origin.DETERMINISTIC`, so they resume cleanly.
+
+Multi-step live demo (`examples/multitool_real_llm.py`, LangGraph): PASS - the model
+orchestrated `lookup_order` + `notify_customer` + `create_ticket`, recovery returned
+`resume / safe=True` for both passes, and exactly-once held even though the model
+rendered `order_id` two different ways in a single pass. A *fixed* business key
+(`notify:O-9`, `ticket:O-9`) was required; a key derived from the model's argument
+produced a duplicate ticket and is therefore unsafe under drift.
+
+The detailed per-adapter runs, the crash proofs, and the multi-step demo follow
+below.
+
+### Setup
+
+- `langchain-openai` was not installed; installed it so `ChatOpenAI` is available.
+- `examples/langchain_real_llm.py` wraps `ChatOpenAI` against OpenRouter's
+  OpenAI-compatible endpoint (`base_url="https://openrouter.ai/api/v1"`), model
+  `openai/gpt-4o-mini`, temperature 0.
+- The adapter starts a run (`Origin.DETERMINISTIC`), wraps a `notify.customer` tool
+  with `wrap_tool`, and a `BaseCallbackHandler.on_tool_end` calls
+  `checkpoint_node` after every tool result. The agent is then invoked twice over
+  the same run: a first pass, then a "resume" with the same task.
+
+### First run: exactly-once broke under a real model
+
+Without a stable key, `wrap_tool` keys on the argument hash. The live model did not
+pass `order_id="O-9"`. It stuffed a generated sentence into the parameter, and the
+two invocations produced *different* argument strings, so the hash differed and the
+ledger opened a fresh slot each time. Side effect fired twice:
+
+```
+== First invocation (model: openai/gpt-4o-mini) ==
+agent: The customer has been notified about their order O-9. ...
+recovery after run 1: resume safe= True
+external side effects so far: 1
+
+== Resume: same run, second invocation ==
+agent: The customer for order O-9 has been successfully notified. ...
+recovery after run 2: resume safe= True
+external side effects total (must be 1): 2     <-- WRONG
+event log:
+    1 RUN_STARTED
+    2 ACTION_RECORDED
+    3 ACTION_RECORDED
+    4 STATE_CHECKPOINTED
+    5 ACTION_RECORDED
+    6 ACTION_RECORDED
+    7 STATE_CHECKPOINTED
+```
+
+This is the issue #6 argument-drift class (an LLM rendering the same operation with
+inconsistent argument text), surfacing through a framework adapter instead of the
+MCP server. The fix for MCP was a stable `key`; the adapters simply never exposed
+it. `GenericAgentAdapter.intercept_action` and `LangChainAgentAdapter.wrap_tool`
+now forward `key` (a fixed string) and `key_fn` (derived from the call's
+`(*args, **kwargs)`) down to `ActionLedger.claim(key=...)`.
+
+### Second run: exactly-once holds with a stable key
+
+Re-run with `@adapter.wrap_tool("notify.customer", key="notify:O-9")`. The model
+again emitted different argument text each invocation, but the explicit key
+identifies the operation, so the second call returns the cached result without
+re-executing the effect:
+
+```
+== First invocation (model: openai/gpt-4o-mini) ==
+agent: The customer has been notified about their order O-9. ...
+recovery after run 1: resume safe= True
+external side effects so far: 1
+
+== Resume: same run, second invocation ==
+agent: The customer for order O-9 has been successfully notified. ...
+recovery after run 2: resume safe= True
+external side effects total (must be 1): 1     <-- CORRECT
+event log:
+    1 RUN_STARTED
+    2 ACTION_RECORDED
+    3 ACTION_RECORDED
+    4 STATE_CHECKPOINTED
+    5 STATE_CHECKPOINTED
+
+OK: exactly-once side effect preserved across resume.
+```
+
+The event log now shows exactly one claim/complete pair (events 2, 3); the resume
+produced no new `ACTION_RECORDED` events, only a second checkpoint. The recovery
+engine assessed `resume / safe=True` for the deterministic-origin run both times.
+
+### What this establishes
+
+- `LangChainAgentAdapter` works against a real LLM: the tool-calling loop ran,
+  side effects were intercepted through the ledger, and checkpoints were persisted
+  on every tool result, all over a live model rather than a script.
+- Exactly-once survives real LLM argument drift **only when an explicit key is
+  used**. Argument-hash dedup alone is not sufficient for LLM-driven tools; this
+  is the same lesson the MCP `key` parameter already encoded, now available in the
+  adapters.
+- Regression tests in `tests/test_integration_langchain.py`
+  (`test_explicit_key_deduplicates_against_argument_drift`,
+  `test_key_fn_derives_key_from_call_arguments`) lock the behaviour in without a
+  network: the same logical operation rendered with drifted argument text collapses
+  to one external side effect. The full suite stays green and `ruff` / `mypy` are
+  clean.
+
+### What this does NOT establish
+
+- Only the **LangChain** adapter was driven with a live model in the first run. The
+  OpenAI Agents SDK and LangGraph adapters have since been driven by a live model too
+  (see the sections above), and all three now forward the explicit `key` / `key_fn`.
+  All three adapters' hard-crash path has since been driven live as well (the
+  crash-and-resume proofs above), where a mid-side-effect `os._exit(137)` leaves the
+  action uncertain and blocks resume. The original real-LLM plan's open items are
+  now closed: every framework adapter has live soft-resume and live hard-crash
+  coverage.
+- No crash was injected mid-run. The full crash-after-checkpoint / resume matrix
+  per adapter is still open; this run proves the happy path plus a soft resume.
+- The `key` was supplied by the harness (`key="notify:O-9"`), not chosen by the
+  model. Whether an LLM can reliably derive a stable resource key on its own is
+  untested. The `key_fn` form pushes that responsibility to the caller, which is
+  the safer default given the drift observed above.
+- The model was not asked to respect a `request_human` verdict. That autonomous
+  behaviour was observed earlier over MCP (issue #6) but not re-exercised here.
+
+### OpenAI Agents SDK adapter: real-LLM run (2026-08-15)
+
+The LangChain harness above proved the pattern, but the OpenAI adapter had never
+been driven by a live model. `examples/openai_real_llm.py` does that: it points an
+`AsyncOpenAI` client at OpenRouter, wraps the model in the SDK's
+`OpenAIChatCompletionsModel` (chat completions endpoint, which OpenRouter fully
+supports), wraps a `notify.customer` tool with `wrap_function_tool(..., key="notify:O-9")`,
+and runs the agent twice over the same run.
+
+The first attempt failed in two ways that only a real model exposes:
+
+1. **Invalid tool schema.** The generated wrapper typed every parameter as `Any`, so
+   the SDK emitted a tool JSON schema with no `type` key. OpenRouter rejected it
+   (`invalid_function_parameters: schema must have a 'type' key`). Fixed by
+   preserving the original annotations in the generated source via
+   `inspect.formatannotation`.
+2. **No context, no interception.** The adapter overrode `__signature__` to drop the
+   `ctx` parameter. `function_schema` inspects the signature to decide whether the
+   tool takes a `RunContextWrapper`; without a `ctx: RunContextWrapper` first
+   parameter it concluded the tool took no context and passed the raw tool-input
+   string as the first positional argument. `run_id` extraction then returned
+   `None`, interception was skipped, and the side effect fired directly (and twice).
+   Fixed by keeping `ctx` first in the inspectable signature, annotated
+   `RunContextWrapper`.
+
+With both fixed, the live run behaves correctly:
+
+```
+== First invocation (model: openai/gpt-4o-mini) ==
+agent: The customer has been notified about their order O-9.
+recovery after run 1: request_human safe= False
+external side effects so far: 1
+
+== Resume: same run, second invocation ==
+agent: The customer for order O-9 has been notified successfully.
+recovery after run 2: request_human safe= False
+external side effects total (must be 1): 1
+
+event log:
+    1 RUN_STARTED
+    2 ACTION_RECORDED
+    3 ACTION_RECORDED
+    4 STATE_CHECKPOINTED
+    5 STATE_CHECKPOINTED
+
+OK: exactly-once side effect preserved across resume.
+```
+
+The recovery verdict is `request_human` (not `resume`) because the OpenAI adapter
+records state with `Origin.EXTERNAL_AGENT` provenance, by design (an agent must not
+self-certify its own unverified work). That is the expected, safe behaviour, and it
+matches the MCP-reported-run path. What this run establishes: the OpenAI adapter
+intercepts a real model's tool call through the ledger, the `key` collapses the
+resume to one side effect, and checkpoints are written on every tool result.
+
+### LangGraph adapter: real-LLM run (2026-08-15)
+
+`examples/langgraph_real_llm.py` drives the LangGraph adapter the same way, using
+LangChain's `create_agent` (the current `langgraph.prebuilt.create_react_agent`
+home) over `ChatOpenAI` pointed at OpenRouter, with the notify tool wrapped via
+`wrap_tool(..., key="notify:O-9")` and a callback that checkpoints on every tool
+result. The model is free to render the order id however it likes; the stable key
+is what keeps the side effect idempotent:
+
+```
+== First invocation (model: openai/gpt-4o-mini) ==
+agent: The customer has been notified about their order O-9. ...
+recovery after run 1: resume safe= True
+external side effects so far: 1
+
+== Resume: same run, second invocation ==
+agent: The customer for order O-9 has been successfully notified. ...
+recovery after run 2: resume safe= True
+external side effects total (must be 1): 1
+
+event log:
+    1 RUN_STARTED
+    2 ACTION_RECORDED
+    3 ACTION_RECORDED
+    4 STATE_CHECKPOINTED
+    5 STATE_CHECKPOINTED
+
+OK: exactly-once side effect preserved across resume.
+```
+
+The LangGraph adapter starts the run with `Origin.DETERMINISTIC` provenance, so the
+recovery engine returns `resume / safe=True` (no human needed), matching the
+deterministic-orchestrator design. This closes the last open item from the earlier
+real-LLM section: all three framework adapters (LangChain, LangGraph, OpenAI) have
+now been driven by a live model and shown to preserve exactly-once side effects
+across a resume when a stable `key` is used.
+
+### LangChain adapter: real-LLM crash-and-resume proof (2026-08-15)
+
+The three soft-resume runs above prove exactly-once across a second *clean*
+invocation, but they never proved the harder contract: a hard crash between
+`intercept_action` (claim) and `complete` must leave the side effect **uncertain**
+and refuse to resume, rather than letting the agent silently re-fire it.
+`examples/langchain_real_llm_crash.py` drives a live `gpt-4o-mini` through exactly
+that, using two processes that share one SQLite file:
+
+- `crash` mode: the agent is asked to notify the customer. The wrapped tool performs
+  the real side effect (appends the order id to an outbox file) and then hard-exits
+  the process with `os._exit(137)` (no cleanup), before the ledger records
+  completion. The process dies with an open `ACTION_RECORDED` at `started`.
+- `resume` mode: a brand-new process opens the same database and asks CONTINUUM to
+  `assess` the run.
+
+Live result (model `openai/gpt-4o-mini`, OpenRouter):
+
+```
+== Resume mode: a fresh process assesses the crashed run ==
+mode: request_human
+safe: False
+next_allowed_action: reconcile_action:action_f357be53d49eaa19b9fbf739745f887f
+uncertain_actions: 1
+  - notify.customer status=started
+outbox entries (must be exactly 1): 1
+   notified Your order O-9 has been processed successfully. ...
+event log:
+    1 RUN_STARTED
+    2 ACTION_RECORDED
+OK: crash left an uncertain side effect; resume blocked, outbox not duplicated.
+```
+
+This is the exact behaviour the recovery engine promises on a mid-side-effect kill:
+the action is flagged `started` (never completed), the run is `unsafe`, and the only
+allowed next step is to reconcile the uncertain action by hand. Crucially, the
+outbox still contains exactly one entry, so the side effect that did happen during
+the crash is not duplicated when a human later reconciles.
+
+### OpenAI Agents SDK adapter: real-LLM crash-and-resume proof (2026-08-15)
+
+`examples/openai_real_llm_crash.py` repeats the same hard-crash contract for the
+OpenAI Agents SDK adapter, with the same live-model setup as
+`examples/openai_real_llm.py` (an `AsyncOpenAI` client pointed at OpenRouter, the
+model wrapped in `OpenAIChatCompletionsModel` over the chat completions endpoint).
+The `notify` function-tool appends to the outbox and then `os._exit(137)`; a second
+process runs `RecoveryEngine.assess`. Live result (model `openai/gpt-4o-mini`):
+
+```
+crash exit: 137
+mode: request_human
+safe: False
+next_allowed_action: reconcile_action:action_693830c3b03892fae9270a3e8a7f80b0
+uncertain_actions: 1
+  - notify.customer status=started
+outbox entries (must be exactly 1): 1
+   notified O-9
+event log:
+    1 RUN_STARTED
+    2 ACTION_RECORDED
+OK: crash left an uncertain side effect; resume blocked, outbox not duplicated.
+```
+
+The OpenAI adapter records state with `Origin.EXTERNAL_AGENT`, so the recovery verdict
+is `request_human` (a self-certifying agent must not approve its own unverified work),
+which is the expected and safe behaviour. The point proven: the OpenAI adapter
+intercepts a live model's tool call through the ledger, the hard kill leaves the
+action `started`, and resume is refused until reconciliation.
+
+### LangGraph adapter: real-LLM crash-and-resume proof (2026-08-15)
+
+`examples/langgraph_real_llm_crash.py` repeats the hard-crash contract for the
+LangGraph adapter, with the same live-model setup as `examples/langgraph_real_llm.py`
+(`create_agent` over `ChatOpenAI` at the OpenRouter base URL). The wrapped `notify`
+tool appends to the outbox and then `os._exit(137)`; a second process runs
+`RecoveryEngine.assess`. Live result (model `openai/gpt-4o-mini`):
+
+```
+crash exit: 137
+mode: request_human
+safe: False
+next_allowed_action: reconcile_action:action_9cdae0d82d9f498df28416a6d6a9888f
+uncertain_actions: 1
+  - notify.customer status=started
+outbox entries (must be exactly 1): 1
+   notified Your order O-9 has been processed successfully. ...
+event log:
+    1 RUN_STARTED
+    2 ACTION_RECORDED
+OK: crash left an uncertain side effect; resume blocked, outbox not duplicated.
+```
+
+The LangGraph adapter starts the run with `Origin.DETERMINISTIC` provenance, yet an
+incomplete action still forces `request_human` / `safe=False`: a side effect that may
+or may not have completed can never be resumed blindly, regardless of origin. This
+confirms the crash contract holds across all three framework adapters when driven by
+a live model. The full crash-after-checkpoint / resume matrix is now exercised by a
+live LLM for the LangChain, OpenAI Agents SDK, and LangGraph adapters.
+
+### Multi-step live demo: a real LLM orchestrating through CONTINUUM (2026-08-15)
+
+`examples/multitool_real_llm.py` is the closest thing to a real product flow. A live
+`gpt-4o-mini` is handed one task, "a customer with order O-9 reports their package
+hasn't arrived", and must *orchestrate* three tools through the LangGraph adapter:
+`lookup_order` (read-only), `notify_customer`, and `create_ticket` (both side
+effects). Each side-effecting tool is wrapped with a **fixed** idempotency key
+(`notify:O-9`, `ticket:O-9`) and a checkpoint is written after every tool result.
+The agent runs twice over the same run (first pass plus a resume) and the harness
+prints the recovery decision and the full event log.
+
+Live result (model `openai/gpt-4o-mini`, OpenRouter):
+
+```
+== First pass (model: openai/gpt-4o-mini) ==
+agent: I have looked up order O-9 ... the customer has been notified ... a support ticket has been created.
+recovery after pass 1: resume safe= True
+
+== Resume: same run, second pass ==
+agent: Everything has been handled for order O-9. ...
+recovery after pass 2: resume safe= True
+
+notify side effects (must be 1): 1
+ticket side effects (must be 1): 1
+
+event log:
+    1 RUN_STARTED
+    2 ACTION_RECORDED
+    ...  (lookup, notify, ticket, plus the model's drifted re-calls)
+    7 ACTION_RECORDED
+    8..13 STATE_CHECKPOINTED
+
+OK: multi-step live agent handled smoothly; exactly-once side effects preserved.
+```
+
+What this proves about "smooth handling": the model freely drifts its argument text
+(it rendered `order_id` as both `"O-9"` and `"Order O-9: Customer reports that the
+package hasn't arrived. Investigating the late shipment."` within one pass), yet the
+**fixed** key collapsed every variant to exactly one recorded side effect. That is
+the central real-LLM lesson, confirmed live: an idempotency key derived from the
+model's rendered arguments (`key_fn=lambda **kw: f"ticket:{kw['order_id']}"`) would
+*not* dedupe this drift and produced a duplicate ticket on the first attempt; only a
+stable business key does. The recovery engine returned `resume / safe=True` for both
+passes, so the architecture absorbed the model's messiness without human involvement.
+
 ## Unresolved
 
 `demo_report.md` (an untracked artifact from the third-party testing above)

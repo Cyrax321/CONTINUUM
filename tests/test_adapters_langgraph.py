@@ -329,3 +329,56 @@ class TestWithRealLangGraph:
         result2 = send_email(to="user@example.com", continuum_run_id="run_real_1")
         assert result2 == "sent to user@example.com"
         assert calls == 1
+
+    def test_wrap_tool_explicit_key_deduplicates_across_drift(self, store: SQLiteStorage) -> None:
+        """An explicit key collapses repeated calls even when the argument text
+        drifts between invocations (the LLM argument-drift failure mode)."""
+        from continuum.adapters.langgraph import LangGraphAgentAdapter
+
+        adapter = LangGraphAgentAdapter(store)
+        adapter.start_run(goal="Real LG key", run_id="run_real_key")
+        calls = 0
+
+        @adapter.wrap_tool("notify.customer", key="notify:O-9")
+        def notify(order_id: str, continuum_run_id: str = "") -> str:
+            nonlocal calls
+            calls += 1
+            return f"notified {order_id}"
+
+        notify(order_id="O-9", continuum_run_id="run_real_key")
+        # Drifted argument text, same explicit key: must not re-fire.
+        notify(
+            order_id="Your order O-9 has been processed successfully.",
+            continuum_run_id="run_real_key",
+        )
+        assert calls == 1
+
+    def test_wrap_tool_key_fn_derives_key_from_args(self, store: SQLiteStorage) -> None:
+        from continuum.adapters.langgraph import LangGraphAgentAdapter
+
+        adapter = LangGraphAgentAdapter(store)
+        adapter.start_run(goal="Real LG keyfn", run_id="run_real_keyfn")
+        calls = 0
+
+        @adapter.wrap_tool(
+            "notify.customer",
+            key_fn=lambda *a, **k: f"notify:{str(k.get('order_id', '')).strip()}",
+        )
+        def notify(order_id: str, continuum_run_id: str = "") -> str:
+            nonlocal calls
+            calls += 1
+            return f"notified {order_id}"
+
+        notify(order_id="O-9", continuum_run_id="run_real_keyfn")
+        notify(order_id="O-9 ", continuum_run_id="run_real_keyfn")
+        assert calls == 1
+
+    def test_wrap_tool_rejects_both_key_and_key_fn(self, store: SQLiteStorage) -> None:
+        from continuum.adapters.langgraph import LangGraphAgentAdapter
+
+        adapter = LangGraphAgentAdapter(store)
+
+        with pytest.raises(ValueError):
+
+            @adapter.wrap_tool("x", key="k", key_fn=lambda: "k")
+            def tool() -> None: ...

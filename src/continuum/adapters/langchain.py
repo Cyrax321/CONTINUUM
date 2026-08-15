@@ -179,6 +179,8 @@ class LangChainAgentAdapter(GenericAgentAdapter):
         arguments_fn: Callable[..., Mapping[str, Any]] | None = None,
         volatile: Sequence[str] = (),
         scoped_to_run: bool = True,
+        key: str | None = None,
+        key_fn: Callable[..., str] | None = None,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Decorator that wraps a LangChain tool with action ledger interception.
 
@@ -197,9 +199,20 @@ class LangChainAgentAdapter(GenericAgentAdapter):
             Argument keys excluded from idempotency hashing.
         scoped_to_run:
             Whether the idempotency key is scoped to the current run.
+        key:
+            A fixed explicit idempotency key (e.g. ``"notify:O-9"``). Use this
+            when the operation's identity is known up front and must not depend
+            on the (possibly drifting) argument text an LLM produces.
+        key_fn:
+            Computes the explicit key from the tool's ``(*args, **kwargs)``.
+            Used when the key depends on the call (e.g. ``lambda *a, **k:
+            f"notify:{k['order_id']}"``). Mutually exclusive with ``key``.
         """
 
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            if key is not None and key_fn is not None:
+                raise ValueError("wrap_tool accepts 'key' or 'key_fn', not both")
+
             def wrapper(*args: Any, **kwargs: Any) -> Any:
                 run_id = _extract_run_id(args, kwargs)
                 if run_id is None:
@@ -211,6 +224,8 @@ class LangChainAgentAdapter(GenericAgentAdapter):
                     else {k: v for k, v in kwargs.items() if k != "continuum_run_id"}
                 )
 
+                explicit_key = key_fn(*args, **kwargs) if key_fn is not None else key
+
                 return self.intercept_action(
                     run_id,
                     action_type,
@@ -218,6 +233,7 @@ class LangChainAgentAdapter(GenericAgentAdapter):
                     arguments=arguments,
                     volatile=volatile,
                     scoped_to_run=scoped_to_run,
+                    key=explicit_key,
                 )
 
             wrapper.__name__ = fn.__name__

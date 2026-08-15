@@ -172,7 +172,48 @@ CONTINUUM plugs into agent frameworks without becoming one. Three adapters ship 
 | LangGraph | `LangGraphAgentAdapter` | Experimental. Wraps a `StateGraph`; optional `langgraph`. |
 | LangChain | `LangChainAgentAdapter` | Experimental. Drops `checkpoint_node` into an LCEL `Runnable` pipeline and the `create_agent` tool-calling loop; optional `langchain`. |
 
-Each adapter records progress and side effects through the ledger and routes external effects through the two-phase intercept/complete protocol. The framework adapters are newer than the generic facade, but each now has end-to-end integration tests (`tests/test_integration_langgraph.py`, `tests/test_integration_langchain.py`, and `tests/test_integration_langchain_agent.py` for a real `create_agent` tool-calling loop) covering checkpoint durability, exactly-once side effects, and crash-after-checkpoint resume. Treat them as experimental until their adapter-specific tests cover the full crash and resume matrix. Full usage, with runnable examples for every adapter, is in [references/adapters.md](references/adapters.md).
+Each adapter records progress and side effects through the ledger and routes external effects through the two-phase intercept/complete protocol. The framework adapters are newer than the generic facade, but each now has end-to-end integration tests (`tests/test_integration_langgraph.py`, `tests/test_integration_langchain.py`, and `tests/test_integration_langchain_agent.py` for a real `create_agent` tool-calling loop) covering checkpoint durability, exactly-once side effects, and crash-after-checkpoint resume. All three framework adapters (LangChain, LangGraph, OpenAI Agents SDK) have now
+been driven against a **live OpenRouter model** (`examples/langchain_real_llm.py`,
+`examples/langgraph_real_llm.py`, `examples/openai_real_llm.py`; recorded in
+STATUS.md), where the runs surfaced and then closed an LLM argument-drift dedup gap
+via an explicit idempotency key and two OpenAI-adapter schema/context bugs. Each
+adapter also has a `examples/*_real_llm_crash.py` harness that proves the
+hard-crash contract: a mid-side-effect `os._exit(137)` leaves the side effect
+uncertain and blocks resume until a human reconciles it. `examples/multitool_real_llm.py`
+is a richer live demo where one prompt orchestrates lookup, notify, and ticket tools
+through the LangGraph adapter, showing exactly-once survives the model's argument
+drift. Treat them as experimental until their adapter-specific tests cover the full
+crash and resume matrix. Full usage, with runnable examples for every adapter, is in
+[references/adapters.md](references/adapters.md).
+
+### Live LLM validation (real model via OpenRouter)
+
+All three framework adapters were driven against a live `gpt-4o-mini` through
+OpenRouter (key from `OPENROUTER_API_KEY`, never written to disk). Each was proven
+two ways: a soft resume (exactly-once side effect across a second clean invocation)
+and a hard crash (`os._exit(137)` mid-side-effect, then a fresh process asserts the
+run is blocked as uncertain). A richer `examples/multitool_real_llm.py` demo has one
+prompt orchestrate `lookup_order` + `notify_customer` + `create_ticket` through the
+LangGraph adapter.
+
+| Adapter    | Soft resume (exactly-once)             | Hard crash (resume blocked)       |
+|------------|----------------------------------------|-----------------------------------|
+| LangChain  | PASS, 1 side effect, `resume` safe     | PASS, `request_human`, 1 uncertain |
+| OpenAI SDK | PASS, 1 side effect, `request_human`*  | PASS, `request_human`, 1 uncertain |
+| LangGraph  | PASS, 1 side effect, `resume` safe     | PASS, `request_human`, 1 uncertain |
+
+\* The OpenAI adapter yields `request_human` even on a clean soft resume because it
+records `Origin.EXTERNAL_AGENT`: an agent must not self-certify its own unverified
+work. That is expected and safe. LangChain and LangGraph use `Origin.DETERMINISTIC`
+and resume cleanly.
+
+Two OpenAI-adapter bugs that only surface with a real model were found and fixed:
+the tool JSON schema was emitted with no `type` key (OpenRouter rejected it), and the
+context parameter was dropped from the inspectable signature, which bypassed
+interception and let the side effect fire twice. The live runs also confirmed the
+idempotency lesson: a stable business key (for example `ticket:O-9`) is required,
+because a key derived from the model's rendered arguments does not dedupe the model's
+argument drift and produced a duplicate ticket. Full run logs are in STATUS.md.
 
 ### Resuming agent- or MCP-reported runs
 

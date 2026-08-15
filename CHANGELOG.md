@@ -21,13 +21,52 @@ All notable changes to this project are documented here. The format follows
   - *Periodic Revalidation* (`revalidation.py`): reuses `RecoveryEngine.assess`
     on a step interval (default 25) and on app switch, so mid-run environment
     drift is caught within one cycle instead of only at the next crash.
-  - Docs: `docs/PROBLEM.md` (problem statement, honest scope) and
+   - Docs: `docs/PROBLEM.md` (problem statement, honest scope) and
     `docs/RESULTS.md` (results; mini-benchmark pending). Tests:
     `tests/test_trust_gate.py`, `tests/test_revalidation_schedule.py`,
     `tests/test_toy_task_banner_attack.py`. All 700 tests pass; `ruff` and
     `mypy --strict` are clean.
 
+- **Real-LLM crash-and-resume harness.** `examples/langchain_real_llm_crash.py`
+  drives the LangChain adapter against a live OpenRouter model through a hard crash:
+  the `crash` subcommand lets the wrapped tool perform a real side effect and then
+  hard-exits the process (`os._exit(137)`) before the ledger records completion; the `resume`
+  subcommand runs a fresh process and asserts `RecoveryEngine.assess` blocks with
+  `request_human` / `safe=False` and an outbox that still holds exactly one entry.
+  `examples/openai_real_llm_crash.py` and `examples/langgraph_real_llm_crash.py`
+  drive the identical contract for the OpenAI Agents SDK and LangGraph adapters. This
+   proves the mid-side-effect crash contract with a live model for all three framework
+   adapters. Documented in STATUS.md and `references/adapters.md`.
+
+- **Real-LLM multi-step demo.** `examples/multitool_real_llm.py` drives the
+  LangGraph adapter with one live-model prompt that orchestrates `lookup_order`,
+  `notify_customer`, and `create_ticket`; each side effect is wrapped with a fixed
+  idempotency key and a checkpoint is written after every tool result. It shows
+  exactly-once survives the model's argument drift across a soft resume
+  (`recovery: resume / safe=True`). Confirmed live that a key derived from the
+  model's rendered arguments does NOT dedupe drift and must not be used. Documented
+  in STATUS.md and `references/adapters.md`.
+
+- **Framework adapters forward an explicit idempotency key.** The action ledger
+  already supported a Stripe-style `key` (operation identity independent of
+  argument text), but the adapters never forwarded it, so an LLM-driven tool that
+  drifts its argument text between calls could not deduplicate. `GenericAgentAdapter.intercept_action`
+  now forwards `key`, and all three framework adapters accept it:
+  `LangChainAgentAdapter.wrap_tool`, `LangGraphAgentAdapter.wrap_tool`, and
+  `OpenAIAgentAdapter.wrap_function_tool` each take `key` (a fixed string) or
+  `key_fn` (derives the key from the call's `(*args, **kwargs)`); the two are
+  mutually exclusive. This is the correct answer to LLM argument drift through the
+  adapters, matching the `key` already accepted by `continuum_intercept_action`
+  over MCP. Verified end to end against a live OpenRouter model via
+  `examples/langchain_real_llm.py` (LangChain adapter); see STATUS.md for the
+  recorded run. Regression tests:
+  `tests/test_integration_langchain.py::TestLangChainArchitecture::test_explicit_key_deduplicates_against_argument_drift`
+  and `test_key_fn_derives_key_from_call_arguments`, plus
+  `tests/test_adapters_langgraph.py` and `tests/test_adapters_openai.py` key/key_fn
+  forwarding tests.
+
 ### Changed
+
 
 - **README.** `Contents` laid out as a horizontal wrapping nav; Security
   Extension added to the Features table and table of contents; website link
@@ -48,6 +87,19 @@ All notable changes to this project are documented here. The format follows
   but `REQUIRES_REVIEW` is not, so a self-report must always block a resume. The
   second check is now an `elif`, so it cannot overwrite a `REQUIRES_REVIEW`.
   Fixed in issue #48.
+- **OpenAI Agents SDK adapter could not run a real tool call.** Two bugs in
+  `OpenAIAgentAdapter.wrap_function_tool` surfaced only when an actual model drove
+  the agent (verified against a live OpenRouter model; see STATUS.md). First, the
+  generated wrapper typed every parameter as `Any`, so the SDK emitted a tool JSON
+  schema with no `type` key, which OpenRouter rejects (`invalid_function_parameters`).
+  The wrapper now preserves the original parameter annotations via
+  `inspect.formatannotation`. Second, the adapter overrode `__signature__` to drop
+  the `ctx` parameter, so `function_schema` never saw a `RunContextWrapper` first
+  argument and concluded the tool took no context, feeding the raw tool-input
+  string as the first positional instead. The context parameter now stays first in
+  the inspectable signature, annotated `RunContextWrapper`, so the SDK passes the
+  run context and the adapter can extract the run id and intercept the side effect.
+  Regression test: `tests/test_adapters_openai.py::TestWithRealOpenAIAgents::test_wrap_function_tool_keeps_param_types_in_schema`.
 
 - **`continuum_intercept_action` deduplicated on argument formatting, not
   resource identity.** The idempotency key hashes the action type plus the

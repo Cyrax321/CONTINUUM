@@ -375,6 +375,26 @@ class TestWithRealOpenAIAgents:
         assert api_call.name == "my_api_call"
         assert api_call.description == ""
 
+    def test_wrap_function_tool_keeps_param_types_in_schema(self, store: SQLiteStorage) -> None:
+        """The generated wrapper must preserve real type annotations, not ``Any``.
+
+        Typing every parameter as ``Any`` (the old behaviour) produced a tool JSON
+        schema with no ``type`` key, which strict schema validators such as
+        OpenRouter reject. The SDK derives the schema from the first-class type
+        hints, so they must survive into the wrapped function.
+        """
+        from continuum.adapters.openai import OpenAIAgentAdapter
+
+        adapter = OpenAIAgentAdapter(store)
+
+        @adapter.wrap_function_tool("api.call")
+        def api_call(ctx: Any, endpoint: str, limit: int = 10) -> dict:
+            return {}
+
+        props = api_call.params_json_schema["properties"]
+        assert props["endpoint"]["type"] == "string"
+        assert props["limit"]["type"] == "integer"
+
     def test_create_run_hooks_with_real_sdk(self, store: SQLiteStorage) -> None:
         from continuum.adapters.openai import OpenAIAgentAdapter
 
@@ -398,3 +418,130 @@ class TestWithRealOpenAIAgents:
         state = adapter.create_semantic_state(ctx)
         assert state.run_id == "run_ctx_1"
         assert state.goal.description == "Test round trip"
+
+    def test_wrap_function_tool_explicit_key_deduplicates_across_drift(
+        self, store: SQLiteStorage, monkeypatch: Any
+    ) -> None:
+        """An explicit key collapses repeated calls even when the LLM renders the
+        same operation with different argument text between calls.
+
+        The live OpenAI Agents SDK `FunctionTool` invocation path is version
+        sensitive, so we stub `function_tool` to return the generated wrapper and
+        drive `intercept_action` directly. This tests the forwarding behaviour
+        (the relevant change) without depending on SDK internals.
+        """
+        import agents
+
+        from continuum.adapters.openai import ContinuumContext, OpenAIAgentAdapter
+
+        captured: list[str | None] = []
+
+        def fake_function_tool(
+            name_override: str | None = None, description_override: str | None = None
+        ):  # noqa: ANN001
+            def deco(fn: Any) -> Any:
+                def wrapper(ctx: Any, endpoint: Any = None, **kw: Any) -> Any:
+                    return fn(ctx, endpoint=endpoint, **kw)
+
+                wrapper.__name__ = getattr(fn, "__name__", "wrapper")
+                return wrapper
+
+            return deco
+
+        monkeypatch.setattr(agents, "function_tool", fake_function_tool)
+
+        adapter = OpenAIAgentAdapter(store)
+        run_id = "run_oa_key"
+        adapter.start_run(goal="Tool key test", run_id=run_id)
+
+        def recorder(
+            run_id: str,
+            action_type: str,
+            action_fn: Any,
+            *,
+            arguments: Any = None,  # noqa: ANN001
+            volatile: Any = (),
+            scoped_to_run: bool = True,
+            key: str | None = None,
+            **kw: Any,
+        ) -> Any:
+            captured.append(key)
+            return action_fn()
+
+        adapter.intercept_action = recorder  # type: ignore[assignment]
+
+        @adapter.wrap_function_tool("api.call", key="api:endpoint")
+        def api_call(ctx: Any, endpoint: str) -> dict:
+            return {"endpoint": endpoint}
+
+        ctx = ContinuumContext(continuum_run_id=run_id, goal="k")
+        api_call(ctx=ctx, endpoint="A")
+        # Drifted argument text, same explicit key: still one ledger claim.
+        api_call(ctx=ctx, endpoint="A totally different string")
+        assert captured == ["api:endpoint", "api:endpoint"]
+
+    def test_wrap_function_tool_key_fn_derives_key_from_args(
+        self, store: SQLiteStorage, monkeypatch: Any
+    ) -> None:
+        import agents
+
+        from continuum.adapters.openai import ContinuumContext, OpenAIAgentAdapter
+
+        captured: list[str | None] = []
+
+        def fake_function_tool(
+            name_override: str | None = None, description_override: str | None = None
+        ):  # noqa: ANN001
+            def deco(fn: Any) -> Any:
+                def wrapper(ctx: Any, endpoint: Any = None, **kw: Any) -> Any:
+                    return fn(ctx, endpoint=endpoint, **kw)
+
+                wrapper.__name__ = getattr(fn, "__name__", "wrapper")
+                return wrapper
+
+            return deco
+
+        monkeypatch.setattr(agents, "function_tool", fake_function_tool)
+
+        adapter = OpenAIAgentAdapter(store)
+        run_id = "run_oa_keyfn"
+        adapter.start_run(goal="Tool keyfn test", run_id=run_id)
+
+        def recorder(
+            run_id: str,
+            action_type: str,
+            action_fn: Any,
+            *,
+            arguments: Any = None,  # noqa: ANN001
+            volatile: Any = (),
+            scoped_to_run: bool = True,
+            key: str | None = None,
+            **kw: Any,
+        ) -> Any:
+            captured.append(key)
+            return action_fn()
+
+        adapter.intercept_action = recorder  # type: ignore[assignment]
+
+        @adapter.wrap_function_tool(
+            "api.call",
+            key_fn=lambda ctx, endpoint: f"api:{str(endpoint).strip()}",
+        )
+        def api_call(ctx: Any, endpoint: str) -> dict:
+            return {"endpoint": endpoint}
+
+        ctx = ContinuumContext(continuum_run_id=run_id, goal="k")
+        api_call(ctx=ctx, endpoint="O-9")
+        api_call(ctx=ctx, endpoint="O-9 ")
+        assert captured == ["api:O-9", "api:O-9"]
+
+    def test_wrap_function_tool_rejects_both_key_and_key_fn(self, store: SQLiteStorage) -> None:
+        from continuum.adapters.openai import OpenAIAgentAdapter
+
+        adapter = OpenAIAgentAdapter(store)
+
+        with pytest.raises(ValueError):
+
+            @adapter.wrap_function_tool("api.call", key="x", key_fn=lambda ctx: "y")
+            def api_call(ctx: Any, endpoint: str) -> dict:
+                return {}

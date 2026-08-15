@@ -56,9 +56,7 @@ class TestLangGraphArchitecture:
             return f"notified {order_id}"
 
         def work(state: dict) -> dict:
-            result = notify(
-                order_id=state["order_id"], continuum_run_id=state["continuum_run_id"]
-            )
+            result = notify(order_id=state["order_id"], continuum_run_id=state["continuum_run_id"])
             return {"notified": result.startswith("notified")}
 
         def checkpoint(state: dict) -> dict:
