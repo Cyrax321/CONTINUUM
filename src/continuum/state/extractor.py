@@ -132,11 +132,10 @@ class LLMExtractor:
 
         try:
             proposal = self._llm(context, state)
+            return self._merge(state, proposal)
         except Exception as exc:  # noqa: BLE001 - enrichment must never break recovery
             self.last_error = exc
             return state
-
-        return self._merge(state, proposal)
 
     def _merge(self, state: SemanticState, proposal: LLMProposal) -> SemanticState:
         provenance = Provenance(origin=Origin.LLM, extractor=self.name)

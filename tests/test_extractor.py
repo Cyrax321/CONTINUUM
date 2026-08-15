@@ -98,6 +98,19 @@ def test_a_failing_llm_degrades_to_the_deterministic_state() -> None:
     assert isinstance(extractor.last_error, RuntimeError)
 
 
+def test_a_malformed_proposal_degrades_to_the_deterministic_state() -> None:
+    log = build_log()
+
+    def malformed(ctx: ExtractionContext, state: object) -> LLMProposal:
+        return LLMProposal(findings=[{"finding_id": "f1", "confidence": "high"}])
+
+    extractor = LLMExtractor(malformed)
+    state = extractor.extract(context(log))
+
+    assert state == project("run_1", log.events("run_1"))
+    assert isinstance(extractor.last_error, ValueError)
+
+
 def test_a_disabled_llm_extractor_never_calls_out() -> None:
     calls: list[int] = []
 
