@@ -70,6 +70,7 @@ class ScenarioSpec:
     side_frac: float
     interrupted: bool
     env_change: bool
+    description: str = ""
 
 
 SCENARIOS: dict[str, ScenarioSpec] = {
@@ -93,6 +94,22 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         side_frac=0.25,
         interrupted=True,
         env_change=False,
+    ),
+    "partial_completion": ScenarioSpec(
+        name="partial_completion",
+        crash_frac=0.8,
+        side_frac=0.4,
+        interrupted=False,
+        env_change=False,
+        description="Task mostly finished before the crash; checks late-crash recovery.",
+    ),
+    "early_crash": ScenarioSpec(
+        name="early_crash",
+        crash_frac=0.2,
+        side_frac=0.1,
+        interrupted=False,
+        env_change=False,
+        description="Crash almost immediately; full replay wastes the most work.",
     ),
 }
 

@@ -63,7 +63,18 @@ All notable changes to this project are documented here. The format follows
   `tests/test_integration_langchain.py::TestLangChainArchitecture::test_explicit_key_deduplicates_against_argument_drift`
   and `test_key_fn_derives_key_from_call_arguments`, plus
   `tests/test_adapters_langgraph.py` and `tests/test_adapters_openai.py` key/key_fn
-  forwarding tests.
+   forwarding tests.
+
+- **CONTINUUM-Bench scenario suite expanded.** Added `partial_completion` and
+  `early_crash` scenarios to `src/continuum/benchmark/__init__.py`, bringing the
+  shipped suite to five controlled-failure scenarios. The new scenarios vary
+  crash timing: `partial_completion` crashes late (most work already done) and
+  `early_crash` crashes almost immediately (full replay wastes the most work).
+  `tests/test_benchmark.py` asserts continuum still recovers with zero duplicate
+  work and that full replay waste scales with crash timing. `model_switch` and
+  the remaining spec scenarios (context compaction, tool failure, API timeout,
+  file modification, permission change, stale decision) remain follow-up work
+  that needs deeper harness modelling of side effects and model or decision state.
 
 ### Changed
 
