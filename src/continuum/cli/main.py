@@ -390,6 +390,7 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
     payload = {
         "run_id": decision.run_id,
+        "goal": storage.get_run(run_id).goal,
         "mode": decision.mode.value,
         "safe": decision.safe,
         "next_allowed_action": decision.next_allowed_action,

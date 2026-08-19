@@ -547,9 +547,14 @@ def build_server(
             current_environment=_environment(run_id, env),
             expected_model=expected_model,
         )
+        # Return the goal so a resumed session knows what to continue without
+        # any external task file. The run's goal is the single source of truth
+        # for "what was this task?" across interruptions.
+        goal = ctx.storage.get_run(run_id).goal
         return _json(
             {
                 "run_id": run_id,
+                "goal": goal,
                 "mode": decision.mode.value,
                 "safe": decision.safe,
                 "next_allowed_action": decision.next_allowed_action,

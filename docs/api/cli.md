@@ -20,7 +20,7 @@ continuum --json <command>      # machine-readable output
 | `events <run_id>` | Dump the raw event log for a run. |
 | `diff <run_id>` | Show the environment/state diff since the last checkpoint. |
 | `validate <run_id>` | Check state against the current environment. |
-| `resume [run_id]` | Assess and describe how the run may resume. Omit `run_id` to resume the most recently active run. |
+| `resume [run_id]` | Assess and describe how the run may resume. Omit `run_id` to resume the most recently active run. Prints the run's `goal` so you know what to continue. |
 | `confirm <run_id>` | Confirm a human-approved recovery step. |
 | `checkpoint <run_id>` | Force a state checkpoint. |
 | `verify <run_id>` | Re-audit the event chain for tampering. |

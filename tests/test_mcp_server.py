@@ -491,6 +491,9 @@ async def test_resume_without_run_id_targets_the_active_run(server_ctx: tuple[An
     resumed = await call(server, "continuum_resume")
     assert resumed["run_id"] == "run_active"
     assert resumed["progress"]["completed"] == 30
+    # The goal comes back so a resumed session knows what to continue, with no
+    # external task file.
+    assert resumed["goal"] == "Analyze 100 documents"
 
 
 @pytest.mark.asyncio

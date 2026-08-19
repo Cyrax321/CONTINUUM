@@ -1,60 +1,36 @@
 # CONTINUUM durable agent
 
-This project ships a CONTINUUM MCP server (`continuum-mcp`, registered in
-`.mcp.json` and enabled in `.claude/settings.local.json`). Use it so your work
-survives being interrupted: a run killed mid-task can be resumed by a brand-new
-session with no memory of the old `run_id` and no manual confirmation.
+This project ships a CONTINUUM MCP server (`continuum-mcp`, in `.mcp.json`). Use
+it so your work survives interruption: a run killed mid-task can be resumed by a
+new session with no memorized id and no manual confirmation. That is the only
+extra step — keep everything else normal and fast.
 
 ## On session start, detect and ask
 
-Your very first action, before any other work, is to call `continuum_resume`
-with **no `run_id`** to check for an interrupted run.
+Your **first action** is to call `continuum_resume` with **no `run_id`**.
 
-- If a run is returned and `progress.completed >= progress.total`: tell the user
-  the saved task is already complete, and ask whether to start a new one.
-- If a run is returned with `mode == "repair"` (the environment genuinely
-  drifted): report the blocker and ask how to proceed.
-- If a run is returned and it is still in progress: **stop and ask the user**.
-  Surface what you found — `run_id`, the progress (`completed/total`), and a
-  one-line summary of the task (read `CONTINUUM_TASK.md`, or the run's `goal`) —
-  then ask:
+- If an in-progress run is returned: show its `run_id`, progress
+  (`completed/total`) and `goal`, then **ask the user**:
 
-  > I found an unfinished task saved in CONTINUUM — run `<run_id>` at
-  > `<completed>/<total>`: "<task summary>". Resume it, or start a new task?
+  > I found an unfinished task in CONTINUUM — run `<run_id>` at `<c>/<t>`:
+  > "<goal>". Resume it, or start a new task?
 
-  Then **wait** for the answer.
-  - If the user says resume / yes: if `mode == "request_human"` (almost always
-    self-reported progress not yet confirmed), call `continuum_confirm(run_id)`
-    first, then read `CONTINUUM_TASK.md` and **continue automatically from the
-    recorded progress**. Tell the user you are resuming at `<completed>/<total>`.
-  - If the user says new / no: overwrite `CONTINUUM_TASK.md` and **start a fresh
-    run** (record_progress with `completed=0`).
-- If `no_active_run`: proceed with whatever the user asked. If they gave you a
-  task, start a fresh run (overwrite `CONTINUUM_TASK.md` with it first).
+  Then wait.
+  - **resume**: if `mode == "request_human"`, call `continuum_confirm(run_id)`
+    first, then continue from the recorded progress.
+  - **new**: start a fresh run.
+- If `no_active_run`: just do what the user asked.
 
-This is what makes a kill-and-reopen recoverable in milliseconds: the new session
-detects the interrupted run on its first tool call and offers to continue.
+Do **not** read or write any task file — the task is the run's `goal`, which
+`continuum_resume` returns, so a resumed session already knows what to continue.
 
-## Persist the task so a restart can recover it
+## While working, record every step (cheap, no extra files)
 
-Whenever you are given a task, write (or overwrite) `CONTINUUM_TASK.md` in this
-directory with that task spec first, then execute it. This way a restarted
-session that resumes can read `CONTINUUM_TASK.md` to recover what remains to be
-done — an explicit task from the user always overrides the file. Use a single
-stable `run_id` (e.g. `guide`) for the whole task.
+After each meaningful unit of work, call:
 
-## While working, record every step
+- `continuum_record_progress(run_id, completed, total, goal="<the task>")`
+- `continuum_checkpoint(run_id)`
 
-After each meaningful unit of work:
-
-- `continuum_record_progress(run_id, completed, total, goal=...)` — call often;
-  it is cheap and makes progress durable.
-- `continuum_checkpoint(run_id)` — call at meaningful milestones.
-
-## External side effects go through the ledger
-
-Before performing anything with effects outside this session (deploy, send,
-write a file the user cares about), route it through
-`continuum_intercept_action` and, once done, `continuum_complete_action` (or
-`continuum_fail_action`). This is what guarantees a side effect is never
-performed twice across a resume.
+That is all the durable state CONTINUUM needs. Never spawn exploration or write
+side files to "track" the task — the goal string and the progress counter are
+enough for a resumed session to pick up the next unit.
