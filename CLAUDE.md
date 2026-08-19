@@ -23,17 +23,20 @@ returns the most recently active (interrupted) run, or `mode: "no_active_run"`.
   automatically as above.
 - If a run is returned with `mode == "repair"` (the environment genuinely
   drifted): report the blocker and stop for the user.
-- If `no_active_run`: if `CONTINUUM_TASK.md` exists, execute it (and keep the
-  run in sync with it). If it does not exist, ask the user for a task.
+- If `no_active_run`: if you were just given a task in this session, persist it
+  (see below) and execute it, checkpointing as you go. Otherwise, if
+  `CONTINUUM_TASK.md` exists, execute it. If neither, ask the user for a task.
 
 This is what makes a kill-and-reopen recoverable in milliseconds and hands-free:
 the new session detects and continues the old run on its very first tool call.
 
 ## Persist the task so a restart can recover it
 
-When you are given a task and no `CONTINUUM_TASK.md` exists, write the task spec
-there first (so a resumed session knows what to continue). Use a single stable
-`run_id` (e.g. `guide`) for the whole task.
+Whenever you are given a task, write (or overwrite) `CONTINUUM_TASK.md` in this
+directory with that task spec first, then execute it. This way a restarted
+session that finds an interrupted run can read `CONTINUUM_TASK.md` to recover what
+remains to be done — an explicit task from the user always overrides the file.
+Use a single stable `run_id` (e.g. `guide`) for the whole task.
 
 ## While working, record every step
 
