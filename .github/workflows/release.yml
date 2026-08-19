@@ -16,22 +16,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v7.0.0
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
         with:
+          enable-cache: true
           python-version: "3.12"
-          cache: pip
-
-      - name: Install build tools
-        run: pip install hatch
 
       - name: Run tests before release
-        run: |
-          pip install -e ".[dev]"
-          pytest --tb=short -q
+        run: uv run pytest --tb=short -q
 
       - name: Build wheel and sdist
-        run: hatch build
+        run: uv build
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7.0.1
