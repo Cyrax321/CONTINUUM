@@ -86,9 +86,9 @@ def test_benchmark_releases_every_storage_handle(
     Both harnesses put their databases inside a ``TemporaryDirectory``. A handle
     left open makes that cleanup raise ``PermissionError`` on Windows, which
     took down the whole ``continuum benchmark`` command. This asserts the
-    handles are released rather than asserting on the platform error, so it also
-    fails on POSIX — where unlinking an open file quietly succeeds — if the
-    surrounding ``with`` blocks are ever dropped.
+    handles are released rather than asserting on the platform error, so it
+    fails on POSIX too if the surrounding ``with`` blocks are ever dropped,
+    even though unlinking an open file quietly succeeds there.
     """
     opened: list[_TrackedStorage] = []
 
