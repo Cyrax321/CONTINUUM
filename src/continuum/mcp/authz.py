@@ -15,16 +15,18 @@ time and injected server-side: a caller cannot elevate itself mid-session by
 passing a forged ``clientInfo`` in tool arguments. That is enough to separate
 cooperating agents, and not enough to stop a hostile one on its own.
 
-When ``CONTINUUM_MCP_TOKEN`` is set (or an ``AuthPolicy`` is supplied), the
-server additionally verifies a shared secret the client presents in the
-handshake's ``_meta.authToken``. A caller that cannot prove possession of the
-secret is refused every mutating tool regardless of the name it claims, which
-is what turns "cooperating agents kept apart" into "hostile caller stopped".
-The check is fail-closed: a missing or mismatched secret always refuses, and an
-unset secret leaves authentication disabled so the default local, single-user,
-no-account behavior is unchanged. A hostile process with direct filesystem
-access to the database can still edit it without the server, which is outside
-this layer's scope.
+When ``CONTINUUM_MCP_TOKEN`` is set, the server verifies one shared secret the
+client presents in the handshake's ``_meta.authToken``. Per-client credentials
+are available via ``CONTINUUM_MCP_CLIENT_TOKENS`` (``name:secret`` pairs): each
+caller's secret is bound to the identity it claims, so a token issued to one
+client cannot be replayed by another. A caller that cannot prove possession of
+the expected secret (for its own name, under per-client mode) is refused every
+mutating tool regardless of the name it claims, which is what turns "cooperating
+agents kept apart" into "hostile caller stopped". The check is fail-closed: a
+missing, empty, or mismatched secret always refuses, and an unset secret leaves
+authentication disabled so the default local, single-user, no-account behavior
+is unchanged. A hostile process with direct filesystem access to the database
+can still edit it without the server, which is outside this layer's scope.
 
 Read-only tools stay open
 -------------------------
@@ -61,6 +63,7 @@ __all__ = [
     "load_auth",
     "caller_name",
     "token_from",
+    "CLIENT_TOKENS_ENV_VAR",
 ]
 
 POLICY_ENV_VAR = "CONTINUUM_MCP_ALLOW"
@@ -151,21 +154,53 @@ class AuthPolicy:
 
 AUTH_ENV_VAR = "CONTINUUM_MCP_TOKEN"
 
+#: Per-client credentials: a ``name:secret`` mapping (whitespace or comma
+#: separated) that binds each caller's shared secret to the identity it claims,
+#: so a token issued to one client cannot be replayed by another (issue #7).
+CLIENT_TOKENS_ENV_VAR = "CONTINUUM_MCP_CLIENT_TOKENS"
+
+
+def _parse_client_tokens(value: str | None) -> dict[str, str] | None:
+    """Parse ``CONTINUUM_MCP_CLIENT_TOKENS`` into ``{name: secret}``."""
+    if not value:
+        return None
+    tokens: dict[str, str] = {}
+    for part in value.replace(",", " ").split():
+        name, sep, secret = part.partition(":")
+        if not sep:
+            raise ValueError(f"{CLIENT_TOKENS_ENV_VAR} entries must be 'name:secret', got {part!r}")
+        name, secret = name.strip(), secret.strip()
+        if not name or not secret:
+            raise ValueError(
+                f"{CLIENT_TOKENS_ENV_VAR} entry {part!r} needs a non-empty name and secret"
+            )
+        tokens[name] = secret
+    return tokens or None
+
 
 def load_auth(
     expected: str | None = None,
     *,
+    tokens: Mapping[str, str] | None = None,
     env: Mapping[str, str] | None = None,
 ) -> AuthPolicy:
     """Resolve the authentication policy.
 
-    Explicit argument wins, then the ``CONTINUUM_MCP_TOKEN`` environment
-    variable, then disabled. An empty variable is treated as unset, so a blank
-    configuration is the same as "no authentication".
+    Precedence: explicit ``tokens`` argument, then the
+    ``CONTINUUM_MCP_CLIENT_TOKENS`` environment variable (per-client secrets),
+    then the explicit ``expected`` argument, then the ``CONTINUUM_MCP_TOKEN``
+    environment variable (a single shared secret), then disabled. An empty
+    variable is treated as unset, so a blank configuration is the same as "no
+    authentication".
     """
+    if tokens is not None:
+        return AuthPolicy(None, tokens=tokens, source="argument")
     if expected is not None:
         return AuthPolicy(expected, source="argument")
     environ = os.environ if env is None else env
+    client_tokens = _parse_client_tokens(environ.get(CLIENT_TOKENS_ENV_VAR))
+    if client_tokens:
+        return AuthPolicy(None, tokens=client_tokens, source=CLIENT_TOKENS_ENV_VAR)
     value = environ.get(AUTH_ENV_VAR)
     if value:
         return AuthPolicy(value, source=AUTH_ENV_VAR)

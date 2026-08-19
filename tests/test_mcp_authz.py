@@ -20,6 +20,7 @@ import pytest
 
 from continuum.mcp.authz import (
     AUTH_ENV_VAR,
+    CLIENT_TOKENS_ENV_VAR,
     POLICY_ENV_VAR,
     POLICY_ENV_VAR_ALIAS,
     POLICY_FILENAME,
@@ -401,6 +402,37 @@ def test_load_auth_is_disabled_without_a_secret() -> None:
     assert not load_auth("x", env={}).disabled
 
 
+def test_load_auth_reads_per_client_tokens_env() -> None:
+    auth = load_auth(env={CLIENT_TOKENS_ENV_VAR: "trusted-agent:tok-a,kilo:tok-k"})
+    assert not auth.disabled
+    assert auth.source == CLIENT_TOKENS_ENV_VAR
+    # Each caller's secret is bound to its own name.
+    auth.verify("trusted-agent", "tok-a")
+    auth.verify("kilo", "tok-k")
+    with pytest.raises(NotAuthenticated):
+        auth.verify("trusted-agent", "tok-k")  # another client's token
+    with pytest.raises(NotAuthenticated):
+        auth.verify("stranger", "tok-a")  # unregistered caller
+
+
+def test_load_auth_rejects_malformed_client_tokens() -> None:
+    with pytest.raises(ValueError, match="name:secret"):
+        load_auth(env={CLIENT_TOKENS_ENV_VAR: "no-colon-here"})
+
+
+def test_load_auth_per_client_tokens_win_over_shared_secret_env() -> None:
+    auth = load_auth(
+        env={
+            CLIENT_TOKENS_ENV_VAR: "trusted-agent:tok-a",
+            AUTH_ENV_VAR: "shared",
+        }
+    )
+    assert auth.source == CLIENT_TOKENS_ENV_VAR
+    auth.verify("trusted-agent", "tok-a")
+    with pytest.raises(NotAuthenticated):
+        auth.verify("trusted-agent", "shared")
+
+
 def test_token_from_reads_the_handshake_meta() -> None:
     assert token_from(fake_context(ALLOWED, auth_token="tok")) == "tok"
     assert token_from(fake_context(ALLOWED)) is None
@@ -487,6 +519,86 @@ async def test_read_only_tools_do_not_require_the_secret(
         "continuum_resume", {"run_id": "run_1"}, context=fake_context(STRANGER)
     )
     assert not result.is_error
+
+
+@pytest.mark.asyncio
+async def test_load_auth_wires_per_client_tokens_into_the_server(
+    store: SQLiteStorage,
+) -> None:
+    """The env-driven per-client policy must reach the running server (issue #7)."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    srv, _ = build_server(
+        storage=store,
+        policy=AuthorizationPolicy([ALLOWED, "kilo"]),
+        auth=load_auth(env={CLIENT_TOKENS_ENV_VAR: f"{ALLOWED}:tok-a,kilo:tok-k"}),
+    )
+    # The right caller with its own token succeeds.
+    result = await srv.call_tool(
+        "continuum_record_progress",
+        {"run_id": "run_1", "completed": 3, "total": 10, "goal": "g"},
+        context=fake_context(ALLOWED, auth_token="tok-a"),
+    )
+    assert json.loads(result.content[0].text)["completed"] == 3
+    # Replaying another client's token against this name is refused.
+    with pytest.raises(ToolError, match="shared secret|not registered"):
+        await srv.call_tool(
+            "continuum_record_progress",
+            {"run_id": "run_1", "completed": 1, "goal": "g"},
+            context=fake_context(ALLOWED, auth_token="tok-k"),
+        )
+
+
+@pytest.fixture
+def per_client_server(store: SQLiteStorage) -> Any:
+    """A server that issues a distinct secret to each allowed caller (issue #7)."""
+    srv, _ = build_server(
+        storage=store,
+        policy=AuthorizationPolicy([ALLOWED, "kilo"]),
+        auth=AuthPolicy(tokens={ALLOWED: "tok-a", "kilo": "tok-k"}),
+    )
+    return srv
+
+
+@pytest.mark.asyncio
+async def test_per_client_secret_is_bound_to_its_name(per_client_server: Any) -> None:
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    # Correct caller and its own token: allowed.
+    result = await per_client_server.call_tool(
+        "continuum_record_progress",
+        {"run_id": "run_1", "completed": 3, "total": 10, "goal": "g"},
+        context=fake_context(ALLOWED, auth_token="tok-a"),
+    )
+    assert json.loads(result.content[0].text)["completed"] == 3
+    # A different client's token replayed under this name is refused.
+    with pytest.raises(ToolError, match="shared secret|not registered"):
+        await per_client_server.call_tool(
+            "continuum_record_progress",
+            {"run_id": "run_1", "completed": 1, "goal": "g"},
+            context=fake_context(ALLOWED, auth_token="tok-k"),
+        )
+    # The other client succeeds with its own token.
+    result = await per_client_server.call_tool(
+        "continuum_record_progress",
+        {"run_id": "run_1", "completed": 5, "total": 10, "goal": "g"},
+        context=fake_context("kilo", auth_token="tok-k"),
+    )
+    assert json.loads(result.content[0].text)["completed"] == 5
+
+
+@pytest.mark.asyncio
+async def test_an_unregistered_caller_is_refused_even_with_a_token(
+    per_client_server: Any,
+) -> None:
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    with pytest.raises(ToolError, match="shared secret|not registered"):
+        await per_client_server.call_tool(
+            "continuum_record_progress",
+            {"run_id": "run_1", "completed": 1, "goal": "g"},
+            context=fake_context(STRANGER, auth_token="tok-a"),
+        )
 
 
 # --- every tool must be classified ------------------------------------------ #
