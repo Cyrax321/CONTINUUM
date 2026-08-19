@@ -318,9 +318,14 @@ def build_server(
     it is resolved from ``CONTINUUM_MCP_TOKEN`` and is disabled when that is
     unset, leaving the default local, no-account behavior unchanged.
     """
-    ctx = ContinuumMCP(database, storage=storage)
+    # Configuration is resolved before storage is opened, because both loaders
+    # reject malformed input with ValueError (a bad policy file, a token entry
+    # without a colon). Opening first would strand that handle with no owner to
+    # close it, and would also leave an empty database behind for a server that
+    # never started. Nothing here depends on the store, so the order is free.
     policy = load_policy() if policy is None else policy
     auth = load_auth() if auth is None else auth
+    ctx = ContinuumMCP(database, storage=storage)
     server = MCPServer(
         name="continuum",
         title="CONTINUUM",
@@ -869,7 +874,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    server, ctx = build_server(args.db)
+    try:
+        server, ctx = build_server(args.db)
+    except ValueError as exc:
+        # A malformed policy file or token list is an operator mistake, so it is
+        # reported the way the CLI reports the same class of failure (see
+        # cli/main.py): a traceback would bury the useful part. It matters more
+        # here than there, because a stdio server writes its traceback into the
+        # protocol pipe, where the client surfaces it only as "not ready" with
+        # no indication of what to fix.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except sqlite3.Error as exc:
+        # resolve_database, not args.db, so the reported path is the one that
+        # was actually opened rather than None when --db was omitted.
+        print(
+            f"error: cannot open storage at {resolve_database(args.db)!r}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         server.run(transport=args.transport)
     finally:

@@ -23,12 +23,13 @@ from continuum.actions.ledger import ActionLedger
 from continuum.checkpoint import CheckpointManager
 from continuum.environment import StaticProvider, capture
 from continuum.events import EventType
-from continuum.mcp.authz import AuthorizationPolicy
+from continuum.mcp.authz import CLIENT_TOKENS_ENV_VAR, AuthorizationPolicy
 from continuum.mcp.server import (
     DEFAULT_DB,
     ContinuumMCP,
     _open_server_storage,
     build_server,
+    main,
     resolve_database,
 )
 from continuum.models import ActionStatus, Origin, RecoveryMode, Run
@@ -1212,6 +1213,86 @@ def test_server_open_reraises_a_disk_error_with_no_sidecars(tmp_path: Any) -> No
 
     # One attempt, then re-raise: no retry when there was nothing to clear.
     assert calls["n"] == 1
+
+
+# --- cold start -------------------------------------------------------------- #
+
+
+def test_a_rejected_configuration_leaves_no_open_handle(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for #87: a failed build must not strand the store.
+
+    ``load_policy`` and ``load_auth`` reject malformed input with ValueError, so
+    a build that opens storage before resolving them has no owner left to close
+    the handle. That is the leak of #81 in the cold-start path, invisible on
+    POSIX and fatal on Windows, where the stranded file cannot be removed.
+
+    This asserts two things. No handle is left open, which any correct fix
+    satisfies, including closing it on the way out. And no database file is
+    created, which holds specifically because configuration is resolved before
+    anything is acquired: a server that never started has no business leaving a
+    database behind in the operator's working directory.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(CLIENT_TOKENS_ENV_VAR, "missing-the-colon")
+
+    live: list[Any] = []
+
+    class _TrackedStorage(SQLiteStorage):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            live.append(self)
+
+        def close(self) -> None:
+            super().close()
+            if self in live:
+                live.remove(self)
+
+    monkeypatch.setattr("continuum.mcp.server.SQLiteStorage", _TrackedStorage)
+
+    with pytest.raises(ValueError):
+        build_server("agent.db")
+
+    assert live == [], "the rejected build left a storage handle open"
+    assert not os.path.exists("agent.db"), "a server that never started created a database"
+
+
+def test_main_reports_an_unopenable_database_instead_of_a_traceback(
+    tmp_path: Any, capsys: Any
+) -> None:
+    """Regression for #87: a bad --db must be diagnosable by the operator.
+
+    Over stdio an unhandled exception is written into the protocol pipe, so the
+    client can only report that the server never became ready. The path that
+    failed has to reach stderr instead, as it already does for the CLI.
+    """
+    missing = tmp_path / "no-such-directory" / "agent.db"
+
+    assert main(["--db", str(missing)]) == 1
+
+    err = capsys.readouterr().err
+    assert "cannot open storage" in err
+    assert str(missing) in err
+    assert "Traceback" not in err
+
+
+def test_main_reports_a_malformed_client_token_list(
+    tmp_path: Any, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of #87's cold start: configuration the loaders reject.
+
+    The message must name the offending variable, since the operator's only
+    other signal is that the server is not ready.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(CLIENT_TOKENS_ENV_VAR, "missing-the-colon")
+
+    assert main(["--db", "agent.db"]) == 1
+
+    err = capsys.readouterr().err
+    assert CLIENT_TOKENS_ENV_VAR in err
+    assert "Traceback" not in err
 
 
 @pytest.mark.asyncio

@@ -138,6 +138,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A failed MCP cold start leaked a database handle and reported itself as a
+  traceback (issue #87).** `build_server` opened storage on its first line but
+  resolved the authorization policy and auth token after it, and both loaders
+  reject malformed input with `ValueError`. A bad policy file or a
+  `CONTINUUM_MCP_CLIENT_TOKENS` entry without a colon therefore stranded an open
+  `SQLiteStorage` with no owner to close it, the same leak as issue #81 and fatal
+  on Windows for the same reason, and left an empty database behind for a server
+  that never started. Configuration is now resolved before storage is opened, so
+  nothing is acquired until it can be used. `main` also called `build_server`
+  outside any handler, so an ordinary operator mistake surfaced as a
+  `sqlite3.OperationalError` or `ValueError` traceback; over stdio that goes into
+  the protocol pipe, where the client reports only that the server never became
+  ready. It now prints the CLI's `error: ...` form to stderr and exits 1,
+  matching the rationale already documented in `cli/main.py`. Tests in
+  `tests/test_mcp_server.py`.
+
 - **`continuum benchmark` crashed on Windows from unclosed database handles
   (issue #81).** `_run_one` and `run_idempotency_benchmark` constructed
   `SQLiteStorage` without ever closing it, so the enclosing
