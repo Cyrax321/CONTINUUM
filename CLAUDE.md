@@ -5,30 +5,35 @@ This project ships a CONTINUUM MCP server (`continuum-mcp`, registered in
 survives being interrupted: a run killed mid-task can be resumed by a brand-new
 session with no memory of the old `run_id` and no manual confirmation.
 
-## On session start, decide new task vs resume
+## On session start, detect and ask
 
-Before doing anything else, call `continuum_resume` with **no `run_id`** to learn
-the active run. Then act on the user's intent **this session**:
+Your very first action, before any other work, is to call `continuum_resume`
+with **no `run_id`** to check for an interrupted run.
 
-- If the user's first message **describes new work to do** (a task): it
-  supersedes any interrupted run. Overwrite `CONTINUUM_TASK.md` with that task,
-  then **start a fresh run** (record_progress with `completed=0`) and execute it,
-  checkpointing as you go. Do **not** continue the interrupted run.
-- If the user's first message only asks to **resume / continue / recover** (no new
-  task described): continue the active run —
-  - if `progress.completed >= progress.total`: finished — tell the user and stop.
-  - if `mode == "resume"`: read `CONTINUUM_TASK.md` to recover the spec, then
-    **continue automatically from the recorded progress** — do not stop to ask.
-    Tell the user you are resuming run `<run_id>` at `<completed>/<total>`.
-  - if `mode == "request_human"` (almost always self-reported progress not yet
-    confirmed): you are the operator resuming your own run, so call
-    `continuum_confirm(run_id)`, then `continuum_resume` again and continue.
-  - if `mode == "repair"` (the environment genuinely drifted): report the blocker
-    and stop.
-- If `no_active_run` and the user gave a task: start fresh as above.
+- If a run is returned and `progress.completed >= progress.total`: tell the user
+  the saved task is already complete, and ask whether to start a new one.
+- If a run is returned with `mode == "repair"` (the environment genuinely
+  drifted): report the blocker and ask how to proceed.
+- If a run is returned and it is still in progress: **stop and ask the user**.
+  Surface what you found — `run_id`, the progress (`completed/total`), and a
+  one-line summary of the task (read `CONTINUUM_TASK.md`, or the run's `goal`) —
+  then ask:
 
-This is what makes a kill-and-reopen recoverable in milliseconds and hands-free:
-the new session detects and continues the old run on its very first tool call.
+  > I found an unfinished task saved in CONTINUUM — run `<run_id>` at
+  > `<completed>/<total>`: "<task summary>". Resume it, or start a new task?
+
+  Then **wait** for the answer.
+  - If the user says resume / yes: if `mode == "request_human"` (almost always
+    self-reported progress not yet confirmed), call `continuum_confirm(run_id)`
+    first, then read `CONTINUUM_TASK.md` and **continue automatically from the
+    recorded progress**. Tell the user you are resuming at `<completed>/<total>`.
+  - If the user says new / no: overwrite `CONTINUUM_TASK.md` and **start a fresh
+    run** (record_progress with `completed=0`).
+- If `no_active_run`: proceed with whatever the user asked. If they gave you a
+  task, start a fresh run (overwrite `CONTINUUM_TASK.md` with it first).
+
+This is what makes a kill-and-reopen recoverable in milliseconds: the new session
+detects the interrupted run on its first tool call and offers to continue.
 
 ## Persist the task so a restart can recover it
 
