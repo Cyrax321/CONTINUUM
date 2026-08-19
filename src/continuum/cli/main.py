@@ -260,13 +260,16 @@ def cmd_inspect(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
 
 
 def cmd_history(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
-    versions = storage.list_versions(args.run_id)
-    checkpoints = {c.version: c for c in storage.list_checkpoints(args.run_id)}
-    if not versions:
-        storage.get_run(args.run_id)  # raises RunNotFound if it truly does not exist
+    # Multiple checkpoints legitimately share a state version (put_version
+    # returns the same version when the state fingerprint is unchanged), so we
+    # list every checkpoint rather than keying by version, which would collapse
+    # the lineage into a single row.
+    storage.get_run(args.run_id)  # raises RunNotFound if it truly does not exist
+    checkpoints = storage.list_checkpoints(args.run_id)
+    if not checkpoints:
         _emit(
-            {"versions": []},
-            "No versions recorded.",
+            {"checkpoints": []},
+            "No checkpoints recorded.",
             as_json=args.json,
             stream=out,
             palette=getattr(args, "_palette", None),
@@ -274,26 +277,25 @@ def cmd_history(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
         return ExitCode.OK
 
     payload = []
-    lines = [f"{'VERSION':<9} {'CHECKPOINT':<12} {'TRIGGER':<24} PROGRESS"]
-    for version in versions:
-        state = storage.get_version(args.run_id, version)
-        checkpoint = checkpoints.get(version)
+    lines = [f"{'CHECKPOINT':<12} {'VERSION':<9} {'TRIGGER':<24} PROGRESS"]
+    for checkpoint in checkpoints:
+        state = storage.get_version(args.run_id, checkpoint.version)
         payload.append(
             {
-                "version": version,
-                "checkpoint_id": checkpoint.checkpoint_id if checkpoint else None,
-                "trigger": checkpoint.trigger if checkpoint else None,
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "version": checkpoint.version,
+                "trigger": checkpoint.trigger,
                 "completed": state.progress.completed,
                 "source_sequence": state.source_sequence,
             }
         )
-        marker = checkpoint.checkpoint_id[:10] if checkpoint else "-"
-        trigger = checkpoint.trigger if checkpoint else "-"
+        marker = checkpoint.checkpoint_id[:10]
         lines.append(
-            f"v{version:<8} {marker:<12} {trigger:<24} {state.progress.completed} completed"
+            f"{marker:<12} v{checkpoint.version:<8} {checkpoint.trigger:<24} "
+            f"{state.progress.completed} completed"
         )
     _emit(
-        {"versions": payload},
+        {"checkpoints": payload},
         "\n".join(lines),
         as_json=args.json,
         stream=out,

@@ -11,7 +11,7 @@ from continuum.actions import (
     idempotency_key,
 )
 from continuum.events import EventType
-from continuum.models import ActionStatus, Run, UnknownSideEffect
+from continuum.models import Action, ActionStatus, Run, UnknownSideEffect
 from continuum.storage import SQLiteStorage
 
 
@@ -210,6 +210,45 @@ def test_an_inline_resolver_can_rescue_an_interrupted_action(
     assert outcome.external_id == "481"
 
 
+def test_an_inline_resolution_settles_the_ledger_durably(
+    ledger: ActionLedger, store: SQLiteStorage
+) -> None:
+    """Issue #45: a resolver that does not itself reconcile must still persist.
+
+    Returning the resolution only to the caller left the stored action UNKNOWN,
+    so the next claim re-raised, ``pending()`` never drained, and the recovery
+    engine asked for a human forever.
+    """
+    from continuum.actions.ledger import ActionOutcome
+
+    first = ledger.claim("act.x", {"k": 1})
+    ledger.fail(first.key, "boom", certain=False)
+
+    def resolve(existing: Action) -> ActionOutcome:
+        settled = existing.model_copy(
+            update={
+                "status": ActionStatus.COMPLETED,
+                "external_id": "ext-1",
+                "result": {"ok": True},
+                "side_effect_uncertain": False,
+            }
+        )
+        return ActionOutcome(key=first.key, action=settled, fresh=False)
+
+    resolved = ledger.claim("act.x", {"k": 1}, on_unknown=resolve)
+    assert resolved.action.status is ActionStatus.COMPLETED
+
+    # The durable state, not just the return value.
+    assert ledger.get(first.key).status is ActionStatus.COMPLETED
+    assert ledger.pending() == []
+
+    # A fresh ledger replaying the same events must agree.
+    replayed = ActionLedger(store, "run_1")
+    assert replayed.get(first.key).status is ActionStatus.COMPLETED
+    assert replayed.get(first.key).external_id == "ext-1"
+    assert replayed.pending() == []
+
+
 # --- reconciliation -------------------------------------------------------- #
 
 
@@ -233,6 +272,26 @@ def test_reconciling_as_not_occurred_permits_a_retry(ledger: ActionLedger) -> No
 
     retry = ledger.claim("github.create_issue", ISSUE)
     assert retry.fresh
+
+
+def test_reconciling_as_not_occurred_clears_the_recorded_effect(
+    ledger: ActionLedger,
+) -> None:
+    """Issue #29: deciding the effect never happened invalidates its evidence.
+
+    Leaving ``external_id`` and ``result`` behind showed a downstream reader a
+    stale external identity and a stale success payload on an action the system
+    had just decided never completed.
+    """
+    outcome = ledger.claim("t.send", {"id": "row-1"})
+    ledger.complete(outcome.key, external_id="EXT-9", result={"ok": True})
+
+    ledger.reconcile(outcome.key, occurred=False, note="probe found nothing")
+
+    settled = ledger.get(outcome.key)
+    assert settled.status is ActionStatus.FAILED
+    assert settled.external_id is None
+    assert settled.result is None
 
 
 def test_reconciliation_is_recorded_as_its_own_event(
@@ -469,9 +528,76 @@ def test_identity_match_requires_a_distinctive_token(ledger: ActionLedger) -> No
     first = ledger.claim("api.call", {"invoice_id": "INV-007", "status": "sent"})
     ledger.complete(first.key, external_id="INV-007.sent")
 
-    # "1" and "sent" are weak tokens; only INV-008 is new work.
+    # "1" is too short to distinguish anything and "sent" is a weak token;
+    # only INV-008 would be new work.
     other = ledger.claim("api.call", {"id": 1, "status": "sent"})
     assert other.fresh
+
+
+def test_identity_match_recognises_a_plain_word_resource(ledger: ActionLedger) -> None:
+    """Issue #33: a word like 'invoice' names a resource as well as 'INV-001'.
+
+    Requiring a digit, '@', or '.' meant every plain-word identity was dropped,
+    so drift across sessions opened a second slot and the effect ran twice.
+    """
+    first = ledger.claim("publish", {"topic": "invoice"})
+    ledger.complete(first.key, external_id="published")
+
+    again = ledger.claim("publish", {"subject": "invoice"})
+    assert not again.fresh
+    assert again.external_id == "published"
+
+
+def test_identity_match_recognises_a_numeric_resource_id(ledger: ActionLedger) -> None:
+    """Issue #36: a row id of 4821 identifies a row as well as INV-001 does.
+
+    Numeric ids were dropped twice over -- as purely-numeric tokens, and because
+    only ``str`` values were tokenised at all, so an ``int`` never became one.
+    """
+    first = ledger.claim("db.update", {"row_id": 4821})
+    ledger.complete(first.key, external_id="updated")
+
+    again = ledger.claim("db.update", {"id": 4821})
+    assert not again.fresh
+    assert again.external_id == "updated"
+
+    other = ledger.claim("db.update", {"row_id": 9999})
+    assert other.fresh, "a different row is different work"
+
+
+def test_identity_match_survives_an_absolute_versus_relative_path(
+    ledger: ActionLedger,
+) -> None:
+    """The same file rendered two ways is one action (the issue #6 scenario).
+
+    Each spelling carries a container the other lacks, so identity is compared at
+    the leaf: ``INV-5.pdf`` and its stem, not the directory that precedes them.
+    CONTINUUM-Bench measures exactly this path, so a regression here shows up as
+    duplicate side effects in the benchmark rather than as a unit failure.
+    """
+    first = ledger.claim("bench.send", {"file": "/data/invoices/INV-5.pdf", "invoice": "INV-5"})
+    ledger.complete(first.key, external_id="ext-5", result={"ok": True})
+
+    again = ledger.claim("bench.send", {"file": "invoices/INV-5.pdf", "invoice": "INV-5"})
+    assert not again.fresh, "a re-rendered path is the same file, not new work"
+    assert again.external_id == "ext-5"
+
+
+def test_identity_match_does_not_collapse_actions_sharing_one_incidental_value(
+    ledger: ActionLedger,
+) -> None:
+    """Admitting plain words must not make a shared adjective an identity.
+
+    Both tickets are ``urgent``; only the title says which one. Matching on mere
+    intersection would report the second as already done and silently never
+    create it -- so recognition requires one token set to contain the other.
+    """
+    first = ledger.claim("ticket.create", {"priority": "urgent", "title": "alpha"})
+    ledger.complete(first.key, external_id="T-1")
+
+    second = ledger.claim("ticket.create", {"priority": "urgent", "title": "beta"})
+    assert second.fresh, "a different ticket must not inherit the first one's identity"
+    assert second.external_id is None
 
 
 def test_identity_match_does_not_fire_for_an_explicit_key(ledger: ActionLedger) -> None:

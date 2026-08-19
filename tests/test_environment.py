@@ -66,11 +66,29 @@ def test_files_are_fingerprinted_by_content_not_mtime(tmp_path: Path) -> None:
     assert not diff_environments(first, third).stable
 
 
-def test_a_missing_file_is_recorded_not_raised(tmp_path: Path) -> None:
-    snapshot = capture("run_1", FileProvider([tmp_path / "gone.csv"]))
-    resource = snapshot.resources[str(tmp_path / "gone.csv")]
-    assert resource.version is None
-    assert resource.metadata["missing"] is True
+def test_a_missing_file_is_omitted_not_raised(tmp_path: Path) -> None:
+    """Issue #30: absence is reported by omission, so the diff reads 'removed'.
+
+    Recording the file with ``version=None`` instead made a deleted file look
+    like a *changed* resource, which understates what happened to it.
+    """
+    gone = tmp_path / "gone.csv"
+    snapshot = capture("run_1", FileProvider([gone]))
+    assert str(gone) not in snapshot.resources
+
+
+def test_a_deleted_file_diffs_as_removed(tmp_path: Path) -> None:
+    target = tmp_path / "data.csv"
+    target.write_text("alpha")
+    before = capture("run_1", FileProvider([target]))
+
+    target.unlink()
+    after = capture("run_1", FileProvider([target]))
+
+    diff = diff_environments(before, after)
+    assert not diff.stable
+    delta = next(d for d in diff.deltas if d.resource == str(target))
+    assert delta.change is ResourceChange.REMOVED
 
 
 def test_an_unreadable_file_becomes_unknown(tmp_path: Path) -> None:

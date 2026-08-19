@@ -213,15 +213,21 @@ def plan_repairs(
             continue
         # An action already escalated to REQUIRES_REVIEW has defeated automatic
         # reconciliation once; sending it back through the same machinery would
-        # loop. It needs a person.
-        needs_person = action.status is ActionStatus.REQUIRES_REVIEW
+        # loop. It needs a person. So does an action whose outcome is still
+        # unknown while strict mode is on: the engine escalates such runs to
+        # REQUEST_HUMAN, so the step must agree rather than quietly offering an
+        # automatic reconcile the contract would then permit (issue #42).
+        escalated = action.status is ActionStatus.REQUIRES_REVIEW
+        needs_person = escalated or strict_unknown
         steps.append(
             RepairStep(
                 kind=RepairKind.RECONCILE_ACTION,
                 target=action.action_id,
+                # Keyed on what actually happened, not on who must handle it: an
+                # interrupted action was never "escalated for review".
                 reason=(
                     f"{action.action_type} was escalated for review"
-                    if needs_person
+                    if escalated
                     else f"{action.action_type} was interrupted; the side effect may or "
                     f"may not have occurred"
                 ),

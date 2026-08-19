@@ -138,6 +138,44 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Six correctness defects found by triaging the open bug backlog (issues #29,
+  #30, #33, #36, #42, #43, #45).** Each is covered by a test that fails on the
+  previous code:
+  - *#33 / #36: the ledger's argument-drift fallback ignored whole classes of
+    resource identity.* `_is_strong_token` required a digit, `@`, or `.`, so a
+    plain-word identity (`invoice`, `dataset`) was discarded, and purely numeric
+    ids were discarded outright; separately, `identity_tokens` only tokenised
+    `str`, so an integer id such as `4821` never became a token at all. Both are
+    real identities now. Admitting plain words would let one shared adjective
+    ("both tickets are `urgent`") collapse two distinct actions into one, silently
+    dropping the second side effect, so `ActionLedger._identity_match` no longer
+    matches on a single shared token: it requires one token set to *contain* the
+    other, compared at the leaf (`leaf_tokens`), so a path counts as its basename
+    and an absolute-vs-relative re-rendering still deduplicates while genuinely
+    different resources do not.
+  - *#45: `claim(on_unknown=...)` did not persist its resolution.* A resolver's
+    `ActionOutcome` was returned to the caller but nothing was recorded, so the
+    stored action stayed `UNKNOWN`: the next claim re-raised, `pending()` never
+    drained, and `RecoveryEngine.assess` asked for a human forever. The
+    resolution is now written as an `ACTION_RECONCILED` event.
+  - *#29: `reconcile(occurred=False)` left stale evidence behind.* An action
+    just decided never to have happened kept the `external_id` and `result` from
+    its earlier `COMPLETED` state. Both are cleared.
+  - *#42: `strict_unknown` was silently ignored for uncertain side effects.* The
+    engine escalates an unknown side effect to `REQUEST_HUMAN`, but `plan_repairs`
+    emitted a `reconcile_action` step with `requires_human=False`, so
+    `plan.requires_human` was `False` and the contract permitted the agent to
+    auto-reconcile against the mode. The step now requires a person in strict
+    mode, and its `reason` reports what happened (interrupted) rather than
+    mislabelling it "escalated for review".
+  - *#43: `continuum history` hid checkpoints.* `put_version` returns the same
+    version when the state fingerprint is unchanged, so keying the listing by
+    version collapsed two checkpoints into one row. It now lists checkpoints;
+    the JSON key is `checkpoints` rather than `versions`.
+  - *#30: a deleted tracked file diffed as "changed" instead of "removed".*
+    `FileProvider` recorded a missing file as a resource with `version=None`;
+    it now omits it, which `diff_environments` reads as `REMOVED`.
+
 - **`StateValidator._check_model` reported model-specific assumptions
   `VALID` when the resume model was unknown (fail-open).** When
   `expected_model` is `None` (e.g. `continuum validate`/`resume` run without

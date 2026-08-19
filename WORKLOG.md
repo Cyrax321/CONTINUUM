@@ -349,3 +349,55 @@ STATUS.md (benchmark + #6 proof), and project.md (A2 marked done).
 
 A2 is now complete. Next in plan order: B2 (PostgreSQL, centralized server,
 distributed locking, schema migration).
+
+## Session 17, 2026-08-19 (C1: fix the open correctness backlog)
+
+Context: the session resumed on an uncommitted working tree carrying draft fixes
+for the C1 triage issues (#29, #30, #33, #34, #36, #42, #43, #45). Three tests
+were red, `idempotency.py` was unformatted, and the draft had two real problems
+of its own, both found by running the code rather than reading it.
+
+What the draft got wrong (and how it was fixed):
+- **A silent-data-loss regression.** Widening `_is_strong_token` so plain words
+  count as identity (correct for #33) combined with `_identity_match`'s
+  single-shared-token rule to collapse genuinely distinct actions: two
+  `ticket.create` calls differing only in title matched on the shared value
+  `urgent`, so the second ticket was reported already-done and never created.
+  Verified against HEAD to confirm the regression was new. Fixed by requiring
+  *containment* of one token set in the other rather than intersection.
+- **Containment alone broke the issue #6 benchmark.** Absolute-vs-relative path
+  drift gives each side a token the other lacks (`/data/invoices/INV-5.pdf` vs
+  `invoices/INV-5.pdf`), so `continuum_drift` went from 0 to 50 duplicate side
+  effects. Fixed with `leaf_tokens`: compare identity at the basename, dropping
+  the container path that a re-rendering changes. Only the benchmark caught this
+  (the unit suite passed), so the case now has its own test.
+- **#36 was not actually fixed.** The issue's own repro passes an `int`
+  (`{'row_id': 4821}`), and `identity_tokens.collect` only handled `str`, so the
+  token set was empty regardless of `_is_strong_token`. Non-bool ints are now
+  tokenised.
+- **#42's reason text was misleading.** `reason` was keyed on `needs_person`, so
+  an interrupted action reported "was escalated for review" though it never was.
+  `reason` now follows status; `requires_human` follows status + `strict_unknown`.
+
+Notable decisions / discoveries:
+- Identity is now decided at basename level, which is the assumption the basename
+  token always encoded: two same-type actions on same-named files in different
+  directories are treated as one. Documented in `leaf_tokens`.
+- Failing to deduplicate is recoverable (that is what an explicit `key` is for);
+  falsely deduplicating silently destroys a side effect. The matcher errs toward
+  a new slot whenever it is not confident.
+- `continuum history`'s JSON key changed from `versions` to `checkpoints`. No
+  other code, test, or doc referenced the old key.
+- `_STOPWORDS` matters less under containment but is kept: it drops filler before
+  it can distort a comparison, and both it and `_WEAK_TOKENS` are now matched
+  case-insensitively.
+
+Verification: 803 passed, 4 skipped; `ruff check` and `mypy src/continuum` clean.
+Every one of the nine new/updated tests was confirmed to fail with `src/` reverted
+to HEAD, so each proves its issue rather than merely passing.
+
+Not done here: `src/continuum/serve/server.py` and `tests/test_serve.py` are
+unformatted on `main` (pre-existing, from `4605c00`); left alone to keep this
+change reviewable. Issue #34 was a documentation fix only: `scoped_to_run=False`
+still cannot enforce cross-run uniqueness, since the ledger only replays its own
+run; a store-wide lookup remains unimplemented.

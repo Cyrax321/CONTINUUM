@@ -113,7 +113,25 @@ def test_interrupted_actions_become_reconciliation_steps() -> None:
     plan = plan_repairs(uncertain_actions=[uncertain()])
     assert plan.steps[0].kind is RepairKind.RECONCILE_ACTION
     assert "may or may not have occurred" in plan.steps[0].reason
+
+
+def test_strict_mode_makes_an_unknown_side_effect_a_human_step() -> None:
+    """Issue #42: the engine escalates to REQUEST_HUMAN, so the step must agree.
+
+    Otherwise ``plan.requires_human`` is False and ``next_allowed_action`` is an
+    automatic reconcile the contract permits, contradicting the mode.
+    """
+    plan = plan_repairs(uncertain_actions=[uncertain()], strict_unknown=True)
+    assert plan.steps[0].requires_human
+    assert plan.requires_human
+    # The reason states what happened, not who handles it: it was never escalated.
+    assert "escalated" not in plan.steps[0].reason
+
+
+def test_tolerating_unknown_side_effects_allows_an_automatic_reconcile() -> None:
+    plan = plan_repairs(uncertain_actions=[uncertain()], strict_unknown=False)
     assert not plan.steps[0].requires_human
+    assert not plan.requires_human
 
 
 def test_an_escalated_action_is_not_sent_back_through_automation() -> None:

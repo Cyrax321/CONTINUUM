@@ -259,6 +259,30 @@ def test_history_lists_checkpoints(db: str) -> None:
     assert "v0" in out
 
 
+def test_history_lists_every_checkpoint_sharing_a_version(db: str) -> None:
+    """Issue #43: two checkpoints at one state version are two checkpoints.
+
+    ``put_version`` returns the same version when the state fingerprint has not
+    changed, so keying the listing by version hid whole checkpoints -- exactly
+    the lineage ``history`` exists to show.
+    """
+    with SQLiteStorage(db) as store:
+        manager = CheckpointManager(store)
+        # No new events in between, so the state fingerprint is unchanged and
+        # both checkpoints land on the same version.
+        first = manager.checkpoint("run_1")
+        second = manager.checkpoint("run_1")
+        assert first.version == second.version
+        assert first.checkpoint_id != second.checkpoint_id
+
+    _, out, _ = run("--db", db, "--json", "history", "run_1")
+    listed = json.loads(out)["checkpoints"]
+    ids = [row["checkpoint_id"] for row in listed]
+    assert first.checkpoint_id in ids
+    assert second.checkpoint_id in ids
+    assert len(ids) == len(set(ids)), "each checkpoint appears once"
+
+
 def test_diff_compares_two_versions(db: str) -> None:
     with SQLiteStorage(db) as store:
         store.append_event("run_1", EventType.WORK_COMPLETED, {"doc": 99})
@@ -395,13 +419,13 @@ def test_benchmark_runs_and_reports_numbers() -> None:
     assert "12.93" in out or "16.61" in out or "compress" in out
 
 
-def test_a_run_with_no_versions_says_so(tmp_path: Path) -> None:
+def test_a_run_with_no_checkpoints_says_so(tmp_path: Path) -> None:
     path = str(tmp_path / "bare.db")
     with SQLiteStorage(path) as store:
         store.create_run(Run(run_id="bare", goal="g"))
     code, out, _ = run("--db", path, "history", "bare")
     assert code == ExitCode.OK
-    assert "No versions recorded" in out
+    assert "No checkpoints recorded" in out
 
 
 def test_history_of_a_missing_run_is_not_found(db: str) -> None:

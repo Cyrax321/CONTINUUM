@@ -104,8 +104,14 @@ def idempotency_key(
     """Derive a stable key identifying this operation.
 
     ``scope`` narrows the key, typically to a run, so two runs performing the
-    same logical operation do not deduplicate against each other. Omit it for
-    effects that must be globally unique regardless of run.
+    same logical operation do not deduplicate against each other within that
+    ledger. A narrower scope (for example, a run id) is what most callers want.
+
+    Note: ``scope`` only shapes the derived key. The ``ActionLedger`` is bound to
+    a single run and only replays that run's events, so it cannot enforce
+    uniqueness across runs on its own. ``scoped_to_run=False`` widens the key but
+    does not make the store consult other runs; cross-run global uniqueness
+    would require a store-wide lookup that is not yet implemented.
 
     ``key`` overrides argument hashing entirely, in the style of Stripe's
     ``Idempotency-Key``. Argument hashing assumes identical arguments mean the
@@ -156,18 +162,120 @@ _WEAK_TOKENS = frozenset(
     }
 )
 
+# Generic words that are far more likely to be incidental argument names or
+# filler than a resource identity. A string like this is not distinctive enough
+# to drive the defensive drift fallback, so it is dropped as a token.
+_STOPWORDS = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "this",
+        "that",
+        "then",
+        "when",
+        "what",
+        "which",
+        "who",
+        "into",
+        "onto",
+        "over",
+        "under",
+        "about",
+        "above",
+        "below",
+        "to",
+        "of",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "has",
+        "have",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "can",
+        "could",
+        "should",
+        "may",
+        "might",
+        "must",
+        "shall",
+        "send",
+        "update",
+        "create",
+        "delete",
+        "read",
+        "write",
+        "get",
+        "set",
+        "add",
+        "remove",
+        "make",
+        "take",
+        "give",
+        "show",
+        "list",
+        "find",
+        "run",
+        "start",
+        "stop",
+        "open",
+        "close",
+        "name",
+        "type",
+        "status",
+        "value",
+        "data",
+        "info",
+        "item",
+        "key",
+        "field",
+        "result",
+        "note",
+        "text",
+        "kind",
+        "mode",
+        "state",
+        "event",
+        "action",
+        "request",
+        "response",
+        "error",
+        "message",
+        "account",
+        "description",
+    }
+)
+
 
 def _is_strong_token(token: str) -> bool:
     """A token distinctive enough to identify a resource.
 
-    Weak tokens are pure numbers (a count is not an identity), filler words,
-    and anything too short to distinguish one resource from another.
+    Any value that is not filler counts. A plain word (``invoice``, ``dataset``)
+    names a resource just as well as ``INV-001`` does (issue #33), and a purely
+    numeric string is a legitimate identity too -- a row id, an account number,
+    an invoice number rendered as digits (issue #36). What gets dropped is only
+    what cannot distinguish one resource from another: tokens too short to be
+    meaningful, the explicit weak list, and generic stopwords.
+
+    Admitting plain words is only safe because ``_identity_match`` requires the
+    two token sets to *contain* one another rather than merely to intersect. A
+    single shared word (two tickets that are both ``urgent``) is not enough to
+    call two actions the same work.
     """
-    if len(token) < 3 or token in _WEAK_TOKENS:
-        return False
-    if token.isdigit():
-        return False
-    return any(ch.isdigit() for ch in token) or "@" in token or token.count(".") >= 1
+    lowered = token.lower()
+    return len(token) >= 3 and lowered not in _WEAK_TOKENS and lowered not in _STOPWORDS
 
 
 def identity_tokens(
@@ -180,15 +288,22 @@ def identity_tokens(
 
     Used by the ledger's defensive fallback when argument hashing cannot match
     two attempts that describe the same resource differently (field renames,
-    path formatting). A token is a scalar string value, plus the basename and
-    basename-stem of any path-like value, plus the same for ``external_id``.
+    path formatting). A token is a scalar value -- a string, or an integer
+    rendered as one, since a row id of ``4821`` identifies a row as well as
+    ``INV-001`` identifies an invoice (issue #36) -- plus the basename and
+    basename-stem of any path-like value, and the same for ``external_id``.
     Weak tokens are dropped so the fallback never matches on incidental values
     like counts or status words.
     """
     tokens: set[str] = set()
 
     def collect(value: Any) -> None:
-        if isinstance(value, str):
+        # bool is an int subclass, and True/False name no resource.
+        if isinstance(value, bool):
+            return
+        if isinstance(value, int):
+            tokens.add(str(value))
+        elif isinstance(value, str):
             tokens.add(value)
             base = os.path.basename(value.rstrip("/\\"))
             stem, _ = os.path.splitext(base)
@@ -209,3 +324,21 @@ def identity_tokens(
         collect(external_id)
 
     return frozenset(t for t in tokens if _is_strong_token(t))
+
+
+def leaf_tokens(tokens: frozenset[str]) -> frozenset[str]:
+    """The tokens that name a resource rather than merely locate it.
+
+    ``identity_tokens`` records a path-like value as the whole string *and* as
+    the basename and stem derived from it. Only those leaves survive a change of
+    rendering: an agent that writes ``/data/invoices/INV-5.pdf`` in one session
+    and ``invoices/INV-5.pdf`` in the next means the same file, and the differing
+    container would otherwise make the two look like different resources.
+
+    Dropping the container is what lets ``_identity_match`` demand containment
+    instead of a single shared token. Note the consequence: identity is decided
+    at basename level, so two same-type actions on same-named files in different
+    directories are treated as one. That is the same assumption the basename
+    token itself has always encoded.
+    """
+    return frozenset(t for t in tokens if "/" not in t and "\\" not in t)

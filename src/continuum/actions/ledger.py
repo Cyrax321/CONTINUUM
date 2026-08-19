@@ -50,6 +50,7 @@ from continuum.actions.idempotency import (
     arguments_hash,
     idempotency_key,
     identity_tokens,
+    leaf_tokens,
 )
 from continuum.events import EventType
 from continuum.models import Action, ActionStatus, UnknownSideEffect, utcnow
@@ -146,28 +147,45 @@ class ActionLedger:
         tokens (scalar values plus path basenames and external ids) rather than
         by the full argument shape.
 
+        Recognition requires one token set to *contain* the other, not merely to
+        intersect it, and it compares leaf tokens so a path counts as its
+        basename rather than its full spelling (see ``leaf_tokens``). Drift makes
+        a description more or less verbose about the same resource, so the
+        sparser set is a subset of the richer one (``{INV-001}`` inside
+        ``{INV-001, INV-001.sent}``). Two genuinely different resources each
+        carry a leaf the other lacks, which is what keeps two tickets that merely
+        share ``urgent`` from collapsing into one. Under mere intersection the
+        second side effect would be silently swallowed -- the exact failure this
+        ledger exists to prevent.
+
         Returns ``(key, action)`` for the unique same-type match, or ``None``
         when nothing is distinctive enough to be confident. ``None`` is also
         returned when several actions share a token, because guessing which one
         the caller means is exactly the quiet failure mode this exists to avoid.
         """
-        incoming = identity_tokens(arguments, volatile=volatile)
-        if not incoming:
-            return None
         # The run id rides along inside arguments as ``continuum_run_id`` and is
         # common to every claim in the run, so it must never count as a
         # resource token when deciding whether two claims are the same work.
-        plumbing = identity_tokens(external_id=self.run_id)
-        incoming = incoming - plumbing
+        plumbing = leaf_tokens(identity_tokens(external_id=self.run_id))
+        incoming = leaf_tokens(identity_tokens(arguments, volatile=volatile)) - plumbing
+        if not incoming:
+            return None
 
         completed: list[tuple[IdempotencyKey, Action]] = []
         uncertain: list[tuple[IdempotencyKey, Action]] = []
         for stored_key, action in self._replay().items():
             if action.action_type != action_type:
                 continue
-            known = identity_tokens(action.arguments, external_id=action.external_id)
-            known = known - plumbing
-            if not (incoming & known):
+            known = (
+                leaf_tokens(identity_tokens(action.arguments, external_id=action.external_id))
+                - plumbing
+            )
+            # An empty ``known`` is contained in everything; treat a stored
+            # action with no identity of its own as unrecognisable, not as a
+            # match for every claim of the same type.
+            if not known:
+                continue
+            if not (incoming <= known or known <= incoming):
                 continue
             if action.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
                 uncertain.append((IdempotencyKey(stored_key), action))
@@ -301,6 +319,10 @@ class ActionLedger:
         if on_unknown is not None:
             resolved = on_unknown(existing)
             if resolved is not None:
+                # The resolution is a real decision and must outlive this call:
+                # persist it so the next claim (or intercept_action) and
+                # ledger.pending() reflect it instead of re-raising UnknownSideEffect.
+                self._record(resolved.key, resolved.action, EventType.ACTION_RECONCILED)
                 return resolved
 
         uncertain = existing.model_copy(
@@ -386,6 +408,9 @@ class ActionLedger:
             action = existing.model_copy(
                 update={
                     "status": ActionStatus.FAILED,
+                    "external_id": None,
+                    "result": None,
+                    "result_hash": None,
                     "side_effect_uncertain": False,
                     "last_error": note or "reconciliation found no external effect",
                 }

@@ -145,9 +145,11 @@ class FileProvider(EnvironmentProvider):
                     metadata={"size": stat.st_size},
                 )
             except FileNotFoundError:
-                captured[key] = EnvResource(
-                    name=key, kind="file", version=None, metadata={"missing": True}
-                )
+                # The tracked file is gone. Report it as absent rather than as a
+                # resource with ``version=None``: diff_environments classifies a
+                # key present in the old snapshot but missing from the new one as
+                # REMOVED, which is the correct reading of a deleted file.
+                continue
             except OSError as exc:
                 captured[key] = EnvResource(
                     name=key,
