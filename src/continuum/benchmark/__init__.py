@@ -163,131 +163,134 @@ def _run_one(method: str, spec: ScenarioSpec, total: int, workdir: Path) -> Meth
     workdir.mkdir(parents=True, exist_ok=True)
     db = workdir / "agent.db"
     effects = workdir / "effects.log"
-    store = SQLiteStorage(str(db))
-    run_id = "run_bench"
-    env_v3 = capture_environment(run_id, StaticProvider(dataset="v3"))
+    with SQLiteStorage(str(db)) as store:
+        run_id = "run_bench"
+        env_v3 = capture_environment(run_id, StaticProvider(dataset="v3"))
 
-    # --- phase 1: first half of the run, up to the crash ------------------- #
-    crash_at = max(1, int(total * spec.crash_frac))
-    side_at = int(total * spec.side_frac)
-    side_at = crash_at if spec.interrupted else min(side_at, crash_at - 1)
+        # --- phase 1: first half of the run, up to the crash ------------------- #
+        crash_at = max(1, int(total * spec.crash_frac))
+        side_at = int(total * spec.side_frac)
+        side_at = crash_at if spec.interrupted else min(side_at, crash_at - 1)
 
-    store.create_run(Run(run_id=run_id, goal="Process documents"))
-    store.append_event(run_id, EventType.RUN_STARTED, {"goal": "Process documents", "total": total})
-    store.append_event(
-        run_id, EventType.DEPENDENCY_DECLARED, {"resource": "dataset", "version": "v3"}
-    )
-    store.append_event(
-        run_id,
-        EventType.EVIDENCE_ADDED,
-        {"evidence_id": "paper_128", "summary": "study", "source": "dataset"},
-    )
-    store.append_event(
-        run_id,
-        EventType.FINDING_ADDED,
-        {
-            "finding_id": "finding_17",
-            "claim": "X holds",
-            "evidence": ["paper_128"],
-            "confidence": 0.91,
-        },
-    )
-
-    ledger = ActionLedger(store, run_id)
-    manager = (
-        CheckpointManager(store, policy=SemanticPolicy(progress_stride=total))
-        if method == "continuum"
-        else None
-    )
-
-    for i in range(crash_at):
-        store.append_event(run_id, EventType.WORK_COMPLETED, {"doc": i})
-        if manager is not None:
-            manager.maybe_checkpoint(run_id, environment=env_v3)
-        if i == side_at and not spec.interrupted:
-            _attempt_side_effect(ledger, effects, spec)
-    if spec.interrupted:
-        # crash happens right after attempting the side effect
-        _attempt_side_effect(ledger, effects, spec)
-
-    if manager is not None:
-        manager.checkpoint(run_id, environment=env_v3)
-
-    env_after = (
-        capture_environment(run_id, StaticProvider(dataset="v4")) if spec.env_change else env_v3
-    )
-
-    # --- phase 2: recover, then continue to the end ---------------------- #
-    detected = False
-    restored_state = None
-    if method == "replay":
-        done = 0
-    elif method == "naive_checkpoint":
-        done = project(run_id, store.read_events(run_id)).progress.completed
-    else:  # continuum
-        assert manager is not None
-        restored = manager.restore(run_id)
-        restored_state = restored.state
-        done = restored_state.progress.completed
-        validation = validate_state(
-            restored_state, current_environment=env_after, checkpoint_environment=env_v3
+        store.create_run(Run(run_id=run_id, goal="Process documents"))
+        store.append_event(
+            run_id, EventType.RUN_STARTED, {"goal": "Process documents", "total": total}
         )
-        detected = not validation.safe
-        if ledger.pending():
-            reconcile_pending(
-                ledger, ProbeReconciler(lambda action: Resolution(occurred=True, external_id="481"))
+        store.append_event(
+            run_id, EventType.DEPENDENCY_DECLARED, {"resource": "dataset", "version": "v3"}
+        )
+        store.append_event(
+            run_id,
+            EventType.EVIDENCE_ADDED,
+            {"evidence_id": "paper_128", "summary": "study", "source": "dataset"},
+        )
+        store.append_event(
+            run_id,
+            EventType.FINDING_ADDED,
+            {
+                "finding_id": "finding_17",
+                "claim": "X holds",
+                "evidence": ["paper_128"],
+                "confidence": 0.91,
+            },
+        )
+
+        ledger = ActionLedger(store, run_id)
+        manager = (
+            CheckpointManager(store, policy=SemanticPolicy(progress_stride=total))
+            if method == "continuum"
+            else None
+        )
+
+        for i in range(crash_at):
+            store.append_event(run_id, EventType.WORK_COMPLETED, {"doc": i})
+            if manager is not None:
+                manager.maybe_checkpoint(run_id, environment=env_v3)
+            if i == side_at and not spec.interrupted:
+                _attempt_side_effect(ledger, effects, spec)
+        if spec.interrupted:
+            # crash happens right after attempting the side effect
+            _attempt_side_effect(ledger, effects, spec)
+
+        if manager is not None:
+            manager.checkpoint(run_id, environment=env_v3)
+
+        env_after = (
+            capture_environment(run_id, StaticProvider(dataset="v4")) if spec.env_change else env_v3
+        )
+
+        # --- phase 2: recover, then continue to the end ---------------------- #
+        detected = False
+        restored_state = None
+        if method == "replay":
+            done = 0
+        elif method == "naive_checkpoint":
+            done = project(run_id, store.read_events(run_id)).progress.completed
+        else:  # continuum
+            assert manager is not None
+            restored = manager.restore(run_id)
+            restored_state = restored.state
+            done = restored_state.progress.completed
+            validation = validate_state(
+                restored_state, current_environment=env_after, checkpoint_environment=env_v3
             )
+            detected = not validation.safe
+            if ledger.pending():
+                reconcile_pending(
+                    ledger,
+                    ProbeReconciler(lambda action: Resolution(occurred=True, external_id="481")),
+                )
 
-    t0 = time.perf_counter()
-    if method == "replay":
-        for i in range(total):
-            store.append_event(run_id, EventType.WORK_COMPLETED, {"doc": i})
-            if i == side_at:
-                _write_effect(effects)  # naive full replay redoes the side effect
-    else:
-        for i in range(done, total):
-            store.append_event(run_id, EventType.WORK_COMPLETED, {"doc": i})
-    elapsed = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        if method == "replay":
+            for i in range(total):
+                store.append_event(run_id, EventType.WORK_COMPLETED, {"doc": i})
+                if i == side_at:
+                    _write_effect(effects)  # naive full replay redoes the side effect
+        else:
+            for i in range(done, total):
+                store.append_event(run_id, EventType.WORK_COMPLETED, {"doc": i})
+        elapsed = time.perf_counter() - t0
 
-    # --- measure --------------------------------------------------------- #
-    events = store.read_events(run_id)
-    docs = [e.payload["doc"] for e in events if e.type.value == "WORK_COMPLETED"]
-    unique = len(set(docs))
-    attempts = len(docs)
-    duplicate_work = round((attempts - unique) / total, 4) if total else 0.0
-    side_effects = sum(1 for line in Path(effects).read_text().splitlines() if line.strip())
-    duplicate_side = max(0, side_effects - 1)
+        # --- measure --------------------------------------------------------- #
+        events = store.read_events(run_id)
+        docs = [e.payload["doc"] for e in events if e.type.value == "WORK_COMPLETED"]
+        unique = len(set(docs))
+        attempts = len(docs)
+        duplicate_work = round((attempts - unique) / total, 4) if total else 0.0
+        side_effects = sum(1 for line in Path(effects).read_text().splitlines() if line.strip())
+        duplicate_side = max(0, side_effects - 1)
 
-    if method == "continuum":
-        ctx = build_recovery_context(restored_state, token_budget=4000)  # type: ignore[arg-type]
-        context_tokens = estimate_tokens(ctx.render())
-    elif method == "replay":
-        context_tokens = estimate_tokens(_render_log(events))
-    else:
-        context_tokens = estimate_tokens(f"resume from {done}")
+        if method == "continuum":
+            ctx = build_recovery_context(restored_state, token_budget=4000)  # type: ignore[arg-type]
+            context_tokens = estimate_tokens(ctx.render())
+        elif method == "replay":
+            context_tokens = estimate_tokens(_render_log(events))
+        else:
+            context_tokens = estimate_tokens(f"resume from {done}")
 
-    full_log_tokens = estimate_tokens(_render_log(events))
-    if method == "naive_checkpoint":
-        # A bare progress count is not the actual information needed to resume,
-        # so a compression ratio here would overstate the method.
-        compression = None
-    else:
-        compression = round(full_log_tokens / context_tokens, 2) if context_tokens else None
+        full_log_tokens = estimate_tokens(_render_log(events))
+        if method == "naive_checkpoint":
+            # A bare progress count is not the actual information needed to resume,
+            # so a compression ratio here would overstate the method.
+            compression = None
+        else:
+            compression = round(full_log_tokens / context_tokens, 2) if context_tokens else None
 
-    return MethodResult(
-        method=method,
-        scenario=spec.name,
-        documents_total=total,
-        documents_processed_unique=unique,
-        duplicate_work_ratio=duplicate_work,
-        side_effects_created=side_effects,
-        duplicate_side_effects=duplicate_side,
-        detected_stale=detected,
-        context_tokens=context_tokens,
-        full_log_tokens=full_log_tokens,
-        compression_ratio=compression,
-        elapsed_seconds=round(elapsed, 6),
-    )
+        return MethodResult(
+            method=method,
+            scenario=spec.name,
+            documents_total=total,
+            documents_processed_unique=unique,
+            duplicate_work_ratio=duplicate_work,
+            side_effects_created=side_effects,
+            duplicate_side_effects=duplicate_side,
+            detected_stale=detected,
+            context_tokens=context_tokens,
+            full_log_tokens=full_log_tokens,
+            compression_ratio=compression,
+            elapsed_seconds=round(elapsed, 6),
+        )
 
 
 def run_benchmark(total: int = 200) -> list[MethodResult]:
@@ -372,26 +375,26 @@ def run_idempotency_benchmark(total: int = 50) -> list[IdempotencyResult]:
             db = base / f"idem_{method}.db"
             effects = base / f"idem_{method}.log"
             effects.write_text("")
-            store = SQLiteStorage(str(db))
-            run_id = "run_idem"
-            store.create_run(Run(run_id=run_id, goal="Send invoices"))
-            store.append_event(run_id, EventType.RUN_STARTED, {"goal": "Send invoices"})
-            ledger = ActionLedger(store, run_id)
-            attempted = 0
-            for i in range(total):
-                attempted += _try_idem_action(method, ledger, effects, i, abs_path=True)
-                attempted += _try_idem_action(method, ledger, effects, i, abs_path=False)
-            sent = {line for line in effects.read_text().splitlines() if line.strip()}
-            results.append(
-                IdempotencyResult(
-                    method=method,
-                    scenario="argument_drift",
-                    actions_total=total,
-                    attempts=attempted,
-                    distinct_side_effects=len(sent),
-                    duplicate_side_effects=attempted - len(sent),
+            with SQLiteStorage(str(db)) as store:
+                run_id = "run_idem"
+                store.create_run(Run(run_id=run_id, goal="Send invoices"))
+                store.append_event(run_id, EventType.RUN_STARTED, {"goal": "Send invoices"})
+                ledger = ActionLedger(store, run_id)
+                attempted = 0
+                for i in range(total):
+                    attempted += _try_idem_action(method, ledger, effects, i, abs_path=True)
+                    attempted += _try_idem_action(method, ledger, effects, i, abs_path=False)
+                sent = {line for line in effects.read_text().splitlines() if line.strip()}
+                results.append(
+                    IdempotencyResult(
+                        method=method,
+                        scenario="argument_drift",
+                        actions_total=total,
+                        attempts=attempted,
+                        distinct_side_effects=len(sent),
+                        duplicate_side_effects=attempted - len(sent),
+                    )
                 )
-            )
     return results
 
 

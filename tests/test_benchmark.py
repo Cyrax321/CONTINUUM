@@ -8,6 +8,12 @@ naive baselines do not.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
+import pytest
+
+from continuum import benchmark
 from continuum.benchmark import (
     METHODS,
     SCENARIOS,
@@ -16,6 +22,7 @@ from continuum.benchmark import (
     run_benchmark,
     run_idempotency_benchmark,
 )
+from continuum.storage import SQLiteStorage
 
 
 def test_recovery_benchmark_covers_every_scenario_and_method() -> None:
@@ -62,3 +69,41 @@ def test_idempotency_benchmark_proves_issue_6() -> None:
         r = results[method]
         assert r.attempts == 2 * total
         assert r.duplicate_side_effects == total
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        pytest.param(lambda: run_benchmark(total=4), id="run_benchmark"),
+        pytest.param(lambda: run_idempotency_benchmark(total=2), id="run_idempotency"),
+    ],
+)
+def test_benchmark_releases_every_storage_handle(
+    run: Callable[[], object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for #81: the benchmark must close every database it opens.
+
+    Both harnesses put their databases inside a ``TemporaryDirectory``. A handle
+    left open makes that cleanup raise ``PermissionError`` on Windows, which
+    took down the whole ``continuum benchmark`` command. This asserts the
+    handles are released rather than asserting on the platform error, so it also
+    fails on POSIX — where unlinking an open file quietly succeeds — if the
+    surrounding ``with`` blocks are ever dropped.
+    """
+    opened: list[_TrackedStorage] = []
+
+    class _TrackedStorage(SQLiteStorage):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.closed = False
+            opened.append(self)
+
+        def close(self) -> None:
+            super().close()
+            self.closed = True
+
+    monkeypatch.setattr(benchmark, "SQLiteStorage", _TrackedStorage)
+    run()
+
+    assert opened, "benchmark opened no database, so this test would prove nothing"
+    assert [s for s in opened if not s.closed] == []

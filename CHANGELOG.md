@@ -138,6 +138,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`continuum benchmark` crashed on Windows from unclosed database handles
+  (issue #81).** `_run_one` and `run_idempotency_benchmark` constructed
+  `SQLiteStorage` without ever closing it, so the enclosing
+  `TemporaryDirectory()` still held open `.db` files at cleanup. POSIX allows
+  unlinking an open file, so this was an invisible resource leak on Linux and
+  macOS; Windows refuses it, and the whole command died on an unhandled
+  `PermissionError`. Both call sites now use `with SQLiteStorage(...) as store:`,
+  matching every other call site in the codebase. `tests/test_cli.py::_cli` also
+  replaced the subprocess environment with a hardcoded POSIX `PATH`, dropping
+  `SystemRoot` and leaving spawned interpreters unable to initialise Winsock on
+  Windows; it now inherits the parent environment and overrides only
+  `PYTHONPATH`. Together these fixed five tests that failed on Windows.
+
 - **Three defects found by an adversarial audit of the MCP surface**, driven over
   the live stdio protocol with every tool result verified against the SQLite store
   rather than taken at its word. Method and per-claim results in `test.md`:

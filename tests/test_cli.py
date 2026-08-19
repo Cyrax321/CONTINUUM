@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -503,12 +504,16 @@ def test_a_model_switch_can_be_declared(db: str) -> None:
 
 
 def _cli(db: str, *argv: str) -> subprocess.CompletedProcess[str]:
+    # Inherit the parent environment rather than replacing it. Only PYTHONPATH
+    # matters here — it makes the subprocess import continuum from src/ instead
+    # of an installed copy. Passing a bare env= drops platform essentials: on
+    # Windows, losing SystemRoot leaves the interpreter unable to initialise
+    # Winsock, and every spawned process dies during startup on `import
+    # _overlapped` long before the CLI is reached.
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
     return subprocess.run(
         [sys.executable, "-m", "continuum.cli", "--db", db, *argv],
-        env={
-            "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
-            "PATH": "/usr/bin:/bin",
-        },
+        env=env,
         capture_output=True,
         text=True,
     )
