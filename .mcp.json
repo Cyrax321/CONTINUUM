@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "continuum": {
+      "command": "continuum-mcp",
+      "args": ["--db", "continuum.db"],
+      "env": {
+        "CONTINUUM_MCP_MUTATING_CLIENTS": "claude-code"
+      }
+    }
+  }
+}
