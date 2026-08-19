@@ -78,9 +78,78 @@ def _stem(token: str) -> str:
     return stem
 
 
+# Extensions accepted as genuine file suffixes for the stem-derivation rule
+# (issue #67, option 2). A dotted extra token is only treated as derived from
+# its basename when its extension looks like a real file suffix, so a handle
+# such as ``alice.smith`` is not collapsed into ``alice`` while legitimate
+# renderings like ``INV-001.sent`` or ``report.csv`` still deduplicate.
+_KNOWN_SUFFIXES = frozenset(
+    {
+        "csv",
+        "tsv",
+        "json",
+        "jsonl",
+        "ndjson",
+        "parquet",
+        "pq",
+        "avro",
+        "orc",
+        "xlsx",
+        "xls",
+        "pdf",
+        "txt",
+        "md",
+        "html",
+        "htm",
+        "xml",
+        "yaml",
+        "yml",
+        "toml",
+        "ini",
+        "cfg",
+        "conf",
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "svg",
+        "webp",
+        "zip",
+        "gz",
+        "tar",
+        "tgz",
+        "bz2",
+        "rar",
+        "7z",
+        "db",
+        "sqlite",
+        "sql",
+        "arrow",
+        "feather",
+        "pkl",
+        "pickle",
+        "bin",
+        "log",
+        "dat",
+        "out",
+        "tmp",
+        "part",
+        "bak",
+        "old",
+        "eml",
+        "msg",
+        "wav",
+        "mp3",
+        "mp4",
+        "mov",
+        "sent",
+    }
+)
+
+
 def _superset_derives_from_subset(subset: frozenset[str], superset: frozenset[str]) -> bool:
     """True when every token present only in ``superset`` is a stem-extended form
-    of a token in ``subset``.
+    of a token in ``subset`` whose extension looks like a genuine file suffix.
 
     Containment alone is not enough: a completed action folds its ``external_id``
     and any optional descriptive argument into its token set, so the stored set
@@ -88,12 +157,24 @@ def _superset_derives_from_subset(subset: frozenset[str], superset: frozenset[st
     different work. The only safe superset is one whose extra tokens are derived
     from the shared ones (``INV-001.sent`` from ``INV-001``), never unrelated
     values like a one-off ``message`` or the effect's ``external_id``.
+
+    The derivation also requires the extension to be a known file suffix
+    (``_KNOWN_SUFFIXES``): ``alice.smith`` shares the stem ``alice`` but its
+    ``.smith`` extension is not a real suffix, so it is treated as distinct work
+    rather than a rendering of ``alice`` (issue #67).
     """
     extra = superset - subset
     if not extra:
         return True
     stems = {_stem(token).lower() for token in subset}
-    return all(_stem(token).lower() in stems for token in extra)
+    for token in extra:
+        stem = _stem(token).lower()
+        if stem not in stems:
+            return False
+        _, ext = os.path.splitext(token)
+        if ext.lstrip(".").lower() not in _KNOWN_SUFFIXES:
+            return False
+    return True
 
 
 class LedgerError(RuntimeError):

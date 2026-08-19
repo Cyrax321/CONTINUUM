@@ -690,3 +690,30 @@ def test_sparse_then_rich_does_not_false_deduplicate(ledger: ActionLedger) -> No
 
     second = ledger.claim("slack.notify", {"channel": "ops", "message": "deploy failed"})
     assert second.fresh, "a richer re-claim is still different work"
+
+
+def test_stem_shaped_distinct_recipients(ledger: ActionLedger) -> None:
+    """Regression test for issue #67 (option 2).
+
+    A dotted recipient whose extension is not a real file suffix must not be
+    collapsed into its basename. ``alice.smith`` and ``alice`` are different
+    work, so the second send must run and not be swallowed as a repeat.
+    """
+    first = ledger.claim("email.send", {"to": "alice"})
+    ledger.complete(first.key, external_id="e1")
+
+    second = ledger.claim("email.send", {"to": "alice.smith"})
+    assert second.fresh, "alice.smith is not a rendering of alice"
+
+
+def test_file_extension_shape_still_deduplicates(ledger: ActionLedger) -> None:
+    """Option 2 must keep legitimate stem/suffix derivations (issue #67).
+
+    ``report`` and ``report.csv`` describe the same artifact rendered with and
+    without its export suffix, so the re-claim is recognised as already done.
+    """
+    first = ledger.claim("export.report", {"dataset": "report"})
+    ledger.complete(first.key, external_id="r1")
+
+    second = ledger.claim("export.report", {"dataset": "report.csv"})
+    assert not second.fresh, "report.csv is a known-suffix rendering of report"

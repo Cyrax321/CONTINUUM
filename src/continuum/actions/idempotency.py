@@ -270,9 +270,11 @@ def _is_strong_token(token: str) -> bool:
     meaningful, the explicit weak list, and generic stopwords.
 
     Admitting plain words is only safe because ``_identity_match`` requires the
-    two token sets to *contain* one another rather than merely to intersect. A
-    single shared word (two tickets that are both ``urgent``) is not enough to
-    call two actions the same work.
+    two token sets to *contain* one another rather than merely to intersect (a
+    single shared word like ``urgent`` is not enough to call two actions the
+    same work), and because a containment match is only accepted when the extra
+    tokens are derived from the shared ones via the stem/suffix rule. Containment
+    alone is no longer sufficient after the derivation check was added.
     """
     lowered = token.lower()
     return len(token) >= 3 and lowered not in _WEAK_TOKENS and lowered not in _STOPWORDS
