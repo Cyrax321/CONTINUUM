@@ -393,6 +393,27 @@ def test_an_unopenable_database_reports_an_error_not_a_traceback(db: str) -> Non
     assert "Traceback" not in err
 
 
+def test_the_reported_path_is_not_backslash_escaped(tmp_path: Path) -> None:
+    """Regression for #94: the operator has to be able to copy the path back.
+
+    ``!r`` escapes each backslash, so a Windows path was reported with every
+    separator doubled -- not the path that was passed, and useless pasted into
+    a shell or a config file.
+
+    Pinned with a backslash in the *filename*, which is legal on POSIX, so the
+    ubuntu-only CI can catch a regression that otherwise only shows on Windows.
+    That blind spot is the reason this shipped: #81 was Windows-only for the
+    same reason.
+    """
+    missing = tmp_path / "no-such-dir" / "back\\slash.db"
+
+    code, _, err = run("--db", str(missing), "runs")
+
+    assert code == ExitCode.ERROR
+    assert str(missing) in err, "the path reported is not the path that was passed"
+    assert "\\\\" not in err, "repr()-style escaping is back"
+
+
 def test_an_empty_env_version_is_refused(db: str) -> None:
     """`--env dataset=` is nearly always an unexpanded shell variable.
 

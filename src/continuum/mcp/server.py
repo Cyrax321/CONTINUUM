@@ -933,8 +933,12 @@ def main(argv: list[str] | None = None) -> int:
     except sqlite3.Error as exc:
         # resolve_database, not args.db, so the reported path is the one that
         # was actually opened rather than None when --db was omitted.
+        #
+        # Quoted with literal delimiters rather than !r (issue #94), matching
+        # cli/main.py: repr() escapes each backslash, so a Windows path came
+        # back doubled and could not be copied into a shell or a config file.
         print(
-            f"error: cannot open storage at {resolve_database(args.db)!r}: {exc}",
+            f"error: cannot open storage at '{resolve_database(args.db)}': {exc}",
             file=sys.stderr,
         )
         return 1

@@ -161,6 +161,23 @@ All notable changes to this project are documented here. The format follows
   field added on one side and forgotten on the other fails CI instead of being
   found by hand.
 
+- **The cannot-open-storage message escaped backslashes, so a Windows path was
+  not copy-pasteable (issue #94).** Both entry points formatted the failing path
+  with `!r`, and `repr()` escapes each backslash, so
+  `C:\Users\ASUS\no-such-dir\agent.db` came back as
+  `'C:\\Users\\ASUS\\no-such-dir\\agent.db'` — not the path the operator passed,
+  and useless pasted into a shell or a config file. POSIX paths were unaffected,
+  having no backslashes to escape, which is also why the MCP server's
+  `test_main_reports_an_unopenable_database_instead_of_a_traceback` was red on a
+  clean checkout of `main` on Windows: its `assert str(missing) in err` held only
+  on POSIX. The escaping broke the exact guarantee #87 was fixed to provide.
+  Both sites now use literal quote delimiters (`at '{path}'`), which still show
+  leading or trailing whitespace but do not escape: `src/continuum/cli/main.py`
+  and `src/continuum/mcp/server.py`. The regression test at each entry point puts
+  a backslash in the *filename*, which is legal on POSIX, so the ubuntu-only CI
+  can catch this class of Windows-only breakage rather than shipping it a third
+  time (#81 was the first). Reported with a full diagnosis by @abyyxhek.
+
 - **MCP server was not found at cold start because its name did not match the
   configured name (issue #87).** `.mcp.json` registered the server under the key
   `continuum`, and `build_server` advertised `MCPServer(name="continuum")`, while

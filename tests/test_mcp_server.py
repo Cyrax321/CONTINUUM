@@ -1279,6 +1279,23 @@ def test_main_reports_an_unopenable_database_instead_of_a_traceback(
     assert "Traceback" not in err
 
 
+def test_the_reported_path_is_not_backslash_escaped(tmp_path: Any, capsys: Any) -> None:
+    """Regression for #94, the same property as the CLI's identical test.
+
+    ``!r`` doubled every backslash, so on Windows the assertion above (``str(
+    missing) in err``) was red on a clean checkout of main -- the escaping broke
+    the very guarantee #87 was fixed to provide. A backslash in the filename is
+    legal on POSIX, so this reproduces on the ubuntu-only CI too.
+    """
+    missing = tmp_path / "no-such-dir" / "back\\slash.db"
+
+    assert main(["--db", str(missing)]) == 1
+
+    err = capsys.readouterr().err
+    assert str(missing) in err, "the path reported is not the path that was passed"
+    assert "\\\\" not in err, "repr()-style escaping is back"
+
+
 def test_main_reports_a_malformed_client_token_list(
     tmp_path: Any, capsys: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -954,7 +954,12 @@ def main(
     except sqlite3.Error as exc:
         # An unreadable or unwritable database is an ordinary operator mistake
         # (bad path, no permission). A traceback would bury the useful part.
-        print(f"error: cannot open storage at {args.db!r}: {exc}", file=err)
+        #
+        # Quoted with literal delimiters rather than !r (issue #94): repr()
+        # escapes each backslash, so a Windows path came back doubled and what
+        # was printed was not the path that was passed. The quotes are kept
+        # because they still reveal leading or trailing whitespace.
+        print(f"error: cannot open storage at '{args.db}': {exc}", file=err)
         return ExitCode.ERROR
 
     try:
