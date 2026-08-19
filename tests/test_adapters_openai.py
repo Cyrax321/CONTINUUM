@@ -7,6 +7,7 @@ tests exercise the actual tool wrapping and hooks.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -545,3 +546,60 @@ class TestWithRealOpenAIAgents:
             @adapter.wrap_function_tool("api.call", key="x", key_fn=lambda ctx: "y")
             def api_call(ctx: Any, endpoint: str) -> dict:
                 return {}
+
+
+def test_wrap_function_tool_invocation_binds_args_and_intercepts(
+    store: SQLiteStorage,
+) -> None:
+    """Regression test for issue #37.
+
+    The OpenAI Agents SDK decides whether a tool takes context by inspecting
+    ``__signature__``. If the wrapper's signature drops ``ctx``, the SDK invokes
+    the tool with ``takes_context=False``, consuming the first real argument as
+    ``ctx`` and silently bypassing CONTINUUM's idempotency interception.
+
+    This drives the real ``on_invoke_tool`` path (no ``function_tool`` stub) so
+    the SDK actually performs argument binding. The tool must receive a genuine
+    ``ToolContext`` and correctly bound arguments, and a repeated identical call
+    must be deduplicated by the ledger.
+    """
+    from agents.tool_context import ToolContext
+
+    from continuum.actions.ledger import ActionLedger
+    from continuum.adapters.openai import (
+        ContinuumContext,
+        OpenAIAgentAdapter,
+        openai_agents_available,
+    )
+
+    if not openai_agents_available:
+        pytest.skip("openai-agents not installed")
+
+    run_id = "run_oa_37"
+    adapter = OpenAIAgentAdapter(store)
+    adapter.start_run(goal="issue 37", run_id=run_id)
+    ledger = ActionLedger(store, run_id=run_id)
+
+    seen_ctx: list[object] = []
+
+    @adapter.wrap_function_tool("external.api_call")
+    def api_call(ctx: Any, endpoint: str, method: str = "GET") -> dict:
+        seen_ctx.append(ctx)
+        return {"endpoint": endpoint, "method": method}
+
+    class FakeTC(ToolContext):
+        def __init__(self) -> None:
+            self.tool_name = "api_call"
+            self.context = ContinuumContext(continuum_run_id=run_id, goal="g")
+            self.tool_input = {"continuum_run_id": run_id}
+
+    payload = '{"endpoint": "https://x", "method": "POST"}'
+    first = asyncio.run(api_call.on_invoke_tool(FakeTC(), payload))
+    second = asyncio.run(api_call.on_invoke_tool(FakeTC(), payload))
+
+    assert first == {"endpoint": "https://x", "method": "POST"}
+    assert second == {"endpoint": "https://x", "method": "POST"}
+    # ctx must be a real ToolContext, never the endpoint string (the #37 failure).
+    assert all(isinstance(c, ToolContext) for c in seen_ctx)
+    # Two identical calls must deduplicate to a single ledger entry.
+    assert len(ledger.all()) == 1
