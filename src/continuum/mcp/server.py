@@ -887,9 +887,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except sqlite3.Error as exc:
         # resolve_database, not args.db, so the reported path is the one that
-        # was actually opened rather than None when --db was omitted.
+        # was actually opened rather than None when --db was omitted. Quoted,
+        # but not with !r: repr() escapes backslashes, so a Windows path comes
+        # back doubled and cannot be pasted back into a shell (issue #94). The
+        # quotes still expose a stray leading or trailing space.
         print(
-            f"error: cannot open storage at {resolve_database(args.db)!r}: {exc}",
+            f"error: cannot open storage at '{resolve_database(args.db)}': {exc}",
             file=sys.stderr,
         )
         return 1

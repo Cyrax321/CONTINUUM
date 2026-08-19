@@ -1277,6 +1277,28 @@ def test_main_reports_an_unopenable_database_instead_of_a_traceback(
     assert "Traceback" not in err
 
 
+def test_unopenable_database_message_does_not_escape_the_path(tmp_path: Any, capsys: Any) -> None:
+    """Regression for #94: the reported path was not copy-pasteable.
+
+    #87 got the failing path onto stderr, but `!r` escaped every backslash on the
+    way, so a path typed with single separators was reported with doubled ones and
+    could not be pasted back into a shell or a config file. A literal backslash in
+    the file name reproduces that on any platform, which keeps this red on the old
+    code under a Linux-only CI instead of only on Windows, where every separator
+    hits it.
+    """
+    missing = os.path.join(str(tmp_path), "no-such-directory", "back\\slash.db")
+
+    assert main(["--db", missing]) == 1
+
+    err = capsys.readouterr().err
+    assert "cannot open storage" in err
+    assert missing in err, err
+    # Two consecutive backslashes anywhere means the path was escaped.
+    assert "\\\\" not in err
+    assert "Traceback" not in err
+
+
 def test_main_reports_a_malformed_client_token_list(
     tmp_path: Any, capsys: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

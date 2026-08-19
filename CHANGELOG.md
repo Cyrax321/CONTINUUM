@@ -138,6 +138,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The `cannot open storage` message escaped the path, so on Windows it could
+  not be pasted back (issue #94).** Both entry points formatted the failing path
+  with `!r`, and `repr()` escapes backslashes, so a path the operator had typed
+  with single separators was reported with doubled ones
+  (`'C:\\Users\\me\\agent.db'`). That defeats the point of naming the path, which
+  is what #87 added the message for: the operator's next step is to paste it into
+  a shell or a config file. It also meant `pytest` was red on a clean checkout of
+  `main` on Windows, because `test_main_reports_an_unopenable_database_instead_of_a_traceback`
+  asserts the path appears verbatim. Both call sites now quote the path without
+  escaping it (`src/continuum/cli/main.py`, `src/continuum/mcp/server.py`); the
+  quotes still expose a stray leading or trailing space, which is the diagnostic
+  value `!r` was providing. Regression tests in `tests/test_cli.py` (which had no
+  coverage of this message at all) and `tests/test_mcp_server.py` use a path
+  containing a literal backslash, so they fail on the old code on every platform
+  rather than only on Windows, where CI does not run.
+
 - **The `continuum serve` sidecar's `resume` had drifted from the MCP tool it
   mirrors, so a non-Python client could not resume hands-free (issue #91).** The
   module docstring promises "the protocol mirrors the MCP tool surface so the two

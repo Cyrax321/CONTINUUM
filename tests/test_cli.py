@@ -393,6 +393,27 @@ def test_an_unopenable_database_reports_an_error_not_a_traceback(db: str) -> Non
     assert "Traceback" not in err
 
 
+def test_an_unopenable_database_reports_the_path_unescaped(tmp_path: Path) -> None:
+    """Regression for #94: the operator has to be able to paste the path back.
+
+    Naming the path is only useful if it survives intact. `repr()` escaped every
+    backslash, so a path typed with single separators was reported with doubled
+    ones. A literal backslash in the file name reproduces that on any platform,
+    which keeps this red on the old code under a Linux-only CI instead of only
+    on a Windows machine, where every separator hits it.
+    """
+    bad = os.path.join(str(tmp_path), "no-such-directory", "back\\slash.db")
+
+    code, _, err = run("--db", bad, "runs")
+
+    assert code == ExitCode.ERROR
+    assert "cannot open storage" in err
+    assert bad in err, err
+    # Two consecutive backslashes anywhere means the path was escaped.
+    assert "\\\\" not in err
+    assert "Traceback" not in err
+
+
 def test_an_empty_env_version_is_refused(db: str) -> None:
     """`--env dataset=` is nearly always an unexpanded shell variable.
 
