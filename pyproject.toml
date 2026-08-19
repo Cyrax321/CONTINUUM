@@ -43,6 +43,10 @@ dev = [
     "langgraph>=0.2",
     "openai-agents>=0.2",
     "langchain>=0.3",
+    # Attestation tests (continuum attest / attest-verify) exercise the optional
+    # Ed25519 signing path, so the crypto dependency is needed in the dev/test
+    # environment even though runtime installs stay dependency-free.
+    "cryptography>=45.0",
 ]
 # The MCP server is optional: the core library and CLI never import it, so
 # installing CONTINUUM does not pull in a server stack you may not want.

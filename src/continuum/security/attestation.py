@@ -11,10 +11,11 @@ Ed25519 key that "this run's chain, trusted through sequence ``N`` with root has
 integrity layer, it does not replace it, and it is deliberately optional so the
 core recovery path needs no crypto dependency.
 
-Nothing here is imported by the core library or CLI. ``continuum attest`` will
-wire these primitives to a real run's ``trusted_through`` head (see the design
-doc ``references/attestation.md``); that CLI surface is intentionally not built
-yet so the design can be reviewed first.
+Nothing here is imported by the core recovery path, which must need no crypto
+dependency. The CLI surfaces ``continuum attest`` and ``continuum attest-verify``
+(plus ``attest-keygen``) wire these primitives to a real run's live head and are
+covered by ``tests/test_attestation.py`` and the attest cases in
+``tests/test_cli.py`` (see the design doc ``references/attestation.md``).
 """
 
 from __future__ import annotations
