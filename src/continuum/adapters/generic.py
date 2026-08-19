@@ -8,13 +8,16 @@ from typing import Any
 from continuum.actions.ledger import ActionLedger, ActionOutcome
 from continuum.adapters.base import AgentAdapter
 from continuum.checkpoint.manager import CheckpointManager
+from continuum.events import EventType
 from continuum.models import (
     EnvironmentSnapshot,
+    Origin,
     Run,
     SemanticState,
     StateCheckpoint,
 )
 from continuum.recovery.engine import RecoveryDecision, RecoveryEngine
+from continuum.state.semantic import ProjectionError, project
 from continuum.storage.base import Storage
 
 #: Key under which a non-dict action result is stored, since the ledger records
@@ -61,12 +64,55 @@ class GenericAgentAdapter(AgentAdapter):
         environment: EnvironmentSnapshot | None = None,
         reason: str = "",
     ) -> StateCheckpoint:
+        # A snapshot alone cannot invalidate a checkpoint: the validator decides
+        # staleness per declared dependency and returns early when a state has
+        # none, so a checkpoint carrying only a snapshot would report
+        # safe_to_resume even after the resource underneath it moved. Declaring
+        # the pinned environment as dependencies is what gives drift something
+        # to invalidate. Mirrors the MCP server and serve sidecar (issue #25).
+        if environment is not None:
+            self._declare_dependencies(run_id, environment)
         return self.manager.checkpoint(
             run_id,
             state=state,
             reason=reason or "adapter state capture",
             environment=environment,
         )
+
+    def _declare_dependencies(self, run_id: str, environment: EnvironmentSnapshot) -> None:
+        """Record a captured environment as declared dependencies of the run.
+
+        Stored as ``DEPENDENCY_DECLARED`` events (not written onto the
+        checkpoint state) so the declaration survives projection and restore, is
+        covered by the hash chain, and carries the same external-agent provenance
+        as the rest of the adapter's writes. Only new or re-pinned resources are
+        appended, so a scheduled checkpoint with an unchanged environment adds
+        nothing.
+        """
+        env_map = {name: str(res.version) for name, res in environment.resources.items()}
+        if not env_map:
+            return
+        # Projecting prior declarations is an optimization (skip re-pinning the
+        # same version). If the run has no goal yet, projection is impossible, so
+        # fall back to declaring everything; project folds duplicates later.
+        try:
+            declared = {
+                dependency.resource: dependency.version
+                for dependency in project(
+                    run_id, self.storage.read_events(run_id)
+                ).external_dependencies
+            }
+        except ProjectionError:
+            declared = {}
+        for name, version in env_map.items():
+            if declared.get(name) == version:
+                continue
+            self.storage.append_event(
+                run_id,
+                EventType.DEPENDENCY_DECLARED,
+                {"resource": name, "version": version},
+                source=Origin.EXTERNAL_AGENT,
+            )
 
     def restore_state(
         self,

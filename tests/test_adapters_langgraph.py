@@ -19,6 +19,7 @@ from continuum.models import (
     Progress,
     RecoveryMode,
     SemanticState,
+    StateStatus,
 )
 from continuum.storage import SQLiteStorage
 
@@ -288,6 +289,37 @@ class TestWithMockedLangGraph:
         decision = adapter.assess_graph_recovery("run_lg_7", current_environment=env)
         assert not decision.safe
         assert decision.mode is not RecoveryMode.RESUME
+
+    def test_revalidate_environment_detects_drift_on_existing_checkpointer(
+        self, adapter: Any
+    ) -> None:
+        """Issue #25: revalidation must catch a moved resource before resume.
+
+        A LangGraph user keeps their own checkpointer for faithful replay, but
+        CONTINUUM should still ask "is this checkpoint still true against today's
+        world?" before resuming. A checkpoint pinned to one environment must not
+        resume against a drifted one: the verdict must be non-RESUME, not a
+        silent green light.
+        """
+        run_id = "run_lg_drift"
+        adapter.start_run(goal="Drift", run_id=run_id)
+
+        state = SemanticState(run_id=run_id, goal=Goal(description="Drift"))
+        env_v3 = capture(run_id, StaticProvider(dataset="v3"))
+        adapter.capture_state(run_id, state, environment=env_v3)
+
+        clean = adapter.revalidate_environment(run_id, current_environment=env_v3)
+        assert clean.safe
+        assert clean.mode is RecoveryMode.RESUME
+
+        drifted = capture(run_id, StaticProvider(dataset="v4"))
+        bad = adapter.revalidate_environment(run_id, current_environment=drifted)
+        assert not bad.safe
+        assert bad.mode is not RecoveryMode.RESUME
+        assert any(
+            e.component.value == "external_dependency" and e.status is not StateStatus.VALID
+            for e in bad.validation.report.statuses
+        )
 
 
 # --------------------------------------------------------------------------- #

@@ -367,6 +367,35 @@ class LangGraphAgentAdapter(GenericAgentAdapter):
             expected_model=expected_model,
         )
 
+    def revalidate_environment(
+        self,
+        run_id: str,
+        *,
+        current_environment: EnvironmentSnapshot | None = None,
+        expected_model: str | None = None,
+    ) -> RecoveryDecision:
+        """Revalidate a resumed checkpoint against the current environment.
+
+        This is the "keep your LangGraph checkpointer, add the validator" entry
+        point from issue #25. A LangGraph user keeps their own
+        ``SqliteSaver``/``PostgresSaver`` for faithful state replay; this method
+        adds CONTINUUM's staleness propagation on top of it, without replacing
+        the checkpointer. Call it before resuming a graph that was restored from
+        a checkpointer, passing the environment as it is *now*.
+
+        Staleness propagates ``dependency -> evidence -> finding -> decision``
+        and ``UNKNOWN`` degrades toward unsafe, so a resource that moved between
+        the checkpoint and the present surfaces as a non-RESUME decision rather
+        than a silent resume. The verdict is identical to :meth:`assess_graph_recovery`
+        (a read-only :class:`RecoveryDecision`); this name makes the
+        checkpointer-companion use case discoverable.
+        """
+        return self.engine.assess(
+            run_id,
+            current_environment=current_environment,
+            expected_model=expected_model,
+        )
+
 
 def _extract_run_id(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str | None:
     """Try to find a continuum_run_id from function arguments.
