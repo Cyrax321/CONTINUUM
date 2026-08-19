@@ -156,7 +156,7 @@ All notable changes to this project are documented here. The format follows
   (`checkpoint_version`, `validation_reason`, `environment_changes`) are
   untouched. Trust behaviour is unchanged, since returning a self-reported goal
   confirms nothing and a self-certified run still resolves to `request_human`.
-  `tests/test_serve.py` gains four regression tests, including one that diffs the
+  `tests/test_serve.py` gains six regression tests, including one that diffs the
   sidecar's `resume` keys against the live `continuum_resume` payload so the next
   field added on one side and forgotten on the other fails CI instead of being
   found by hand.
