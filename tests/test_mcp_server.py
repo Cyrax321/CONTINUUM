@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 from collections.abc import Iterator
 from typing import Any
 
@@ -1293,6 +1295,75 @@ def test_main_reports_a_malformed_client_token_list(
     err = capsys.readouterr().err
     assert CLIENT_TOKENS_ENV_VAR in err
     assert "Traceback" not in err
+
+
+# --- missing optional extra (a real subprocess, as the client launches it) --- #
+
+_WITHOUT_MCP_SDK = """
+import sys
+
+
+class _BlockMCP:
+    def find_spec(self, name, path=None, target=None):
+        if name == "mcp" or name.startswith("mcp."):
+            raise ModuleNotFoundError("No module named %r" % name, name=name)
+        return None
+
+
+sys.meta_path.insert(0, _BlockMCP())
+
+# Must survive import: the SDK is imported inside build_server precisely so
+# that this line cannot be the thing that fails.
+from continuum.mcp.server import main
+
+raise SystemExit(main(["--db", "agent.db"]))
+"""
+
+
+def test_main_reports_a_missing_mcp_extra_instead_of_a_traceback(tmp_path: Any) -> None:
+    """Regression for #87: `pip install continuum` ships the script, not the SDK.
+
+    Run in a subprocess because blocking an already-imported package in-process
+    would corrupt the import state of every later test.
+
+    The load-bearing assertions are the stderr ones. A crash and a reported
+    error both exit 1, so the exit code alone does not distinguish them -- what
+    the operator needs is a named cause and a command to run, neither of which
+    survives an unhandled exception. stdout is asserted empty separately: over
+    stdio the client parses that stream as protocol frames, so diagnostics must
+    never be printed there, however tempting it is.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", _WITHOUT_MCP_SDK],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode == 1, proc.stderr
+    assert proc.stdout == "", "the protocol stream must stay clean"
+    assert "Traceback" not in proc.stderr
+    assert "continuum[mcp]" in proc.stderr, "the operator needs the fix, not just the fault"
+    assert not (tmp_path / "agent.db").exists(), "a server that never started created a database"
+
+
+def test_a_missing_unrelated_module_keeps_its_traceback(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The extra is blamed only when the extra is what is missing.
+
+    A broken install of something else must not be reported as "install
+    continuum[mcp]", which would send the operator after the wrong fix.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    def _explode(*_args: Any, **_kwargs: Any) -> Any:
+        raise ModuleNotFoundError("No module named 'pydantic'", name="pydantic")
+
+    monkeypatch.setattr("continuum.mcp.server.build_server", _explode)
+
+    with pytest.raises(ModuleNotFoundError, match="pydantic"):
+        main(["--db", "agent.db"])
 
 
 @pytest.mark.asyncio

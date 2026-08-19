@@ -24,6 +24,23 @@ which is exactly the state the ledger is designed to surface rather than
 paper over. A caller that never reports back leaves the action uncertain, and
 recovery will refuse to resume until it is reconciled. That is the intended
 behaviour, not a leak.
+
+The optional dependency
+-----------------------
+
+The ``mcp`` SDK is an optional extra, but ``pip install continuum`` installs
+the ``continuum-mcp`` console script regardless. So the entry point exists in
+environments where its dependency does not, and importing the SDK at module
+scope makes that combination fail with a bare ``ModuleNotFoundError``.
+
+That failure is silent where it matters: the process dies before the
+``initialize`` handshake, so the client reports only that the server never
+became ready, and the traceback goes to a stderr log the operator is not
+looking at. The SDK is therefore imported inside ``build_server``, and the
+failure is translated by ``main`` into the one-line ``error:`` form the other
+cold-start failures already use. Keep it that way -- hoisting these imports
+back to module scope re-breaks the diagnosis, because no handler in ``main``
+can run if the module never finished importing.
 """
 
 from __future__ import annotations
@@ -36,11 +53,7 @@ import os
 import sqlite3
 import sys
 from collections.abc import Callable, Mapping
-from typing import Any
-
-from mcp.server import MCPServer
-from mcp.server.mcpserver.context import Context
-from mcp.types import ToolAnnotations
+from typing import TYPE_CHECKING, Any
 
 from continuum.actions.ledger import ActionLedger
 from continuum.adapters.generic import GenericAgentAdapter
@@ -65,6 +78,11 @@ from continuum.models import (
 from continuum.recovery.contract import render_contract
 from continuum.state.semantic import project
 from continuum.storage import RunNotFound, SQLiteStorage, Storage
+
+if TYPE_CHECKING:
+    # Type-only: the runtime import lives in build_server. See the module
+    # docstring's "The optional dependency" section.
+    from mcp.server import MCPServer
 
 __all__ = ["build_server", "ContinuumMCP", "MalformedRunLog", "DEFAULT_DB", "main"]
 
@@ -317,7 +335,20 @@ def build_server(
     ``auth`` verifies a shared secret before any mutating tool runs. Omitted,
     it is resolved from ``CONTINUUM_MCP_TOKEN`` and is disabled when that is
     unset, leaving the default local, no-account behavior unchanged.
+
+    Raises ``ModuleNotFoundError`` when the optional ``mcp`` extra is not
+    installed; ``main`` reports that as an actionable error rather than a
+    traceback.
     """
+    # Imported here rather than at module scope so a missing optional extra is
+    # reported by main() instead of killing the process during import, before
+    # any handler can run. Importing continuum.mcp.server therefore succeeds
+    # without the extra, which is what lets both entry points -- the
+    # continuum-mcp script and `python -m continuum.mcp` -- reach main() at all.
+    from mcp.server import MCPServer
+    from mcp.server.mcpserver.context import Context
+    from mcp.types import ToolAnnotations
+
     # Configuration is resolved before storage is opened, because both loaders
     # reject malformed input with ValueError (a bad policy file, a token entry
     # without a colon). Opening first would strand that handle with no owner to
@@ -876,6 +907,20 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         server, ctx = build_server(args.db)
+    except ModuleNotFoundError as exc:
+        # The console script ships with the base package but the SDK it needs
+        # does not, so "installed but unimportable" is a normal state to land
+        # in rather than a broken build. Narrowed to the SDK itself: a missing
+        # transitive dependency of some other package is a different fault and
+        # must keep its traceback instead of being blamed on the extra.
+        if exc.name != "mcp" and not (exc.name or "").startswith("mcp."):
+            raise
+        print(
+            f"error: the MCP server needs the optional 'mcp' dependency, which is "
+            f"not importable ({exc}). Install it with: pip install 'continuum[mcp]'",
+            file=sys.stderr,
+        )
+        return 1
     except ValueError as exc:
         # A malformed policy file or token list is an operator mistake, so it is
         # reported the way the CLI reports the same class of failure (see

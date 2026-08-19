@@ -166,6 +166,26 @@ All notable changes to this project are documented here. The format follows
   matching the rationale already documented in `cli/main.py`. Tests in
   `tests/test_mcp_server.py`.
 
+- **A `continuum-mcp` installed without its optional SDK died with a
+  `ModuleNotFoundError` traceback (issue #87).** The `mcp` extra is optional, but
+  `[project.scripts]` installs the `continuum-mcp` console script
+  unconditionally, so a plain `pip install continuum` produces an entry point
+  whose dependency is absent — and `mcp/server.py` imported `MCPServer`,
+  `Context` and `ToolAnnotations` at module scope. The process therefore died
+  during import, before the `initialize` handshake and before any handler in
+  `main` could run, so the client reported only that the server never became
+  ready while the traceback went to a stderr log nobody was reading. This is the
+  same class of failure as the `ValueError`/`sqlite3.Error` cold starts above,
+  but it was out of reach of those handlers because it happened at import time.
+  The three SDK imports now live inside `build_server` (with a `TYPE_CHECKING`
+  import for the return annotation), and `main` prints
+  `error: the MCP server needs the optional 'mcp' dependency ... pip install
+  'continuum[mcp]'` to stderr and exits 1. The handler is narrowed to the SDK
+  itself, so a missing transitive dependency of some other package keeps its
+  traceback instead of being misreported as a missing extra. Importing
+  `continuum.mcp` no longer requires the extra either. Tests in
+  `tests/test_mcp_server.py`.
+
 - **`continuum benchmark` crashed on Windows from unclosed database handles
   (issue #81).** `_run_one` and `run_idempotency_benchmark` constructed
   `SQLiteStorage` without ever closing it, so the enclosing
