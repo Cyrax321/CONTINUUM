@@ -131,6 +131,17 @@ class Storage(ABC):
     @abstractmethod
     def list_runs(self, *, limit: int | None = None) -> Sequence[Run]: ...
 
+    @abstractmethod
+    def get_active_run(self) -> Run | None:
+        """Return the most recently active run that is not in a terminal state.
+
+        A terminal run (completed, crashed, aborted, failed) is finished and must
+        not be offered for resume. The rest are candidates for interruption:
+        the one touched most recently is the one a new session should resume
+        without the caller having to remember its id. Returns ``None`` when no
+        such run exists.
+        """
+
     # -- events ----------------------------------------------------------- #
 
     @abstractmethod

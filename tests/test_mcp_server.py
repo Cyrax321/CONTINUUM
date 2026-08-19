@@ -477,6 +477,22 @@ async def test_resume_returns_a_contract_and_next_action(
     assert payload["progress"]["completed"] == 20
 
 
+async def test_resume_without_run_id_targets_the_active_run(server_ctx: tuple[Any, Any]) -> None:
+    """A fresh session need not remember the old run id to resume it."""
+    server, _ = server_ctx
+    # No runs yet -> explicit "no active run" signal.
+    none = await call(server, "continuum_resume")
+    assert none["mode"] == "no_active_run"
+    assert none["run_id"] is None
+    assert "continuum_record_progress" in none["message"]
+
+    # Seed a run; resume with no id should discover and assess it.
+    await seed_run(server, "run_active", completed=30)
+    resumed = await call(server, "continuum_resume")
+    assert resumed["run_id"] == "run_active"
+    assert resumed["progress"]["completed"] == 30
+
+
 @pytest.mark.asyncio
 async def test_deterministic_state_still_resumes_cleanly(
     server_ctx: tuple[Any, Any],

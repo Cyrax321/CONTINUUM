@@ -26,6 +26,12 @@ is the live environment to compare against the checkpoint's declared dependencie
 maximum on a severity ordering, so the most cautious signal wins regardless of
 evaluation order.
 
+The MCP `continuum_resume` tool and the `continuum resume` CLI accept an
+*optional* `run_id`: when omitted they resolve the **active run** via
+`Storage.get_active_run()`, the most recently touched run not in a terminal state
+(`COMPLETED`/`CRASHED`/`ABORTED`/`FAILED`). That is what lets a fresh session
+resume an interrupted run without having remembered its id.
+
 ## RecoveryDecision
 
 `continuum.recovery.engine.RecoveryDecision(run_id, mode, contract, plan, validation, restored, uncertain_actions=(), rationale=())`

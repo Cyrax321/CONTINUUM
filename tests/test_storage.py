@@ -91,6 +91,25 @@ def test_run_metadata_survives(storage: SQLiteStorage) -> None:
     assert storage.get_run("run_m").metadata == {"owner": "sam", "retries": 2}
 
 
+def test_get_active_run_returns_none_when_there_are_no_runs(storage: SQLiteStorage) -> None:
+    assert storage.get_active_run() is None
+
+
+def test_get_active_run_excludes_terminal_runs(storage: SQLiteStorage) -> None:
+    storage.create_run(Run(run_id="c", goal="g", status=RunStatus.COMPLETED))
+    storage.create_run(Run(run_id="x", goal="g", status=RunStatus.ABORTED))
+    storage.create_run(Run(run_id="f", goal="g", status=RunStatus.FAILED))
+    assert storage.get_active_run() is None
+
+
+def test_get_active_run_returns_the_most_recent_non_terminal_run(storage: SQLiteStorage) -> None:
+    # A finished run touched more recently must still be excluded.
+    finished = storage.create_run(Run(run_id="done", goal="g", status=RunStatus.COMPLETED))
+    storage.update_run(finished.model_copy(update={"goal": "done again"}))
+    active = storage.create_run(Run(run_id="active", goal="g"))
+    assert storage.get_active_run().run_id == active.run_id
+
+
 # --- events ---------------------------------------------------------------- #
 
 

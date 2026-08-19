@@ -371,10 +371,20 @@ def cmd_validate(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
 
 def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Report how a run may resume. Read-only unless ``--repair`` is given."""
+    run_id = args.run_id
+    if not run_id:
+        active = storage.get_active_run()
+        if active is None:
+            print(
+                "No active run to resume. Start one with: continuum checkpoint <run_id>",
+                file=err,
+            )
+            return 2
+        run_id = active.run_id
     engine = RecoveryEngine(storage, strict_unknown=not args.tolerate_unknown)
     decision = engine.assess(
-        args.run_id,
-        current_environment=_environment(args, args.run_id),
+        run_id,
+        current_environment=_environment(args, run_id),
         expected_model=args.model,
     )
 
@@ -407,7 +417,7 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
     if args.repair and decision.plan:
         storage.append_event(
-            args.run_id,
+            run_id,
             EventType.RECOVERY_STARTED,
             {
                 "mode": decision.mode.value,
@@ -844,7 +854,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--dashboard", action="store_true", help="render the Phase 14 recovery dashboard"
     )
 
-    resume = with_env(with_run(add("resume", cmd_resume, "Decide how a run may resume.")))
+    resume = with_env(add("resume", cmd_resume, "Decide how a run may resume."))
+    resume.add_argument(
+        "run_id",
+        nargs="?",
+        default=None,
+        help="the run to resume; omit to resume the most recently active run",
+    )
     resume.add_argument("--model", help="model that will run the resumed agent")
     resume.add_argument("--tolerate-unknown", action="store_true")
     resume.add_argument("--repair", action="store_true", help="record the repair plan")

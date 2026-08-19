@@ -32,7 +32,7 @@ tools are gated by the allowlist (see Security).
 | `continuum_reconcile_action` | mutate | Resolve an uncertain side effect from outside evidence. |
 | `continuum_confirm` | mutate | Confirm a human-approved recovery step. |
 | `continuum_validate` | read | Check state against the current environment. |
-| `continuum_resume` | read | Assess and describe how the run may resume. |
+| `continuum_resume` | read | Assess and describe how the run may resume. Omit `run_id` to target the most recently active (interrupted) run. |
 | `continuum_list_actions` | read | List recorded side effects and their outcomes. |
 
 ## build_server

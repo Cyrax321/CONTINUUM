@@ -32,7 +32,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from continuum.events import Event, EventType, IntegrityReport, IntegrityViolation
-from continuum.models import Origin, Run, SemanticState, StateCheckpoint, utcnow
+from continuum.models import Origin, Run, RunStatus, SemanticState, StateCheckpoint, utcnow
 from continuum.security.hashing import make_id
 from continuum.state.versioning import state_fingerprint
 from continuum.storage.base import (
@@ -267,6 +267,21 @@ class SQLiteStorage(Storage):
         with self._read() as conn:
             rows = conn.execute(query, params).fetchall()
         return [self._row_to_run(row) for row in rows]
+
+    def get_active_run(self) -> Run | None:
+        terminal = (
+            RunStatus.COMPLETED.value,
+            RunStatus.CRASHED.value,
+            RunStatus.ABORTED.value,
+            RunStatus.FAILED.value,
+        )
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT * FROM runs WHERE status NOT IN (?, ?, ?, ?) "
+                "ORDER BY updated_at DESC, run_id DESC LIMIT 1",
+                terminal,
+            ).fetchall()
+        return self._row_to_run(rows[0]) if rows else None
 
     @staticmethod
     def _row_to_run(row: sqlite3.Row) -> Run:

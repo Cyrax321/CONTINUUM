@@ -515,16 +515,33 @@ def build_server(
             "Ask whether it is safe to continue a run after any interruption, and "
             "what to do first. Call this BEFORE resuming work. Returns a mode: "
             "'resume' means proceed; anything else means stop and perform "
-            "'next_allowed_action' first. Read-only."
+            "'next_allowed_action' first. Read-only. If 'run_id' is omitted, targets "
+            "the most recently active (interrupted) run, so a fresh session can "
+            "resume without remembering the id."
         ),
         annotations=read_only,
     )
     def continuum_resume(
-        run_id: str,
+        run_id: str | None = None,
         env: dict[str, str] | None = None,
         expected_model: str | None = None,
     ) -> str:
         """Compute a recovery decision and contract."""
+        if not run_id:
+            active = ctx.storage.get_active_run()
+            if active is None:
+                return _json(
+                    {
+                        "run_id": None,
+                        "mode": "no_active_run",
+                        "safe": False,
+                        "message": (
+                            "No active run to resume. Start one with "
+                            "continuum_record_progress(run_id, completed, total, goal=...)."
+                        ),
+                    }
+                )
+            run_id = active.run_id
         decision = ctx.adapter.resume(
             run_id,
             current_environment=_environment(run_id, env),
