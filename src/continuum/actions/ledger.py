@@ -41,6 +41,7 @@ The distinction is documented rather than marketed away.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -63,6 +64,36 @@ __all__ = [
     "LedgerError",
     "DuplicateAction",
 ]
+
+
+def _stem(token: str) -> str:
+    """The basename-stem of a token, used to recognise derived spellings.
+
+    ``INV-001.sent`` and ``INV-001`` are the same resource rendered more or less
+    verbosely, so the matcher treats the former as derived from the latter. A
+    token without an extension returns itself, which keeps plain words and ids
+    self-derived.
+    """
+    stem, _ = os.path.splitext(token)
+    return stem
+
+
+def _superset_derives_from_subset(subset: frozenset[str], superset: frozenset[str]) -> bool:
+    """True when every token present only in ``superset`` is a stem-extended form
+    of a token in ``subset``.
+
+    Containment alone is not enough: a completed action folds its ``external_id``
+    and any optional descriptive argument into its token set, so the stored set
+    is a *superset* of a sparser re-claim even when the two are genuinely
+    different work. The only safe superset is one whose extra tokens are derived
+    from the shared ones (``INV-001.sent`` from ``INV-001``), never unrelated
+    values like a one-off ``message`` or the effect's ``external_id``.
+    """
+    extra = superset - subset
+    if not extra:
+        return True
+    stems = {_stem(token).lower() for token in subset}
+    return all(_stem(token).lower() in stems for token in extra)
 
 
 class LedgerError(RuntimeError):
@@ -158,6 +189,17 @@ class ActionLedger:
         second side effect would be silently swallowed -- the exact failure this
         ledger exists to prevent.
 
+        Containment on its own is still too loose: a completed action folds its
+        outcome ``external_id`` and any optional descriptive argument into its
+        token set, so the stored set is a *superset* of a sparser re-claim even
+        when the two are different work. The superset is therefore only accepted
+        when every token it carries beyond the subset is *derived* from the
+        subset -- a path stem (``INV-001.sent`` from ``INV-001``), not an
+        unrelated value such as a one-off ``message``. The outcome ``external_id``
+        is excluded from the comparison entirely, because it is recorded by
+        ``complete()`` and never present on the incoming claim, so it could only
+        ever manufacture a false superset (issue #64).
+
         Returns ``(key, action)`` for the unique same-type match, or ``None``
         when nothing is distinctive enough to be confident. ``None`` is also
         returned when several actions share a token, because guessing which one
@@ -176,16 +218,27 @@ class ActionLedger:
         for stored_key, action in self._replay().items():
             if action.action_type != action_type:
                 continue
-            known = (
-                leaf_tokens(identity_tokens(action.arguments, external_id=action.external_id))
-                - plumbing
-            )
+            # The ``external_id`` is an *outcome* recorded by ``complete()`` and
+            # is never present on the incoming claim, so folding it into ``known``
+            # would make the stored set a systematic superset of every sparser
+            # re-claim. It is therefore excluded from the comparison (issue #64).
+            known = leaf_tokens(identity_tokens(action.arguments)) - plumbing
             # An empty ``known`` is contained in everything; treat a stored
             # action with no identity of its own as unrecognisable, not as a
             # match for every claim of the same type.
             if not known:
                 continue
-            if not (incoming <= known or known <= incoming):
+            if incoming <= known:
+                # The stored action carries more tokens than the claim. That is
+                # only safe when the extra tokens are derived from the shared
+                # ones (a path stem, an ``external_id`` shape), never unrelated
+                # optional arguments.
+                if not _superset_derives_from_subset(incoming, known):
+                    continue
+            elif known <= incoming:
+                if not _superset_derives_from_subset(known, incoming):
+                    continue
+            else:
                 continue
             if action.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
                 uncertain.append((IdempotencyKey(stored_key), action))

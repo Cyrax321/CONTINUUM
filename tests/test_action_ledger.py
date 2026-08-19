@@ -661,3 +661,32 @@ def test_a_differing_amount_counts_whether_it_is_a_number_or_a_string(
     second = ledger.claim("charge_card", {"recipient": "acct-4471", "amount_usd": "5000"})
 
     assert second.fresh
+
+
+def test_rich_then_sparse_does_not_false_deduplicate(ledger: ActionLedger) -> None:
+    """Regression test for issue #64.
+
+    A completed action with an optional descriptive argument (``message``) is
+    re-claimed without it. The stored token set is a superset of the sparser
+    claim only because of that unrelated optional value, not because the two are
+    the same work, so the second, genuinely different notify must run.
+    """
+    first = ledger.claim("slack.notify", {"channel": "ops", "message": "deploy failed"})
+    ledger.complete(first.key, external_id="msg_1")
+
+    second = ledger.claim("slack.notify", {"channel": "ops"})
+    assert second.fresh, "the second notify is distinct work, not a retry of the first"
+
+
+def test_sparse_then_rich_does_not_false_deduplicate(ledger: ActionLedger) -> None:
+    """Pin the call-order asymmetry from issue #64.
+
+    The reverse order (a sparse claim completed, then a richer re-claim) must
+    also stay distinct, exercising the ``known <= incoming`` branch of the
+    matcher.
+    """
+    first = ledger.claim("slack.notify", {"channel": "ops"})
+    ledger.complete(first.key, external_id="msg_1")
+
+    second = ledger.claim("slack.notify", {"channel": "ops", "message": "deploy failed"})
+    assert second.fresh, "a richer re-claim is still different work"
