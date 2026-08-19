@@ -138,6 +138,29 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The `continuum serve` sidecar's `resume` had drifted from the MCP tool it
+  mirrors, so a non-Python client could not resume hands-free (issue #91).** The
+  module docstring promises "the protocol mirrors the MCP tool surface so the two
+  stay in sync", but two capabilities added to `continuum_resume` never reached
+  the sidecar: the run `goal` in the payload (PR #80) and an optional `run_id`
+  that targets the most recently active run (PR #75). A sidecar client therefore
+  learned `mode` and `completed/total` but never what the task *was*, and
+  `_h_resume` raised `bad_params` on the omitted `run_id` that an interrupted
+  session has no way to supply. The sidecar is the boundary intended for clients
+  that cannot embed Python or the `mcp` extra, so it was the one surface still
+  requiring an external task file and a memorized id, the exact overhead those
+  two changes removed for the MCP and CLI paths. `resume` now returns `goal` and
+  accepts an absent `run_id`, reporting `mode: "no_active_run"` (matching
+  `continuum_resume`) rather than a protocol error when there is nothing to
+  resume. Additive: no existing key changed, and the serve-only diagnostics
+  (`checkpoint_version`, `validation_reason`, `environment_changes`) are
+  untouched. Trust behaviour is unchanged, since returning a self-reported goal
+  confirms nothing and a self-certified run still resolves to `request_human`.
+  `tests/test_serve.py` gains four regression tests, including one that diffs the
+  sidecar's `resume` keys against the live `continuum_resume` payload so the next
+  field added on one side and forgotten on the other fails CI instead of being
+  found by hand.
+
 - **MCP server was not found at cold start because its name did not match the
   configured name (issue #87).** `.mcp.json` registered the server under the key
   `continuum`, and `build_server` advertised `MCPServer(name="continuum")`, while

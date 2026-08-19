@@ -260,12 +260,13 @@ def _write(stream: TextIO, payload: dict[str, Any]) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _decision_payload(decision: Any) -> dict[str, Any]:
+def _decision_payload(decision: Any, *, goal: str) -> dict[str, Any]:
     report = decision.validation.report
     return {
         "checkpoint_version": report.checkpoint_version,
         "validation_reason": report.reason,
         "run_id": decision.state.run_id,
+        "goal": goal,
         "mode": decision.mode.value,
         "safe": decision.safe,
         "next_allowed_action": decision.next_allowed_action,
@@ -374,13 +375,34 @@ def _h_validate(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]
 
 
 def _h_resume(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]:
-    run_id = _require(params, "run_id")
+    # run_id is optional, exactly as it is on continuum_resume: a session that
+    # was interrupted and restarted has no id to send, so an omitted one means
+    # "the run that was interrupted". Reported as a mode rather than a protocol
+    # error, so a client branches on mode alone across both transports.
+    run_id = params.get("run_id")
+    if not run_id:
+        active = server.storage.get_active_run()
+        if active is None:
+            return {
+                "run_id": None,
+                "mode": "no_active_run",
+                "safe": False,
+                "message": (
+                    "No active run to resume. Start one with "
+                    "record_progress(run_id, completed, total, goal=...)."
+                ),
+            }
+        run_id = active.run_id
     decision = server.adapter.resume(
         run_id,
         current_environment=_environment(run_id, params.get("env")),
         expected_model=params.get("expected_model"),
     )
-    return _decision_payload(decision)
+    # The goal travels with the decision so a resumed client knows what to
+    # continue without keeping its own task file. Read-only: returning the
+    # self-reported goal confirms nothing, so a self-certified run still comes
+    # back as request_human.
+    return _decision_payload(decision, goal=server.storage.get_run(run_id).goal)
 
 
 def _h_confirm(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]:

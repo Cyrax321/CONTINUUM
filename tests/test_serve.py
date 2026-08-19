@@ -69,6 +69,114 @@ def test_checkpoint_and_resume_round_trip() -> None:
     assert decision["progress"]["completed"] == 1
 
 
+# --- resume mirrors the MCP surface (issue #91) ------------------------------
+
+
+def test_resume_returns_the_run_goal() -> None:
+    """A resumed client must learn what the task was, not just how far it got.
+
+    Without this the sidecar is the one boundary that still needs an external
+    task file to answer "what was I doing", which is the overhead the goal was
+    added to continuum_resume to remove.
+    """
+    srv = make_server()
+    srv.dispatch(
+        "record_progress",
+        {"run_id": "r1", "completed": 3, "total": 10, "goal": "migrate the billing module"},
+    )
+    srv.dispatch("checkpoint", {"run_id": "r1"})
+
+    decision = srv.dispatch("resume", {"run_id": "r1"})
+    assert decision["goal"] == "migrate the billing module"
+
+
+def test_resume_without_run_id_targets_the_active_run() -> None:
+    """An interrupted session has no id to send, so omitting it must work.
+
+    This is the whole point of the capability: a fresh process that lost its
+    memory of the run can still ask what to continue.
+    """
+    srv = make_server()
+    srv.dispatch(
+        "record_progress",
+        {"run_id": "r1", "completed": 3, "total": 10, "goal": "migrate the billing module"},
+    )
+    srv.dispatch("checkpoint", {"run_id": "r1"})
+
+    decision = srv.dispatch("resume", {})
+    assert decision["run_id"] == "r1"
+    assert decision["goal"] == "migrate the billing module"
+    assert decision["progress"]["completed"] == 3
+
+
+def test_resume_without_run_id_reports_no_active_run() -> None:
+    """Nothing to resume is a verdict, not a protocol error.
+
+    Reported as a mode so a client can branch on ``mode`` alone and get the
+    same answer from the sidecar as from continuum_resume.
+    """
+    srv = make_server()
+    decision = srv.dispatch("resume", {})
+    assert decision["mode"] == "no_active_run"
+    assert decision["safe"] is False
+    assert decision["run_id"] is None
+
+
+def test_resume_still_requires_review_for_a_self_reported_run() -> None:
+    """Returning the goal must not confirm it.
+
+    The goal is a self-report from a remote caller, so surfacing it is
+    read-only and the run stays behind the human-review gate.
+    """
+    srv = make_server()
+    srv.dispatch("record_progress", {"run_id": "r1", "completed": 1, "total": 10, "goal": "g"})
+    srv.dispatch("checkpoint", {"run_id": "r1"})
+
+    assert srv.dispatch("resume", {"run_id": "r1"})["mode"] == "request_human"
+
+
+async def test_resume_payload_covers_the_mcp_resume_surface() -> None:
+    """Every field continuum_resume returns must also come back from the sidecar.
+
+    Compared against the live MCP payload rather than a hardcoded key list,
+    because a field added there and forgotten here is exactly how ``goal`` went
+    missing. Skipped without the ``mcp`` extra, which ``continuum serve`` is
+    designed not to need.
+    """
+    pytest.importorskip("mcp")
+    from continuum.mcp.authz import AuthorizationPolicy
+    from continuum.mcp.server import build_server
+    from continuum.storage.sqlite import SQLiteStorage
+    from tests.mcp_helpers import fake_context
+
+    caller = "pytest-client"
+    server, ctx = build_server(
+        storage=SQLiteStorage(":memory:"), policy=AuthorizationPolicy([caller])
+    )
+    try:
+
+        async def call(name: str, **arguments: object) -> dict:
+            result = await server.call_tool(name, arguments, context=fake_context(caller))
+            return dict(json.loads(result.content[0].text))
+
+        await call("continuum_record_progress", run_id="r1", completed=3, total=10, goal="g")
+        await call("continuum_checkpoint", run_id="r1")
+        expected = await call("continuum_resume", run_id="r1")
+    finally:
+        ctx.close()
+
+    srv = make_server()
+    srv.dispatch("record_progress", {"run_id": "r1", "completed": 3, "total": 10, "goal": "g"})
+    srv.dispatch("checkpoint", {"run_id": "r1"})
+    actual = srv.dispatch("resume", {"run_id": "r1"})
+
+    missing = sorted(set(expected) - set(actual))
+    assert not missing, f"sidecar resume omits MCP fields: {missing}"
+
+    missing_progress = sorted(set(expected["progress"]) - set(actual["progress"]))
+    assert not missing_progress, f"sidecar progress omits MCP fields: {missing_progress}"
+
+
 def test_checkpointing_with_env_makes_drift_block_resume() -> None:
     """The sidecar must not disagree with the MCP surface about drift.
 
@@ -152,6 +260,37 @@ def test_stdio_loop_reads_jsonl_and_answers() -> None:
     assert json.loads(lines[0])["result"]["completed"] == 2
     assert json.loads(lines[1])["result"]["mode"]
     assert json.loads(lines[2])["error"]["type"] == "method_not_found"
+
+
+def test_stdio_resume_needs_no_params_at_all() -> None:
+    """The wire shape a restarted foreign client actually sends (issue #91).
+
+    Such a client knows the method and nothing else, so ``params`` may be absent
+    entirely rather than merely lacking ``run_id``. It must still come back with
+    the active run and its goal instead of a ``bad_params`` error.
+    """
+    srv = make_server()
+    requests = (
+        "\n".join(
+            [
+                json_line(
+                    0,
+                    "record_progress",
+                    {"run_id": "r1", "completed": 3, "total": 10, "goal": "migrate billing"},
+                ),
+                json_line(1, "checkpoint", {"run_id": "r1"}),
+                '{"id": 2, "method": "resume"}',
+            ]
+        )
+        + "\n"
+    )
+    out = io.StringIO()
+    srv.serve_stdio(io.StringIO(requests), out)
+
+    last = json.loads([line for line in out.getvalue().splitlines() if line.strip()][-1])
+    assert "error" not in last, last
+    assert last["result"]["run_id"] == "r1"
+    assert last["result"]["goal"] == "migrate billing"
 
 
 # --- authentication (fail-closed) ------------------------------------------
