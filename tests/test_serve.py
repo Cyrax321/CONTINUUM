@@ -21,6 +21,7 @@ from continuum.serve import (
     list_methods,
     serve_subprocess,
 )
+from continuum.serve.server import MUTATING
 
 
 def make_server() -> SidecarServer:
@@ -317,6 +318,79 @@ def test_auth_disabled_by_default() -> None:
     auth = SidecarAuth()
     assert auth.disabled
     auth.verify(None)  # must not raise
+
+
+@pytest.mark.parametrize("method", list_methods())
+def test_every_method_requires_the_secret(monkeypatch, method: str) -> None:
+    """The sidecar's real policy, pinned exhaustively (issue #95).
+
+    The two token tests in this section both drive ``record_progress``, so
+    between them they only proved the policy for one mutating method -- which
+    left the suite consistent with a mutating-only policy that the sidecar does
+    not implement. Driving every entry in ``list_methods()`` closes that, and
+    keeps a method added later from landing unauthenticated by default.
+
+    ``dispatch`` verifies before it routes, so the missing ``run_id`` here
+    cannot be what raises: ``BadParams`` would mean auth had already been
+    skipped.
+    """
+    monkeypatch.setenv("CONTINUUM_SERVE_TOKEN", "secret")
+    srv = make_server()
+
+    with pytest.raises(NotAuthorized):
+        srv.dispatch(method, {"run_id": "r1"})
+
+
+def test_the_mutating_constant_does_not_govern_authentication(monkeypatch) -> None:
+    """Regression for #95: the exported constant is metadata, not the policy.
+
+    ``MUTATING`` omits the three read-only methods, and until this test the only
+    trace of a mutating-only rule was an unreferenced ``_auth_check`` helper.
+    Deleting the helper is not enough on its own -- someone reading the constant
+    can reintroduce the same gate in ``dispatch``, and every other test in this
+    file would still pass while ``resume``, ``validate`` and ``list_actions``
+    silently opened up to unauthenticated callers, in precisely the deployments
+    that bothered to set a secret. This is the test that goes red instead.
+    """
+    monkeypatch.setenv("CONTINUUM_SERVE_TOKEN", "secret")
+    srv = make_server()
+
+    read_only = [method for method in list_methods() if method not in MUTATING]
+    assert read_only == ["list_actions", "resume", "validate"], (
+        "the set of methods MUTATING leaves out has changed; "
+        "confirm the auth policy still covers them"
+    )
+
+    for method in read_only:
+        with pytest.raises(NotAuthorized):
+            srv.dispatch(method, {"run_id": "r1"})
+
+
+def test_a_read_only_method_succeeds_with_the_secret(monkeypatch) -> None:
+    """Closing reads must gate them, not break them.
+
+    Also shows what the gate is protecting: ``resume`` returns the goal string,
+    and ``list_actions`` the arguments and results of real side effects. That is
+    the argument for the sidecar being stricter than the MCP server -- anything
+    that can reach this pipe can ask for it.
+    """
+    monkeypatch.setenv("CONTINUUM_SERVE_TOKEN", "secret")
+    srv = make_server()
+    srv.dispatch(
+        "record_progress",
+        {
+            "run_id": "r1",
+            "completed": 1,
+            "total": 3,
+            "goal": "migrate billing",
+            "auth_token": "secret",
+        },
+    )
+
+    out = srv.dispatch("resume", {"run_id": "r1", "auth_token": "secret"})
+
+    assert out["goal"] == "migrate billing"
+    assert out["progress"]["completed"] == 1
 
 
 # --- real subprocess path (what an external client uses) --------------------

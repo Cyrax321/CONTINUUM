@@ -46,6 +46,15 @@ from continuum.storage import RunNotFound, Storage, open_storage
 #: about its own work, so it is recorded as self-certified.
 AGENT_SOURCE = Origin.EXTERNAL_AGENT
 
+#: Which methods write run state, as descriptive metadata for clients that want
+#: to treat a write differently from a read (confirm it, log it, retry it).
+#:
+#: This does **not** govern sidecar authentication, and never has: ``dispatch``
+#: verifies the shared secret for *every* method, read-only ones included. The
+#: name invites the opposite reading, so it is spelled out here -- a caller that
+#: gates its own token on this set will be refused on ``resume``. See
+#: ``SidecarServer.dispatch`` for why the sidecar is stricter than the MCP
+#: server, whose policy really is mutating-only.
 MUTATING = {
     "record_progress",
     "checkpoint",
@@ -81,10 +90,11 @@ class SidecarAuth:
     """Fail-closed shared-secret authentication for the sidecar.
 
     When ``expected`` is ``None`` (the default), authentication is disabled and
-    the sidecar behaves as before. When set, every mutating call must present
-    the matching ``auth_token`` parameter or it is refused. A missing or wrong
-    secret always refuses; an empty configured secret refuses rather than
-    opening the door.
+    the sidecar behaves as before. When set, every call must present the
+    matching ``auth_token`` parameter or it is refused -- reads as well as
+    writes, not only the methods in ``MUTATING``. A missing or wrong secret
+    always refuses; an empty configured secret refuses rather than opening the
+    door.
     """
 
     def __init__(self, expected: str | None = None) -> None:
@@ -202,11 +212,24 @@ class SidecarServer:
     def _ledger(self, run_id: str) -> ActionLedger:
         return ActionLedger(self.storage, run_id)
 
-    def _auth_check(self, method: str, params: dict[str, Any]) -> None:
-        if method in MUTATING:
-            self.auth.verify(params.get("auth_token"))
-
     def dispatch(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Authenticate, then route to the handler for ``method``.
+
+        The secret is required for every method, not just the ones in
+        ``MUTATING``. That is deliberate, and it is where the sidecar diverges
+        from the MCP server's mutating-only policy: the MCP server talks to a
+        client the user launched on their own machine, whereas any process that
+        can reach this pipe can speak the protocol. Reads are worth closing
+        because of what they return -- ``resume`` hands back the goal string,
+        ``list_actions`` the arguments and results of external side effects.
+        Gating those on the same secret costs nothing by default, since
+        ``CONTINUUM_SERVE_TOKEN`` unset disables authentication entirely.
+
+        A ``MUTATING``-only variant of this check used to exist here as an
+        unreferenced helper. Restoring it would open reads to unauthenticated
+        callers in exactly the deployments that bothered to set a secret, so the
+        policy is pinned by tests in ``tests/test_serve.py`` (issue #95).
+        """
         handler = _HANDLERS.get(method)
         if handler is None:
             raise MethodNotFound(method)

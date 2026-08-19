@@ -138,6 +138,34 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The `continuum serve` sidecar exported a `MUTATING` constant describing an
+  authentication policy it does not implement, and no test pinned the real one
+  (issue #95, reported by @abyyxhek).** `MUTATING` names seven of the ten
+  methods, and `_auth_check` gated the shared secret on membership in it — but
+  `_auth_check` had no call sites anywhere in the tree, and `dispatch` calls
+  `self.auth.verify` unconditionally, so `resume`, `validate` and `list_actions`
+  do require a token despite being absent from the set. `SidecarAuth`'s docstring
+  documented the same phantom rule ("every mutating call must present the
+  matching `auth_token`"). The behaviour is the correct one and the description
+  was wrong: unlike the MCP server — whose mutating-only policy is deliberate and
+  pinned by `test_read_only_tools_stay_open_to_anyone` — the sidecar is reachable
+  by any process that can speak to its pipe, and its reads are worth closing for
+  what they return (`resume` hands back the goal string, `list_actions` the
+  arguments and results of external side effects). Gating them costs nothing by
+  default, since an unset `CONTINUUM_SERVE_TOKEN` disables authentication
+  entirely. So the dead `_auth_check` is deleted, `MUTATING` keeps its export as
+  descriptive write-vs-read metadata with a docstring stating that it does not
+  govern authentication, and `SidecarAuth` and `dispatch` now document the real
+  policy and why it diverges from the MCP server's. The gap was not only
+  cosmetic: the existing auth tests all drove `record_progress`, so the suite was
+  consistent with *both* policies, and reinstating the mutating-only gate in
+  `dispatch` opened all three read-only methods to unauthenticated callers
+  without turning a single existing test red. `tests/test_serve.py` gains three
+  regression tests, twelve cases in all — every method in `list_methods()`
+  refused without the secret, the read-only methods refused although `MUTATING`
+  omits them, and a read-only method still succeeding with it — verified red
+  against that reintroduced gate.
+
 - **The `continuum serve` sidecar's `resume` had drifted from the MCP tool it
   mirrors, so a non-Python client could not resume hands-free (issue #91).** The
   module docstring promises "the protocol mirrors the MCP tool surface so the two
