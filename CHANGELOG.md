@@ -138,6 +138,47 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Three defects found by an adversarial audit of the MCP surface**, driven over
+  the live stdio protocol with every tool result verified against the SQLite store
+  rather than taken at its word. Method and per-claim results in `test.md`:
+  - *Environment drift was detected but invalidated nothing.* `continuum_checkpoint`
+    passed `env` to `capture_state` as an `EnvironmentSnapshot` only, and
+    `StateValidator._apply_dependency_status` returns early for a state with no
+    `external_dependencies` — so a moved dataset was rendered in
+    `environment_changes` while the verdict stayed `safe: true` with the reason
+    "all components verified against the current environment". The core validator
+    was never wrong: given a declared dependency it already yields `CONFLICTED`
+    and `safe_to_resume=False`. The gap was that no MCP client could declare one,
+    and the existing test appended `DEPENDENCY_DECLARED` straight to storage.
+    Checkpointing now records each pinned resource as a `DEPENDENCY_DECLARED`
+    event, so the declaration is durable across projections and restores, covered
+    by the hash chain, and carries `EXTERNAL_AGENT` provenance — which does not
+    weaken the check, since a dependency's status comes from comparing two
+    snapshots rather than from trusting the claim. Only new or re-pinned resources
+    are appended, so checkpointing on a schedule does not grow the log. The
+    `serve` sidecar shared the defect verbatim and is fixed identically; the two
+    surfaces must not disagree about whether drift is safe.
+  - *`continuum_list_actions` under-reported an interrupted action.* A claim left
+    `STARTED` by a crash reported `side_effect_uncertain: false` while
+    `continuum_resume` described the same action as an unknown outcome — the
+    aggregate `unresolved` count was right while the row a human reads said the
+    opposite. `side_effect_uncertain` is only set on escalation to `UNKNOWN`,
+    which has not happened yet for a fresh interruption. Each row now carries
+    `outcome_unresolved`, derived from ledger state so it cannot drift from what
+    recovery reports. Also fixed in the `serve` sidecar.
+  - *WAL "self-healing" could destroy committed transactions.*
+    `_open_server_storage` deleted both sidecars on a startup `OperationalError`,
+    on the stated grounds that they are reconstructable from the main database.
+    That holds for `-shm` and not for `-wal`, which carries transactions committed
+    but not yet checkpointed; measured on a real database the main file was 4 KB
+    while the WAL held all 16 events, and deleting it lost everything *silently*,
+    because an emptied database still verifies as an intact chain. Recovery is now
+    staged least-destructive-first: discard the reconstructable `-shm` and retry,
+    and only if that fails move the `-wal` aside — never unlink it — restoring it
+    if the retry fails anyway, and warning on stderr with the quarantine path when
+    it succeeds. Reachable only when the initial open raises, so latent rather
+    than observed, but it is exactly the hard-kill path the feature advertises.
+
 - **Six correctness defects found by triaging the open bug backlog (issues #29,
   #30, #33, #36, #42, #43, #45).** Each is covered by a test that fails on the
   previous code:

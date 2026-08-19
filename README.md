@@ -147,8 +147,19 @@ CONTINUUM is verified not just with mock unit tests, but against real LLM agents
 
 ### Automated Test Suite and Benchmarks
 
-- **740 tests passing** on Python 3.11, 3.12, and 3.13 (including unit, `hypothesis` property-based, and concurrency tests).
+- **817 tests passing** on Python 3.11, 3.12, and 3.13 (including unit, `hypothesis` property-based, and concurrency tests).
 - **CONTINUUM-Bench**: `continuum benchmark` executes in-process recovery benchmarks across five scenarios (`process_crash`, `dataset_change`, `unknown_side_effect`, `partial_completion`, `early_crash`), proving 0 duplicate work, 0 duplicate side effects, and automatic detection of stale environment dependencies.
+
+### Adversarial Audit of the MCP Surface
+
+The MCP server was audited end to end over the live stdio protocol, with every
+tool result checked against the SQLite store rather than taken at its word. The
+self-certification gate, the two-phase ledger, crash-mid-action reconciliation,
+tamper-evidence, and deny-by-default authorization all held. Three defects were
+found and fixed: environment drift was detected but did not invalidate state,
+`list_actions` under-reported an interrupted row, and the WAL sidecar recovery
+could delete committed transactions. Method, per-claim results, and reproduction
+steps are in [test.md](test.md).
 
 ## MCP Integration
 
@@ -308,7 +319,7 @@ Recent preprints that measure or model the same reliability gaps CONTINUUM targe
 
 ## Status and limitations
 
-- **Tested**: 740 tests passing, 4 skipped (see [STATUS.md](STATUS.md)).
+- **Tested**: 817 tests passing, 4 skipped (see [STATUS.md](STATUS.md)). The MCP surface has also been audited adversarially over the live protocol; see [test.md](test.md).
 - **Not on PyPI.** Install from a clone (see Quick Start).
 - **MCP caller authentication is optional.** When `CONTINUUM_MCP_TOKEN` is set, the server refuses every mutating tool unless the caller presents that shared secret in the `initialize` handshake's `_meta.authToken`. Without it, authorization is by declared identity only (the historical default, preserved for local single-user use). Tracked as [#1](https://github.com/Cyrax321/CONTINUUM/issues/1).
 - **Unbuilt components**: Cloud API (Phase 13) and Dashboard (Phase 14).

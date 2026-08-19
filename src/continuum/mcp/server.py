@@ -28,11 +28,13 @@ behaviour, not a leak.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import inspect
 import json
 import os
 import sqlite3
+import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -89,37 +91,92 @@ def resolve_database(explicit: str | None = None) -> str:
     return explicit or os.environ.get(_DB_ENV_VAR) or DEFAULT_DB
 
 
+def _quarantine_path(sidecar: str) -> str:
+    """An unused path to park a sidecar at, never clobbering an earlier one.
+
+    A second crash must not overwrite the evidence from the first, so the
+    suffix is bumped until the name is free.
+    """
+    candidate = f"{sidecar}.orphaned"
+    counter = 1
+    while os.path.exists(candidate):
+        candidate = f"{sidecar}.orphaned.{counter}"
+        counter += 1
+    return candidate
+
+
 def _open_server_storage(database: str) -> SQLiteStorage:
     """Open the server's store, recovering from a hard-killed predecessor.
 
     A server process killed with SIGKILL cannot run SQLite's WAL cleanup, so it
-    can leave ``<db>-wal`` and ``<db>-shm`` sidecars in an inconsistent state.
-    The next launch then fails to reopen the database in WAL mode with a disk
-    I/O error before it can serve a single request. Those sidecars are
-    reconstructable from the main database, so on that specific error we remove
-    them and retry opening exactly once.
+    can leave ``<db>-wal`` and ``<db>-shm`` sidecars in a state that makes the
+    next WAL-mode open fail with a disk I/O error before it can serve a single
+    request. Recovery proceeds from least to most destructive, because the two
+    sidecars are not equally expendable:
+
+    ``<db>-shm`` is a shared-memory index and genuinely is reconstructable from
+    the database and the log, so removing it costs nothing. If a stale ``-shm``
+    was the blocker, the retry replays the ``-wal`` and every committed
+    transaction survives.
+
+    ``<db>-wal`` is not reconstructable. It holds transactions that were
+    committed but not yet checkpointed into the main database, which for a
+    write-heavy run can be the entire history — deleting it turns durable work
+    into silent loss, and an emptied database still verifies as an intact chain.
+    So it is moved aside rather than unlinked: the server comes up, and the
+    committed data remains on disk for recovery instead of being destroyed. If
+    the retry still fails, the file is put back, since quarantining it bought
+    nothing.
 
     Deliberately scoped to the server's startup rather than ``SQLiteStorage``
     itself: an in-process caller that hits a disk I/O error wants it raised, not
-    papered over by deleting files next to its database. The MCP server is the
-    one place where a stale sidecar from a crashed predecessor is the expected
-    cause and clearing it is the right recovery.
+    papered over by moving files next to its database.
     """
     try:
         return SQLiteStorage(database)
-    except sqlite3.OperationalError:
-        removed = False
-        for sidecar in (f"{database}-wal", f"{database}-shm"):
-            try:
-                os.remove(sidecar)
-                removed = True
-            except FileNotFoundError:
-                pass
-        # Nothing to clear means the error was something else; re-raise it
-        # rather than retrying an open that will fail the same way.
-        if not removed:
+    except sqlite3.OperationalError as exc:
+        error: sqlite3.OperationalError = exc
+
+    shm = f"{database}-shm"
+    wal = f"{database}-wal"
+
+    # Stage 1: discard the reconstructable sidecar only.
+    try:
+        os.remove(shm)
+    except FileNotFoundError:
+        pass
+    else:
+        try:
+            return SQLiteStorage(database)
+        except sqlite3.OperationalError as exc:
+            error = exc
+
+    # Stage 2: preserve the write-ahead log, but get out of its way.
+    if os.path.exists(wal):
+        quarantine = _quarantine_path(wal)
+        try:
+            os.replace(wal, quarantine)
+        except OSError:
+            raise error from None
+        try:
+            storage = SQLiteStorage(database)
+        except sqlite3.OperationalError:
+            # No better off than before: restore the log rather than leave it
+            # parked under a name nothing looks for.
+            with contextlib.suppress(OSError):
+                os.replace(quarantine, wal)
             raise
-        return SQLiteStorage(database)
+        print(
+            f"continuum: orphaned write-ahead log moved to {quarantine}. "
+            "It may contain committed transactions that are NOT in "
+            f"{database}; recover them before deleting it.",
+            file=sys.stderr,
+        )
+        return storage
+
+    # Nothing was clearable, so the error was something else entirely. Retrying
+    # an identical open would fail identically.
+    raise error
 
 
 def _environment(run_id: str, env: Mapping[str, str] | None) -> EnvironmentSnapshot | None:
@@ -135,6 +192,49 @@ def _environment(run_id: str, env: Mapping[str, str] | None) -> EnvironmentSnaps
         name: EnvResource(name=name, version=str(version)) for name, version in env.items()
     }
     return capture(run_id, StaticProvider(resources))
+
+
+def _declare_dependencies(ctx: ContinuumMCP, run_id: str, env: Mapping[str, str] | None) -> None:
+    """Record the checkpointed environment as *declared dependencies* of the run.
+
+    Capturing a snapshot is not enough to make drift matter. The validator
+    decides staleness per ``external_dependencies`` entry and returns early when
+    a state has none, so a checkpoint carrying only a snapshot produces a
+    visible environment diff that invalidates nothing — the run reports
+    ``safe_to_resume`` while the dataset underneath it has moved. Declaring each
+    resource the agent pinned is what gives the diff something to invalidate,
+    and what lets staleness propagate to the evidence resting on it.
+
+    Declared as events rather than written straight onto the checkpoint's state:
+    the log is the durable record, so the declaration survives later projections
+    and restores, is covered by the hash chain, and carries the same
+    ``EXTERNAL_AGENT`` provenance as everything else this server writes. That
+    provenance does not weaken the check — unlike goal and progress, a
+    dependency's status comes from comparing two snapshots rather than from
+    trusting the claim, so the *comparison* stays independent of the agent that
+    named the resource.
+
+    Only new or re-pinned resources are appended. An agent checkpointing on a
+    schedule with an unchanged environment would otherwise add an event per
+    resource per checkpoint, and the projection would fold every one of them
+    back down to the same entry.
+    """
+    if not env:
+        return
+
+    declared = {
+        dependency.resource: dependency.version
+        for dependency in project(run_id, ctx.storage.read_events(run_id)).external_dependencies
+    }
+    for name, version in env.items():
+        if declared.get(name) == str(version):
+            continue
+        ctx.storage.append_event(
+            run_id,
+            EventType.DEPENDENCY_DECLARED,
+            {"resource": name, "version": str(version)},
+            source=AGENT_SOURCE,
+        )
 
 
 class ContinuumMCP:
@@ -343,6 +443,7 @@ def build_server(
     ) -> str:
         """Create a semantic checkpoint."""
         ctx.ensure_run(run_id)
+        _declare_dependencies(ctx, run_id, env)
         state = project(run_id, ctx.storage.read_events(run_id))
         checkpoint = ctx.adapter.capture_state(
             run_id,
@@ -677,8 +778,9 @@ def build_server(
     @server.tool(
         name="continuum_list_actions",
         description=(
-            "List external side effects recorded for a run, flagging any with "
-            "unresolved outcomes. Read-only."
+            "List external side effects recorded for a run. Each row carries "
+            "'outcome_unresolved': true when that action's real-world outcome is "
+            "not known and must be reconciled before resuming. Read-only."
         ),
         annotations=read_only,
     )
@@ -691,6 +793,7 @@ def build_server(
         ctx.storage.get_run(run_id)
         ledger = ctx.ledger(run_id)
         actions = ledger.all()
+        unresolved = {a.action_id for a in ledger.pending()}
         return _json(
             {
                 "run_id": run_id,
@@ -701,10 +804,18 @@ def build_server(
                         "status": a.status.value,
                         "external_id": a.external_id,
                         "side_effect_uncertain": a.side_effect_uncertain,
+                        # The durable flag above is only set once an action has
+                        # been *escalated* to UNKNOWN. An action still STARTED
+                        # because the process died mid-flight has not been
+                        # escalated yet, so the flag reads false while the
+                        # outcome is in fact unresolved — which is what a
+                        # recovering caller needs to see per row, not just in
+                        # the aggregate count.
+                        "outcome_unresolved": a.action_id in unresolved,
                     }
                     for a in actions
                 ],
-                "unresolved": len(ledger.pending()),
+                "unresolved": len(unresolved),
             }
         )
 

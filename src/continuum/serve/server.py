@@ -107,22 +107,66 @@ def _require(params: dict[str, Any], key: str) -> Any:
     return params[key]
 
 
-def _environment(run_id: str, env: Any) -> EnvironmentSnapshot | None:
-    if not env:
-        return None
-    resources: dict[str, EnvResource] = {}
+def _env_versions(env: Any) -> dict[str, str]:
+    """Normalize the two accepted ``env`` shapes to ``{resource: version}``.
+
+    Callers send either a mapping or a list of ``name=version`` strings, and both
+    the snapshot and the dependency declaration have to agree on what was pinned.
+    """
+    versions: dict[str, str] = {}
     if isinstance(env, dict):
         for name, version in env.items():
-            resources[str(name)] = EnvResource(name=str(name), version=str(version))
+            versions[str(name)] = str(version)
     elif isinstance(env, list):
         for item in env:
             if not isinstance(item, str) or "=" not in item:
                 continue
             name, _, version = item.partition("=")
-            resources[name] = EnvResource(name=name, version=version)
-    if not resources:
+            versions[name] = version
+    return versions
+
+
+def _environment(run_id: str, env: Any) -> EnvironmentSnapshot | None:
+    if not env:
         return None
+    versions = _env_versions(env)
+    if not versions:
+        return None
+    resources = {
+        name: EnvResource(name=name, version=version) for name, version in versions.items()
+    }
     return capture(run_id, StaticProvider(resources))
+
+
+def _declare_dependencies(server: SidecarServer, run_id: str, env: Any) -> None:
+    """Record the pinned environment as declared dependencies of the run.
+
+    A snapshot alone cannot invalidate anything: the validator decides staleness
+    per declared dependency and returns early when a state has none, so a
+    checkpoint carrying only a snapshot reports ``safe_to_resume`` even after the
+    resource underneath it moved. Mirrors ``continuum.mcp.server`` — the two
+    surfaces expose the same recovery semantics and must not disagree about
+    whether drift is safe.
+    """
+    if not env:
+        return
+    versions = _env_versions(env)
+    if not versions:
+        return
+
+    declared = {
+        dependency.resource: dependency.version
+        for dependency in project(run_id, server.storage.read_events(run_id)).external_dependencies
+    }
+    for name, version in versions.items():
+        if declared.get(name) == version:
+            continue
+        server.storage.append_event(
+            run_id,
+            EventType.DEPENDENCY_DECLARED,
+            {"resource": name, "version": version},
+            source=AGENT_SOURCE,
+        )
 
 
 class SidecarServer:
@@ -181,7 +225,9 @@ class SidecarServer:
             try:
                 req = json.loads(line)
             except json.JSONDecodeError as exc:
-                _write(outstream, {"id": None, "error": {"type": "bad_request", "message": str(exc)}})
+                _write(
+                    outstream, {"id": None, "error": {"type": "bad_request", "message": str(exc)}}
+                )
                 continue
             rid = req.get("id")
             try:
@@ -191,7 +237,10 @@ class SidecarServer:
             except Exception as exc:  # noqa: BLE001 - report, never crash the loop
                 _write(
                     outstream,
-                    {"id": rid, "error": {"type": "internal", "message": f"{type(exc).__name__}: {exc}"}},
+                    {
+                        "id": rid,
+                        "error": {"type": "internal", "message": f"{type(exc).__name__}: {exc}"},
+                    },
                 )
             else:
                 _write(outstream, {"id": rid, "result": result})
@@ -278,6 +327,7 @@ def _h_record_progress(server: SidecarServer, params: dict[str, Any]) -> dict[st
 def _h_checkpoint(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]:
     run_id = _require(params, "run_id")
     server._ensure_run(run_id)
+    _declare_dependencies(server, run_id, params.get("env"))
     state = project(run_id, server.storage.read_events(run_id))
     checkpoint = server.adapter.capture_state(
         run_id,
@@ -449,6 +499,7 @@ def _h_list_actions(server: SidecarServer, params: dict[str, Any]) -> dict[str, 
     server.storage.get_run(run_id)
     ledger = server._ledger(run_id)
     actions = ledger.all()
+    unresolved = {a.action_id for a in ledger.pending()}
     return {
         "run_id": run_id,
         "actions": [
@@ -458,10 +509,14 @@ def _h_list_actions(server: SidecarServer, params: dict[str, Any]) -> dict[str, 
                 "status": a.status.value,
                 "external_id": a.external_id,
                 "side_effect_uncertain": a.side_effect_uncertain,
+                # The durable flag above is only set once an action has been
+                # escalated to UNKNOWN, so one left STARTED by a crash reads
+                # false while its outcome is in fact unresolved.
+                "outcome_unresolved": a.action_id in unresolved,
             }
             for a in actions
         ],
-        "unresolved": len(ledger.pending()),
+        "unresolved": len(unresolved),
     }
 
 

@@ -31,7 +31,8 @@ from continuum.mcp.server import (
     build_server,
     resolve_database,
 )
-from continuum.models import ActionStatus, RecoveryMode, Run
+from continuum.models import ActionStatus, Origin, RecoveryMode, Run
+from continuum.state.semantic import project
 from continuum.storage import SQLiteStorage
 from tests.mcp_helpers import fake_context as _ctx
 
@@ -306,6 +307,137 @@ async def test_validate_flags_a_changed_dependency(server_ctx: tuple[Any, Any]) 
         e["component"] == "external_dependency" and e["status"] == "conflicted"
         for e in payload["components"]
     )
+
+
+# --- environment declared through the protocol ----------------------------- #
+#
+# The test above declares the dependency by appending an event straight to
+# storage, which no MCP client can do. Checkpointing with ``env`` used to record
+# a snapshot and nothing else, and the validator returns early for a state with
+# no declared dependencies — so drift was rendered in ``environment_changes``
+# while the verdict stayed ``safe``, which is precisely "reported as verified
+# when it is not". These drive the whole path through the tools.
+
+
+@pytest.mark.asyncio
+async def test_checkpointing_with_env_declares_the_dependencies(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """``env`` has to become declared state, not just a snapshot beside it."""
+    server, ctx = server_ctx
+    await seed_run(server)
+    await call(
+        server,
+        "continuum_checkpoint",
+        run_id="run_1",
+        env={"dataset": "sha256:aaaa", "schema": "2.1"},
+    )
+
+    declared = [
+        e for e in ctx.storage.read_events("run_1") if e.type is EventType.DEPENDENCY_DECLARED
+    ]
+    assert {e.payload["resource"] for e in declared} == {"dataset", "schema"}
+    # Written through this server, so it is self-certified like everything else.
+    assert {e.source for e in declared} == {Origin.EXTERNAL_AGENT}
+
+
+@pytest.mark.asyncio
+async def test_drift_in_an_env_declared_dependency_blocks_resume(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """A moved dataset must stop the run even once the self-report is confirmed.
+
+    Confirming clears the REQUIRES_REVIEW on goal and progress, so nothing else
+    is left to mask the environment check — if the verdict were still ``safe``
+    the agent would resume on top of data that changed underneath it.
+    """
+    server, _ = server_ctx
+    await seed_run(server)
+    await call(server, "continuum_checkpoint", run_id="run_1", env={"dataset": "sha256:aaaa"})
+    await call(server, "continuum_confirm", run_id="run_1")
+
+    clean = await call(server, "continuum_validate", run_id="run_1", env={"dataset": "sha256:aaaa"})
+    assert clean["safe"] is True, "an unchanged environment must still resume"
+
+    drifted = await call(
+        server, "continuum_validate", run_id="run_1", env={"dataset": "sha256:bbbb"}
+    )
+    assert drifted["safe"] is False
+    assert "conflicted" in drifted["reason"]
+    assert ("external_dependency", "dataset", "conflicted") in {
+        (e["component"], e["component_id"], e["status"]) for e in drifted["components"]
+    }
+
+    resumed = await call(server, "continuum_resume", run_id="run_1", env={"dataset": "sha256:bbbb"})
+    assert resumed["safe"] is False
+    assert resumed["next_allowed_action"] == "revalidate_dependency:dataset"
+    assert any(r["kind"] == "revalidate_dependency" for r in resumed["repairs"])
+    # Repair must not discard work already done.
+    assert resumed["progress"]["completed"] == 20
+
+
+@pytest.mark.asyncio
+async def test_only_the_changed_dependency_is_invalidated(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """Over-blocking is its own failure: untouched resources stay valid."""
+    server, _ = server_ctx
+    await seed_run(server)
+    await call(
+        server,
+        "continuum_checkpoint",
+        run_id="run_1",
+        env={"dataset": "sha256:aaaa", "schema": "2.1"},
+    )
+    await call(server, "continuum_confirm", run_id="run_1")
+
+    payload = await call(
+        server,
+        "continuum_validate",
+        run_id="run_1",
+        env={"dataset": "sha256:bbbb", "schema": "2.1"},
+    )
+    statuses = {
+        (e["component_id"], e["status"])
+        for e in payload["components"]
+        if e["component"] == "external_dependency"
+    }
+    assert statuses == {("dataset", "conflicted"), ("schema", "valid")}
+
+
+@pytest.mark.asyncio
+async def test_repinning_only_records_what_actually_changed(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """Checkpointing on a schedule must not append an event per resource per call."""
+    server, ctx = server_ctx
+    await seed_run(server)
+
+    for _ in range(4):
+        await call(
+            server,
+            "continuum_checkpoint",
+            run_id="run_1",
+            env={"dataset": "v3", "schema": "1.0"},
+        )
+
+    def declared() -> list[Any]:
+        return [
+            e for e in ctx.storage.read_events("run_1") if e.type is EventType.DEPENDENCY_DECLARED
+        ]
+
+    assert len(declared()) == 2, "an unchanged environment re-declared itself"
+
+    await call(
+        server, "continuum_checkpoint", run_id="run_1", env={"dataset": "v4", "schema": "1.0"}
+    )
+    assert len(declared()) == 3, "a genuine re-pin must be recorded"
+
+    state = project("run_1", ctx.storage.read_events("run_1"))
+    assert {(d.resource, d.version) for d in state.external_dependencies} == {
+        ("dataset", "v4"),
+        ("schema", "1.0"),
+    }
 
 
 @pytest.mark.asyncio
@@ -727,6 +859,49 @@ async def test_list_actions_surfaces_unresolved_outcomes(
     assert payload["unresolved"] == 1
 
 
+@pytest.mark.asyncio
+async def test_list_actions_marks_the_unresolved_row_itself(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """The aggregate count is not enough; the row has to say which one.
+
+    ``side_effect_uncertain`` is only set once an action has been *escalated* to
+    UNKNOWN. An action left STARTED by a process that died mid-flight has not
+    been escalated, so that flag reads false while ``continuum_resume`` reports
+    the very same action as an unknown outcome. Reading the list row by row
+    previously suggested the interrupted side effect was fine.
+    """
+    server, _ = server_ctx
+    await seed_run(server)
+    done = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="a.do",
+        arguments={"n": 1},
+    )
+    await call(server, "continuum_complete_action", run_id="run_1", action_key=done["action_key"])
+    # Claimed and never completed: the crash-mid-action shape.
+    await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="b.do",
+        arguments={"n": 2},
+    )
+
+    payload = await call(server, "continuum_list_actions", run_id="run_1")
+    rows = {a["action_type"]: a for a in payload["actions"]}
+    assert rows["a.do"]["outcome_unresolved"] is False
+    assert rows["b.do"]["outcome_unresolved"] is True
+
+    # And it agrees with what the recovery decision says about the same action.
+    resumed = await call(server, "continuum_resume", run_id="run_1")
+    unresolved_ids = {a["action_id"] for a in resumed["uncertain_actions"]}
+    assert rows["b.do"]["action_id"] in unresolved_ids
+    assert {a["action_id"] for a in payload["actions"] if a["outcome_unresolved"]} == unresolved_ids
+
+
 # --- storage configuration --------------------------------------------------- #
 
 
@@ -769,8 +944,11 @@ def test_server_startup_recovers_from_orphaned_wal_sidecars(tmp_path: Any) -> No
     """A hard-killed predecessor must not wedge the next server launch.
 
     The first WAL-mode open raises the disk I/O error a crashed predecessor's
-    sidecars provoke; the server's open path must then clear those sidecars and
-    retry, coming up with the database's prior contents still readable. The
+    sidecars provoke; the server's open path must then clear the sidecars that
+    are in the way and retry, coming up with the database's prior contents still
+    readable. Recovery is staged, so reaching a blocking ``-wal`` takes three
+    opens: the initial failure, a retry after the reconstructable ``-shm`` is
+    discarded, and a final retry once the log is parked aside. The
     ``ContinuumMCP`` constructor is checked too, since that is what the entry
     point builds.
 
@@ -802,25 +980,33 @@ def test_server_startup_recovers_from_orphaned_wal_sidecars(tmp_path: Any) -> No
 
     SQLiteStorage.__init__ = _fail_while_sidecar_present  # type: ignore[method-assign]
     try:
-        # The wal was removed between the two opens: the mid-open callback saw
+        # The wal was moved aside between the two opens: the mid-open callback saw
         # it present on the failing attempt and absent on the succeeding one.
-        removed_between: list[bool] = []
+        cleared_between: list[str] = []
         real_remove = os.remove
+        real_replace = os.replace
 
         def _record_remove(target: str) -> None:
-            removed_between.append(True)
+            cleared_between.append(str(target))
             real_remove(target)
 
+        def _record_replace(src: str, dst: str) -> None:
+            cleared_between.append(str(src))
+            real_replace(src, dst)
+
         os.remove = _record_remove  # type: ignore[assignment]
+        os.replace = _record_replace  # type: ignore[assignment]
         try:
             storage = _open_server_storage(path)
         finally:
             os.remove = real_remove  # type: ignore[assignment]
+            os.replace = real_replace  # type: ignore[assignment]
         try:
-            # The recovery ran: a failed open, a sidecar removal, then a retry.
-            assert calls["n"] == 2
-            assert removed_between  # at least one stale sidecar was cleared
-            # And the pre-crash work survived the sidecar removal.
+            # Staged recovery: failed open, -shm discarded, retry, -wal parked
+            # aside, final retry.
+            assert calls["n"] == 3
+            assert cleared_between  # at least one stale sidecar was cleared
+            # And the pre-crash work survived the sidecar recovery.
             assert storage.get_run("survivor").goal == "pre-crash work"
             assert [e.type for e in storage.read_events("survivor")] == [EventType.RUN_STARTED]
         finally:
@@ -831,12 +1017,155 @@ def test_server_startup_recovers_from_orphaned_wal_sidecars(tmp_path: Any) -> No
         calls["n"] = 0
         ctx = ContinuumMCP(path)
         try:
-            assert calls["n"] == 2
+            assert calls["n"] == 3
             assert ctx.storage.get_run("survivor").goal == "pre-crash work"
         finally:
             ctx.close()
     finally:
         SQLiteStorage.__init__ = real_init  # type: ignore[method-assign]
+
+
+def test_server_startup_prefers_discarding_only_the_shm_sidecar(tmp_path: Any) -> None:
+    """A stale ``-shm`` must be recovered without touching the write-ahead log.
+
+    The ``-shm`` file is a shared-memory index and is rebuildable, so discarding
+    it is free. The ``-wal`` is not: it can hold committed transactions absent
+    from the main database. When clearing the cheap sidecar is enough to reopen,
+    the log must be left exactly where it is so SQLite replays it.
+    """
+    path = str(tmp_path / "agent.db")
+    seed = SQLiteStorage(path)
+    seed.create_run(Run(run_id="survivor", goal="pre-crash work"))
+    seed.close()
+
+    _orphan_wal_sidecars(path)
+    wal_bytes = b"committed-but-not-checkpointed"
+    with open(f"{path}-wal", "wb") as wal:
+        wal.write(wal_bytes)
+
+    real_init = SQLiteStorage.__init__
+    calls = {"n": 0}
+
+    def _fail_while_shm_present(self: Any, database: str, *args: Any, **kwargs: Any) -> None:
+        calls["n"] += 1
+        if os.path.exists(f"{database}-shm"):
+            raise sqlite3.OperationalError("disk I/O error")
+        real_init(self, database, *args, **kwargs)
+
+    SQLiteStorage.__init__ = _fail_while_shm_present  # type: ignore[method-assign]
+    try:
+        storage = _open_server_storage(path)
+        try:
+            assert calls["n"] == 2  # failed open, then a retry after -shm went
+            # The log is untouched: same path, same bytes, nothing quarantined.
+            assert os.path.exists(f"{path}-wal")
+            with open(f"{path}-wal", "rb") as wal:
+                assert wal.read() == wal_bytes
+            assert not os.path.exists(f"{path}-wal.orphaned")
+        finally:
+            storage.close()
+    finally:
+        SQLiteStorage.__init__ = real_init  # type: ignore[method-assign]
+
+
+def test_server_startup_never_deletes_the_write_ahead_log(tmp_path: Any) -> None:
+    """A blocking ``-wal`` is quarantined, not destroyed.
+
+    Deleting it would turn committed transactions into silent loss, and an
+    emptied database still verifies as an intact chain — the failure would look
+    like success. The bytes must survive somewhere recoverable.
+    """
+    path = str(tmp_path / "agent.db")
+    SQLiteStorage(path).close()
+
+    _orphan_wal_sidecars(path)
+    wal_bytes = b"committed-but-not-checkpointed"
+    with open(f"{path}-wal", "wb") as wal:
+        wal.write(wal_bytes)
+
+    real_init = SQLiteStorage.__init__
+
+    def _fail_while_wal_present(self: Any, database: str, *args: Any, **kwargs: Any) -> None:
+        if os.path.exists(f"{database}-wal"):
+            raise sqlite3.OperationalError("disk I/O error")
+        real_init(self, database, *args, **kwargs)
+
+    SQLiteStorage.__init__ = _fail_while_wal_present  # type: ignore[method-assign]
+    try:
+        storage = _open_server_storage(path)
+        try:
+            quarantined = f"{path}-wal.orphaned"
+            assert os.path.exists(quarantined), "the log was destroyed, not preserved"
+            with open(quarantined, "rb") as wal:
+                assert wal.read() == wal_bytes
+        finally:
+            storage.close()
+    finally:
+        SQLiteStorage.__init__ = real_init  # type: ignore[method-assign]
+
+
+def test_quarantining_a_log_does_not_overwrite_an_earlier_one(tmp_path: Any) -> None:
+    """A second crash must not erase the first crash's unrecovered log."""
+    path = str(tmp_path / "agent.db")
+    SQLiteStorage(path).close()
+
+    with open(f"{path}-wal.orphaned", "wb") as previous:
+        previous.write(b"from-the-first-crash")
+
+    _orphan_wal_sidecars(path)
+    with open(f"{path}-wal", "wb") as wal:
+        wal.write(b"from-the-second-crash")
+
+    real_init = SQLiteStorage.__init__
+
+    def _fail_while_wal_present(self: Any, database: str, *args: Any, **kwargs: Any) -> None:
+        if os.path.exists(f"{database}-wal"):
+            raise sqlite3.OperationalError("disk I/O error")
+        real_init(self, database, *args, **kwargs)
+
+    SQLiteStorage.__init__ = _fail_while_wal_present  # type: ignore[method-assign]
+    try:
+        storage = _open_server_storage(path)
+        try:
+            with open(f"{path}-wal.orphaned", "rb") as first:
+                assert first.read() == b"from-the-first-crash"
+            with open(f"{path}-wal.orphaned.1", "rb") as second:
+                assert second.read() == b"from-the-second-crash"
+        finally:
+            storage.close()
+    finally:
+        SQLiteStorage.__init__ = real_init  # type: ignore[method-assign]
+
+
+def test_a_log_is_restored_when_quarantining_it_does_not_help(tmp_path: Any) -> None:
+    """If the retry still fails, the filesystem is left as it was found.
+
+    Parking the log bought nothing, so leaving it under a name nothing looks for
+    would only make the operator's recovery harder.
+    """
+    path = str(tmp_path / "agent.db")
+    SQLiteStorage(path).close()
+
+    _orphan_wal_sidecars(path)
+    wal_bytes = b"committed-but-not-checkpointed"
+    with open(f"{path}-wal", "wb") as wal:
+        wal.write(wal_bytes)
+
+    real_init = SQLiteStorage.__init__
+
+    def _always_disk_error(self: Any, database: str, *args: Any, **kwargs: Any) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    SQLiteStorage.__init__ = _always_disk_error  # type: ignore[method-assign]
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            _open_server_storage(path)
+    finally:
+        SQLiteStorage.__init__ = real_init  # type: ignore[method-assign]
+
+    with open(f"{path}-wal", "rb") as wal:
+        assert wal.read() == wal_bytes
+    assert not os.path.exists(f"{path}-wal.orphaned")
 
 
 def test_server_open_reraises_a_disk_error_with_no_sidecars(tmp_path: Any) -> None:

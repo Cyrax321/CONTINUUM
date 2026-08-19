@@ -622,3 +622,42 @@ def test_identity_match_ignores_the_run_id_plumbing_token(ledger: ActionLedger) 
         {"endpoint": "/b", "continuum_run_id": ledger.run_id},
     )
     assert other.fresh, "a different endpoint is different work"
+
+
+def test_a_larger_charge_is_not_deduplicated_against_a_smaller_one(
+    ledger: ActionLedger,
+) -> None:
+    """Same payee, different amount, is a second charge -- not a retry of the first.
+
+    The sharpest form of the containment rule. One token (the payee) is shared
+    while the token that distinguishes the two actions is numeric, so this fails
+    unless numbers count toward identity *and* a partial overlap is refused. The
+    money is the whole distinction; suppressing the second charge reports success
+    while the payment never happens.
+    """
+    first = ledger.claim("charge_card", {"recipient": "acct-4471", "amount_usd": 100})
+    ledger.complete(first.key, external_id="txn-aaa", result={"charged": 100})
+
+    second = ledger.claim("charge_card", {"recipient": "acct-4471", "amount_usd": 5000})
+
+    assert second.fresh, "the $5000 charge was suppressed by the $100 one"
+    assert second.action.arguments["amount_usd"] == 5000
+    assert second.external_id is None
+
+
+def test_a_differing_amount_counts_whether_it_is_a_number_or_a_string(
+    ledger: ActionLedger,
+) -> None:
+    """Identity must not depend on the JSON type the caller happened to send.
+
+    Over MCP an amount arrives as an ``int``; a client that quotes it sends a
+    ``str``. Both draw the same distinction, so both must be honoured -- an agent
+    cannot be expected to know that quoting a number changes whether its side
+    effect runs.
+    """
+    first = ledger.claim("charge_card", {"recipient": "acct-4471", "amount_usd": "100"})
+    ledger.complete(first.key, external_id="txn-aaa", result={"charged": "100"})
+
+    second = ledger.claim("charge_card", {"recipient": "acct-4471", "amount_usd": "5000"})
+
+    assert second.fresh

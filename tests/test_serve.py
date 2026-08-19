@@ -41,7 +41,9 @@ def test_list_methods_covers_the_surface() -> None:
 
 def test_record_progress_creates_the_run() -> None:
     srv = make_server()
-    out = srv.dispatch("record_progress", {"run_id": "r1", "completed": 3, "total": 10, "goal": "g"})
+    out = srv.dispatch(
+        "record_progress", {"run_id": "r1", "completed": 3, "total": 10, "goal": "g"}
+    )
     assert out["completed"] == 3
     assert out["total"] == 10
 
@@ -67,6 +69,53 @@ def test_checkpoint_and_resume_round_trip() -> None:
     assert decision["progress"]["completed"] == 1
 
 
+def test_checkpointing_with_env_makes_drift_block_resume() -> None:
+    """The sidecar must not disagree with the MCP surface about drift.
+
+    Pinning an environment at checkpoint has to declare it as a dependency, or
+    the validator has nothing to invalidate and a moved resource still reports
+    safe. Confirming the run first clears the self-report review so the
+    environment check is what decides the verdict.
+    """
+    srv = make_server()
+    srv.dispatch("record_progress", {"run_id": "r1", "completed": 1, "total": 10, "goal": "g"})
+    srv.dispatch("checkpoint", {"run_id": "r1", "env": {"dataset": "v3"}})
+    srv.dispatch("confirm", {"run_id": "r1"})
+
+    clean = srv.dispatch("validate", {"run_id": "r1", "env": {"dataset": "v3"}})
+    assert clean["safe"] is True
+
+    drifted = srv.dispatch("validate", {"run_id": "r1", "env": {"dataset": "v4"}})
+    assert drifted["safe"] is False
+    assert any(
+        c["component"] == "external_dependency" and c["status"] == "conflicted"
+        for c in drifted["components"]
+    )
+
+
+def test_env_accepts_the_name_equals_version_list_shape() -> None:
+    """Both accepted ``env`` shapes must declare dependencies identically."""
+    srv = make_server()
+    srv.dispatch("record_progress", {"run_id": "r1", "completed": 1, "goal": "g"})
+    srv.dispatch("checkpoint", {"run_id": "r1", "env": ["dataset=v3"]})
+    srv.dispatch("confirm", {"run_id": "r1"})
+
+    drifted = srv.dispatch("validate", {"run_id": "r1", "env": ["dataset=v4"]})
+    assert drifted["safe"] is False
+
+
+def test_list_actions_marks_an_interrupted_row_unresolved() -> None:
+    srv = make_server()
+    srv.dispatch("record_progress", {"run_id": "r1", "completed": 1, "goal": "g"})
+    done = srv.dispatch("intercept_action", {"run_id": "r1", "action_type": "a.do", "key": "k1"})
+    srv.dispatch("complete_action", {"run_id": "r1", "action_key": done["action_key"]})
+    srv.dispatch("intercept_action", {"run_id": "r1", "action_type": "b.do", "key": "k2"})
+
+    rows = {a["action_type"]: a for a in srv.dispatch("list_actions", {"run_id": "r1"})["actions"]}
+    assert rows["a.do"]["outcome_unresolved"] is False
+    assert rows["b.do"]["outcome_unresolved"] is True
+
+
 def test_intercept_then_complete_action() -> None:
     srv = make_server()
     srv.dispatch("record_progress", {"run_id": "r1", "completed": 1, "goal": "g"})
@@ -86,13 +135,16 @@ def test_unknown_method_is_not_found() -> None:
 
 def test_stdio_loop_reads_jsonl_and_answers() -> None:
     srv = make_server()
-    requests = "\n".join(
-        [
-            json_line(0, "record_progress", {"run_id": "r1", "completed": 2, "goal": "g"}),
-            json_line(1, "resume", {"run_id": "r1"}),
-            json_line(2, "bogus", {}),
-        ]
-    ) + "\n"
+    requests = (
+        "\n".join(
+            [
+                json_line(0, "record_progress", {"run_id": "r1", "completed": 2, "goal": "g"}),
+                json_line(1, "resume", {"run_id": "r1"}),
+                json_line(2, "bogus", {}),
+            ]
+        )
+        + "\n"
+    )
     out = io.StringIO()
     srv.serve_stdio(io.StringIO(requests), out)
     lines = [line for line in out.getvalue().splitlines() if line.strip()]
@@ -144,9 +196,7 @@ def test_serve_subprocess_end_to_end(tmp_path) -> None:
         # a fresh action is allowed, then completed
         claim = client.request("intercept_action", run_id="r1", action_type="x.do", key="k1")
         assert claim["proceed"] is True
-        done = client.request(
-            "complete_action", run_id="r1", action_key=claim["action_key"]
-        )
+        done = client.request("complete_action", run_id="r1", action_key=claim["action_key"])
         assert done["status"] == "completed"
     finally:
         client.terminate()
