@@ -25,6 +25,42 @@ body:
         - label: I can reproduce this on the latest commit on `main`
           required: true
 
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      description: Which part of CONTINUUM does this affect?
+      options:
+        - Core (state, checkpoints, recovery)
+        - Adapters (LangGraph, OpenAI Agents, LangChain, generic)
+        - CLI
+        - MCP server
+        - Detector / drift detection
+        - Benchmarks
+        - Documentation
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: How badly does this affect you?
+      options:
+        - Blocks my use of CONTINUUM entirely
+        - Major functionality broken, workaround exists
+        - Minor inconvenience or cosmetic issue
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: regression
+    attributes:
+      label: Regression check
+      options:
+        - label: This worked in an earlier version or commit
+
   - type: textarea
     id: environment
     attributes:

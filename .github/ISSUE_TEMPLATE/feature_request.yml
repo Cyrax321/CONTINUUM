@@ -2,6 +2,23 @@ name: Feature request
 description: Propose a change or addition
 labels: ["enhancement"]
 body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      description: Which part of CONTINUUM would this change touch?
+      options:
+        - Core (state, checkpoints, recovery)
+        - Adapters (LangGraph, OpenAI Agents, LangChain, generic)
+        - CLI
+        - MCP server
+        - Detector / drift detection
+        - Benchmarks
+        - Documentation
+        - Other / not sure
+    validations:
+      required: true
+
   - type: textarea
     id: problem
     attributes:
@@ -41,3 +58,17 @@ body:
         - "Not sure"
     validations:
       required: false
+
+  - type: dropdown
+    id: contribute
+    attributes:
+      label: Would you like to work on this?
+      description: >
+        You do not need to commit to anything by answering yes. A maintainer
+        will help you get started.
+      options:
+        - "No"
+        - "Yes, with guidance"
+        - "Yes, I have a plan"
+    validations:
+      required: true

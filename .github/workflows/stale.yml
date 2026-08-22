@@ -2,7 +2,7 @@ name: Mark Stale
 
 on:
   schedule:
-    - cron: "0 6 * * *"
+    - cron: '0 6 * * *'
 
 jobs:
   stale:
@@ -16,16 +16,16 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           days-before-stale: 30
           days-before-close: 14
-          stale-issue-message: |
+          stale-issue-message: >-
             This issue has been automatically marked as stale because it has
             not had recent activity. It will be closed in 14 days if no further
             activity occurs. Comment to keep it open.
-          stale-pr-message: |
+          stale-pr-message: >-
             This pull request has been automatically marked as stale because it
             has not had recent activity. It will be closed in 14 days if no
             further activity occurs. Comment or push to keep it open.
-          stale-issue-label: "stale"
-          stale-pr-label: "stale"
-          exempt-issue-labels: ["help wanted", "good first issue", "security"]
-          exempt-pr-labels: ["security", "ready to pull"]
+          stale-issue-label: stale
+          stale-pr-label: stale
+          exempt-issue-labels: 'help wanted,good first issue,security'
+          exempt-pr-labels: 'security'
           exempt-all-milestones: true
