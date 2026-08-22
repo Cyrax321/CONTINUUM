@@ -1,0 +1,79 @@
+name: PR Status Labels
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  update-labels:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Sync status labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const isReview = context.eventName === "pull_request_review";
+            const pr = isReview ? context.payload.review.pull_request : context.payload.pull_request;
+            const prNumber = pr.number;
+
+            let addLabel;
+            let removeLabels;
+
+            if (isReview) {
+              const state = context.payload.review.state;
+              if (state === "approved") {
+                addLabel = "ready to merge";
+                removeLabels = ["awaiting review", "changes requested"];
+              } else if (state === "changes_requested") {
+                addLabel = "changes requested";
+                removeLabels = ["awaiting review", "ready to merge"];
+              } else {
+                // COMMENT reviews do not change approval status
+                return;
+              }
+            } else {
+              const action = context.payload.action;
+              if (action === "synchronize") {
+                // New commits pushed: approval no longer reflects HEAD
+                addLabel = null;
+                removeLabels = ["ready to merge"];
+              } else {
+                // opened or reopened
+                addLabel = "awaiting review";
+                removeLabels = ["ready to merge", "changes requested"];
+              }
+            }
+
+            const current = await github.paginate(github.rest.issues.listLabelsOnIssue, {
+              owner,
+              repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+            const names = new Set(current.map((l) => l.name));
+
+            for (const label of removeLabels) {
+              if (names.has(label)) {
+                await github.rest.issues.removeLabel({
+                  owner,
+                  repo,
+                  issue_number: prNumber,
+                  name: label,
+                });
+              }
+            }
+
+            if (addLabel && !names.has(addLabel)) {
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number: prNumber,
+                labels: [addLabel],
+              });
+            }
