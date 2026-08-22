@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -266,14 +267,22 @@ def test_for_stream_infers_from_the_stream() -> None:
 
 
 def test_a_real_piped_process_emits_no_colour(db: str) -> None:
+    # The uncoloured in-process render is the reference: a real piped process
+    # must produce it byte for byte, exit code included.
+    expected_code, expected_out, _ = run("--db", db, "resume", "run_1")
+
     result = subprocess.run(
         [sys.executable, "-m", "continuum.cli", "--db", db, "resume", "run_1"],
-        env={
-            "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
-            "PATH": "/usr/bin:/bin",
-        },
+        # Inherit the parent environment; only PYTHONPATH is added, so the
+        # subprocess imports continuum from src/. A bare env= drops SystemRoot on
+        # Windows and the process dies on `import _overlapped` during startup.
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
         capture_output=True,
         text=True,
     )
+    # Assert the CLI actually ran. Checking only for absent escape sequences
+    # would pass for a process that died before producing any output at all.
+    assert result.returncode == expected_code, result.stderr
+    assert result.stdout == expected_out
     assert not ANSI.search(result.stdout)
     assert not ANSI.search(result.stderr)
