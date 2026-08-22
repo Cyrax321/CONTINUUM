@@ -13,6 +13,7 @@ correct.
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 import subprocess
 import sys
 import textwrap
@@ -94,7 +95,10 @@ def test_separate_processes_append_to_one_chain_without_corruption(tmp_path: Pat
     children = [
         subprocess.Popen(
             [sys.executable, str(script), str(db), label, "15"],
-            env={"PYTHONPATH": env_path, "PATH": "/usr/bin:/bin"},
+            # Inherit the parent environment; only PYTHONPATH is added, so the
+            # child imports continuum from src/. A bare env= drops SystemRoot on
+            # Windows and the child dies on `import _overlapped` during startup.
+            env={**os.environ, "PYTHONPATH": env_path},
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -252,10 +253,10 @@ def _run_worker(tmp_path: Path, mode: str) -> subprocess.CompletedProcess[str]:
             str(tmp_path / "effects.log"),
             mode,
         ],
-        env={
-            "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
-            "PATH": "/usr/bin:/bin",
-        },
+        # Inherit the parent environment; only PYTHONPATH is added, so the
+        # worker imports continuum from src/. A bare env= drops SystemRoot on
+        # Windows and the worker dies on `import _overlapped` during startup.
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
         capture_output=True,
         text=True,
     )
