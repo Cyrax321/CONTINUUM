@@ -1,0 +1,156 @@
+name: PR Status Labels
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  update-labels:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Sync status labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const THANK_YOU_MESSAGES = [
+              '**Momo** 🍑: Your PR has been approved, and Momo could not be happier about it. Thank you for the care you put into this work. Contributions like yours are what keep this project moving forward.',
+              '**Hana** 🌸: Approved! Hana says a garden grows because of gardeners like you. Thank you for contributing, and we hope to see your name here again soon.',
+              '**Yui** 🎀: Yui reviewed your work twice before approving, which she does rarely. Thank you for holding such a high standard. It shows in every line.',
+              '**Saki** 🌷: This PR earned its approval honestly. Thank you for the thoughtful contribution. We look forward to whatever you build next.',
+              '**Rin** 🐱: Nyaa~ approved! Rin inspected everything and found it worthy. Thank you for contributing; quality work like this makes the whole project better.',
+              '**Mei** ☕: Mei raises her cup to you tonight. Thank you for the patience and thoroughness in this PR. Reviewers notice contributors like you.',
+              '**Hina** ☀️: The review came back clear and the sun came out with it! Thank you for this contribution. It genuinely improved the project.',
+              '**Aoi** 💙: Aoi read every line twice before approving. Thank you for writing code others can trust. That is a rarer skill than people realize.',
+              "**Riko** 🎵: Approved, and Riko composed a small tune in your honor. Thank you for adding to this project's story. We hope it is one of many.",
+              '**Nana** 🍡: Nana reserves her best dango for contributors who deliver. Thank you for doing exactly that. Enjoy, you have earned it.',
+              '**Miko** ⛩️: The fortune Miko drew for this PR read: careful hands, bright future. Thank you for proving it true with a clean approval.',
+              '**Sakura** 🌸: From first commit to approval, Sakura watched this branch grow well. Thank you for the contribution. Take a moment to be proud of it.',
+              "**Tsumugi** 🧶: Your changes are now part of the project's fabric, stitched in carefully. Thank you for contributing. Every row like yours keeps it warm.",
+              '**Kanna** 👓: Kanna examined every hunk and approved without a single note. Thank you for making that possible. It does not happen often.',
+              '**Chibi** 🌱: Small but thorough, Chibi approves! Thank you for the good work. Contributions like this help the whole project grow.',
+              '**Xiaomei** 🐼: Xiaomei rolled happily across the grove at this result. Thank you for the excellent contribution. It was a pleasure to see pass.',
+              '**Meimei** 🀄: Meimei found your work as clean as fresh snow on quiet mountains. Thank you, and congratulations on the approval.',
+              '**Baozi** 🥟: Steamed, stamped, and approved! Thank you for the solid contribution. Please consider coming back with more.',
+              "**Lulu** 🦊: Lulu's sharp eyes combed the diff and found nothing to flag. Thank you for precise, dependable work. Contributors like you are always welcome here.",
+              '**Niuniu** 🐄: Straight through to approval, no detours! Thank you for the strong contribution. Niuniu does not gallop for just anyone.',
+              '**Doufu** ♨️: Solid where it counts, just like this PR. Doufu salutes you. Thank you for the contribution and the standard it sets.',
+              '**Tangyuan** 🍡: Approved cleanly, and Tangyuan rolled a happy circle around the CI logs. Thank you for contributing to the family project.',
+              '**Boba** 🥛: Boba went through the entire test suite and came up with only pearls. Thank you for the careful work. It is appreciated more than you know.',
+              '**Xiaohua** 🌺: Your name is now planted in the contributor garden. Thank you for this approval-worthy work. We hope many more rows follow.',
+              '**Kiki** 🐰: Three hops around the merge queue, all joy! Thank you for this contribution. The queue looks forward to your next visit.',
+              '**Yuzu** 🍋: A little zesty, fully approved. Thank you for bringing bright, focused work to the project. It did not go unnoticed.',
+              '**Mochi** 🍡: Mochi followed this PR from the first commit to approval. Thank you for seeing it through properly. Persistence like that matters.',
+              "**Anko** ☕: Anko added an extra scoop to today's tea in your honor. Thank you for the well made contribution. Please come brew another sometime.",
+              '**Sumi** 🖍️: Sumi marked this PR approved in the record book, in careful ink. Thank you for the memorable contribution. Work like this stands out.',
+            ];
+
+            const { owner, repo } = context.repo;
+            const isReview = context.eventName === "pull_request_review";
+            // Both event payloads carry the PR at payload.pull_request
+            const pr = context.payload.pull_request;
+            const prNumber = pr.number;
+
+            let addLabel;
+            let removeLabels;
+
+            if (isReview) {
+              const state = context.payload.review.state;
+              if (state === "approved") {
+                addLabel = "ready to merge";
+                removeLabels = ["awaiting review", "changes requested"];
+                await thankContributor(pr);
+              } else if (state === "changes_requested") {
+                addLabel = "changes requested";
+                removeLabels = ["awaiting review", "ready to merge"];
+              } else {
+                // COMMENT reviews do not change approval status
+                return;
+              }
+            } else {
+              const action = context.payload.action;
+              if (action === "synchronize") {
+                // New commits pushed: approval no longer reflects HEAD
+                addLabel = null;
+                removeLabels = ["ready to merge"];
+              } else {
+                // opened or reopened
+                addLabel = "awaiting review";
+                removeLabels = ["ready to merge", "changes requested"];
+              }
+            }
+
+            const current = await github.paginate(github.rest.issues.listLabelsOnIssue, {
+              owner,
+              repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+            const names = new Set(current.map((l) => l.name));
+
+            for (const label of removeLabels) {
+              if (names.has(label)) {
+                await github.rest.issues.removeLabel({
+                  owner,
+                  repo,
+                  issue_number: prNumber,
+                  name: label,
+                });
+              }
+            }
+
+            if (addLabel && !names.has(addLabel)) {
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number: prNumber,
+                labels: [addLabel],
+              });
+            }
+
+            async function thankContributor(pr) {
+              const author = pr.user.login;
+              if (author.endsWith("[bot]")) {
+                return;
+              }
+
+              const { data: comments } = await github.rest.issues.listComments({
+                owner,
+                repo,
+                issue_number: prNumber,
+              });
+              if (comments.some((c) => c.body && c.body.includes("<!-- contributor-thanks -->"))) {
+                return;
+              }
+
+              const message = THANK_YOU_MESSAGES[Math.floor(Math.random() * THANK_YOU_MESSAGES.length)];
+
+              const merged = await github.paginate(github.rest.pulls.list, {
+                owner,
+                repo,
+                state: "closed",
+                per_page: 100,
+              });
+              const isFirstContribution = !merged.some(
+                (p) => p.user.login === author && p.merged_at && p.number !== pr.number
+              );
+
+              let body = ["<!-- contributor-thanks -->", message];
+              if (isFirstContribution) {
+                body.push(
+                  "",
+                  "This is also your first merged contribution here, which makes it extra special. If you want ideas for a next change, issues labeled `good first issue` are a good place to start. Welcome aboard."
+                );
+              }
+
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body: body.join("\n"),
+              });
+            }

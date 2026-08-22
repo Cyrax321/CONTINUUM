@@ -1,0 +1,32 @@
+name: Auto Merge
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+jobs:
+  enable-auto-merge:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+    steps:
+      - name: Enable auto-merge (squash)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const prNumber = context.payload.pull_request.number;
+            try {
+              await github.rest.pulls.enableAutoMerge({
+                owner,
+                repo,
+                pull_number: prNumber,
+                merge_method: "squash",
+              });
+              console.log(`Auto-merge enabled for PR #${prNumber}`);
+            } catch (error) {
+              // Auto-merge can fail if requirements are already satisfied or
+              // if the PR is not mergeable; log and continue without failing.
+              console.log(`Could not enable auto-merge for PR #${prNumber}: ${error.message}`);
+            }

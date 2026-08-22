@@ -1,0 +1,63 @@
+name: yuki-review
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  yuki-review:
+    if: |
+      github.event.comment.user.login != 'anya-research' &&
+      github.event.comment.user.login != 'yuki-fuyutsuki' &&
+      contains(github.event.comment.body, '/yuki review')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run Yuki Review
+        uses: anomalyco/opencode/github@latest
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY_YUKI }}
+          GITHUB_TOKEN: ${{ secrets.YUKI_TOKEN }}
+        with:
+          model: opencode/muse-spark-1.2-contributor-free
+          use_github_token: true
+          mentions: "/yuki"
+          share: false
+          prompt: |
+            You are performing a rigorous code review of this pull request, in the style of a senior staff engineer. The user request is the comment text; the pull request diff is available in the repository context.
+
+            Structure your response exactly like this:
+
+            **Code Review**
+
+            One paragraph summarizing what this PR changes and your overall assessment of its quality.
+
+            Then one section per finding, ordered from most to least severe. Each finding must have:
+
+            - A severity label on its own line: one of **high**, **medium**, or **low**
+            - The file path (and line number when known) in backticks
+            - Two to four sentences explaining the problem and why it matters in practice
+
+            - When the fix is a concrete code replacement, append a GitHub suggestion block so maintainers can apply it with one click. Use a fenced code block tagged `suggestion` containing ONLY the corrected replacement lines, matching the surrounding indentation exactly. Example:
+
+            ```suggestion
+            raise OSError(error_msg.format(origin, e.code, e.msg)) from e
+            ```
+
+            Rules for findings:
+            - Report only real, actionable issues: correctness bugs, broken exception handling (for example wrapping exceptions without preserving context), resource leaks, race conditions, security problems, performance regressions, API misuse, missing error paths.
+            - Do NOT report style nits, formatting, naming preferences, or anything linters already catch.
+            - Do NOT invent issues to seem thorough. If the diff is clean, say so explicitly and briefly note what was done well.
+            - Keep the whole review under 600 words unless there are many findings.

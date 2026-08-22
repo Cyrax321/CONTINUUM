@@ -4,21 +4,21 @@ tag-template: "v$RESOLVED_VERSION"
 autolabeler:
   - label: "enhancement"
     title:
-      - "/^feat(?!\()(\(.+\))?(!)?:/"
-      - "/^perf(?!\()(\(.+\))?(!)?:/"
+      - '/^feat(\(.+\))?(!)?:/'
+      - '/^perf(\(.+\))?(!)?:/'
   - label: "bug"
     title:
-      - "/^fix(?!\()(\(.+\))?:/"
+      - '/^fix(\(.+\))?:/'
   - label: "documentation"
     title:
-      - "/^docs(?!\()(\(.+\))?:/"
+      - '/^docs(\(.+\))?:/'
   - label: "ci"
     title:
-      - "/^ci(?!\()(\(.+\))?:/"
-      - "/^build(?!\()(\(.+\))?:/"
+      - '/^ci(\(.+\))?:/'
+      - '/^build(\(.+\))?:/'
   - label: "tests"
     title:
-      - "/^test(?!\()(\(.+\))?:/"
+      - '/^test(\(.+\))?:/'
   - label: "adapter"
     files:
       - "src/continuum/adapters/**"

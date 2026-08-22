@@ -17,19 +17,20 @@ concurrency:
 
 jobs:
   deploy:
+    if: github.repository == 'Cyrax321/CONTINUUM'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v6.0.0
 
       - name: Upload Pages Artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: 'docs'
 

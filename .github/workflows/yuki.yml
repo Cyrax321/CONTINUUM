@@ -1,0 +1,38 @@
+name: yuki
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  yuki:
+    if: |
+      github.event.comment.user.login != 'anya-research' &&
+      github.event.comment.user.login != 'yuki-fuyutsuki' &&
+      (contains(github.event.comment.body, ' /yuki') ||
+      startsWith(github.event.comment.body, '/yuki')) &&
+      !contains(github.event.comment.body, '/yuki review')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Run Yuki
+        uses: anomalyco/opencode/github@latest
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY_YUKI }}
+          GITHUB_TOKEN: ${{ secrets.YUKI_TOKEN }}
+        with:
+          model: opencode/muse-spark-1.2-contributor-free
+          use_github_token: true
+          mentions: "/yuki"
+          share: false

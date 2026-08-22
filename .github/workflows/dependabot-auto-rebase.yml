@@ -1,0 +1,56 @@
+name: Dependabot Auto Rebase
+
+on:
+  schedule:
+    # Every day at 05:00 UTC
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rebase outdated Dependabot PRs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const defaultBranch = context.payload.repository.default_branch;
+
+            const prs = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: "open",
+              per_page: 100,
+            });
+
+            let requested = 0;
+            for (const pr of prs) {
+              if (pr.user.login !== "dependabot[bot]" || pr.draft) {
+                continue;
+              }
+
+              const compare = await github.rest.repos.compareCommits({
+                owner,
+                repo,
+                base: defaultBranch,
+                head: pr.head.ref,
+              });
+
+              if (compare.data.behind_by > 0) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: pr.number,
+                  body: "@dependabot rebase",
+                });
+                console.log(`Requested rebase on PR #${pr.number} (behind by ${compare.data.behind_by} commits)`);
+                requested += 1;
+              }
+            }
+
+            console.log(`Rebase requested on ${requested} PR(s)`);
