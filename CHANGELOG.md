@@ -8,6 +8,44 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`scoped_to_run=False` now enforces global uniqueness (#34).** An unscoped
+  idempotency key claims store-global identity but the ledger only replayed its
+  own run's log, so two runs could each open a fresh slot for the same
+  identity. `claim` now scans every other run in the store when an unscoped
+  claim misses locally: a completed record anywhere deduplicates the claim
+  (`fresh=False` with the stored result), and an unresolved attempt in another
+  run raises `UnknownSideEffect` rather than opening a parallel slot, since a
+  foreign record cannot be reconciled from this run's ledger. Certain failures
+  and compensations elsewhere do not block. The scan is event-sourced through
+  a shared `fold_action_events` helper so both ledgers read the log with
+  identical semantics; it is paid only on the unscoped path after the local
+  lookup missed. Regression tests cover cross-run dedup, the uncertain-elsewhere
+  refusal, and the certain-failure pass-through.
+
+### Added
+
+- **Automatic durability for every harness (#191).** The file-derived progress
+  hook and the policy-gated background checkpoint are now wired into
+  `GenericAgentAdapter` itself instead of living only in examples. With the
+  opt-in `auto_file` / `auto_total` constructor arguments set, every completed
+  `intercept_action` mirrors file-derived progress into the log (gated on the
+  derived count actually changing) and submits a checkpoint write to a shared
+  background executor only when the checkpoint policy agrees, so the agent's
+  turn never blocks on SQLite I/O. `LangChainAgentAdapter`,
+  `LangGraphAgentAdapter` and `OpenAIAgentAdapter` forward both options to the
+  base class, making the same zero-prompt durability available from all three
+  frameworks. Supporting fixes in `continuum.hooks`: one shared executor with
+  an `atexit` shutdown replaces the per-hook thread pool that leaked a worker,
+  the async hook now returns whether the policy actually warranted a write
+  instead of always True, `record_file_progress` appends `TASK_UPDATED` plus
+  the `EVIDENCE_ADDED` tail only when the count changed, and the adapter path
+  delegates to these hooks rather than duplicating them inline. Regression
+  tests in `tests/test_harness_auto.py` cover tail evidence through the
+  adapter path, no log bloat over unchanged files, non-blocking auto progress
+  after an intercepted action, and subclass forwarding.
+
+### Added
+
 - **Localized recovery is now dep_scope-aware and file-aware (#184).**
   `RecoveryEngine.assess` respects `Action.dep_scope` when a scope is given: an
   uncertain side effect tagged to a dependency outside the scope no longer

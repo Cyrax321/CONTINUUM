@@ -128,9 +128,11 @@ class LangGraphAgentAdapter(GenericAgentAdapter):
         *,
         graph: Any = None,
         state_to_semantic: Callable[[dict[str, Any]], SemanticState] | None = None,
+        auto_file: str | None = None,
+        auto_total: int | None = None,
     ) -> None:
         _ensure_langgraph()
-        super().__init__(storage)
+        super().__init__(storage, auto_file=auto_file, auto_total=auto_total)
         self.graph = graph
         self._state_to_semantic = state_to_semantic
 

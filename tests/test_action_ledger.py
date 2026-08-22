@@ -361,6 +361,54 @@ def test_a_globally_scoped_action_deduplicates_across_runs(
     assert not ledger.claim("send_welcome_email", {"to": "x@y.z"}, scoped_to_run=False).fresh
 
 
+def _seed_run(store: SQLiteStorage, run_id: str) -> None:
+    store.create_run(Run(run_id=run_id, goal="g"))
+    store.append_event(run_id, EventType.RUN_STARTED, {"goal": "g"})
+
+
+def test_an_unscoped_claim_deduplicates_against_another_run(
+    store: SQLiteStorage,
+) -> None:
+    """Issue 34: scoped_to_run=False must consult other runs, not just this one."""
+    _seed_run(store, "runA")
+    _seed_run(store, "runB")
+    first = ActionLedger(store, "runA")
+    second = ActionLedger(store, "runB")
+
+    outcome = first.claim("send.invoice", {"id": "INV-1"}, scoped_to_run=False)
+    assert outcome.fresh
+    first.complete(outcome.key, external_id="EXT-1")
+
+    replay = second.claim("send.invoice", {"id": "INV-1"}, scoped_to_run=False)
+    assert not replay.fresh
+    assert replay.external_id == "EXT-1"
+
+
+def test_an_unscoped_claim_refuses_while_another_run_is_uncertain(
+    store: SQLiteStorage,
+) -> None:
+    """An unresolved attempt elsewhere must block a parallel unclaimed slot."""
+    _seed_run(store, "runA")
+    _seed_run(store, "runB")
+    ActionLedger(store, "runA").claim("send.invoice", {"id": "INV-2"}, scoped_to_run=False)
+    with pytest.raises(UnknownSideEffect):
+        ActionLedger(store, "runB").claim("send.invoice", {"id": "INV-2"}, scoped_to_run=False)
+
+
+def test_a_failed_unscoped_action_in_another_run_does_not_block(
+    store: SQLiteStorage,
+) -> None:
+    """Certain failure means no effect stands in the way of this run's own slot."""
+    _seed_run(store, "runA")
+    _seed_run(store, "runB")
+    first = ActionLedger(store, "runA")
+    outcome = first.claim("send.invoice", {"id": "INV-3"}, scoped_to_run=False)
+    first.fail(outcome.key, "rejected before send", certain=True)
+
+    replay = ActionLedger(store, "runB").claim("send.invoice", {"id": "INV-3"}, scoped_to_run=False)
+    assert replay.fresh
+
+
 def test_a_resolver_that_declines_falls_back_to_refusing(
     ledger: ActionLedger,
 ) -> None:

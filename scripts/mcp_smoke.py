@@ -295,7 +295,7 @@ def main() -> int:
                 print(paint(f"    - {failure}", RED))
             return 1
         print(paint("  SMOKE TEST PASSED", BOLD + GREEN))
-        print(paint("    handshake ok · 9 tools · progress durable ·", GREEN))
+        print(paint(f"    handshake ok · {len(tools)} tools · progress durable ·", GREEN))
         print(paint("    side effect performed exactly once ·", GREEN))
         print(paint("    agent-reported state correctly withheld from 'resume'", GREEN))
         return 0

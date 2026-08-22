@@ -58,6 +58,31 @@ from continuum.models import Action, ActionStatus, UnknownSideEffect, utcnow
 from continuum.security.hashing import stable_hash
 from continuum.storage.base import Storage
 
+_ACTION_EVENT_TYPES = (
+    EventType.ACTION_RECORDED,
+    EventType.ACTION_RECONCILED,
+    EventType.ACTION_COMPENSATED,
+)
+
+
+def fold_action_events(events: Any) -> dict[str, Action]:
+    """Fold action events into ``{key: Action}``, last write per key wins.
+
+    Shared by :meth:`ActionLedger._replay` and the cross-run scan behind
+    unscoped claims so both read the log with identical semantics.
+    """
+    actions: dict[str, Action] = {}
+    for event in events:
+        if event.type not in _ACTION_EVENT_TYPES:
+            continue
+        payload = dict(event.payload)
+        key = str(payload.get("key", ""))
+        if not key:
+            continue
+        actions[key] = Action.model_validate(payload["action"])
+    return actions
+
+
 __all__ = [
     "ActionLedger",
     "ActionOutcome",
@@ -225,20 +250,29 @@ class ActionLedger:
 
     def _replay(self) -> dict[str, Action]:
         """Rebuild the ledger by folding action events. Cheap and verifiable."""
-        actions: dict[str, Action] = {}
-        for event in self.storage.read_events(self.run_id):
-            if event.type not in (
-                EventType.ACTION_RECORDED,
-                EventType.ACTION_RECONCILED,
-                EventType.ACTION_COMPENSATED,
-            ):
+        return fold_action_events(self.storage.read_events(self.run_id))
+
+    def _foreign_action(self, key: str) -> Action | None:
+        """Find ``key`` in another run's ledger, for unscoped claims.
+
+        An unscoped idempotency key carries no run prefix, so the same key is
+        directly comparable across runs. When a claim declares itself
+        run-global (``scoped_to_run=False``), honouring that promise requires
+        looking at every other run in the store before opening a fresh slot,
+        not just this run's log. Returns the most recent action recorded under
+        ``key`` outside this run, or None. The scan reads each run's events
+        once, so it costs O(total logged events) and is only paid on the
+        unscoped path after the local lookup missed.
+        """
+        found: Action | None = None
+        for run in self.storage.list_runs():
+            if run.run_id == self.run_id:
                 continue
-            payload = dict(event.payload)
-            key = str(payload.get("key", ""))
-            if not key:
-                continue
-            actions[key] = Action.model_validate(payload["action"])
-        return actions
+            folded = fold_action_events(self.storage.read_events(run.run_id))
+            candidate = folded.get(key)
+            if candidate is not None:
+                found = candidate
+        return found
 
     def get(self, key: str) -> Action | None:
         return self._replay().get(key)
@@ -385,6 +419,11 @@ class ActionLedger:
         ``fresh=False`` with the stored result when the action already
         completed.
 
+        With ``scoped_to_run=False`` the key carries no run prefix and is
+        honoured store-wide: a completed record in any run deduplicates the
+        claim, and an unresolved attempt in another run raises
+        ``UnknownSideEffect`` rather than opening a parallel slot (issue 34).
+
         Raises ``UnknownSideEffect`` when a previous attempt was interrupted and
         its real-world outcome cannot be determined, unless ``on_unknown``
         resolves it.
@@ -399,6 +438,27 @@ class ActionLedger:
         )
         key = idem
         existing = self.get(key)
+
+        if existing is None and not scoped_to_run:
+            # The local log has no such action, but an unscoped key claims
+            # global identity: another run may already hold it (issue 34).
+            foreign = self._foreign_action(key)
+            if foreign is not None:
+                if foreign.status is ActionStatus.COMPLETED:
+                    # The effect already happened under this identity, wherever
+                    # it happened. Report it instead of duplicating it.
+                    return ActionOutcome(key=key, action=foreign, fresh=False)
+                if foreign.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
+                    # Another run is mid-flight on the same identity and this
+                    # ledger cannot reconcile a foreign record (its outcome
+                    # belongs to that run's log), so refuse rather than guess.
+                    raise UnknownSideEffect(
+                        f"action {foreign.action_type!r} (key {key[:12]}...) has an "
+                        f"unresolved attempt recorded by another run; reconcile "
+                        f"that run before claiming the same unscoped identity."
+                    )
+                # FAILED or COMPENSATED elsewhere means no live effect stands
+                # in the way; this run may open its own slot.
 
         if existing is None and not explicit_key:
             # No explicit key was supplied (the caller did not assert an

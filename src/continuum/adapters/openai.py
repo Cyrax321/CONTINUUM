@@ -148,9 +148,11 @@ class OpenAIAgentAdapter(GenericAgentAdapter):
         storage: Storage,
         *,
         state_to_semantic: Callable[[ContinuumContext], SemanticState] | None = None,
+        auto_file: str | None = None,
+        auto_total: int | None = None,
     ) -> None:
         _ensure_openai_agents()
-        super().__init__(storage)
+        super().__init__(storage, auto_file=auto_file, auto_total=auto_total)
         self._state_to_semantic = state_to_semantic
 
     def wrap_function_tool(

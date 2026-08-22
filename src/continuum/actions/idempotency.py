@@ -107,11 +107,15 @@ def idempotency_key(
     same logical operation do not deduplicate against each other within that
     ledger. A narrower scope (for example, a run id) is what most callers want.
 
-    Note: ``scope`` only shapes the derived key. The ``ActionLedger`` is bound to
-    a single run and only replays that run's events, so it cannot enforce
-    uniqueness across runs on its own. ``scoped_to_run=False`` widens the key but
-    does not make the store consult other runs; cross-run global uniqueness
-    would require a store-wide lookup that is not yet implemented.
+    ``scope`` narrows the key, typically to a run, so two runs performing the
+    same logical operation do not deduplicate against each other within that
+    ledger. A narrower scope (for example, a run id) is what most callers want.
+
+    Note: ``scope`` only shapes the derived key. With the default per-run scope
+    the key is unique to that run. With ``scope=None`` (``scoped_to_run=False``)
+    the key is store-global and ``ActionLedger.claim`` consults every run's log,
+    so a completed record anywhere deduplicates the claim and an unresolved
+    attempt elsewhere raises instead of opening a parallel slot (issue 34).
 
     ``key`` overrides argument hashing entirely, in the style of Stripe's
     ``Idempotency-Key``. Argument hashing assumes identical arguments mean the

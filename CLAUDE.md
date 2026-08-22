@@ -29,6 +29,11 @@ For instant detection without waiting for a user message, install
 `continuum resume --json` out of band and injects the banner before the model
 starts, so no inference is spent on detection.
 
+When `continuum_resume` returns `tail_evidence`, use that tail to match
+style for the next section. Do not re read the whole file unless the
+validator reports the file as stale. The file stays as ground truth for
+content, the tail is just a cache for style.
+
 ## While working, progress is recorded automatically
 
 Durability is handled by an auto checkpoint hook that calls

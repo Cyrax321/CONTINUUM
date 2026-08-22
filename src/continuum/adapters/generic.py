@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -81,20 +82,13 @@ class GenericAgentAdapter(AgentAdapter):
         # to invalidate. Mirrors the MCP server and serve sidecar (issue #25).
         if environment is not None:
             self._declare_dependencies(run_id, environment)
+        # Auto mode: the file is ground truth for progress. The derived events
+        # are appended before the checkpoint so the checkpoint captures them,
+        # and record_file_progress is a no-op when the count is unchanged.
         if self.auto_file is not None and self.auto_total is not None:
-            from pathlib import Path
+            from continuum.hooks import record_file_progress
 
-            from continuum.events import EventType as _EventType
-            from continuum.hooks import count_sections as _count_sections
-            from continuum.models import Origin as _Origin
-
-            completed = _count_sections(Path(self.auto_file))
-            self.storage.append_event(
-                run_id,
-                _EventType.TASK_UPDATED,
-                {"completed": completed, "total": self.auto_total},
-                source=_Origin.EXTERNAL_AGENT,
-            )
+            record_file_progress(self.manager, run_id, self.auto_file, self.auto_total)
             # Reproject so the checkpoint captures the derived progress
             state = project(run_id, self.storage.read_events(run_id))
         return self.manager.checkpoint(
@@ -227,7 +221,29 @@ class GenericAgentAdapter(AgentAdapter):
         needs_envelope = not isinstance(val, dict) or RESULT_ENVELOPE_KEY in val
         result_dict = {RESULT_ENVELOPE_KEY: val} if needs_envelope else val
         ledger.complete(outcome.key, result=result_dict)
+        self._auto_progress(run_id)
         return val
+
+    def _auto_progress(self, run_id: str) -> None:
+        """Fire the opt-in auto hooks after a turn without blocking the caller.
+
+        Mirrors the file into the log when the derived count changed (cheap:
+        one small read plus an event-log comparison), then lets the policy
+        decide whether a checkpoint write is due. The write itself goes to the
+        shared background executor, so the agent's turn is never blocked on
+        SQLite I/O. This is what makes durability automatic for every harness
+        using the adapter: no model tool call and no prompt mention of
+        CONTINUUM required (issue 191).
+        """
+        if self.auto_file is None or self.auto_total is None:
+            return
+        from continuum.hooks import make_async_file_derived_progress_hook
+
+        hook = make_async_file_derived_progress_hook(
+            self.manager, run_id, self.auto_file, self.auto_total
+        )
+        with contextlib.suppress(Exception):  # durability must never break the turn
+            hook()
 
     def resume(
         self,
