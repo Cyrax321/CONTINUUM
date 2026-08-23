@@ -129,7 +129,9 @@ def render_run_detail_html(storage: Storage, run_id: str) -> str:
 <p><a href=\"/\">Back to dashboard</a></p></body></html>"""
 
 
-def serve_dashboard(storage: Storage, port: int = 8000) -> None:
+def serve_dashboard(
+    storage: Storage, port: int = 8000, host: str = "127.0.0.1"
+) -> None:
     import urllib.parse
 
     from continuum.dashboard.hitl import (
@@ -215,6 +217,6 @@ def serve_dashboard(storage: Storage, port: int = 8000) -> None:
 
     server_class = socketserver.ThreadingTCPServer
     server_class.allow_reuse_address = True
-    with server_class(("", port), Handler) as httpd:
-        print(f"Serving dashboard at http://localhost:{port}")
+    with socketserver.ThreadingTCPServer((host, port), Handler) as httpd:
+        print(f"Serving dashboard at http://{host}:{port}")
         httpd.serve_forever()

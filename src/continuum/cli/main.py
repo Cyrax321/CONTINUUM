@@ -2013,12 +2013,17 @@ def build_parser() -> argparse.ArgumentParser:
         from continuum.dashboard import serve_dashboard as _serve
 
         print(f"Serving dashboard at http://localhost:{args.port}", file=out)
-        _serve(storage, port=args.port)
+        _serve(storage, port=args.port, host=args.host)
         return 0
 
     dashboard = add("dashboard", cmd_dashboard, "Serve the dashboard (presentation over run data).")
     dashboard.add_argument(
         "--port", type=int, default=8000, help="port to listen on (default: 8000)"
+    )
+    dashboard.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="bind address (default: 127.0.0.1; 0.0.0.0 exposes recovery data)",
     )
 
     return parser
