@@ -64,7 +64,40 @@ ruff format --check src/ tests/
 mypy src/continuum
 ```
 
-The CI pipeline runs all three on every PR. A clean PR must pass all checks.
+The CI pipeline runs all three on every PR. A clean PR must pass all checks.  
+### Pre-commit hooks (optional but recommended)
+
+To catch lint and formatting issues automatically before you commit, you can use
+[pre-commit](https://pre-commit.com/):
+
+```bash
+pip install pre-commit
+```
+
+Create a `.pre-commit-config.yaml` in the repo root with:
+
+```yaml
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.3
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+```
+
+Then install the git hook:
+
+```bash
+pre-commit install
+```
+
+Now `ruff check --fix` and `ruff format` will run automatically on every `git commit`.
+To run it manually against all files:
+
+```bash
+pre-commit run --all-files
+```  
 
 ---
 
