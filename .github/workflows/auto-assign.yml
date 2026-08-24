@@ -1,22 +1,76 @@
 name: Auto Assign
 
 on:
-  pull_request:
+  # pull_request_target, not pull_request: fork contributions must get a
+  # writable token. Under plain pull_request GitHub downgrades GITHUB_TOKEN
+  # to read-only for forks and the assignee call fails with
+  # "Resource not accessible by integration" (403), which is what happened
+  # on #340. The script below never executes code from the PR: it is inline
+  # in this file and only talks to the assignees API, so the usual
+  # pull_request_target risk does not apply here.
+  pull_request_target:
     types: [opened]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Issue or PR number to assign to the owner"
+        required: true
+        type: string
+
+concurrency:
+  group: auto-assign-${{ github.event.pull_request.number || inputs.issue_number }}
+  cancel-in-progress: false
 
 jobs:
   assign:
     runs-on: ubuntu-latest
     permissions:
+      issues: write
       pull-requests: write
     steps:
-      - name: Assign PR to owner
+      - name: Assign to owner
         uses: actions/github-script@v9
+        env:
+          ISSUE_NUMBER: ${{ github.event.pull_request.number || inputs.issue_number }}
         with:
           script: |
-            await github.rest.issues.addAssignees({
+            const issue = Number(process.env.ISSUE_NUMBER);
+            const assignee = 'Cyrax321';
+            if (!Number.isInteger(issue) || issue <= 0) {
+              core.warning(`No valid issue number resolved (${JSON.stringify(process.env.ISSUE_NUMBER)}); nothing to do.`);
+              return;
+            }
+
+            // Assigning a non-collaborator is a guaranteed 422; check first.
+            const { data: assignable } = await github.rest.issues.listAssignees({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
-              assignees: ['Cyrax321'],
             });
+            if (!assignable.some((u) => u.login === assignee)) {
+              core.setFailed(`${assignee} is not an assignable user on this repository.`);
+              return;
+            }
+
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                await github.rest.issues.addAssignees({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue,
+                  assignees: [assignee],
+                });
+                core.info(`Assigned ${assignee} to #${issue}.`);
+                return;
+              } catch (err) {
+                const status = err.status ?? err.response?.status;
+                // Already assigned is the desired end state.
+                if (status === 422) {
+                  core.info(`#${issue} already carries ${assignee}; nothing to do.`);
+                  return;
+                }
+                if (attempt === 3) throw err;
+                // Secondary rate limits surface as transient 403s; back off.
+                core.warning(`Attempt ${attempt} failed (status ${status}); retrying.`);
+                await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
+              }
+            }

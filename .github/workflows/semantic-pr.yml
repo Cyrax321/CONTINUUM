@@ -1,21 +1,27 @@
 name: Semantic PR Title
 
 on:
-  pull_request:
+  # pull_request_target, not pull_request: fork contributions need a writable
+  # token to post the guidance comment below. The workflow never executes code
+  # from the PR; it only validates the title string and talks to the API.
+  pull_request_target:
     types:
       - opened
       - edited
       - reopened
       - synchronize
 
+permissions:
+  issues: write
+  pull-requests: write
+
 jobs:
   title-check:
     runs-on: ubuntu-latest
-    permissions:
-      pull-requests: read
-      statuses: write
     steps:
-      - uses: amannn/action-semantic-pull-request@v6
+      - id: lint
+        continue-on-error: true
+        uses: amannn/action-semantic-pull-request@v6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -34,3 +40,93 @@ jobs:
           requireScope: false
           disallowScopes: |
             [name:none]
+
+      # Guidance instead of a red X. External contributors kept tripping the
+      # case-sensitive check ("Fix:" vs "fix"), and the failing check carried
+      # no actionable feedback. Post one comment with the exact expected shape
+      # and a corrected title they can copy; keep the job green either way.
+      - name: Explain the convention
+        if: steps.lint.outcome == 'failure'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const MARKER = '<!-- semantic-title-help -->';
+            const KNOWN = ['feat', 'fix', 'docs', 'style', 'refactor', 'perf', 'test', 'build', 'ci', 'chore', 'revert'];
+            const title = context.payload.pull_request.title;
+
+            // Derive a conventional title from what was submitted: lowercase
+            // a recognised leading type, otherwise propose fix: <title>.
+            let suggestion = `fix: ${title}`;
+            const head = title.match(/^\s*([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.+)$/);
+            if (head && KNOWN.includes(head[1].toLowerCase())) {
+              suggestion = `${head[1].toLowerCase()}: ${head[2]}`;
+            }
+
+            const body = [
+              MARKER,
+              '### Pull request title convention',
+              '',
+              'This repository uses [Conventional Commits](https://www.conventionalcommits.org/) style titles:',
+              '',
+              '```',
+              'type(optional-scope): short description',
+              '```',
+              '',
+              `Allowed types: ${KNOWN.join(', ')}. The check is case sensitive, so \`Fix:\` does not match \`fix\`.`,
+              '',
+              '**Your title**',
+              '',
+              `\`${title}\``,
+              '',
+              '**Suggested replacement**',
+              '',
+              `\`${suggestion}\``,
+              '',
+              'Edit the title via the "..." menu next to it; this comment updates itself once the title conforms.',
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+            const existing = comments.find((c) => c.body && c.body.includes(MARKER));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body,
+              });
+            }
+            core.info(`Title does not conform; guidance posted (${JSON.stringify(title)}).`);
+
+      # Once the title conforms, remove stale guidance so the thread stays clean.
+      - name: Withdraw stale guidance
+        if: steps.lint.outcome == 'success'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const MARKER = '<!-- semantic-title-help -->';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+            for (const c of comments.filter((c) => c.body && c.body.includes(MARKER))) {
+              await github.rest.issues.deleteComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: c.id,
+              });
+            }
