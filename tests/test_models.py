@@ -221,6 +221,5 @@ def test_versions_increase_monotonically(steps: int) -> None:
         (Origin.IMPORTED, True),
     ],
 )
-def test_self_certified_truth_table(origin, expected) -> None:
+def test_self_certified_truth_table(origin: Origin, expected: bool) -> None:
     assert origin.self_certified is expected
-    
