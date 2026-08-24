@@ -94,6 +94,10 @@ def test_backoff_delay_is_exponential_with_cap() -> None:
     with pytest.raises(ValueError):
         backoff_delay(0)
 
+def test_backoff_delay_rejects_zero() -> None:
+    with pytest.raises(ValueError, match="got 0"):
+        backoff_delay(0)
+
 
 # --- enforcement through the real ledger path --------------------------------------- #
 

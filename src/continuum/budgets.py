@@ -127,5 +127,5 @@ def backoff_delay(
 ) -> float:
     """Exponential backoff with a ceiling. Pure; jitter is the caller's job."""
     if attempt < 1:
-        raise ValueError("attempt starts at 1")
+        raise ValueError(f"attempt must be >= 1, got {attempt}")
     return float(min(base * (2 ** (attempt - 1)), cap))
