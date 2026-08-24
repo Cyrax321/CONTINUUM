@@ -23,7 +23,6 @@ from continuum.models import (
     SemanticState,
     StateCheckpoint,
     StateStatus,
-    
 )
 from continuum.security.hashing import stable_hash
 
@@ -224,3 +223,4 @@ def test_versions_increase_monotonically(steps: int) -> None:
 )
 def test_self_certified_truth_table(origin, expected) -> None:
     assert origin.self_certified is expected
+    
