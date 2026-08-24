@@ -17,11 +17,13 @@ from continuum.models import (
     Goal,
     ModelSpecificState,
     ModelState,
+    Origin,
     PendingWork,
     Progress,
     SemanticState,
     StateCheckpoint,
     StateStatus,
+    
 )
 from continuum.security.hashing import stable_hash
 
@@ -205,3 +207,20 @@ def test_versions_increase_monotonically(steps: int) -> None:
         versions.append(state.version)
     assert versions == sorted(versions)
     assert versions[-1] == steps
+
+
+# --- provenance ------------------------------------------------------------ #
+
+
+@pytest.mark.parametrize(
+    "origin,expected",
+    [
+        (Origin.DETERMINISTIC, False),
+        (Origin.HUMAN, False),
+        (Origin.LLM, True),
+        (Origin.EXTERNAL_AGENT, True),
+        (Origin.IMPORTED, True),
+    ],
+)
+def test_self_certified_truth_table(origin, expected) -> None:
+    assert origin.self_certified is expected
