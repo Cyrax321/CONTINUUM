@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Wheel artifacts on every push to main (#279).** Wheels were built only on
+  release tags, so testing current `main` meant cloning it. The CI workflow
+  gains a `build-wheel` job that runs on pushes to `main` in the canonical
+  repository: `uv build`, then a smoke test that installs the fresh wheel into
+  a clean virtualenv and runs `continuum --version` before the `dist/` output
+  is uploaded as a workflow artifact. Tag and release behaviour is unchanged.
+
 - **Semantic replay-or-fork at the tool boundary (#291).** Exact key
   matching fails when an LLM renders the same intent with different argument
   text. New `replay_similarity` module adds three comparison backends (exact,
@@ -706,6 +713,10 @@ All notable changes to this project are documented here. The format follows
   earlier; the Postgres backend's tests skip without `CONTINUUM_TEST_POSTGRES_DSN`).
 
 ### Fixed
+
+- **Em dash in the CI lint job name.** The `mypy` step in `ci.yml` was named
+  with an em dash, violating the no-em-dash house rule (#266); renamed with a
+  comma. Found while editing the file for the wheel-artifact job.
 
 - **Anchored verification trusted the first live row of a compacted run
   (PR #253 review, security).** After compaction, `verify_events` checked
