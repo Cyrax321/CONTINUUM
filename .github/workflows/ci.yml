@@ -112,7 +112,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # persist-credentials: false keeps the GITHUB_TOKEN out of the local git
+      # config; nothing in this job talks to git after checkout.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v7.0.0
