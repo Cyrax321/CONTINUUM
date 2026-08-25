@@ -64,7 +64,8 @@ ruff format --check src/ tests/
 mypy src/continuum
 ```
 
-The CI pipeline runs all three on every PR. A clean PR must pass all checks.  
+The CI pipeline runs all three on every PR. A clean PR must pass all checks.
+
 ### Pre-commit hooks (optional but recommended)
 
 To catch lint and formatting issues automatically before you commit, you can use
@@ -89,35 +90,43 @@ repos:
 Then install the git hook:
 
 ```bash
+pre-commit install
+```
+
+Now `ruff check --fix` and `ruff format` will run automatically on every `git commit`.
+
+To run it manually against all files:
+
+```bash
 pre-commit run --all-files
 ```
 
 **Note on mypy:** mypy is intentionally not included in this pre-commit setup.
 Pre-commit hooks run in isolated environments without the project's installed
-dependencies, so mypy would produce inaccurate results there. Instead, mypy
-runs in CI (`mypy src/continuum`, strict mode) against a full environment with
-all dev dependencies installed. Always check `mypy` locally with `pip install
--e ".[dev]"` completed, or rely on the CI check on your PR.
+dependencies, so a mypy hook there would produce inaccurate results. Instead,
+mypy runs in CI (`mypy src/continuum`, strict mode) against a full environment.
+To check locally, run `pip install -e ".[dev]"` once, then run `mypy
+src/continuum` yourself - or rely on the CI check on your PR.
 
 ---
+
 ## Project Structure
 
-```
 src/continuum/
-├── __init__.py          # Public API surface
-├── models.py            # Immutable Pydantic data models
-├── events.py            # Append-only event log
-├── actions/             # Action ledger (idempotency + reconciliation)
-├── checkpoint/          # Checkpoint manager + policies
-├── environment/         # Environment snapshot + diff
-├── recovery/            # Recovery engine + repair planner
-├── security/            # Content hashing, ID generation
-├── state/               # State projection, extraction, diffing, validation
-└── storage/             # Storage interface + SQLite engine
+├── init.py # Public API surface
+├── models.py # Immutable Pydantic data models
+├── events.py # Append-only event log
+├── actions/ # Action ledger (idempotency + reconciliation)
+├── checkpoint/ # Checkpoint manager + policies
+├── environment/ # Environment snapshot + diff
+├── recovery/ # Recovery engine + repair planner
+├── security/ # Content hashing, ID generation
+├── state/ # State projection, extraction, diffing, validation
+└── storage/ # Storage interface + SQLite engine
 
-tests/                   # Mirrors src/continuum/ structure
-docs/                    # Website (deployed to GitHub Pages)
-```
+tests/ # Mirrors src/continuum/ structure
+docs/ # Website (deployed to GitHub Pages)
+
 
 ---
 
