@@ -5,7 +5,7 @@
   "framework": null,
   "git": {
     "deploymentEnabled": {
-      "*": false,
+      "**": false,
       "main": true
     }
   }
