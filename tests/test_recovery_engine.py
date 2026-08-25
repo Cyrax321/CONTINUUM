@@ -25,6 +25,7 @@ from continuum.recovery import (
     render_contract,
     verify_contract,
 )
+from continuum.recovery.guidance import human_steps_for
 from continuum.storage import SQLiteStorage
 
 
@@ -504,3 +505,112 @@ def test_self_certified_runs_are_confirmable(store: SQLiteStorage) -> None:
     assert all(
         e.status is not StateStatus.REQUIRES_REVIEW for e in confirmed.validation.report.statuses
     )
+
+
+# --- unprojectable logs (issue #383) ---------------------------------------- #
+
+
+def test_an_unprojectable_log_requests_a_human_and_names_the_break(store: SQLiteStorage) -> None:
+    """A poisoned log must produce a verdict, not a pydantic traceback.
+
+    The action tools fold only ACTION_* events, so a run whose projection is
+    dead can still authorise real side effects. Recovery has to be able to say
+    what is known, where the log stops folding, and that continuing is not a
+    decision software may take.
+    """
+    seed(store)
+    store.append_event("run_1", EventType.TASK_UPDATED, {"completed": 999, "failed": 0})
+
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v3"))
+
+    assert decision.mode is not RecoveryMode.RESUME
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    assert not decision.safe
+    assert decision.contract.recovery_status is RecoverySafety.REQUIRES_HUMAN
+    assert "stops folding at sequence" in " ".join(decision.rationale)
+    # The verdict covers the last-good prefix only, and says so.
+    state = decision.state
+    assert state.status is StateStatus.INVALID
+    assert state.unprojectable_at_sequence == 26
+    assert state.source_sequence == 24
+
+
+def test_the_contract_names_the_break_as_a_required_action(store: SQLiteStorage) -> None:
+    """The structured artifact must carry the break, not just the prose.
+
+    With an empty plan the contract read required_actions=[] and fell through
+    to "continue" over a requires_human verdict (#385 review): prose and
+    structure disagreeing, with a machine reader most likely to act on the
+    structure.
+    """
+    seed(store)
+    store.append_event("run_1", EventType.TASK_UPDATED, {"completed": 999, "failed": 0})
+
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v3"))
+
+    steps = decision.plan.of_kind(RepairKind.REPAIR_LOG)
+    assert len(steps) == 1
+    assert steps[0].target == "sequence_26"
+    assert steps[0].requires_human
+    assert decision.next_allowed_action == "repair_log:sequence_26"
+    assert decision.plan.steps[0] is steps[0], "the unreadable log sorts first"
+    assert decision.contract.required_actions[0] == "repair_log:sequence_26"
+    assert decision.contract.next_allowed_action == "repair_log:sequence_26"
+
+
+def test_the_degraded_contract_does_not_claim_unqualified_verification(
+    store: SQLiteStorage,
+) -> None:
+    """verified entries were checked against the last-good prefix only."""
+    seed(store)
+    store.append_event("run_1", EventType.TASK_UPDATED, {"completed": 999, "failed": 0})
+
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v3"))
+    contract = decision.contract
+
+    assert all(e.startswith("goal (through sequence 24)") for e in contract.verified if e == "goal")
+    assert any("projection (invalid" in e for e in contract.invalidated)
+    assert any("projection stopped at sequence 26" in e for e in contract.evidence)
+    assert verify_contract(contract)
+
+
+def test_rendered_output_never_offers_continue_on_a_broken_log(store: SQLiteStorage) -> None:
+    """'continue' over requires_human reads as permission the gate never gave."""
+    seed(store)
+    store.append_event("run_1", EventType.TASK_UPDATED, {"completed": 999, "failed": 0})
+
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v3"))
+    rendered = render_contract(decision.contract)
+
+    assert "continue" not in rendered
+    assert "next_allowed:      repair_log:sequence_26" in rendered
+    assert "Next permitted action: continue" not in decision.render()
+    assert "Next permitted action: repair_log:sequence_26" in decision.render()
+
+
+def test_guidance_names_the_break_instead_of_the_generic_fallback(store: SQLiteStorage) -> None:
+    seed(store)
+    store.append_event("run_1", EventType.TASK_UPDATED, {"completed": 999, "failed": 0})
+
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v3"))
+    steps = human_steps_for(decision, run_id="run_1")
+
+    assert any("stops folding at sequence_26" in s for s in steps)
+    assert not any("nothing further is automatable" in s for s in steps)
+
+
+def test_a_healthy_log_still_resumes_with_degrade_wired_in(store: SQLiteStorage) -> None:
+    """The engine now folds with degrade enabled everywhere; a sound log must
+    be untouched by that."""
+    seed(store)
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v3"))
+
+    assert decision.mode is RecoveryMode.RESUME
+    assert decision.safe
+    assert decision.state.status is StateStatus.VALID
+    assert decision.state.unprojectable_at_sequence is None
+    # Healthy contracts keep their exact shape: bare verified names, no
+    # projection entry, and "continue" remains correct under SAFE_TO_RESUME.
+    assert decision.contract.verified == ["external_dependency:dataset", "goal", "progress"]
+    assert decision.contract.invalidated == []
+    assert "next_allowed:      continue" in render_contract(decision.contract)

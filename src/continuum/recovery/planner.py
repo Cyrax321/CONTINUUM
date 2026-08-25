@@ -40,6 +40,11 @@ class RepairKind(StrEnum):
     RECONCILE_ACTION = "reconcile_action"
     """Determine whether an external side effect actually happened."""
 
+    REPAIR_LOG = "repair_log"
+    """Correct or authorise the event whose refusal stopped the log folding
+    (issue #383). No automated surface can settle it yet; it is a human step
+    by construction until a repair/amend command exists."""
+
     REVALIDATE_DEPENDENCY = "revalidate_dependency"
     """Re-pin a dependency whose version moved."""
 
@@ -62,17 +67,20 @@ class RepairKind(StrEnum):
     """Something no automated step can settle."""
 
 
-#: Lower sorts earlier. Uncertain side effects first: nothing else is safe
-#: while the world may or may not have been modified.
+#: Lower sorts earlier. An unreadable log first: until the fold can run again,
+#: nothing else about the run can even be assessed, including whether any
+#: other repair did what it claimed. Uncertain side effects come next: nothing
+#: else is safe while the world may or may not have been modified.
 _ORDER: dict[RepairKind, int] = {
-    RepairKind.RECONCILE_ACTION: 0,
-    RepairKind.HUMAN_REVIEW: 1,
-    RepairKind.RENEW_APPROVAL: 2,
-    RepairKind.REVALIDATE_DEPENDENCY: 3,
-    RepairKind.REVALIDATE_MODEL_STATE: 4,
-    RepairKind.REDERIVE_EVIDENCE: 5,
-    RepairKind.REDERIVE_FINDING: 6,
-    RepairKind.REVIEW_DECISION: 7,
+    RepairKind.REPAIR_LOG: 0,
+    RepairKind.RECONCILE_ACTION: 1,
+    RepairKind.HUMAN_REVIEW: 2,
+    RepairKind.RENEW_APPROVAL: 3,
+    RepairKind.REVALIDATE_DEPENDENCY: 4,
+    RepairKind.REVALIDATE_MODEL_STATE: 5,
+    RepairKind.REDERIVE_EVIDENCE: 6,
+    RepairKind.REDERIVE_FINDING: 7,
+    RepairKind.REVIEW_DECISION: 8,
 }
 
 
@@ -194,6 +202,7 @@ def plan_repairs(
     *,
     uncertain_actions: Sequence[Action] = (),
     strict_unknown: bool = True,
+    unprojectable: tuple[int, str, str] | None = None,
 ) -> RepairPlan:
     """Build an ordered repair plan from validation findings and ledger state.
 
@@ -201,8 +210,26 @@ def plan_repairs(
     the work that depends on them. Sorting is stable and total, so the same
     inputs always yield the same plan — a contract that varied between runs
     would be impossible to audit.
+
+    ``unprojectable`` is ``(sequence, event_type, reason)`` for a log whose fold
+    stops partway (issue #383). Without it the plan would be empty on a poisoned
+    run whose last-good prefix validates cleanly, and a contract with no steps
+    renders ``next_allowed: continue`` over a verdict of requires_human: prose
+    and structure disagreeing, with a machine reader most likely to act on the
+    structure. The break becomes a step so required_actions names real work.
     """
     steps: list[RepairStep] = []
+
+    if unprojectable is not None:
+        sequence, event_type, reason = unprojectable
+        steps.append(
+            RepairStep(
+                kind=RepairKind.REPAIR_LOG,
+                target=f"sequence_{sequence}",
+                reason=f"{event_type} refuses to fold: {reason}",
+                requires_human=True,
+            )
+        )
 
     for action in uncertain_actions:
         if action.status not in (

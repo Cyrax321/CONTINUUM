@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from continuum.events import EventLog, EventType
 from continuum.models import ApprovalStatus, Origin, StateStatus
 from continuum.state.semantic import ProjectionError, project, project_incremental
+from continuum.state.versioning import state_fingerprint
 
 
 def started(log: EventLog, run_id: str = "run_1", total: int | None = 100) -> EventLog:
@@ -293,3 +295,101 @@ def test_dangling_evidence_is_detectable() -> None:
     )
     state = project("run_1", log.events("run_1"))
     assert state.dangling_evidence() == {"paper_404"}
+
+
+# --- degrade instead of raise (issue #383) ---------------------------------- #
+
+
+def _poisoned_log() -> EventLog:
+    """A healthy prefix plus the over-total write #364 used to allow."""
+    log = started(EventLog())
+    log.append("run_1", EventType.WORK_COMPLETED, {})
+    log.append("run_1", EventType.TASK_UPDATED, {"completed": 999, "failed": 0})
+    return log
+
+
+def test_degrade_returns_an_invalid_state_naming_the_break() -> None:
+    log = _poisoned_log()
+
+    state = project("run_1", log.events("run_1"), on_unprojectable="degrade")
+
+    assert state.status is StateStatus.INVALID
+    assert state.unprojectable_at_sequence == 3
+    assert state.unprojectable_event_type == "TASK_UPDATED"
+    assert "exceeds total" in (state.unprojectable_reason or "")
+    # The fold stops at the last good event: it does not skip and continue.
+    assert state.source_sequence == 2
+    assert state.progress.completed == 1
+    assert state.goal.description == "Analyze 100 documents"
+
+
+def test_default_mode_still_raises_the_same_error() -> None:
+    log = _poisoned_log()
+    events = log.events("run_1")
+
+    with pytest.raises(ValidationError) as explicit:
+        project("run_1", events, on_unprojectable="raise")
+    with pytest.raises(ValidationError) as implicit:
+        project("run_1", events)
+
+    # Byte-for-byte unchanged behaviour: the default is the same exception
+    # type callers see today, not a new wrapper.
+    assert type(explicit.value) is type(implicit.value)
+    assert "exceeds total" in str(implicit.value)
+
+
+def test_degrade_on_a_healthy_log_equals_the_raise_result() -> None:
+    log = started(EventLog())
+    log.append("run_1", EventType.WORK_COMPLETED, {})
+
+    raised = project("run_1", log.events("run_1"))
+    degraded = project("run_1", log.events("run_1"), on_unprojectable="degrade")
+
+    assert degraded == raised
+    assert degraded.status is StateStatus.VALID
+    assert degraded.unprojectable_at_sequence is None
+
+
+def test_two_bad_events_report_the_earliest() -> None:
+    log = started(EventLog())
+    # Both writes are individually unprojectable (each counter alone exceeds
+    # total), so wherever the fold stops it has a real choice to report.
+    log.append("run_1", EventType.TASK_UPDATED, {"completed": 999})
+    log.append("run_1", EventType.TASK_UPDATED, {"completed": 500})
+
+    state = project("run_1", log.events("run_1"), on_unprojectable="degrade")
+
+    # A repair aimed at the second break would leave the first in place, so
+    # the diagnosis must name the earliest refusal.
+    assert state.unprojectable_at_sequence == 2
+    assert state.source_sequence == 1
+
+
+def test_degrade_with_no_valid_prefix_still_raises() -> None:
+    log = EventLog()
+    log.append("run_1", EventType.TASK_UPDATED, {"completed": 1})
+
+    # "What is known up to sequence N-1" needs an N-1. With nothing foldable
+    # before the break there is no partial answer to give, and degrading into
+    # an empty-looking state would invent one.
+    with pytest.raises(ProjectionError, match="never recorded RUN_STARTED"):
+        project("run_1", log.events("run_1"), on_unprojectable="degrade")
+
+
+def test_degraded_folds_content_address_like_their_prefix() -> None:
+    """The fingerprint keeps meaning task content; status carries the warning.
+
+    put_version dedupes on this hash, so a degraded fold must not hash
+    differently from the healthy state it actually contains, and it must not
+    be distinguishable from that state by content alone, which is exactly why
+    the INVALID marker lives outside the hashed payload.
+    """
+    poisoned = started(EventLog())
+    poisoned.append("run_1", EventType.TASK_UPDATED, {"completed": 999, "failed": 0})
+    events = poisoned.events("run_1")
+
+    prefix = project("run_1", events, upto=1)
+    degraded = project("run_1", events, on_unprojectable="degrade")
+
+    assert state_fingerprint(degraded) == state_fingerprint(prefix)
+    assert degraded.status is not prefix.status

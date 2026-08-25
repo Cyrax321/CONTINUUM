@@ -59,7 +59,7 @@ from typing import TYPE_CHECKING, Any
 from continuum.actions.ledger import ActionLedger
 from continuum.adapters.generic import GenericAgentAdapter
 from continuum.environment import StaticProvider, capture
-from continuum.events import EventType
+from continuum.events import Event, EventType
 from continuum.mcp.authz import (
     CONFIRM_ENV_VAR,
     AuthorizationPolicy,
@@ -77,6 +77,7 @@ from continuum.models import (
     EnvResource,
     Origin,
     Run,
+    SemanticState,
     UnknownSideEffect,
 )
 from continuum.recovery.contract import render_contract
@@ -224,13 +225,175 @@ def _refusal_reaches_the_caller() -> Iterator[None]:
     Genuinely unexpected exceptions are deliberately not converted. Those should
     keep surfacing as unexpected, because a bug in this server is not a message
     to act on.
+
+    ``LedgerError`` belongs on the list even though it is a ``RuntimeError``
+    rather than one of the obvious refusal types. Every way the ledger raises it
+    is a deliberate answer: an identifier matching no action in either space, or
+    a settle call on an action whose status makes it a correction rather than a
+    settlement. Under mcp 2.0 its message happened to survive regardless, so the
+    omission was invisible locally; from 2.1.0 the caller was told only "Error
+    executing tool continuum_reconcile_action", which is the least useful possible
+    reply to being handed the wrong identifier (issue #367).
     """
     from mcp.server.mcpserver.exceptions import ToolError
 
+    from continuum.actions.ledger import LedgerError
+
     try:
         yield
-    except (PermissionError, ValueError, RunNotFound, MalformedRunLog) as exc:
+    except (PermissionError, ValueError, RunNotFound, MalformedRunLog, LedgerError) as exc:
         raise ToolError(str(exc)) from exc
+
+
+def _project_candidate(
+    ctx: ContinuumMCP,
+    run_id: str,
+    event_type: EventType,
+    payload: Mapping[str, Any],
+) -> tuple[SemanticState, int]:
+    """Fold the log with ``payload`` appended, without committing it (issue #364).
+
+    The write path must reject exactly what the read path rejects, and the only
+    way to know what the read path will do is to run it. Validating a field in
+    isolation is not equivalent: a payload is legal or not *relative to the
+    state it lands on*, so a guard that inspects only the arguments is blind to
+    every invariant that spans events.
+
+    ``continuum_record_progress`` demonstrated the cost of getting this wrong.
+    It appended first and projected after, so a payload the fold refused was
+    already durable when the refusal arrived. Because the fold validates each
+    intermediate state, no later event could correct it, and every projecting
+    surface for that run stayed dead permanently: ``record_progress``,
+    ``checkpoint``, ``validate`` and ``resume`` over MCP, plus ``status``,
+    ``inspect``, ``replay``, ``show-contract`` and ``briefing`` over the CLI.
+    Meanwhile the action tools kept working, so the run could still authorise
+    real side effects while recovery was unable to say whether continuing was
+    safe. That inversion is what makes an unprojectable log worse than a
+    rejected call.
+
+    The candidate event is constructed in memory rather than written and rolled
+    back. There is no transaction spanning the append here, and a rollback that
+    fails would leave behind precisely the state this prevents.
+
+    Returns the projected state and the head sequence it was validated against.
+    The caller passes that sequence to ``append_event`` as ``expected_sequence``:
+    validation and append are two statements, so a second writer can advance the
+    run in between and two individually-legal payloads can compose into a log
+    neither of them would have been allowed to produce (for example ``total=50``
+    landing between the read and the write of a ``completed=75`` that omits
+    ``total``). One run has one owner by design, but the failure being guarded
+    here is unrecoverable, so it is worth not relying on that.
+    """
+    history = list(ctx.storage.read_events(run_id))
+    head = history[-1].sequence if history else 0
+    candidate = Event(
+        run_id=run_id,
+        sequence=head + 1,
+        type=event_type,
+        payload=dict(payload),
+        source=AGENT_SOURCE,
+    )
+    try:
+        return project(run_id, [*history, candidate]), head
+    except ValueError as exc:
+        # pydantic's ValidationError is a ValueError, so this covers both the
+        # model invariants and the projector's own checks. Re-raised with the
+        # payload named, because the bare pydantic message reports the folded
+        # figures without saying which call produced them.
+        raise ValueError(
+            f"{event_type.value} {dict(payload)} would leave run {run_id!r} unprojectable "
+            f"and was not recorded: {exc}"
+        ) from exc
+
+
+def _append_projectable(
+    ctx: ContinuumMCP,
+    run_id: str,
+    event_type: EventType,
+    payload: Mapping[str, Any],
+    *,
+    attempts: int = 3,
+) -> tuple[SemanticState, Event]:
+    """Commit ``payload`` only if the fold accepts it against the state it lands on.
+
+    Retries on ``ConcurrentWriteError`` rather than failing, because losing the
+    optimistic-concurrency race says nothing about whether the caller's update is
+    valid. Re-validation against the new head is the point: the update may still
+    be legal, and if the intervening write made it illegal that is exactly what
+    the next fold reports. Bounded, so a permanently busy run answers rather than
+    spinning.
+    """
+    from continuum.storage import ConcurrentWriteError
+
+    for remaining in range(attempts - 1, -1, -1):
+        state, expected = _project_candidate(ctx, run_id, event_type, payload)
+        try:
+            event = ctx.storage.append_event(
+                run_id,
+                event_type,
+                payload,
+                expected_sequence=expected,
+                source=AGENT_SOURCE,
+            )
+        except ConcurrentWriteError:
+            if remaining:
+                continue
+            raise ValueError(
+                f"run {run_id!r} is being written concurrently and this update lost the "
+                f"race {attempts} times; nothing was recorded. One run is meant to have "
+                f"one owner at a time, so check whether another agent holds this run."
+            ) from None
+        return state, event
+    raise AssertionError("unreachable: the loop either returns or raises")
+
+
+def _declare_model(
+    ctx: ContinuumMCP,
+    run_id: str,
+    model_id: str | None,
+    provider: str | None = None,
+) -> None:
+    """Record which model is driving this run, so drift becomes detectable (#370).
+
+    ``MODEL_CHANGED`` was defined, treated as checkpoint-worthy by the trigger
+    policy, and projected into ``SemanticState.model``, but nothing anywhere in
+    the codebase ever emitted it. So the validator's model component could only
+    ever answer "no model recorded for this run, cannot compare against ...", the
+    ``expected_model`` parameter on ``continuum_resume`` and ``continuum_validate``
+    could never do anything, and ``RepairKind.REVALIDATE_MODEL_STATE`` was
+    unreachable. A parameter that cannot be satisfied is worse than an absent one,
+    because its presence implies the check is covered.
+
+    That matters more than an ordinary dead branch: a different model resuming
+    another model's work is exactly the drift the surrounding architecture exists
+    to catch, and model-specific assumptions recorded by one model are not
+    automatically sound for another.
+
+    Attached to checkpointing rather than to progress because it is the same kind
+    of statement as ``env``: here is what the world looked like when this state was
+    saved. Recorded as ``EXTERNAL_AGENT``, since an agent naming its own model is
+    self-reporting, but the *comparison* against a later ``expected_model`` stays
+    independent of that claim, exactly as it does for declared dependencies.
+
+    Only appended when the value actually changes, so an agent checkpointing on a
+    schedule does not add an identical event each time. ``provider`` carries
+    forward when omitted, so naming the model alone cannot silently erase a
+    provider recorded earlier.
+    """
+    if not model_id:
+        return
+    current = project(run_id, ctx.storage.read_events(run_id)).model
+    recorded_model = current.model if current else None
+    recorded_provider = current.provider if current else None
+    settled_provider = provider if provider is not None else recorded_provider
+    if recorded_model == model_id and recorded_provider == settled_provider:
+        return
+    ctx.storage.append_event(
+        run_id,
+        EventType.MODEL_CHANGED,
+        {"model": model_id, "provider": settled_provider},
+        source=AGENT_SOURCE,
+    )
 
 
 def _environment(run_id: str, env: Mapping[str, str] | None) -> EnvironmentSnapshot | None:
@@ -536,9 +699,14 @@ def build_server(
         """Record progress for a run."""
         # Reject impossible counters before anything is written, including the
         # run itself: a rejected call must not leave behind a runs row and a
-        # RUN_STARTED event (issue #203). The `Progress` model enforces the
-        # arithmetic at projection time; checking here keeps the bad value out
-        # of the event log in the first place.
+        # RUN_STARTED event (issue #203).
+        #
+        # These two checks are kept even though `_project_candidate` below would
+        # catch the same states, because they can answer without touching
+        # storage and they name the offending argument rather than the folded
+        # figures. They are not sufficient on their own: `total` is only known
+        # here when the caller passes it, and a call that omits it is still
+        # bounded by the `total` already on record (issue #364).
         if completed < 0 or failed < 0:
             raise ValueError("progress counters must be non-negative")
         if total is not None and completed + failed > total:
@@ -548,9 +716,13 @@ def build_server(
         if total is not None:
             payload["total"] = total
             payload["pending"] = max(total - completed - failed, 0)
-        ctx.storage.append_event(run_id, EventType.TASK_UPDATED, payload, source=AGENT_SOURCE)
 
-        state = project(run_id, ctx.storage.read_events(run_id))
+        # Fold with this payload appended before committing it, and commit under
+        # optimistic concurrency so the validated state is the one it lands on.
+        # Appending first and projecting after leaves a rejected event
+        # permanently in the log, which no later event can correct (issue #364).
+        state, event = _append_projectable(ctx, run_id, EventType.TASK_UPDATED, payload)
+
         return _json(
             {
                 "run_id": run_id,
@@ -558,7 +730,10 @@ def build_server(
                 "pending": state.progress.pending,
                 "failed": state.progress.failed,
                 "total": state.progress.total,
-                "source_sequence": state.source_sequence,
+                # From the committed event rather than the candidate: the two
+                # agree because the append is guarded by expected_sequence, and
+                # reporting the real sequence keeps the answer honest regardless.
+                "source_sequence": event.sequence,
             }
         )
 
@@ -570,7 +745,10 @@ def build_server(
             "Save a durable checkpoint of the current task state. Worth doing at "
             "milestones, before risky or irreversible steps, and before a long gap. "
             "Recovery replays from the newest checkpoint, so checkpointing bounds "
-            "how much work a crash can cost."
+            "how much work a crash can cost.\n\n"
+            "Pass 'model_id' with your own model identifier. It is what later lets "
+            "continuum_resume answer whether the model resuming this work is the one "
+            "that produced it; without it that check can only report 'unknown'."
         ),
         annotations=mutating,
     )
@@ -579,10 +757,13 @@ def build_server(
         run_id: str,
         reason: str = "",
         env: dict[str, str] | None = None,
+        model_id: str | None = None,
+        provider: str | None = None,
     ) -> str:
         """Create a semantic checkpoint."""
         ctx.ensure_run(run_id)
         _declare_dependencies(ctx, run_id, env)
+        _declare_model(ctx, run_id, model_id, provider)
         state = project(run_id, ctx.storage.read_events(run_id))
         checkpoint = ctx.adapter.capture_state(
             run_id,
@@ -597,6 +778,7 @@ def build_server(
                 "version": checkpoint.version,
                 "trigger": checkpoint.trigger,
                 "integrity_hash": checkpoint.integrity_hash,
+                "model": state.model.model if state.model else None,
                 "completed": checkpoint.state.progress.completed,
                 "source_sequence": checkpoint.state.source_sequence,
             }
@@ -770,6 +952,12 @@ def build_server(
             probed_types=probed,
             gate_configured=Path(DEFAULT_GATE_CONFIG_PATH).exists(),
         )
+        # `next_allowed_action` and the plan name actions by `action_id`, which
+        # the settle tools accept only since #367. Carry the ledger key too, so a
+        # caller never has to guess which identifier space it is holding.
+        uncertain_keys = {
+            action.action_id: key for key, action in ctx.ledger(run_id).folded().items()
+        }
         return _json(
             {
                 "run_id": run_id,
@@ -792,6 +980,7 @@ def build_server(
                 "uncertain_actions": [
                     {
                         "action_id": a.action_id,
+                        "action_key": uncertain_keys.get(a.action_id),
                         "action_type": a.action_type,
                         "status": a.status.value,
                     }
@@ -898,7 +1087,7 @@ def build_server(
         from continuum.budgets import (
             DEFAULT_BUDGETS_PATH,
             BudgetConfigError,
-            attempts_for_type,
+            attempts_by_key,
             evaluate_budget,
         )
 
@@ -941,16 +1130,31 @@ def build_server(
 
         if not settled:
             events = ctx.storage.read_events(run_id)
-            attempts = attempts_for_type(events, action_type)
+            # Counted per key, so the budget caps retries of *this* operation
+            # rather than the run's distinct work of this type (issue #368).
+            claim_key = str(
+                idempotency_key(
+                    action_type,
+                    arguments,
+                    scope=run_id if scoped_to_run else None,
+                    key=key,
+                )
+            )
+            attempts = attempts_by_key(events, action_type).get(claim_key, 0)
             allowed, used, maximum = evaluate_budget(budgets, action_type, attempts)
             if not allowed:
                 from mcp.server.mcpserver.exceptions import ToolError
 
+                # The old wording advised reconciling, which is no help when every
+                # prior attempt is already settled FAILED, and pointed at a
+                # registry file that usually does not exist yet (issue #368).
                 raise ToolError(
-                    f"retry budget exhausted for {action_type!r}: "
-                    f"{used} attempt(s) recorded, budget is {maximum}. "
-                    "Reconcile existing attempts or ask the operator to raise "
-                    ".continuum/budgets.json."
+                    f"retry budget exhausted for this {action_type!r} operation "
+                    f"(key {claim_key[:12]}...): {used} attempt(s) recorded, budget is "
+                    f"{maximum}. Retrying it again is the thing the budget exists to "
+                    f"stop, so either settle it a different way or raise the limit by "
+                    f"setting action_types.{action_type}.max_attempts in "
+                    f"{DEFAULT_BUDGETS_PATH} (creating that file if it does not exist)."
                 )
 
         try:
@@ -986,12 +1190,18 @@ def build_server(
                     "action_type": action_type,
                     "proceed": False,
                     "status": ActionStatus.UNKNOWN.value,
+                    # Both identifiers, because reconciling needs one and every
+                    # other surface reports the other. Omitting them left the
+                    # only copy of the key inside the truncated prefix in
+                    # `reason`, which no caller could act on (issue #367).
+                    "action_key": exc.action_key,
+                    "action_id": exc.action_id,
                     "reason": str(exc),
                     "guidance": (
                         "A previous attempt was interrupted and its outcome is "
                         "unknown. Do not retry. Verify with the external system "
                         "whether it happened, then report via "
-                        "continuum_reconcile_action."
+                        "continuum_reconcile_action with the action_key above."
                     ),
                 }
             )
@@ -1088,7 +1298,10 @@ def build_server(
             "Settle an action whose outcome was unknown, after checking the external "
             "system. occurred=true records it as done (never repeated); "
             "occurred=false frees it to be retried. Only call this with real "
-            "evidence — guessing here causes either a duplicate or lost work."
+            "evidence — guessing here causes either a duplicate or lost work.\n\n"
+            "'action_key' accepts either the action_key from continuum_intercept_action "
+            "or the action_id that continuum_resume and continuum_list_actions report, "
+            "so the identifier named in next_allowed_action can be passed as-is."
         ),
         annotations=mutating,
     )
@@ -1098,11 +1311,20 @@ def build_server(
         action_key: str,
         occurred: bool,
         external_id: str | None = None,
+        result: dict[str, Any] | None = None,
         note: str = "",
     ) -> str:
         """Resolve an uncertain action using external evidence."""
+        # `result` is accepted here because `complete` refuses an UNKNOWN action
+        # (issue #366) and this is the route it points at. Without it, structured
+        # evidence gathered by the probe had nowhere to go over MCP even though
+        # `ActionLedger.reconcile` has always stored it.
         action = ctx.ledger(run_id).reconcile(
-            action_key, occurred=occurred, external_id=external_id, note=note
+            action_key,
+            occurred=occurred,
+            external_id=external_id,
+            result=result,
+            note=note,
         )
         return _json(
             {
@@ -1110,6 +1332,7 @@ def build_server(
                 "action_id": action.action_id,
                 "status": action.status.value,
                 "external_id": action.external_id,
+                "result": dict(action.result) if action.result else None,
                 "side_effect_uncertain": action.side_effect_uncertain,
             }
         )
@@ -1131,7 +1354,11 @@ def build_server(
         # a genuinely unknown run without writing anything.
         ctx.storage.get_run(run_id)
         ledger = ctx.ledger(run_id)
-        actions = ledger.all()
+        folded = ledger.folded()
+        actions = list(folded.values())
+        # The settle tools key on the idempotency key, so a row that omits it
+        # cannot be acted on from this listing alone (issue #367).
+        key_by_action_id = {action.action_id: key for key, action in folded.items()}
         unresolved = {a.action_id for a in ledger.pending()}
         return _json(
             {
@@ -1139,6 +1366,7 @@ def build_server(
                 "actions": [
                     {
                         "action_id": a.action_id,
+                        "action_key": key_by_action_id.get(a.action_id),
                         "action_type": a.action_type,
                         "status": a.status.value,
                         "external_id": a.external_id,

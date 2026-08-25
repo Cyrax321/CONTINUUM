@@ -458,8 +458,8 @@ class StateValidator:
             # silently here reads as "no drift" and is indistinguishable from a
             # clean comparison, so a caller passing expected_model believes it
             # got an assurance it never received (issue #308). Report the gap
-            # instead. Note no MCP tool records a model today, so this is the
-            # normal outcome for MCP-originated runs.
+            # instead. Reached whenever no writer named the model: pass model_id
+            # to continuum_checkpoint to make the comparison answerable (#370).
             entries.append(
                 ComponentValidationEntry(
                     component=Component.MODEL,

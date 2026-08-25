@@ -148,7 +148,12 @@ def render_dashboard(decision: RecoveryDecision) -> str:
     lines.append(f"checkpoint:        v{decision.contract.checkpoint_version}")
     lines.append(f"recovery mode:     {decision.mode.value}")
     lines.append(f"safe to resume:     {'yes' if decision.safe else 'no'}")
-    lines.append(f"next allowed:      {decision.next_allowed_action or 'continue'}")
+    # Same rule as render_contract: "continue" only when resuming is actually
+    # permitted; a blocked verdict must not render permission as prose.
+    permitted = decision.next_allowed_action or (
+        "continue" if decision.safe else "none (settle required_actions first)"
+    )
+    lines.append(f"next allowed:      {permitted}")
 
     lines.append("")
     lines.append("STATE COMPONENTS")

@@ -34,7 +34,7 @@ from pydantic import ValidationError
 from continuum.events import Event, EventType, IntegrityReport, IntegrityViolation
 from continuum.models import Action, Origin, Run, RunStatus, SemanticState, StateCheckpoint, utcnow
 from continuum.security.hashing import make_id
-from continuum.state.versioning import state_fingerprint
+from continuum.state.versioning import canonical_state_json, state_fingerprint
 from continuum.storage.actionindex import index_entry_from_payload
 from continuum.storage.base import (
     CheckpointNotFound,
@@ -865,7 +865,7 @@ class SQLiteStorage(Storage):
                     head["fingerprint"] if head else None,
                     reason,
                     utcnow().isoformat(),
-                    stored.model_dump_json(),
+                    canonical_state_json(stored),
                 ),
             )
         return version
@@ -929,7 +929,7 @@ class SQLiteStorage(Storage):
                         sealed.trigger,
                         sealed.created_at.isoformat(),
                         sealed.integrity_hash,
-                        sealed.model_dump_json(),
+                        sealed.canonical_json(),
                     ),
                 )
             except sqlite3.IntegrityError as exc:

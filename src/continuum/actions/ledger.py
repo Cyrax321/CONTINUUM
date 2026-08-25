@@ -57,6 +57,8 @@ from continuum.actions.idempotency import (
     idempotency_key,
     identity_tokens,
     leaf_tokens,
+    location_tokens,
+    locations_agree,
 )
 from continuum.concurrency.lease import LeaseCoordinator
 from continuum.events import EventType
@@ -423,6 +425,34 @@ class ActionLedger:
     def get(self, key: str) -> Action | None:
         return self._replay().get(key)
 
+    def resolve_key(self, identifier: str) -> str | None:
+        """The ledger key for ``identifier``, which may be a key or an ``action_id``.
+
+        The ledger is keyed by idempotency key, but almost everything a caller
+        reads back is keyed by ``action_id``: ``Action.action_id`` itself, the
+        recovery plan's ``reconcile_action:<target>`` steps, the contract's
+        ``required_actions``, and the rendered report. So the identifier a
+        recovering caller has in hand is usually the one the settle methods did
+        not accept, and the two are indistinguishable by shape (issue #367).
+
+        Resolving both here rather than at one call site means every settle
+        method inherits it, and the recovery guidance that names an ``action_id``
+        becomes executable as written instead of needing to be rewritten in terms
+        of an identifier no output exposes.
+
+        The mapping is unambiguous: one key holds one action, and a re-claim after
+        FAILED or COMPENSATED copies the existing action, so ``action_id`` stays
+        with its key rather than being reissued. Returns ``None`` when neither
+        space matches.
+        """
+        folded = self._replay()
+        if identifier in folded:
+            return identifier
+        for stored_key, action in folded.items():
+            if action.action_id == identifier:
+                return stored_key
+        return None
+
     def _identity_match(
         self,
         action_type: str,
@@ -450,6 +480,16 @@ class ActionLedger:
         second side effect would be silently swallowed -- the exact failure this
         ledger exists to prevent.
 
+        Leaf comparison alone was not enough either, for the same reason in a
+        different disguise: two files with the same name in different directories
+        share every leaf, so ``/tenants/acme/report.csv`` matched
+        ``/tenants/globex/report.csv`` and globex was never notified (issue #365).
+        A match therefore also requires the *locations* to agree, which
+        ``locations_agree`` decides by suffix rather than equality so the drift
+        case that motivated leaf comparison (``invoices/INV-5.pdf`` for
+        ``/data/invoices/INV-5.pdf``) still matches. A side carrying no path at
+        all makes no claim about location and so contradicts nothing.
+
         Containment on its own is still too loose: a completed action folds its
         outcome ``external_id`` and any optional descriptive argument into its
         token set, so the stored set is a *superset* of a sparser re-claim even
@@ -470,7 +510,9 @@ class ActionLedger:
         # common to every claim in the run, so it must never count as a
         # resource token when deciding whether two claims are the same work.
         plumbing = leaf_tokens(identity_tokens(external_id=self.run_id))
-        incoming = leaf_tokens(identity_tokens(arguments, volatile=volatile)) - plumbing
+        incoming_all = identity_tokens(arguments, volatile=volatile)
+        incoming = leaf_tokens(incoming_all) - plumbing
+        incoming_where = location_tokens(incoming_all)
         if not incoming:
             return None
 
@@ -483,11 +525,15 @@ class ActionLedger:
             # is never present on the incoming claim, so folding it into ``known``
             # would make the stored set a systematic superset of every sparser
             # re-claim. It is therefore excluded from the comparison (issue #64).
-            known = leaf_tokens(identity_tokens(action.arguments)) - plumbing
+            known_all = identity_tokens(action.arguments)
+            known = leaf_tokens(known_all) - plumbing
             # An empty ``known`` is contained in everything; treat a stored
             # action with no identity of its own as unrecognisable, not as a
             # match for every claim of the same type.
             if not known:
+                continue
+            # Same leaves, different directories, is different work (issue #365).
+            if not locations_agree(incoming_where, location_tokens(known_all)):
                 continue
             if incoming <= known:
                 # The stored action carries more tokens than the claim. That is
@@ -729,7 +775,13 @@ class ActionLedger:
         raise UnknownSideEffect(
             f"action {existing.action_type!r} (key {key[:12]}...) was interrupted before its "
             f"outcome was recorded; the side effect may or may not have occurred. "
-            f"Reconcile it before retrying."
+            f"Reconcile it before retrying.",
+            # The caller is being told to reconcile, so it needs the identity to
+            # reconcile *with*. Truncating it into the message was the only place
+            # it appeared, which left a recovering session unable to act on its
+            # own instruction (issue #367).
+            action_key=str(key),
+            action_id=uncertain.action_id,
         )
 
     @_single_writer
@@ -740,14 +792,52 @@ class ActionLedger:
         external_id: str | None = None,
         result: Mapping[str, Any] | None = None,
     ) -> Action:
-        """Record that the effect succeeded."""
-        existing = self._require(key)
+        """Record that the effect succeeded.
+
+        Settles a claim that is still in flight. Re-reporting an action that is
+        already ``COMPLETED`` is allowed, because a caller repeating itself after
+        a dropped response is not asserting anything new.
+
+        Every other status is refused (issue #366). Those are not settlements, they
+        are corrections of a recorded outcome, and correcting an outcome needs
+        evidence about the outside world that this method neither takes nor
+        records. ``UNKNOWN`` is the case that matters: the action reached that
+        status precisely because nobody could say whether the effect happened, and
+        completing it here erased the recovery blocker, wrote no note, and left an
+        ``ACTION_RECORDED`` event indistinguishable from an ordinary first-time
+        success. An auditor could not tell that an uncertain charge had been
+        resolved by assertion.
+
+        :meth:`reconcile` is the supported route for all of them. It takes the
+        same decision, demands the caller stand behind it, and records
+        ``ACTION_RECONCILED`` with a note so the correction is visible in the log.
+
+        Omitted arguments never erase what is on record. A caller repeating a
+        completion after a dropped response usually sends only the key, and
+        overwriting ``external_id`` and ``result`` with ``None`` would destroy the
+        receipt proving the effect happened. Same invariant :meth:`reconcile`
+        already documents, and a no-op on a first completion, where there is
+        nothing yet to preserve.
+        """
+        key, existing = self._require(key)
+        if existing.status not in (ActionStatus.STARTED, ActionStatus.COMPLETED):
+            raise LedgerError(
+                f"action {existing.action_type!r} is {existing.status.value}, not in flight, so "
+                f"completing it would assert an outcome nothing has verified. "
+                f"Check the external system, then call reconcile(occurred=True) "
+                f"(continuum_reconcile_action over MCP), which records the evidence "
+                f"and the note alongside the correction."
+            )
+        settled_external = external_id if external_id is not None else existing.external_id
+        settled_result = dict(result) if result is not None else existing.result
         action = existing.model_copy(
             update={
                 "status": ActionStatus.COMPLETED,
-                "external_id": external_id,
-                "result": dict(result) if result is not None else None,
-                "result_hash": stable_hash(dict(result)) if result is not None else None,
+                "external_id": settled_external,
+                "result": dict(settled_result) if settled_result is not None else None,
+                "result_hash": (
+                    stable_hash(dict(settled_result)) if settled_result is not None else None
+                ),
                 "completed_at": utcnow(),
                 "side_effect_uncertain": False,
             }
@@ -763,7 +853,7 @@ class ActionLedger:
         ``UNKNOWN`` rather than ``FAILED``, because a timeout is not evidence of
         absence.
         """
-        existing = self._require(key)
+        key, existing = self._require(key)
         action = existing.model_copy(
             update={
                 "status": ActionStatus.FAILED if certain else ActionStatus.UNKNOWN,
@@ -804,7 +894,7 @@ class ActionLedger:
         caller does not supply replacements, so confirming an effect happened can
         never erase the receipt proving it did.
         """
-        existing = self._require(key)
+        key, existing = self._require(key)
         if occurred:
             # Fall back to what is already recorded rather than overwriting with
             # None. Confirming an effect occurred must never be the reason its
@@ -840,7 +930,7 @@ class ActionLedger:
     @_single_writer
     def compensate(self, key: str, *, note: str = "", by: str | None = None) -> Action:
         """Record that a completed effect was deliberately undone."""
-        existing = self._require(key)
+        key, existing = self._require(key)
         action = existing.model_copy(
             update={
                 "status": ActionStatus.COMPENSATED,
@@ -854,14 +944,31 @@ class ActionLedger:
     @_single_writer
     def flag_for_review(self, key: str, reason: str) -> Action:
         """Escalate an action a human must judge."""
-        existing = self._require(key)
+        key, existing = self._require(key)
         action = existing.model_copy(
             update={"status": ActionStatus.REQUIRES_REVIEW, "last_error": reason}
         )
         return self._record(key, action)
 
-    def _require(self, key: str) -> Action:
-        existing = self.get(key)
-        if existing is None:
-            raise LedgerError(f"no action recorded for key {key[:12]}...")
-        return existing
+    def _require(self, key: str) -> tuple[str, Action]:
+        """Resolve ``key`` to its stored key and action, or explain what is wrong.
+
+        Returns the *resolved* key alongside the action, because the caller has
+        to record its settlement under the key the fold uses, not under whatever
+        identifier the caller happened to hold (issue #367).
+
+        The message names both identifier spaces. The previous wording,
+        ``no action recorded for key <prefix>...``, left a caller that had passed
+        a perfectly valid ``action_id`` with no way to tell that it had reached
+        for the wrong identifier rather than a nonexistent action.
+        """
+        resolved = self.resolve_key(key)
+        if resolved is None:
+            known = len(self._replay())
+            raise LedgerError(
+                f"no action in run {self.run_id!r} matches {key[:16]!r} as either an "
+                f"idempotency key or an action_id ({known} action(s) recorded). "
+                f"List them with `continuum actions {self.run_id}` or "
+                f"continuum_list_actions, and pass the action_key or action_id from there."
+            )
+        return resolved, self._replay()[resolved]

@@ -531,3 +531,48 @@ features, #266-#285 contributor good-first-issues, #288 provenance graph
 files. Five integration seams, six schema migrations, eleven MCP tools,
 twenty-five CLI commands. Every feature verified against real Claude Code
 sessions with hard kills and live protocol boundaries.
+
+## Session 18, 2026-08-25 (issue #383: degrade instead of die, PR #385)
+
+Fixed #383 in a dedicated worktree (`/tmp/wt-383`, branch
+`fix/degrade-unprojectable-fold`, self-assigned before starting). Three
+commits, each answering one review round.
+
+**The fix (3f2b769).** `project`/`project_incremental` gained
+`on_unprojectable="raise"|"degrade"` (default unchanged). Degrade stops at the
+earliest refused event and returns the last-good prefix marked
+`SemanticState.status=INVALID` with `unprojectable_at_sequence/_event_type/
+_reason`; it never skips past the break, and raises if nothing folds before
+it. Opt-ins limited to diagnostic surfaces (engine restore path, CLI
+status/inspect/replay, serve progress report and dep dedup, benchmark
+readout); the #364 write guard `_project_candidate` and every checkpoint
+capture path deliberately stay on raise. Recovery decides REQUEST_HUMAN.
+Reproduction used the `_poison` helper from tests/test_cli.py; all four dead
+commands confirmed failing before any change.
+
+**Review round 1: the contract must carry the break (0768e38).** Resume's
+prose named the break but `required_actions` was empty and `next_allowed`
+rendered as "continue" over a requires_human verdict. New `RepairKind.
+REPAIR_LOG` step (sorted first) gives the contract real work, qualified
+`verified` entries (`goal (through sequence N)`), a `projection (invalid)`
+entry in `invalidated`, and honest fallbacks at all three `or 'continue'`
+sites (contract render, engine render, dashboard).
+
+**Review round 2: cross-version checkpoint break (39b0756, ddbb6bd).** The
+four added fields changed `StateCheckpoint.content()`, so every pre-existing
+checkpoint failed verification as tampered, and new bodies carried fields old
+readers (`extra="forbid"`) reject. `PROJECTION_BOOKKEEPING` now excludes them
+from the digest and from all four persisted-body write sites (sqlite and
+postgres, checkpoints and versions). Lesson recorded for next time: no
+same-process round-trip can catch a hash-compatibility break, and a naive
+strip-and-reread fixture passes against broken code because pydantic
+re-injects defaults on reload; the fixture must also re-seal the hash over
+the reduced payload, exactly as the old writer did.
+
+Red-before-green proven per round by checking out earlier trees over `src/`
+(stash alone is insufficient once changes are committed). Final gates:
+1425 passed, 23 skipped, ruff clean, 206 files formatted, strict mypy clean
+on 104 files, mcp pinned to 2.1.0 first. All CI checks green on the branch.
+Options 2 (repair/amend) and 3 (fork-from-last-good-prefix) remain open by
+design; the reviewer floated moving the bookkeeping fields off
+`SemanticState` entirely as follow-up scope.

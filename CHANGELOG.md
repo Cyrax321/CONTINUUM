@@ -714,6 +714,194 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **One unprojectable event bricked every projecting command, with no route back (#383).**
+  A log whose fold fails is intact as a chain but dead as a run: because the fold
+  validates each intermediate state, no later event could correct an earlier bad
+  one, so `status`, `resume`, `inspect`, `replay`, `show-contract`, `validate`,
+  `briefing` and `compact` all raised on precisely the runs that needed them,
+  while the action tools (which fold only ACTION_* events) kept authorising real
+  side effects that recovery could not assess. The fold can now degrade instead
+  of raising: `project` and `project_incremental` accept
+  `on_unprojectable="raise"|"degrade"`, defaulting to `"raise"` so every existing
+  caller sees byte-for-byte today's behaviour. Degrade mode stops at the earliest
+  refused event and returns the last-good prefix marked
+  `SemanticState.status = INVALID` with `unprojectable_at_sequence`,
+  `unprojectable_event_type` and a condensed `unprojectable_reason`; it never
+  skips past the break, and if nothing folds before the break it still raises,
+  since a partial answer invented from nothing would be worse than an error. The
+  recovery engine folds with degrade enabled, so a poisoned log yields a
+  `request_human` verdict naming where folding stopped instead of a pydantic
+  traceback, and CLI `status`, `inspect` and `replay` report the same break and
+  exit non-zero. The break also reaches the machine-readable contract instead of
+  living only in prose: a new `repair_log` repair step makes `required_actions`
+  name real work, `next_allowed_action` points at it rather than falling through
+  to a rendered "continue" over a `requires_human` verdict, `verified` entries
+  are qualified with the last-good sequence, and `invalidated` records the
+  projection itself. The diagnostic call sites opted in are the engine's restore
+  path, the CLI status/inspect/replay surfaces, the serve sidecar's progress
+  report and dependency dedup, and the benchmark's strategy readout; the MCP
+  write-path guard `_project_candidate` and the checkpoint capture surfaces
+  deliberately keep raising, because accepting or pinning a partial fold would
+  launder it into authoritative state. Repair/amend and fork-from-last-good-prefix
+  remain future work and are not attempted here.
+
+- **`MODEL_CHANGED` had no writer, so `expected_model` could never validate (#370).**
+  The event type was defined, treated as checkpoint-worthy by the trigger policy and
+  projected into `SemanticState.model`, but nothing in `src/` ever emitted it. The
+  validator's model component could therefore only ever answer "no model recorded
+  for this run, cannot compare against ...", the `expected_model` parameter on
+  `continuum_resume` and `continuum_validate` could never do anything, and
+  `RepairKind.REVALIDATE_MODEL_STATE` with its "pass `--model <name>`" guidance was
+  unreachable. A parameter that cannot be satisfied is worse than an absent one,
+  because its presence implies the check is covered, and a different model resuming
+  another model's work is exactly the drift the surrounding architecture exists to
+  catch. `continuum_checkpoint` gains optional `model_id` and `provider`, emitting
+  `MODEL_CHANGED` when the value actually changes, so drift now reports
+  `requires_review` naming both models instead of `unknown`. Attached to
+  checkpointing because it is the same kind of statement as `env`: here is what the
+  world looked like when this state was saved. Recorded as `EXTERNAL_AGENT`, since
+  an agent naming its own model is self-reporting, but the comparison against a
+  later `expected_model` stays independent of that claim. `provider` carries forward
+  when omitted, so naming the model alone cannot erase a provider recorded earlier,
+  and omitting `model_id` records nothing rather than asserting absence.
+
+- **The retry budget counted per action type, blocking work that never failed (#368).**
+  `attempts_for_type` folded on `action_type` and ignored the idempotency key, so
+  the limit capped a run's distinct unsettled work of a type rather than retries of
+  one operation. Three different recipients each failing once, with zero retries
+  anywhere, exhausted the default budget of three and refused a fourth that had
+  never been attempted, so any fan-out with more failures than the limit deadlocked
+  mid-run. The default applies with no config file present, so this was live in any
+  project that had never configured budgets. New `attempts_by_key` counts per
+  idempotency key, which is the operation's identity and is stable across retries
+  because re-claiming after FAILED or COMPENSATED copies the existing action.
+  `attempts_for_type` now reports the worst single operation, which is the figure
+  the claim site compares against the limit, so `continuum budget` agrees with what
+  is enforced; it is deliberately not the sum across keys, since that measures
+  distinct work and nothing here caps that. The limit stays configured per type,
+  because that is the unit an operator thinks in. The exhaustion message also fits
+  the state it fires in: it names the specific operation, drops the advice to
+  reconcile existing attempts (useless when every prior attempt is settled FAILED),
+  and says the registry file may need creating rather than raising.
+
+- **Same-named files in different directories collapsed into one action (#365).**
+  With no explicit `key` the exact argument hash misses on two differently-spelled
+  paths, so the identity fallback decides, and it compared basenames.
+  `/tenants/acme/report.csv` and `/tenants/globex/report.csv` both reduced to
+  `{report.csv, report}`, containment held both ways, and the second claim was
+  answered `proceed=false` carrying acme's `external_id` and the guidance "Already
+  performed. Reuse the previous result; do not repeat it." Globex was never
+  notified, which is the silent swallow the fallback exists to prevent, and
+  per-directory files with conventional names are a common fan-out shape. Leaf
+  comparison was introduced so a re-rendered path (`invoices/INV-5.pdf` for
+  `/data/invoices/INV-5.pdf`) would still deduplicate, so the container is now set
+  aside rather than discarded: new `location_tokens` returns exactly what
+  `leaf_tokens` drops, and `_identity_match` additionally requires the locations to
+  agree. `same_location` compares by path suffix rather than equality, which is the
+  shape drift actually takes, so the re-rendering case still matches while two
+  fully-qualified paths agreeing on nothing but the filename do not. A side that
+  names no path at all makes no claim about location and so contradicts nothing,
+  which keeps the field-rename case working. Comparison stays purely lexical, with
+  no filesystem or working-directory resolution, so the answer is identical on
+  every machine.
+
+- **`complete` could launder an `UNKNOWN` action into `COMPLETED` (#366).**
+  `ActionLedger.complete` had no status guard, so a side effect whose real-world
+  outcome nobody could determine, a charge that timed out after the request was
+  sent, could be recorded as a clean success in one call: no evidence, no note,
+  and an `ACTION_RECORDED` event indistinguishable from an ordinary first-time
+  completion. `continuum_list_actions` then reported `unresolved: 0` and the
+  recovery blocker was gone, with nothing in the log to show the decision had been
+  made by assertion. The incentives pointed straight at it, because
+  `continuum_complete_action` is the tool an agent is told to call routinely, sits
+  on the same mutation allowlist as everything else, and accepts the key already in
+  hand, while the evidence-gated route through `reconcile` was the harder one.
+  `complete` now settles only a claim still in flight, plus a repeat report of one
+  already `COMPLETED`, since a caller retrying after a dropped response asserts
+  nothing new. `UNKNOWN`, `FAILED`, `COMPENSATED` and `REQUIRES_REVIEW` are refused
+  with a message naming the status and pointing at `reconcile`, which takes the
+  same decision but demands the caller stand behind it and records
+  `ACTION_RECONCILED` with the note.
+
+- **`continuum verify` certified a run whose log could not be projected (#382).**
+  `verify` re-audits the hash chain, which is a statement about integrity, and an
+  unprojectable log is perfectly intact: the offending event was written through
+  the normal path and hashed like any other. Nothing in that audit evaluates
+  whether the fold satisfies its own invariants, so the one health-shaped command
+  an operator reaches for during an incident answered "13 events, no violations"
+  for a run on which `resume`, `status`, `inspect`, `replay`, `validate` and
+  `briefing` all failed. `verify` now reports both verdicts and exits non-zero
+  when the fold fails, so `continuum verify "$RUN" && ./resume.sh` short-circuits.
+  New `first_unprojectable_event` names the sequence, event type and the specific
+  constraint that failed, folding one event at a time onto the previous state so
+  the scan is a single linear pass rather than a re-projection per prefix.
+  Archived events are folded alongside the live ones, because after compaction
+  (#239) the live log starts at the anchor and no longer contains `RUN_STARTED`;
+  reading only the tail would report every compacted run as broken. The
+  projection is attempted only once the chain verifies, since folding a tampered
+  log to say where it stops projecting would describe events that cannot be
+  trusted to say anything. Repairing such a log is a separate gap, tracked in
+  #383.
+
+- **`self_report_guidance` said nothing was wrong over an unresolved action (#369).**
+  The note exists to explain a `request_human` caused only by unverified
+  self-reporting, and it is deliberately withheld when anything else is also
+  blocking. Its predicate scanned `decision.validation.report.statuses`, but an
+  uncertain action reaches `request_human` through `decision.uncertain_actions` and
+  never appears in the report, so the check saw goal and progress alone and stayed
+  true. The result was a single `continuum_resume` response whose contract read
+  `recovery_status: requires_human` because a side effect's outcome was unknown,
+  next to guidance reading "Nothing is wrong with this run" and "Work is not
+  blocked", pointing the agent past the one thing the system exists to stop it
+  walking past. The ledger is now part of the test. The dependency half of the
+  predicate was already correct and is covered by a test that keeps it that way.
+
+- **Recovery guidance named an identifier the settle tools rejected (#367).**
+  `continuum_resume` reports uncertain actions by `action_id` in five places
+  (`next_allowed_action`, the contract's `required_actions`, `human_steps`,
+  `informed_retry.avoid` and the rendered report), and `human_steps` spelled out
+  a `continuum_reconcile_action(action_key=<action_id>)` call. The ledger keyed
+  only on the idempotency key, so following that instruction verbatim failed with
+  `no action recorded for key ...`, and no MCP surface exposed the value that
+  would have worked: `list_actions` and `uncertain_actions` reported `action_id`,
+  the `UnknownSideEffect` response omitted the key entirely and left a
+  12-character truncated prefix in free text as its only trace, `arguments_hash`
+  from `continuum actions --json` looks like a key but is a different hash, and
+  `continuum reconcile` needs a registered probe. An `UNKNOWN` action created
+  over MCP was therefore unreconcilable through every documented interface.
+  `ActionLedger.resolve_key` now accepts either space and `_require` returns the
+  resolved key, so `complete`, `fail`, `reconcile`, `compensate` and
+  `flag_for_review` all take an `action_id` or a key and settle under the fold's
+  own key either way. `UnknownSideEffect` carries `action_key` and `action_id`,
+  which `continuum_intercept_action` returns on the unknown path, and both
+  `continuum_list_actions` rows and `continuum_resume`'s `uncertain_actions` gain
+  `action_key`. The unmatched-identifier message names both spaces and says how
+  to list them.
+
+- **One `continuum_record_progress` call could permanently brick a run (#364).**
+  The `completed + failed > total` guard only fired when `total` was passed in
+  the same call. Omitting it skipped the guard while projection still folded the
+  `total` recorded earlier, so the invariant was evaluated against a limit the
+  call never mentioned. Worse, the handler appended before it projected, so the
+  rejected event was already durable when validation failed, and because the
+  fold validates each intermediate state no later event could correct it. Every
+  projecting surface for that run then stayed dead permanently: `record_progress`,
+  `checkpoint`, `validate` and `resume` over MCP, plus `status`, `inspect`,
+  `replay`, `show-contract` and `briefing` over the CLI. The action tools kept
+  working throughout, so the run could go on authorising real side effects while
+  recovery was unable to say whether continuing was safe, and `continuum verify`
+  still reported the chain as intact. The new `_project_candidate` helper folds
+  the log with the candidate payload appended and commits only if that succeeds,
+  so the write path now rejects exactly what the read path would reject rather
+  than approximating it one field at a time. The cheap argument checks are kept
+  ahead of it because they answer without touching storage and name the offending
+  argument. The commit passes `expected_sequence`, because validation and append
+  are two statements: a second writer landing `total=50` between the read and the
+  write of a `completed=75` that omits `total` would otherwise compose a log
+  neither payload would have been allowed to produce on its own. Losing that race
+  re-validates against the new head and retries, bounded, since losing it says
+  nothing about whether the update is valid.
+
 - **`ActionLedger` could not serialise concurrent claims on one key (#345).**
   `claim()` deduplicates by folding the log and then appending, with nothing
   between the read and the write, so processes racing on one key could each be

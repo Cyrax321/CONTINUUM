@@ -58,6 +58,8 @@ from continuum.models import (
     RecoveryMode,
     Run,
     RunStatus,
+    SemanticState,
+    StateStatus,
 )
 from continuum.observability import render_dashboard
 from continuum.provenance_map import summarize
@@ -69,7 +71,7 @@ from continuum.security.attestation import (
 )
 from continuum.serve import cmd_serve
 from continuum.state.diff import diff_states, render_diff
-from continuum.state.semantic import ProjectionError, project
+from continuum.state.semantic import ProjectionError, first_unprojectable_event, project
 from continuum.state.versioning import state_fingerprint
 from continuum.storage import (
     CheckpointNotFound,
@@ -296,12 +298,29 @@ def cmd_runs(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> 
     return ExitCode.OK
 
 
+def _degraded_lines(state: SemanticState) -> list[str]:
+    """Render a degraded fold's break for status/inspect output.
+
+    Mirrors verify's PROJECTION FAILURE block (#384) so every surface names the
+    same event the same way, and points at verify because it is the one command
+    that already carries the full diagnosis.
+    """
+    return [
+        f"PROJECTION FAILURE: the log stops folding at sequence "
+        f"{state.unprojectable_at_sequence} ({state.unprojectable_event_type})",
+        f"  {state.unprojectable_reason}",
+        f"  Figures cover events through sequence {state.source_sequence} only;",
+        "  they are what was known before the break, not the current state.",
+        "  `continuum verify` reports the offending event.",
+    ]
+
+
 def cmd_inspect(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Show semantic state, optionally at a past version."""
     if args.version is not None:
         state = storage.get_version(args.run_id, args.version)
     else:
-        restored = CheckpointManager(storage).restore(args.run_id)
+        restored = CheckpointManager(storage).restore(args.run_id, on_unprojectable="degrade")
         state = restored.state
 
     payload = state.model_dump(mode="json")
@@ -322,6 +341,15 @@ def cmd_inspect(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
             f"  - {d.resource}: {d.version or 'unversioned'} [{d.status}]"
             for d in state.external_dependencies
         ]
+    degraded = state.status is StateStatus.INVALID
+    if degraded:
+        lines += [""]
+        lines += _degraded_lines(state)
+        payload["projection_failed_at"] = {
+            "sequence": state.unprojectable_at_sequence,
+            "type": state.unprojectable_event_type,
+            "reason": state.unprojectable_reason,
+        }
     _emit(
         payload,
         "\n".join(lines),
@@ -329,13 +357,21 @@ def cmd_inspect(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
         stream=out,
         palette=getattr(args, "_palette", None),
     )
+    if degraded:
+        # Not OK: a run whose tail did not fold is not a usable answer, and
+        # `inspect $RUN && ...` must short-circuit like resume does.
+        return ExitCode.CORRUPTED
     return ExitCode.OK
 
 
 def cmd_status(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Show run status, optionally as a canonical provenance view (issue #148)."""
-    restored = CheckpointManager(storage).restore(args.run_id)
+    restored = CheckpointManager(storage).restore(args.run_id, on_unprojectable="degrade")
     state = restored.state
+    # A degraded fold (issue #383) still answers here, naming the break, but it
+    # must not exit 0: the figures describe a prefix of the log, and piping a
+    # prefix off as "the status" is how a poisoned run gets waved through.
+    degraded = state.status is StateStatus.INVALID
 
     if args.provenance:
         rows: list[dict[str, str]] = []
@@ -361,7 +397,13 @@ def cmd_status(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
                     }
                 )
         if args.json:
-            payload = {"provenance": rows}
+            payload: dict[str, Any] = {"provenance": rows}
+            if degraded:
+                payload["projection_failed_at"] = {
+                    "sequence": state.unprojectable_at_sequence,
+                    "type": state.unprojectable_event_type,
+                    "reason": state.unprojectable_reason,
+                }
             _emit(
                 payload,
                 json.dumps(payload, indent=2),
@@ -371,6 +413,9 @@ def cmd_status(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             )
         else:
             lines = [f"run: {state.run_id}  (provenance view)"]
+            if degraded:
+                lines += _degraded_lines(state)
+                lines.append("")
             for r in rows:
                 lines.append(
                     f"  {r['kind']:<8} {r['id']:<14} who={r['who']:<14} "
@@ -383,7 +428,7 @@ def cmd_status(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
                 stream=out,
                 palette=getattr(args, "_palette", None),
             )
-        return ExitCode.OK
+        return ExitCode.CORRUPTED if degraded else ExitCode.OK
 
     lines = [
         f"run:      {state.run_id}",
@@ -393,8 +438,28 @@ def cmd_status(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         f"{state.progress.pending} pending, {state.progress.failed} failed",
         f"decisions: {len(state.valid_decisions())}/{len(state.decisions)} valid",
     ]
-    _emit({}, "\n".join(lines), as_json=False, stream=out, palette=getattr(args, "_palette", None))
-    return ExitCode.OK
+    if degraded:
+        lines.append("")
+        lines += _degraded_lines(state)
+    text_payload: dict[str, Any] = (
+        {
+            "projection_failed_at": {
+                "sequence": state.unprojectable_at_sequence,
+                "type": state.unprojectable_event_type,
+                "reason": state.unprojectable_reason,
+            }
+        }
+        if degraded
+        else {}
+    )
+    _emit(
+        text_payload,
+        "\n".join(lines),
+        as_json=False,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.CORRUPTED if degraded else ExitCode.OK
 
 
 def cmd_history(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
@@ -1470,8 +1535,56 @@ def cmd_verify(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         text = text + "\n" + "\n".join(index_lines)
         payload["action_index_drift"] = drift
 
+    # Integrity and coherence are different guarantees, and reporting only the
+    # first let `verify` certify a run no projecting command could read (issue
+    # #382). An unprojectable log is perfectly intact: the offending event was
+    # written through the normal path and hashed like any other, so the chain
+    # audit is right to pass it. Nothing in that audit evaluates whether the fold
+    # satisfies its own invariants, which is the question an operator reaching for
+    # a health command is actually asking.
+    #
+    # Archived events are folded alongside the live ones, because after
+    # compaction (#239) the live log starts at the anchor and no longer contains
+    # RUN_STARTED. Reading only the tail would report every compacted run as
+    # unprojectable. `ActionLedger._replay` merges the two streams for the same
+    # reason; the archive holds the prefix verbatim from sequence 1, so the union
+    # is the whole history.
+    #
+    # Only attempted once the chain verified. Folding a tampered log to report
+    # where it stops projecting would describe events that cannot be trusted to
+    # say anything, the same reasoning that refuses action-index repair above.
+    broken = None
+    if report.ok:
+        whole_log = [
+            *storage.read_archived_events(args.run_id),
+            *storage.read_events(args.run_id),
+        ]
+        broken = first_unprojectable_event(args.run_id, whole_log)
+    if broken is not None:
+        sequence, event_type, reason = broken
+        payload["projectable"] = False
+        payload["projection_failed_at"] = {
+            "sequence": sequence,
+            "type": event_type,
+            "reason": reason,
+        }
+        text += "\n" + "\n".join(
+            [
+                f"PROJECTION FAILURE: the log stops folding at sequence {sequence} ({event_type})",
+                f"  {reason}",
+                "  The chain is intact; the state it folds to is not. Commands that",
+                "  project (resume, status, inspect, replay, validate) fail until this",
+                "  is repaired.",
+            ]
+        )
+    elif report.ok:
+        payload["projectable"] = True
+
     _emit(payload, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
-    return ExitCode.OK if report.ok else ExitCode.CORRUPTED
+    # Non-zero for either failure, so `continuum verify "$RUN" && ./resume.sh`
+    # short-circuits. exitcodes.py states the rule: only a verified, usable run
+    # exits 0, and a run that cannot be projected is not usable.
+    return ExitCode.OK if report.ok and broken is None else ExitCode.CORRUPTED
 
 
 def cmd_actions(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
@@ -1556,6 +1669,7 @@ def cmd_replay(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             args.run_id,
             [e for e in tail if e.sequence <= stored.source_sequence],
             base=base,
+            on_unprojectable="degrade",
         )
         matches = state_fingerprint(at_stored) == state_fingerprint(stored)
         where = f"checkpoint v{stored.version} at sequence {stored.source_sequence}"
@@ -1594,7 +1708,10 @@ def cmd_replay(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             f"beginning"
         )
 
-    state = project(args.run_id, events)
+    # Degrade, not raise (issue #383): replay is a diagnostic, and a poisoned
+    # log is exactly what it is asked about. A partial fold is reported as
+    # such and fails the command below instead of passing as a full replay.
+    state = project(args.run_id, events, on_unprojectable="degrade")
 
     verified, verification = _verify_against_stored(args.run_id, storage)
 
@@ -1611,12 +1728,23 @@ def cmd_replay(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         f"{len(state.decisions)} decision(s), {len(state.findings)} finding(s)\n"
         f"Verification: {verification}"
     )
+    if state.status is StateStatus.INVALID:
+        payload["projection_failed_at"] = {
+            "sequence": state.unprojectable_at_sequence,
+            "type": state.unprojectable_event_type,
+            "reason": state.unprojectable_reason,
+        }
+        text += "\n" + "\n".join(_degraded_lines(state))
     _emit(payload, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
     if verified is False:
         print(
             f"replayed state does not match the stored version for run {args.run_id}",
             file=err,
         )
+        return ExitCode.CORRUPTED
+    if state.status is StateStatus.INVALID:
+        # The prefix folded but the log disagrees with itself past the break,
+        # so this replay certifies nothing and must not exit 0.
         return ExitCode.CORRUPTED
     return ExitCode.OK
 
@@ -1642,8 +1770,17 @@ def _verify_against_stored(run_id: str, storage: Storage) -> tuple[bool | None, 
     if stored is None:
         return None, "skipped (no stored version to compare against)"
     prefix = storage.read_events(run_id, upto=stored.source_sequence)
-    replayed = project(run_id, prefix)
+    replayed = project(run_id, prefix, on_unprojectable="degrade")
     where = f"version {stored.version} at sequence {stored.source_sequence}"
+    if replayed.status is StateStatus.INVALID:
+        # Name the break rather than a bare mismatch: the stored version may be
+        # perfectly sound, and the interesting fact is that the log can no
+        # longer reproduce it (issue #383).
+        return (
+            False,
+            f"log stops folding at sequence {replayed.unprojectable_at_sequence} "
+            f"before reaching stored {where}: {replayed.unprojectable_reason}",
+        )
     if state_fingerprint(replayed) == state_fingerprint(stored):
         return True, f"matches stored {where}"
     return False, f"DOES NOT match stored {where}"

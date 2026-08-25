@@ -33,6 +33,10 @@ __all__ = [
     "idempotency_key",
     "arguments_hash",
     "identity_tokens",
+    "leaf_tokens",
+    "location_tokens",
+    "locations_agree",
+    "same_location",
     "IdempotencyKey",
 ]
 
@@ -347,9 +351,67 @@ def leaf_tokens(tokens: frozenset[str]) -> frozenset[str]:
     container would otherwise make the two look like different resources.
 
     Dropping the container is what lets ``_identity_match`` demand containment
-    instead of a single shared token. Note the consequence: identity is decided
-    at basename level, so two same-type actions on same-named files in different
-    directories are treated as one. That is the same assumption the basename
-    token itself has always encoded.
+    instead of a single shared token. On its own it also made two same-type
+    actions on same-named files in *different* directories look like one, which
+    silently swallowed the second side effect (issue #365). The container is
+    therefore not discarded, only set aside: :func:`location_tokens` returns
+    exactly what this drops, and ``_identity_match`` requires the locations to
+    agree before it accepts a leaf-level match.
     """
     return frozenset(t for t in tokens if "/" not in t and "\\" not in t)
+
+
+def location_tokens(tokens: frozenset[str]) -> frozenset[str]:
+    """The path-like tokens :func:`leaf_tokens` sets aside.
+
+    Its exact complement, so between them no token is lost. These say *where* a
+    resource is, which is what distinguishes two files that happen to share a
+    name (issue #365).
+    """
+    return frozenset(t for t in tokens if "/" in t or "\\" in t)
+
+
+def _segments(path: str) -> list[str]:
+    """A path split into comparable segments, separator-agnostic.
+
+    Both separators are split on regardless of platform, because the token being
+    compared was written by whatever machine recorded the action and need not
+    match the one reading it.
+    """
+    normalized = os.path.normpath(os.path.expanduser(path)).replace("\\", "/")
+    return [segment for segment in normalized.split("/") if segment not in ("", ".")]
+
+
+def same_location(left: str, right: str) -> bool:
+    """Whether two path-like tokens can be one file rendered differently.
+
+    Drift makes a path more or less qualified about one resource, so the shorter
+    rendering is a trailing part of the longer one: ``invoices/INV-5.pdf`` inside
+    ``/data/invoices/INV-5.pdf``. Two paths that agree on nothing but the
+    basename are different files, and treating them as one is what let
+    ``/tenants/acme/report.csv`` swallow ``/tenants/globex/report.csv``
+    (issue #365).
+
+    Suffix comparison rather than equality, because that is the shape drift
+    actually takes. Deliberately not a filesystem check: nothing here resolves
+    against a working directory, so the answer is identical on every machine and
+    for paths that no longer exist.
+    """
+    a, b = _segments(left), _segments(right)
+    if not a or not b:
+        return False
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    return longer[-len(shorter) :] == shorter
+
+
+def locations_agree(left: frozenset[str], right: frozenset[str]) -> bool:
+    """Whether two token sets locate the same resource, or locate nothing.
+
+    A side carrying no path-like token is making no claim about location, so it
+    cannot contradict one: an argument rename that drops the path entirely still
+    matches on its leaves. When both sides do locate something, at least one pair
+    has to be reconcilable under :func:`same_location`.
+    """
+    if not left or not right:
+        return True
+    return any(same_location(a, b) for a in left for b in right)

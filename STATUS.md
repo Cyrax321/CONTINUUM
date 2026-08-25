@@ -17,6 +17,22 @@ believed, and what is neither.
 
 ---
 
+## In flight: unprojectable logs degrade instead of dying (#383, PR #385)
+
+As of 2026-08-25, PR #383's fix is open on `fix/degrade-unprojectable-fold`
+(three commits), reviewed through two rounds. The fold accepts
+`on_unprojectable="raise"|"degrade"` (default byte-for-byte unchanged);
+degrade returns the last-good prefix marked `SemanticState.status=INVALID`
+naming where folding stopped; recovery decides REQUEST_HUMAN and the contract
+carries a `repair_log` step. Checkpoint digests and persisted bodies exclude
+the projection-bookkeeping fields, so databases written before or after the
+change load either way (cross-version tests pin serialised fixtures in
+`tests/test_checkpoint_compat.py`). Verified on the branch: 1425 passed,
+23 skipped, ruff clean, strict mypy clean on 104 files. Repair/amend (option
+2) and fork-from-last-good-prefix (option 3) remain unbuilt by design.
+
+---
+
 ## Full-gate audit (2026-08-24)
 
 Ran against `main` at `8013f6a` in a clean worktree, Python 3.13

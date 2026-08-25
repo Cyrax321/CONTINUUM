@@ -26,7 +26,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from continuum.events import Event, EventType
 from continuum.models import (
@@ -46,7 +46,13 @@ from continuum.models import (
     StateStatus,
 )
 
-__all__ = ["ProjectionError", "ProjectionReport", "project", "project_incremental"]
+__all__ = [
+    "ProjectionError",
+    "ProjectionReport",
+    "first_unprojectable_event",
+    "project",
+    "project_incremental",
+]
 
 
 class ProjectionError(ValueError):
@@ -384,6 +390,34 @@ class _Accumulator:
     # -- finish ----------------------------------------------------------- #
 
     def build(self) -> SemanticState:
+        return self._build()
+
+    def build_degraded(self, event: Event, reason: str) -> SemanticState:
+        """The last-good prefix, marked INVALID and naming where folding stopped.
+
+        Shares ``build``'s guards deliberately: if even the prefix cannot
+        produce a state (no RUN_STARTED before the break), there is nothing
+        known to report, and degrade mode raises like raise mode. A degraded
+        state that named no break would be worse than an error.
+        """
+        state = self._build()
+        return state.model_copy(
+            update={
+                "status": StateStatus.INVALID,
+                "unprojectable_at_sequence": event.sequence,
+                "unprojectable_event_type": str(event.type),
+                "unprojectable_reason": _condense(reason),
+            }
+        )
+
+    def _build(
+        self,
+        *,
+        status: StateStatus = StateStatus.VALID,
+        unprojectable_at_sequence: int | None = None,
+        unprojectable_event_type: str | None = None,
+        unprojectable_reason: str | None = None,
+    ) -> SemanticState:
         if self.goal is None:
             raise ProjectionError(
                 f"run {self.run_id!r} has no goal: the log never recorded RUN_STARTED"
@@ -405,6 +439,10 @@ class _Accumulator:
             model=self.model,
             version=self.version,
             source_sequence=self.source_sequence,
+            status=status,
+            unprojectable_at_sequence=unprojectable_at_sequence,
+            unprojectable_event_type=unprojectable_event_type,
+            unprojectable_reason=unprojectable_reason,
             created_at=self.created_at or stamp,
             updated_at=stamp,
         )
@@ -478,12 +516,29 @@ def project_incremental(
     events: Iterable[Event],
     *,
     base: SemanticState | None = None,
+    on_unprojectable: Literal["raise", "degrade"] = "raise",
 ) -> tuple[SemanticState, ProjectionReport]:
     """Fold ``events`` onto ``base`` and report what was consumed.
 
     Passing a ``base`` lets a long run advance its state without re-reading the
     whole log; the result must equal a full re-projection of the same prefix.
+
+    ``on_unprojectable="degrade"`` (issue #383) stops at the earliest event the
+    fold refuses and returns the last-good prefix marked ``INVALID``, naming the
+    sequence, event type and condensed reason. It never skips the bad event and
+    keeps going: the state after a skipped write is not a state the run was ever
+    in, so folding resumes nowhere. The default stays ``"raise"`` so every
+    existing caller keeps getting exactly today's behaviour; a silent partial
+    state reads as authoritative, which is worse than a crash. Note that
+    ``report.consumed`` counts the refused event too, since it is incremented
+    before the fold is attempted; ``consumed - applied`` therefore includes it.
+
+    The run-mismatch and sequence-order checks above deliberately stay outside
+    that treatment: they mean the caller handed the fold a malformed stream, not
+    that the log contains an event its model rejects.
     """
+    if on_unprojectable not in ("raise", "degrade"):
+        raise ValueError(f"on_unprojectable must be 'raise' or 'degrade', got {on_unprojectable!r}")
     acc = _Accumulator(run_id, base)
     report = ProjectionReport()
     previous_sequence = base.source_sequence if base else 0
@@ -500,12 +555,23 @@ def project_incremental(
         previous_sequence = event.sequence
         report.consumed += 1
 
-        if _dispatch(acc, event):
-            report.applied += 1
-            acc.updated_at = event.timestamp
-        elif event.type not in _NON_PROJECTING:
-            name = str(event.type)
-            report.ignored_types[name] = report.ignored_types.get(name, 0) + 1
+        try:
+            if _dispatch(acc, event):
+                report.applied += 1
+                acc.updated_at = event.timestamp
+            elif event.type not in _NON_PROJECTING:
+                name = str(event.type)
+                report.ignored_types[name] = report.ignored_types.get(name, 0) + 1
+        except Exception as exc:
+            # Deliberately broad, same reasoning as first_unprojectable_event:
+            # any failure here means the log stops folding at this event, no
+            # matter whether it came from a model invariant or a payload shape
+            # nothing anticipated. Narrowing the catch would trade a named
+            # diagnosis for an opaque traceback precisely on the malformed
+            # logs this mode exists to answer.
+            if on_unprojectable != "degrade":
+                raise
+            return acc.build_degraded(event, str(exc)), report
 
         acc.source_sequence = event.sequence
         if acc.created_at is None:
@@ -514,17 +580,74 @@ def project_incremental(
     return acc.build(), report
 
 
+def _condense(reason: str) -> str:
+    """One readable line from a possibly multi-line validation error.
+
+    pydantic renders "1 validation error for Progress" as its first line and puts
+    the constraint that actually failed on the second, followed by a docs URL. So
+    the naive first line is the least informative part. This keeps the header only
+    when there is nothing better, and drops the machine-facing bracket detail and
+    the URL either way.
+    """
+    lines = [line.strip() for line in reason.splitlines() if line.strip()]
+    if not lines:
+        return "unknown projection failure"
+    informative = next(
+        (line for line in lines[1:] if not line.startswith("For further information")),
+        lines[0],
+    )
+    return informative.split(" [type=")[0].rstrip()
+
+
+def first_unprojectable_event(
+    run_id: str,
+    events: Iterable[Event],
+) -> tuple[int, str, str] | None:
+    """Locate the earliest event whose fold fails, or ``None`` if the log folds.
+
+    Returns ``(sequence, event_type, reason)`` with ``reason`` condensed to a
+    single line. Naming the event is what turns "this run cannot be projected"
+    into something an operator can act on: the raw message reports the folded
+    figures without saying which write produced them, and the log may be thousands
+    of events long (issue #382).
+
+    Folds one event at a time carrying the state forward through
+    ``project_incremental``'s ``base``, so this is a single linear pass rather
+    than a re-projection per prefix. That matters because the logs most likely to
+    need this are the long ones.
+
+    Deliberately catches broadly. The question is *where* the log stops folding,
+    and any exception means it stopped there, whether it came from a model
+    invariant, the projector's own ordering checks, or a payload shape nothing
+    anticipated. Re-raising a narrower set would leave the operator holding the
+    same opaque traceback this exists to replace.
+    """
+    state: SemanticState | None = None
+    for event in sorted(events, key=lambda e: e.sequence):
+        try:
+            state, _ = project_incremental(run_id, [event], base=state)
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            return event.sequence, str(event.type), _condense(str(exc))
+    return None
+
+
 def project(
     run_id: str,
     events: Iterable[Event],
     *,
     upto: int | None = None,
+    on_unprojectable: Literal["raise", "degrade"] = "raise",
 ) -> SemanticState:
     """Project a run's events into semantic state.
 
     ``upto`` truncates the fold at a sequence number — the mechanism behind
     ``continuum inspect --version`` and recovery from a partially trusted log.
+
+    ``on_unprojectable`` forwards to :func:`project_incremental`: ``"raise"``
+    (the default) preserves today's behaviour for every existing caller;
+    ``"degrade"`` returns the last-good prefix marked INVALID instead of
+    raising, for callers whose job is to diagnose a log rather than fold it.
     """
     selected = [e for e in events if upto is None or e.sequence <= upto]
-    state, _ = project_incremental(run_id, selected)
+    state, _ = project_incremental(run_id, selected, on_unprojectable=on_unprojectable)
     return state

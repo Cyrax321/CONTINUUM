@@ -24,6 +24,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 from continuum.checkpoint.policy import (
     CheckpointDecision,
@@ -224,12 +225,24 @@ class CheckpointManager:
 
     # -- restoring -------------------------------------------------------- #
 
-    def restore(self, run_id: str, *, replay: bool = True) -> RestoredRun:
+    def restore(
+        self,
+        run_id: str,
+        *,
+        replay: bool = True,
+        on_unprojectable: Literal["raise", "degrade"] = "raise",
+    ) -> RestoredRun:
         """Load the newest checkpoint and catch it up to the log.
 
         With ``replay=False`` the checkpoint is returned as-is, which is what a
         validator wants when it must judge the checkpoint on its own terms
         before trusting anything newer.
+
+        ``on_unprojectable="degrade"`` lets a caller whose job is diagnosis
+        (the recovery engine) get the last-good prefix marked INVALID instead
+        of a ProjectionError, so a poisoned log produces a verdict rather than
+        ending the assessment. Defaults to ``"raise"``: ``restore`` also feeds
+        write paths that must never mistake a partial fold for state.
         """
         checkpoint = self.storage.latest_checkpoint(run_id)
 
@@ -239,7 +252,7 @@ class CheckpointManager:
                 raise CheckpointError(f"run {run_id!r} has no checkpoint and no events")
             return RestoredRun(
                 run_id=run_id,
-                state=project(run_id, events),
+                state=project(run_id, events, on_unprojectable=on_unprojectable),
                 checkpoint=None,
                 pending_events=len(events),
                 replayed=True,
@@ -264,7 +277,9 @@ class CheckpointManager:
 
         from continuum.state.semantic import project_incremental
 
-        state, _ = project_incremental(run_id, pending, base=checkpoint.state)
+        state, _ = project_incremental(
+            run_id, pending, base=checkpoint.state, on_unprojectable=on_unprojectable
+        )
         return RestoredRun(
             run_id=run_id,
             state=state,

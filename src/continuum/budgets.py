@@ -15,6 +15,13 @@ registries):
 ledger and returns whether another claim may proceed. CONTINUUM never retries
 anything itself - it counts and gates - so the enforcement surface stays a
 single pure function plus thin wiring at claim sites.
+
+Attempts are counted per idempotency key, not per action type (issue #368). The
+limit is still configured per type, because that is the unit an operator thinks
+in, but what it caps is repetition of one operation. Counting per type made
+distinct work compete for the same allowance: three different recipients each
+failing once, with no retry anywhere, exhausted a budget of three and blocked a
+fourth that had never been attempted.
 """
 
 from __future__ import annotations
@@ -26,10 +33,10 @@ from typing import Any
 
 __all__ = [
     "DEFAULT_BUDGETS_PATH",
+    "attempts_by_key",
     "attempts_for_type",
     "BudgetConfigError",
     "load_budgets",
-    "attempts_for_type",
     "evaluate_budget",
     "backoff_delay",
 ]
@@ -88,25 +95,29 @@ def _max_for(action_type: str, raw: Mapping[str, Any]) -> int:
     return int(fallback)
 
 
-def attempts_for_type(events: Any, action_type: str) -> int:
-    """Count unsettled claim slots opened for ``action_type`` from raw events.
+def attempts_by_key(events: Any, action_type: str) -> dict[str, int]:
+    """Unsettled claim attempts for ``action_type``, counted per idempotency key.
 
-    A claim slot (an ACTION_RECORDED whose action status is STARTED) is one
-    attempt. Settlement events (completed/failed/unknown) are updates, not
-    new attempts - so retries count but their bookkeeping does not.
+    A retry budget has to count retries of *one operation*. Counting per action
+    type instead conflated distinct work with repetition: three different
+    recipients each failing once, with no retry anywhere, exhausted a budget of
+    three and blocked a fourth recipient that had never been attempted (issue
+    #368). Any fan-out with more than ``max_attempts`` failures of one type
+    deadlocked mid-run.
 
-    Slots whose action went on to COMPLETE are excluded. This is a *retry*
-    budget: an operation that succeeded was never retried, and counting it caps
-    how much distinct work a run may do rather than how hard it may hammer a
-    failing upstream (issue #309). Failures, unknowns and in-flight attempts
-    all still count, which is what the amplification guard actually needs.
+    The key is the right unit because it *is* the operation's identity, and it is
+    stable across retries: re-claiming after FAILED or COMPENSATED copies the
+    existing action, so successive attempts under one key accumulate here rather
+    than each opening a fresh row.
+
+    A claim slot (an ``ACTION_RECORDED`` whose action status is STARTED) is one
+    attempt. Settlement events are updates, not new attempts, so retries count but
+    their bookkeeping does not. Keys whose action went on to COMPLETE are omitted:
+    an operation that succeeded was never retried (issue #309).
     """
     from continuum.events import EventType
     from continuum.models import ActionStatus
 
-    # The claim slot and its settlement are separate events describing the same
-    # action, so fold to the final status per action id before counting: only
-    # that tells us whether the attempt ultimately succeeded.
     slots: dict[str, int] = {}
     final: dict[str, str] = {}
     for event in events:
@@ -115,17 +126,29 @@ def attempts_for_type(events: Any, action_type: str) -> int:
         action = event.payload.get("action")
         if not isinstance(action, Mapping) or action.get("action_type") != action_type:
             continue
-        action_id = str(action.get("action_id"))
+        key = str(event.payload.get("key", ""))
+        if not key:
+            continue
         status = str(action.get("status"))
         if status == ActionStatus.STARTED.value:
-            slots[action_id] = slots.get(action_id, 0) + 1
-        final[action_id] = status
+            slots[key] = slots.get(key, 0) + 1
+        final[key] = status
 
-    return sum(
-        count
-        for action_id, count in slots.items()
-        if final.get(action_id) != ActionStatus.COMPLETED.value
-    )
+    return {
+        key: count for key, count in slots.items() if final.get(key) != ActionStatus.COMPLETED.value
+    }
+
+
+def attempts_for_type(events: Any, action_type: str) -> int:
+    """The most attempts any single operation of ``action_type`` has used.
+
+    Reports the figure the budget is actually compared against, so the ``continuum
+    budget`` view agrees with what the claim site enforces. It is deliberately not
+    the sum across keys: that total is a measure of how much distinct work a run
+    did, which no limit here caps (issue #368).
+    """
+    per_key = attempts_by_key(events, action_type)
+    return max(per_key.values(), default=0)
 
 
 def evaluate_budget(

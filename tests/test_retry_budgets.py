@@ -16,6 +16,7 @@ import pytest
 from continuum.actions import ActionLedger
 from continuum.budgets import (
     BudgetConfigError,
+    attempts_by_key,
     attempts_for_type,
     backoff_delay,
     evaluate_budget,
@@ -67,15 +68,44 @@ def test_nonpositive_limits_are_refused(tmp_path: Path) -> None:
 
 
 def test_attempts_count_every_claim_slot(db: str) -> None:
-    """Retries that reuse the same key still count - that is the point."""
+    """Retries of one operation accumulate against that operation's allowance.
+
+    Re-claiming after FAILED copies the existing action, so successive attempts
+    land under the same key rather than each opening a fresh row. That is what
+    makes the key the right unit to count (issue #368).
+    """
     ledger = ActionLedger(SQLiteStorage(db), "run_1")
     outcome = ledger.claim("send_invoice", {}, key="invoice:1")
     ledger.fail(outcome.key, "boom", certain=True)
-    # Retry opens a second slot under a fresh key suffix.
-    ledger.claim("send_invoice", {}, key="invoice:1#retry2")
+    ledger.claim("send_invoice", {}, key="invoice:1")
 
     events = SQLiteStorage(db).read_events("run_1")
+    assert attempts_by_key(events, "send_invoice") == {str(outcome.key): 2}
     assert attempts_for_type(events, "send_invoice") == 2
+
+
+def test_distinct_operations_do_not_share_one_allowance(db: str) -> None:
+    """Different work must not compete for the same budget (issue #368).
+
+    Counting per action type made three recipients each failing once, with no
+    retry anywhere, exhaust a budget of three and block a fourth that had never
+    been attempted. Any fan-out with more failures than the limit deadlocked
+    mid-run, and the refusal called it a retry budget while nothing had been
+    retried.
+    """
+    ledger = ActionLedger(SQLiteStorage(db), "run_1")
+    for recipient in ("a", "b", "c"):
+        outcome = ledger.claim("email_send", {"to": recipient}, key=f"email:{recipient}")
+        ledger.fail(outcome.key, "550 rejected", certain=True)
+
+    events = SQLiteStorage(db).read_events("run_1")
+    per_key = attempts_by_key(events, "email_send")
+    assert len(per_key) == 3
+    assert set(per_key.values()) == {1}
+    # The figure compared against the limit is the worst single operation, not
+    # the sum, so a fourth recipient is still allowed.
+    assert attempts_for_type(events, "email_send") == 1
+    assert evaluate_budget({"default_max_attempts": 3}, "email_send", 1)[0] is True
 
 
 def test_completed_attempts_do_not_count(db: str) -> None:
@@ -98,17 +128,28 @@ def test_completed_attempts_do_not_count(db: str) -> None:
 def test_only_the_unsettled_attempts_of_a_retried_key_count(db: str) -> None:
     """The amplification guard must survive the fix: failures still count."""
     ledger = ActionLedger(SQLiteStorage(db), "run_1")
-    # One key that fails twice then succeeds, and one that is still in flight.
-    first = ledger.claim("send_invoice", {}, key="invoice:1")
-    ledger.fail(first.key, "boom", certain=True)
-    retry = ledger.claim("send_invoice", {}, key="invoice:1#retry2")
-    ledger.fail(retry.key, "boom again", certain=True)
-    won = ledger.claim("send_invoice", {}, key="invoice:1#retry3")
-    ledger.complete(won.key, external_id="ext-1")
+    # One key retried twice and still unsettled, one that succeeded on retry,
+    # and one untouched operation in flight.
+    stuck = ledger.claim("send_invoice", {}, key="invoice:1")
+    ledger.fail(stuck.key, "boom", certain=True)
+    ledger.claim("send_invoice", {}, key="invoice:1")
+    ledger.fail(stuck.key, "boom again", certain=True)
+    ledger.claim("send_invoice", {}, key="invoice:1")
+
+    won = ledger.claim("send_invoice", {}, key="invoice:2")
+    ledger.fail(won.key, "transient", certain=True)
     ledger.claim("send_invoice", {}, key="invoice:2")
+    ledger.complete(won.key, external_id="ext-2")
+
+    fresh = ledger.claim("send_invoice", {}, key="invoice:3")
 
     events = SQLiteStorage(db).read_events("run_1")
-    # Two failures plus one in-flight; the completed retry is excluded.
+    # invoice:1 burned three attempts and is still unsettled; invoice:2 succeeded
+    # so it is excluded entirely; invoice:3 is on its first.
+    assert attempts_by_key(events, "send_invoice") == {
+        str(stuck.key): 3,
+        str(fresh.key): 1,
+    }
     assert attempts_for_type(events, "send_invoice") == 3
 
 
@@ -138,24 +179,30 @@ def test_backoff_delay_rejects_zero() -> None:
 
 
 def test_claims_beyond_budget_are_refused_at_the_mcp_boundary(db: str, tmp_path: Path) -> None:
-    """Drive the real intercept handler logic: after N claims of one type, the
-    next claim for that type is refused naming the budget.
+    """Drive the real intercept handler logic: after N attempts at one operation,
+    the next claim for it is refused naming the budget.
 
-    The MCP tool raises ToolError; here we pin the counting + refusal maths
-    against the same folded view the server uses.
+    The MCP tool raises ToolError; here we pin the counting and refusal maths
+    against the same folded view the server uses. Retries of one key, not two
+    different invoices, because the budget caps repetition (issue #368).
     """
     cfg = {"default_max_attempts": 2}
     registry_path = registry(tmp_path, cfg)
     del registry_path
 
     ledger = ActionLedger(SQLiteStorage(db), "run_1")
+    outcome = ledger.claim("send_invoice", {}, key="invoice:1")
+    ledger.fail(outcome.key, "boom", certain=True)
     ledger.claim("send_invoice", {}, key="invoice:1")
-    ledger.claim("send_invoice", {}, key="invoice:2")
 
     events = SQLiteStorage(db).read_events("run_1")
-    attempts = attempts_for_type(events, "send_invoice")
+    attempts = attempts_by_key(events, "send_invoice")[str(outcome.key)]
     allowed, used, maximum = evaluate_budget(cfg, "send_invoice", attempts)
     assert (allowed, used, maximum) == (False, 2, 2)
+
+    # A different invoice has its own allowance and is unaffected.
+    other = evaluate_budget(cfg, "send_invoice", 0)
+    assert other[0] is True
 
 
 def registry(tmp_path: Path, body: dict[str, object]) -> str:
@@ -168,6 +215,11 @@ def registry(tmp_path: Path, body: dict[str, object]) -> str:
 
 
 def test_cli_budget_reports_usage_per_type(db: str, tmp_path: Path) -> None:
+    """The report shows the worst single operation, which is what the gate uses.
+
+    Two different invoices are two operations with their own allowances, not two
+    attempts at one (issue #368), so `send_invoice` sits at 1 of 3 rather than 2.
+    """
     ledger = ActionLedger(SQLiteStorage(db), "run_1")
     ledger.claim("send_invoice", {}, key="invoice:1")
     ledger.claim("send_invoice", {}, key="invoice:2")
@@ -191,7 +243,8 @@ def test_cli_budget_reports_usage_per_type(db: str, tmp_path: Path) -> None:
     assert code == ExitCode.OK, err
     payload = json.loads(out)
     by_type = {r["action_type"]: r for r in payload["budgets"]}
-    assert by_type["send_invoice"]["remaining"] == 1  # 3 - 2
+    assert by_type["send_invoice"]["attempts"] == 1
+    assert by_type["send_invoice"]["remaining"] == 2  # 3 - 1
     assert by_type["charge_card"]["exhausted"] is True  # 1 - 1
 
 
