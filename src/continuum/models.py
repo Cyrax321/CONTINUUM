@@ -498,7 +498,25 @@ class UnknownSideEffect(RuntimeError):
     """Raised when CONTINUUM cannot determine whether an external side effect occurred.
 
     The caller must reconcile (do not blindly retry).
+
+    ``action_key`` and ``action_id`` carry the identity of the action needing
+    reconciliation, when the raiser knows it. Telling a caller to reconcile
+    without telling it *what* to reconcile is not actionable, and a recovering
+    session is by definition the one least able to reconstruct that identity for
+    itself (issue #367). Both are optional: a cross-run refusal is raised about
+    another run's record, which this ledger has no standing to settle.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        action_key: str | None = None,
+        action_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.action_key = action_key
+        self.action_id = action_id
 
 
 # --------------------------------------------------------------------------- #

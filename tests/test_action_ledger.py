@@ -142,8 +142,53 @@ def test_a_compensated_action_may_be_performed_again(ledger: ActionLedger) -> No
 
 
 def test_completing_an_unknown_key_is_refused(ledger: ActionLedger) -> None:
-    with pytest.raises(LedgerError, match="no action recorded"):
+    """The refusal names both identifier spaces (issue #367).
+
+    Settle methods accept either an idempotency key or an ``action_id``, so a
+    failure means neither matched. The old wording said only "no action recorded
+    for key", which left a caller holding a valid identifier of the other kind
+    unable to tell a wrong-space mistake from a nonexistent action.
+    """
+    with pytest.raises(LedgerError, match="idempotency key or an action_id"):
         ledger.complete("nonexistent", external_id="1")
+
+
+def test_settle_methods_accept_an_action_id(ledger: ActionLedger) -> None:
+    """`action_id` is the identifier every read surface reports (issue #367).
+
+    The ledger keys on the idempotency key, but `Action.action_id`, the recovery
+    plan's `reconcile_action:<target>` steps, the contract's `required_actions`
+    and the rendered report all name the action id. Accepting only the key made
+    the project's own recovery guidance unexecutable as written.
+    """
+    outcome = ledger.claim("github.create_issue", ISSUE)
+    settled = ledger.complete(outcome.action.action_id, external_id="issue-7")
+
+    assert settled.status is ActionStatus.COMPLETED
+    assert settled.external_id == "issue-7"
+    # Settled under the ledger's own key, not under the identifier passed in, or
+    # the fold would grow a second entry for one action.
+    assert len(ledger.all()) == 1
+    assert ledger.get(str(outcome.key)) is not None
+
+
+def test_an_unknown_action_reports_the_key_needed_to_reconcile_it(
+    ledger: ActionLedger,
+) -> None:
+    """Telling a caller to reconcile without saying what is not actionable (#367).
+
+    The identity used to appear only as a 12-character truncated prefix inside
+    the exception message, so a recovering session, the one least able to
+    reconstruct it, had no way to follow the instruction it was given.
+    """
+    outcome = ledger.claim("github.create_issue", ISSUE)
+    with pytest.raises(UnknownSideEffect) as raised:
+        ledger.claim("github.create_issue", ISSUE)
+
+    assert raised.value.action_key == str(outcome.key)
+    assert raised.value.action_id == outcome.action.action_id
+    # Usable as passed, rather than merely reported.
+    assert ledger.reconcile(raised.value.action_key, occurred=False).status is ActionStatus.FAILED
 
 
 # --- the crash gap: the reason this module exists -------------------------- #

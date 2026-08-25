@@ -732,6 +732,52 @@ All notable changes to this project are documented here. The format follows
   same decision but demands the caller stand behind it and records
   `ACTION_RECONCILED` with the note.
 
+- **Recovery guidance named an identifier the settle tools rejected (#367).**
+  `continuum_resume` reports uncertain actions by `action_id` in five places
+  (`next_allowed_action`, the contract's `required_actions`, `human_steps`,
+  `informed_retry.avoid` and the rendered report), and `human_steps` spelled out
+  a `continuum_reconcile_action(action_key=<action_id>)` call. The ledger keyed
+  only on the idempotency key, so following that instruction verbatim failed with
+  `no action recorded for key ...`, and no MCP surface exposed the value that
+  would have worked: `list_actions` and `uncertain_actions` reported `action_id`,
+  the `UnknownSideEffect` response omitted the key entirely and left a
+  12-character truncated prefix in free text as its only trace, `arguments_hash`
+  from `continuum actions --json` looks like a key but is a different hash, and
+  `continuum reconcile` needs a registered probe. An `UNKNOWN` action created
+  over MCP was therefore unreconcilable through every documented interface.
+  `ActionLedger.resolve_key` now accepts either space and `_require` returns the
+  resolved key, so `complete`, `fail`, `reconcile`, `compensate` and
+  `flag_for_review` all take an `action_id` or a key and settle under the fold's
+  own key either way. `UnknownSideEffect` carries `action_key` and `action_id`,
+  which `continuum_intercept_action` returns on the unknown path, and both
+  `continuum_list_actions` rows and `continuum_resume`'s `uncertain_actions` gain
+  `action_key`. The unmatched-identifier message names both spaces and says how
+  to list them.
+
+- **One `continuum_record_progress` call could permanently brick a run (#364).**
+  The `completed + failed > total` guard only fired when `total` was passed in
+  the same call. Omitting it skipped the guard while projection still folded the
+  `total` recorded earlier, so the invariant was evaluated against a limit the
+  call never mentioned. Worse, the handler appended before it projected, so the
+  rejected event was already durable when validation failed, and because the
+  fold validates each intermediate state no later event could correct it. Every
+  projecting surface for that run then stayed dead permanently: `record_progress`,
+  `checkpoint`, `validate` and `resume` over MCP, plus `status`, `inspect`,
+  `replay`, `show-contract` and `briefing` over the CLI. The action tools kept
+  working throughout, so the run could go on authorising real side effects while
+  recovery was unable to say whether continuing was safe, and `continuum verify`
+  still reported the chain as intact. The new `_project_candidate` helper folds
+  the log with the candidate payload appended and commits only if that succeeds,
+  so the write path now rejects exactly what the read path would reject rather
+  than approximating it one field at a time. The cheap argument checks are kept
+  ahead of it because they answer without touching storage and name the offending
+  argument. The commit passes `expected_sequence`, because validation and append
+  are two statements: a second writer landing `total=50` between the read and the
+  write of a `completed=75` that omits `total` would otherwise compose a log
+  neither payload would have been allowed to produce on its own. Losing that race
+  re-validates against the new head and retries, bounded, since losing it says
+  nothing about whether the update is valid.
+
 - **`ActionLedger` could not serialise concurrent claims on one key (#345).**
   `claim()` deduplicates by folding the log and then appending, with nothing
   between the read and the write, so processes racing on one key could each be

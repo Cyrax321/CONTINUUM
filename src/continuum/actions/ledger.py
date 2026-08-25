@@ -423,6 +423,34 @@ class ActionLedger:
     def get(self, key: str) -> Action | None:
         return self._replay().get(key)
 
+    def resolve_key(self, identifier: str) -> str | None:
+        """The ledger key for ``identifier``, which may be a key or an ``action_id``.
+
+        The ledger is keyed by idempotency key, but almost everything a caller
+        reads back is keyed by ``action_id``: ``Action.action_id`` itself, the
+        recovery plan's ``reconcile_action:<target>`` steps, the contract's
+        ``required_actions``, and the rendered report. So the identifier a
+        recovering caller has in hand is usually the one the settle methods did
+        not accept, and the two are indistinguishable by shape (issue #367).
+
+        Resolving both here rather than at one call site means every settle
+        method inherits it, and the recovery guidance that names an ``action_id``
+        becomes executable as written instead of needing to be rewritten in terms
+        of an identifier no output exposes.
+
+        The mapping is unambiguous: one key holds one action, and a re-claim after
+        FAILED or COMPENSATED copies the existing action, so ``action_id`` stays
+        with its key rather than being reissued. Returns ``None`` when neither
+        space matches.
+        """
+        folded = self._replay()
+        if identifier in folded:
+            return identifier
+        for stored_key, action in folded.items():
+            if action.action_id == identifier:
+                return stored_key
+        return None
+
     def _identity_match(
         self,
         action_type: str,
@@ -729,7 +757,13 @@ class ActionLedger:
         raise UnknownSideEffect(
             f"action {existing.action_type!r} (key {key[:12]}...) was interrupted before its "
             f"outcome was recorded; the side effect may or may not have occurred. "
-            f"Reconcile it before retrying."
+            f"Reconcile it before retrying.",
+            # The caller is being told to reconcile, so it needs the identity to
+            # reconcile *with*. Truncating it into the message was the only place
+            # it appeared, which left a recovering session unable to act on its
+            # own instruction (issue #367).
+            action_key=str(key),
+            action_id=uncertain.action_id,
         )
 
     @_single_writer
@@ -760,7 +794,7 @@ class ActionLedger:
         same decision, demands the caller stand behind it, and records
         ``ACTION_RECONCILED`` with a note so the correction is visible in the log.
         """
-        existing = self._require(key)
+        key, existing = self._require(key)
         if existing.status not in (ActionStatus.STARTED, ActionStatus.COMPLETED):
             raise LedgerError(
                 f"action {existing.action_type!r} is {existing.status.value}, not in flight, so "
@@ -790,7 +824,7 @@ class ActionLedger:
         ``UNKNOWN`` rather than ``FAILED``, because a timeout is not evidence of
         absence.
         """
-        existing = self._require(key)
+        key, existing = self._require(key)
         action = existing.model_copy(
             update={
                 "status": ActionStatus.FAILED if certain else ActionStatus.UNKNOWN,
@@ -831,7 +865,7 @@ class ActionLedger:
         caller does not supply replacements, so confirming an effect happened can
         never erase the receipt proving it did.
         """
-        existing = self._require(key)
+        key, existing = self._require(key)
         if occurred:
             # Fall back to what is already recorded rather than overwriting with
             # None. Confirming an effect occurred must never be the reason its
@@ -867,7 +901,7 @@ class ActionLedger:
     @_single_writer
     def compensate(self, key: str, *, note: str = "", by: str | None = None) -> Action:
         """Record that a completed effect was deliberately undone."""
-        existing = self._require(key)
+        key, existing = self._require(key)
         action = existing.model_copy(
             update={
                 "status": ActionStatus.COMPENSATED,
@@ -881,14 +915,31 @@ class ActionLedger:
     @_single_writer
     def flag_for_review(self, key: str, reason: str) -> Action:
         """Escalate an action a human must judge."""
-        existing = self._require(key)
+        key, existing = self._require(key)
         action = existing.model_copy(
             update={"status": ActionStatus.REQUIRES_REVIEW, "last_error": reason}
         )
         return self._record(key, action)
 
-    def _require(self, key: str) -> Action:
-        existing = self.get(key)
-        if existing is None:
-            raise LedgerError(f"no action recorded for key {key[:12]}...")
-        return existing
+    def _require(self, key: str) -> tuple[str, Action]:
+        """Resolve ``key`` to its stored key and action, or explain what is wrong.
+
+        Returns the *resolved* key alongside the action, because the caller has
+        to record its settlement under the key the fold uses, not under whatever
+        identifier the caller happened to hold (issue #367).
+
+        The message names both identifier spaces. The previous wording,
+        ``no action recorded for key <prefix>...``, left a caller that had passed
+        a perfectly valid ``action_id`` with no way to tell that it had reached
+        for the wrong identifier rather than a nonexistent action.
+        """
+        resolved = self.resolve_key(key)
+        if resolved is None:
+            known = len(self._replay())
+            raise LedgerError(
+                f"no action in run {self.run_id!r} matches {key[:16]!r} as either an "
+                f"idempotency key or an action_id ({known} action(s) recorded). "
+                f"List them with `continuum actions {self.run_id}` or "
+                f"continuum_list_actions, and pass the action_key or action_id from there."
+            )
+        return resolved, self._replay()[resolved]
