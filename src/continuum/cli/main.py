@@ -69,7 +69,7 @@ from continuum.security.attestation import (
 )
 from continuum.serve import cmd_serve
 from continuum.state.diff import diff_states, render_diff
-from continuum.state.semantic import ProjectionError, project
+from continuum.state.semantic import ProjectionError, first_unprojectable_event, project
 from continuum.state.versioning import state_fingerprint
 from continuum.storage import (
     CheckpointNotFound,
@@ -1470,8 +1470,56 @@ def cmd_verify(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         text = text + "\n" + "\n".join(index_lines)
         payload["action_index_drift"] = drift
 
+    # Integrity and coherence are different guarantees, and reporting only the
+    # first let `verify` certify a run no projecting command could read (issue
+    # #382). An unprojectable log is perfectly intact: the offending event was
+    # written through the normal path and hashed like any other, so the chain
+    # audit is right to pass it. Nothing in that audit evaluates whether the fold
+    # satisfies its own invariants, which is the question an operator reaching for
+    # a health command is actually asking.
+    #
+    # Archived events are folded alongside the live ones, because after
+    # compaction (#239) the live log starts at the anchor and no longer contains
+    # RUN_STARTED. Reading only the tail would report every compacted run as
+    # unprojectable. `ActionLedger._replay` merges the two streams for the same
+    # reason; the archive holds the prefix verbatim from sequence 1, so the union
+    # is the whole history.
+    #
+    # Only attempted once the chain verified. Folding a tampered log to report
+    # where it stops projecting would describe events that cannot be trusted to
+    # say anything, the same reasoning that refuses action-index repair above.
+    broken = None
+    if report.ok:
+        whole_log = [
+            *storage.read_archived_events(args.run_id),
+            *storage.read_events(args.run_id),
+        ]
+        broken = first_unprojectable_event(args.run_id, whole_log)
+    if broken is not None:
+        sequence, event_type, reason = broken
+        payload["projectable"] = False
+        payload["projection_failed_at"] = {
+            "sequence": sequence,
+            "type": event_type,
+            "reason": reason,
+        }
+        text += "\n" + "\n".join(
+            [
+                f"PROJECTION FAILURE: the log stops folding at sequence {sequence} ({event_type})",
+                f"  {reason}",
+                "  The chain is intact; the state it folds to is not. Commands that",
+                "  project (resume, status, inspect, replay, validate) fail until this",
+                "  is repaired.",
+            ]
+        )
+    elif report.ok:
+        payload["projectable"] = True
+
     _emit(payload, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
-    return ExitCode.OK if report.ok else ExitCode.CORRUPTED
+    # Non-zero for either failure, so `continuum verify "$RUN" && ./resume.sh`
+    # short-circuits. exitcodes.py states the rule: only a verified, usable run
+    # exits 0, and a run that cannot be projected is not usable.
+    return ExitCode.OK if report.ok and broken is None else ExitCode.CORRUPTED
 
 
 def cmd_actions(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:

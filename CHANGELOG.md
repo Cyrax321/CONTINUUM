@@ -732,6 +732,39 @@ All notable changes to this project are documented here. The format follows
   same decision but demands the caller stand behind it and records
   `ACTION_RECONCILED` with the note.
 
+- **`continuum verify` certified a run whose log could not be projected (#382).**
+  `verify` re-audits the hash chain, which is a statement about integrity, and an
+  unprojectable log is perfectly intact: the offending event was written through
+  the normal path and hashed like any other. Nothing in that audit evaluates
+  whether the fold satisfies its own invariants, so the one health-shaped command
+  an operator reaches for during an incident answered "13 events, no violations"
+  for a run on which `resume`, `status`, `inspect`, `replay`, `validate` and
+  `briefing` all failed. `verify` now reports both verdicts and exits non-zero
+  when the fold fails, so `continuum verify "$RUN" && ./resume.sh` short-circuits.
+  New `first_unprojectable_event` names the sequence, event type and the specific
+  constraint that failed, folding one event at a time onto the previous state so
+  the scan is a single linear pass rather than a re-projection per prefix.
+  Archived events are folded alongside the live ones, because after compaction
+  (#239) the live log starts at the anchor and no longer contains `RUN_STARTED`;
+  reading only the tail would report every compacted run as broken. The
+  projection is attempted only once the chain verifies, since folding a tampered
+  log to say where it stops projecting would describe events that cannot be
+  trusted to say anything. Repairing such a log is a separate gap, tracked in
+  #383.
+
+- **`self_report_guidance` said nothing was wrong over an unresolved action (#369).**
+  The note exists to explain a `request_human` caused only by unverified
+  self-reporting, and it is deliberately withheld when anything else is also
+  blocking. Its predicate scanned `decision.validation.report.statuses`, but an
+  uncertain action reaches `request_human` through `decision.uncertain_actions` and
+  never appears in the report, so the check saw goal and progress alone and stayed
+  true. The result was a single `continuum_resume` response whose contract read
+  `recovery_status: requires_human` because a side effect's outcome was unknown,
+  next to guidance reading "Nothing is wrong with this run" and "Work is not
+  blocked", pointing the agent past the one thing the system exists to stop it
+  walking past. The ledger is now part of the test. The dependency half of the
+  predicate was already correct and is covered by a test that keeps it that way.
+
 - **Recovery guidance named an identifier the settle tools rejected (#367).**
   `continuum_resume` reports uncertain actions by `action_id` in five places
   (`next_allowed_action`, the contract's `required_actions`, `human_steps`,

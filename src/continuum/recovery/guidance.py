@@ -49,10 +49,21 @@ def self_report_guidance(decision: RecoveryDecision) -> dict[str, str]:
     dependency, an unresolved action) the caller has a real problem to fix and
     this note would only dilute it, so it is omitted.
 
+    "Anything else" has to include the ledger, not just the validation report
+    (issue #369). An uncertain action reaches ``request_human`` through
+    ``decision.uncertain_actions``, never through ``report.statuses``, so scanning
+    only the report found nothing but goal and progress and emitted this note
+    beside a contract that said ``recovery_status: requires_human`` because a side
+    effect's outcome was unknown. The agent was told "Nothing is wrong with this
+    run" and "Work is not blocked" and pointed past the one thing this system
+    exists to stop it walking past.
+
     Returns a mapping to splice into a payload, empty when not applicable, so a
     caller adds the key only when there is something to say.
     """
     if decision.mode is not RecoveryMode.REQUEST_HUMAN:
+        return {}
+    if decision.uncertain_actions:
         return {}
     blocking = [e for e in decision.validation.report.statuses if e.status is not StateStatus.VALID]
     only_self_report = bool(blocking) and all(
