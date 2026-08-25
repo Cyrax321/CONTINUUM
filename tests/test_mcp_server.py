@@ -286,6 +286,78 @@ async def test_a_rejected_progress_call_writes_nothing_at_all(
 
 
 @pytest.mark.asyncio
+async def test_progress_over_the_recorded_total_is_rejected_when_total_is_omitted(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """The `total` guard must apply to the total already on record (issue #364).
+
+    Omitting `total` used to skip the argument check entirely while projection
+    still folded the `total` from an earlier event, so the invariant was
+    evaluated against a limit the call never mentioned. The event was appended
+    before it was projected, which made the rejected value durable.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, ctx = server_ctx
+    await call(
+        server,
+        "continuum_record_progress",
+        run_id="run_1",
+        completed=3,
+        total=6,
+        goal="g",
+    )
+    before = [e.type.value for e in ctx.storage.read_events("run_1")]
+
+    with pytest.raises(ToolError, match="unprojectable"):
+        await server.call_tool(
+            "continuum_record_progress",
+            {"run_id": "run_1", "completed": 99},
+            context=_ctx(TEST_CLIENT),
+        )
+
+    assert [e.type.value for e in ctx.storage.read_events("run_1")] == before
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_progress_call_leaves_the_run_projectable(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """A refused update must not cost the run its recovery surface (issue #364).
+
+    The fold validates each intermediate state, so a single unprojectable event
+    could never be corrected by appending another. Every projecting tool stayed
+    dead for that run while the action tools kept working, which let the run go
+    on authorising side effects that recovery could no longer reason about.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, _ = server_ctx
+    await call(
+        server,
+        "continuum_record_progress",
+        run_id="run_1",
+        completed=3,
+        total=6,
+        goal="g",
+    )
+    with pytest.raises(ToolError):
+        await server.call_tool(
+            "continuum_record_progress",
+            {"run_id": "run_1", "completed": 99},
+            context=_ctx(TEST_CLIENT),
+        )
+
+    # Each of these folds the log, and each was permanently broken before.
+    assert (await call(server, "continuum_record_progress", run_id="run_1", completed=4))[
+        "completed"
+    ] == 4
+    assert await call(server, "continuum_checkpoint", run_id="run_1")
+    assert await call(server, "continuum_validate", run_id="run_1")
+    assert await call(server, "continuum_resume", run_id="run_1")
+
+
+@pytest.mark.asyncio
 async def test_recording_progress_for_an_unknown_run_without_a_goal_fails(
     server_ctx: tuple[Any, Any],
 ) -> None:
