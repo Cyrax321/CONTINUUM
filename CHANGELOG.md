@@ -714,6 +714,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`continuum_confirm` hid handler refusals (#371).** `confirm_gate` now
+  invokes the handler inside `_refusal_reaches_the_caller`, so domain errors
+  such as a missing run retain their useful `ToolError` message.
+
 - **One `continuum_record_progress` call could permanently brick a run (#364).**
   The `completed + failed > total` guard only fired when `total` was passed in
   the same call. Omitting it skipped the guard while projection still folded the

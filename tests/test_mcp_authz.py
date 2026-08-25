@@ -850,3 +850,21 @@ async def test_a_validation_refusal_also_carries_its_reason(store: SQLiteStorage
             {"run_id": "r", "completed": 999, "total": 10, "goal": "g"},
             context=fake_context(ALLOWED),
         )
+
+
+@pytest.mark.asyncio
+async def test_confirm_handler_refusal_carries_its_reason(store: SQLiteStorage) -> None:
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, _ = build_server(
+        storage=store,
+        policy=AuthorizationPolicy([ALLOWED]),
+        confirm_auth=ConfirmPolicy("confirm-secret"),
+    )
+
+    with pytest.raises(ToolError, match="no such run: 'missing'"):
+        await server.call_tool(
+            "continuum_confirm",
+            {"run_id": "missing"},
+            context=fake_context(ALLOWED, auth_token="confirm-secret"),
+        )

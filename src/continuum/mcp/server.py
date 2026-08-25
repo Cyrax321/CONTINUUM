@@ -601,7 +601,7 @@ def build_server(
             with _refusal_reaches_the_caller():
                 confirm_auth.verify(token_from(ctx))
                 policy.require(caller, fn.__name__)
-            return fn(*args, **kwargs)
+                return fn(*args, **kwargs)
 
         # Same fix-up as ``guard``: re-advertise the context parameter or the
         # SDK never hands us one and every caller looks tokenless.
