@@ -239,7 +239,7 @@ def _project_candidate(
     run_id: str,
     event_type: EventType,
     payload: Mapping[str, Any],
-) -> SemanticState:
+) -> tuple[SemanticState, int]:
     """Fold the log with ``payload`` appended, without committing it (issue #364).
 
     The write path must reject exactly what the read path rejects, and the only
@@ -264,19 +264,26 @@ def _project_candidate(
     back. There is no transaction spanning the append here, and a rollback that
     fails would leave behind precisely the state this prevents.
 
-    Returns the projected state so the caller can answer from it instead of
-    folding a second time.
+    Returns the projected state and the head sequence it was validated against.
+    The caller passes that sequence to ``append_event`` as ``expected_sequence``:
+    validation and append are two statements, so a second writer can advance the
+    run in between and two individually-legal payloads can compose into a log
+    neither of them would have been allowed to produce (for example ``total=50``
+    landing between the read and the write of a ``completed=75`` that omits
+    ``total``). One run has one owner by design, but the failure being guarded
+    here is unrecoverable, so it is worth not relying on that.
     """
     history = list(ctx.storage.read_events(run_id))
+    head = history[-1].sequence if history else 0
     candidate = Event(
         run_id=run_id,
-        sequence=(history[-1].sequence + 1) if history else 1,
+        sequence=head + 1,
         type=event_type,
         payload=dict(payload),
         source=AGENT_SOURCE,
     )
     try:
-        return project(run_id, [*history, candidate])
+        return project(run_id, [*history, candidate]), head
     except ValueError as exc:
         # pydantic's ValidationError is a ValueError, so this covers both the
         # model invariants and the projector's own checks. Re-raised with the
@@ -286,6 +293,47 @@ def _project_candidate(
             f"{event_type.value} {dict(payload)} would leave run {run_id!r} unprojectable "
             f"and was not recorded: {exc}"
         ) from exc
+
+
+def _append_projectable(
+    ctx: ContinuumMCP,
+    run_id: str,
+    event_type: EventType,
+    payload: Mapping[str, Any],
+    *,
+    attempts: int = 3,
+) -> tuple[SemanticState, Event]:
+    """Commit ``payload`` only if the fold accepts it against the state it lands on.
+
+    Retries on ``ConcurrentWriteError`` rather than failing, because losing the
+    optimistic-concurrency race says nothing about whether the caller's update is
+    valid. Re-validation against the new head is the point: the update may still
+    be legal, and if the intervening write made it illegal that is exactly what
+    the next fold reports. Bounded, so a permanently busy run answers rather than
+    spinning.
+    """
+    from continuum.storage import ConcurrentWriteError
+
+    for remaining in range(attempts - 1, -1, -1):
+        state, expected = _project_candidate(ctx, run_id, event_type, payload)
+        try:
+            event = ctx.storage.append_event(
+                run_id,
+                event_type,
+                payload,
+                expected_sequence=expected,
+                source=AGENT_SOURCE,
+            )
+        except ConcurrentWriteError:
+            if remaining:
+                continue
+            raise ValueError(
+                f"run {run_id!r} is being written concurrently and this update lost the "
+                f"race {attempts} times; nothing was recorded. One run is meant to have "
+                f"one owner at a time, so check whether another agent holds this run."
+            ) from None
+        return state, event
+    raise AssertionError("unreachable: the loop either returns or raises")
 
 
 def _environment(run_id: str, env: Mapping[str, str] | None) -> EnvironmentSnapshot | None:
@@ -609,13 +657,11 @@ def build_server(
             payload["total"] = total
             payload["pending"] = max(total - completed - failed, 0)
 
-        # Fold with this payload appended before committing it. Appending first
-        # and projecting after leaves a rejected event permanently in the log,
-        # which no later event can correct (issue #364).
-        state = _project_candidate(ctx, run_id, EventType.TASK_UPDATED, payload)
-        event = ctx.storage.append_event(
-            run_id, EventType.TASK_UPDATED, payload, source=AGENT_SOURCE
-        )
+        # Fold with this payload appended before committing it, and commit under
+        # optimistic concurrency so the validated state is the one it lands on.
+        # Appending first and projecting after leaves a rejected event
+        # permanently in the log, which no later event can correct (issue #364).
+        state, event = _append_projectable(ctx, run_id, EventType.TASK_UPDATED, payload)
 
         return _json(
             {
@@ -625,8 +671,8 @@ def build_server(
                 "failed": state.progress.failed,
                 "total": state.progress.total,
                 # From the committed event rather than the candidate: the two
-                # agree on a single-writer run, and reporting the real sequence
-                # keeps the answer honest if they ever diverge.
+                # agree because the append is guarded by expected_sequence, and
+                # reporting the real sequence keeps the answer honest regardless.
                 "source_sequence": event.sequence,
             }
         )

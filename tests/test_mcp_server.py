@@ -358,6 +358,62 @@ async def test_a_rejected_progress_call_leaves_the_run_projectable(
 
 
 @pytest.mark.asyncio
+async def test_a_racing_writer_cannot_compose_an_unprojectable_log(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """Validation and append are two statements, so guard the gap (issue #364).
+
+    Two individually-legal payloads can compose into a log neither would have
+    been allowed to produce. Here `completed=75` is validated against `total=100`
+    and a second writer lands `total=50` before the append. Without
+    `expected_sequence` the stale candidate is committed and the run is
+    unprojectable; with it the append is rejected, re-validated against the new
+    head, and refused on its own merits.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, ctx = server_ctx
+    await seed_run(server, completed=10)  # total=100
+
+    real_read = ctx.storage.read_events
+    real_append = ctx.storage.append_event
+    interposed = {"done": False}
+
+    def read_then_let_a_writer_in(run_id: str, **kwargs: Any) -> Any:
+        history = real_read(run_id, **kwargs)
+        # Only the unbounded read is the one `_project_candidate` validates
+        # against; `ensure_run` reads with `upto=1` earlier in the same call.
+        if not interposed["done"] and not kwargs and run_id == "run_1":
+            interposed["done"] = True
+            # A concurrent writer shrinks the total after we have read it.
+            real_append(
+                "run_1",
+                EventType.TASK_UPDATED,
+                {"completed": 10, "failed": 0, "total": 50, "pending": 40},
+                source=Origin.EXTERNAL_AGENT,
+            )
+        return history
+
+    ctx.storage.read_events = read_then_let_a_writer_in  # type: ignore[method-assign]
+    try:
+        with pytest.raises(ToolError, match="unprojectable"):
+            await server.call_tool(
+                "continuum_record_progress",
+                {"run_id": "run_1", "completed": 75},
+                context=_ctx(TEST_CLIENT),
+            )
+    finally:
+        ctx.storage.read_events = real_read  # type: ignore[method-assign]
+
+    # The run survived the race: the log still folds, and the racing writer's
+    # own event is the one that stands.
+    state = project("run_1", ctx.storage.read_events("run_1"))
+    assert state.progress.total == 50
+    assert state.progress.completed == 10
+    assert await call(server, "continuum_resume", run_id="run_1")
+
+
+@pytest.mark.asyncio
 async def test_recording_progress_for_an_unknown_run_without_a_goal_fails(
     server_ctx: tuple[Any, Any],
 ) -> None:

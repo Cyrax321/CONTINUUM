@@ -731,7 +731,12 @@ All notable changes to this project are documented here. The format follows
   so the write path now rejects exactly what the read path would reject rather
   than approximating it one field at a time. The cheap argument checks are kept
   ahead of it because they answer without touching storage and name the offending
-  argument.
+  argument. The commit passes `expected_sequence`, because validation and append
+  are two statements: a second writer landing `total=50` between the read and the
+  write of a `completed=75` that omits `total` would otherwise compose a log
+  neither payload would have been allowed to produce on its own. Losing that race
+  re-validates against the new head and retries, bounded, since losing it says
+  nothing about whether the update is valid.
 
 
   `claim()` deduplicates by folding the log and then appending, with nothing
