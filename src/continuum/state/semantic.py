@@ -46,7 +46,13 @@ from continuum.models import (
     StateStatus,
 )
 
-__all__ = ["ProjectionError", "ProjectionReport", "project", "project_incremental"]
+__all__ = [
+    "ProjectionError",
+    "ProjectionReport",
+    "first_unprojectable_event",
+    "project",
+    "project_incremental",
+]
 
 
 class ProjectionError(ValueError):
@@ -512,6 +518,57 @@ def project_incremental(
             acc.created_at = event.timestamp
 
     return acc.build(), report
+
+
+def _condense(reason: str) -> str:
+    """One readable line from a possibly multi-line validation error.
+
+    pydantic renders "1 validation error for Progress" as its first line and puts
+    the constraint that actually failed on the second, followed by a docs URL. So
+    the naive first line is the least informative part. This keeps the header only
+    when there is nothing better, and drops the machine-facing bracket detail and
+    the URL either way.
+    """
+    lines = [line.strip() for line in reason.splitlines() if line.strip()]
+    if not lines:
+        return "unknown projection failure"
+    informative = next(
+        (line for line in lines[1:] if not line.startswith("For further information")),
+        lines[0],
+    )
+    return informative.split(" [type=")[0].rstrip()
+
+
+def first_unprojectable_event(
+    run_id: str,
+    events: Iterable[Event],
+) -> tuple[int, str, str] | None:
+    """Locate the earliest event whose fold fails, or ``None`` if the log folds.
+
+    Returns ``(sequence, event_type, reason)`` with ``reason`` condensed to a
+    single line. Naming the event is what turns "this run cannot be projected"
+    into something an operator can act on: the raw message reports the folded
+    figures without saying which write produced them, and the log may be thousands
+    of events long (issue #382).
+
+    Folds one event at a time carrying the state forward through
+    ``project_incremental``'s ``base``, so this is a single linear pass rather
+    than a re-projection per prefix. That matters because the logs most likely to
+    need this are the long ones.
+
+    Deliberately catches broadly. The question is *where* the log stops folding,
+    and any exception means it stopped there, whether it came from a model
+    invariant, the projector's own ordering checks, or a payload shape nothing
+    anticipated. Re-raising a narrower set would leave the operator holding the
+    same opaque traceback this exists to replace.
+    """
+    state: SemanticState | None = None
+    for event in sorted(events, key=lambda e: e.sequence):
+        try:
+            state, _ = project_incremental(run_id, [event], base=state)
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            return event.sequence, str(event.type), _condense(str(exc))
+    return None
 
 
 def project(

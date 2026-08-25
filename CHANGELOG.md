@@ -714,6 +714,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`continuum verify` certified a run whose log could not be projected (#382).**
+  `verify` re-audits the hash chain, which is a statement about integrity, and an
+  unprojectable log is perfectly intact: the offending event was written through
+  the normal path and hashed like any other. Nothing in that audit evaluates
+  whether the fold satisfies its own invariants, so the one health-shaped command
+  an operator reaches for during an incident answered "13 events, no violations"
+  for a run on which `resume`, `status`, `inspect`, `replay`, `validate` and
+  `briefing` all failed. `verify` now reports both verdicts and exits non-zero
+  when the fold fails, so `continuum verify "$RUN" && ./resume.sh` short-circuits.
+  New `first_unprojectable_event` names the sequence, event type and the specific
+  constraint that failed, folding one event at a time onto the previous state so
+  the scan is a single linear pass rather than a re-projection per prefix.
+  Archived events are folded alongside the live ones, because after compaction
+  (#239) the live log starts at the anchor and no longer contains `RUN_STARTED`;
+  reading only the tail would report every compacted run as broken. The
+  projection is attempted only once the chain verifies, since folding a tampered
+  log to say where it stops projecting would describe events that cannot be
+  trusted to say anything. Repairing such a log is a separate gap, tracked in
+  #383.
+
 - **`self_report_guidance` said nothing was wrong over an unresolved action (#369).**
   The note exists to explain a `request_human` caused only by unverified
   self-reporting, and it is deliberately withheld when anything else is also

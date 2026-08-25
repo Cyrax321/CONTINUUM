@@ -950,3 +950,118 @@ def test_complete_unknown_run_is_not_found(tmp_path: Path) -> None:
         pass
     code, _, err = run("--db", path, "complete", "ghost")
     assert code == ExitCode.NOT_FOUND
+
+
+# --- verify reports coherence, not only integrity (issue #382) --------------- #
+
+
+def _poison(path: str) -> None:
+    """Append a TASK_UPDATED the fold rejects, through the normal write path.
+
+    Mirrors what #364 allowed before it was fixed: `completed` past the `total`
+    already on record. The event is hashed like any other, so the chain stays
+    intact and only the projection breaks, which is the whole point here.
+    """
+    with SQLiteStorage(path) as store:
+        store.append_event("run_1", EventType.TASK_UPDATED, {"completed": 999, "failed": 0})
+
+
+def test_verify_reports_a_run_whose_log_cannot_be_projected(db: str) -> None:
+    """`verify` certified a run no projecting command could read (issue #382).
+
+    An unprojectable log is perfectly intact, so the chain audit passes it and is
+    right to. Reporting only that verdict meant the one command an operator
+    reaches for during an incident was the one that could not see the incident.
+    """
+    _poison(db)
+    code, out, _ = run("--db", db, "verify", "run_1")
+
+    assert "no violations" in out, "the chain really is intact; do not hide that"
+    assert "PROJECTION FAILURE" in out
+    assert "sequence" in out and "TASK_UPDATED" in out
+    assert "exceeds total" in out, "name the constraint, not just the pydantic header"
+    assert code == ExitCode.CORRUPTED, "verify $RUN && resume must short-circuit"
+
+
+def test_verify_still_passes_a_healthy_run(db: str) -> None:
+    """The new check must not fail a run that folds; that would be worse."""
+    code, out, _ = run("--db", db, "verify", "run_1")
+    assert code == ExitCode.OK
+    assert "PROJECTION FAILURE" not in out
+
+
+def test_verify_json_names_the_offending_event(db: str) -> None:
+    """Scripts read the payload, not the prose."""
+    _poison(db)
+    code, out, _ = run("--db", db, "--json", "verify", "run_1")
+    payload = json.loads(out)
+
+    assert payload["ok"] is True, "chain integrity is unaffected"
+    assert payload["projectable"] is False
+    assert payload["projection_failed_at"]["type"] == "TASK_UPDATED"
+    assert payload["projection_failed_at"]["sequence"] > 0
+    assert code == ExitCode.CORRUPTED
+
+
+def test_verify_json_marks_a_healthy_run_projectable(db: str) -> None:
+    payload = json.loads(run("--db", db, "--json", "verify", "run_1")[1])
+    assert payload["projectable"] is True
+    assert "projection_failed_at" not in payload
+
+
+def test_a_tampered_chain_is_not_also_projected(db: str, tmp_path: Path) -> None:
+    """Do not describe events that cannot be trusted to say anything.
+
+    Same reasoning the action-index repair already uses: folding a tampered log
+    to report where it stops projecting would launder its contents into a
+    diagnosis the operator might act on.
+    """
+    _poison(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE events SET payload = ? WHERE sequence = 2", ('{"tampered": true}',))
+
+    code, out, _ = run("--db", db, "verify", "run_1")
+    assert code == ExitCode.CORRUPTED
+    assert "INTEGRITY FAILURE" in out
+    assert "PROJECTION FAILURE" not in out, "integrity comes first; do not fold a tampered log"
+
+
+def test_first_unprojectable_event_finds_the_earliest_break(db: str) -> None:
+    """Two bad events must report the first, or a repair fixes the wrong one."""
+    from continuum.state.semantic import first_unprojectable_event
+
+    _poison(db)
+    _poison(db)
+    with SQLiteStorage(db) as store:
+        events = list(store.read_events("run_1"))
+        broken = first_unprojectable_event("run_1", events)
+
+    assert broken is not None
+    sequence, event_type, reason = broken
+    bad = [e.sequence for e in events if e.type is EventType.TASK_UPDATED]
+    assert sequence == min(bad)
+    assert event_type == "TASK_UPDATED"
+    assert "\n" not in reason, "the reason is rendered on one line"
+
+
+def test_first_unprojectable_event_returns_none_for_a_sound_log(db: str) -> None:
+    from continuum.state.semantic import first_unprojectable_event
+
+    with SQLiteStorage(db) as store:
+        assert first_unprojectable_event("run_1", store.read_events("run_1")) is None
+
+
+def test_verify_projects_a_compacted_run_from_its_archive(db: str) -> None:
+    """After compaction the live log starts at the anchor (issue #239).
+
+    It no longer contains RUN_STARTED, so folding only the live tail reports
+    every compacted run as unprojectable. The archive holds the prefix verbatim
+    from sequence 1, so the two streams are folded together, the same merge
+    `ActionLedger._replay` does.
+    """
+    assert run("--db", db, "compact", "run_1", "--force")[0] == ExitCode.OK
+
+    code, out, err = run("--db", db, "verify", "run_1")
+    assert code == ExitCode.OK, f"a healthy compacted run must still verify: {out}{err}"
+    assert "PROJECTION FAILURE" not in out
+    assert json.loads(run("--db", db, "--json", "verify", "run_1")[1])["projectable"] is True
