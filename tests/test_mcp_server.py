@@ -286,6 +286,134 @@ async def test_a_rejected_progress_call_writes_nothing_at_all(
 
 
 @pytest.mark.asyncio
+async def test_progress_over_the_recorded_total_is_rejected_when_total_is_omitted(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """The `total` guard must apply to the total already on record (issue #364).
+
+    Omitting `total` used to skip the argument check entirely while projection
+    still folded the `total` from an earlier event, so the invariant was
+    evaluated against a limit the call never mentioned. The event was appended
+    before it was projected, which made the rejected value durable.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, ctx = server_ctx
+    await call(
+        server,
+        "continuum_record_progress",
+        run_id="run_1",
+        completed=3,
+        total=6,
+        goal="g",
+    )
+    before = [e.type.value for e in ctx.storage.read_events("run_1")]
+
+    with pytest.raises(ToolError, match="unprojectable"):
+        await server.call_tool(
+            "continuum_record_progress",
+            {"run_id": "run_1", "completed": 99},
+            context=_ctx(TEST_CLIENT),
+        )
+
+    assert [e.type.value for e in ctx.storage.read_events("run_1")] == before
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_progress_call_leaves_the_run_projectable(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """A refused update must not cost the run its recovery surface (issue #364).
+
+    The fold validates each intermediate state, so a single unprojectable event
+    could never be corrected by appending another. Every projecting tool stayed
+    dead for that run while the action tools kept working, which let the run go
+    on authorising side effects that recovery could no longer reason about.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, _ = server_ctx
+    await call(
+        server,
+        "continuum_record_progress",
+        run_id="run_1",
+        completed=3,
+        total=6,
+        goal="g",
+    )
+    with pytest.raises(ToolError):
+        await server.call_tool(
+            "continuum_record_progress",
+            {"run_id": "run_1", "completed": 99},
+            context=_ctx(TEST_CLIENT),
+        )
+
+    # Each of these folds the log, and each was permanently broken before.
+    assert (await call(server, "continuum_record_progress", run_id="run_1", completed=4))[
+        "completed"
+    ] == 4
+    assert await call(server, "continuum_checkpoint", run_id="run_1")
+    assert await call(server, "continuum_validate", run_id="run_1")
+    assert await call(server, "continuum_resume", run_id="run_1")
+
+
+@pytest.mark.asyncio
+async def test_a_racing_writer_cannot_compose_an_unprojectable_log(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """Validation and append are two statements, so guard the gap (issue #364).
+
+    Two individually-legal payloads can compose into a log neither would have
+    been allowed to produce. Here `completed=75` is validated against `total=100`
+    and a second writer lands `total=50` before the append. Without
+    `expected_sequence` the stale candidate is committed and the run is
+    unprojectable; with it the append is rejected, re-validated against the new
+    head, and refused on its own merits.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, ctx = server_ctx
+    await seed_run(server, completed=10)  # total=100
+
+    real_read = ctx.storage.read_events
+    real_append = ctx.storage.append_event
+    interposed = {"done": False}
+
+    def read_then_let_a_writer_in(run_id: str, **kwargs: Any) -> Any:
+        history = real_read(run_id, **kwargs)
+        # Only the unbounded read is the one `_project_candidate` validates
+        # against; `ensure_run` reads with `upto=1` earlier in the same call.
+        if not interposed["done"] and not kwargs and run_id == "run_1":
+            interposed["done"] = True
+            # A concurrent writer shrinks the total after we have read it.
+            real_append(
+                "run_1",
+                EventType.TASK_UPDATED,
+                {"completed": 10, "failed": 0, "total": 50, "pending": 40},
+                source=Origin.EXTERNAL_AGENT,
+            )
+        return history
+
+    ctx.storage.read_events = read_then_let_a_writer_in  # type: ignore[method-assign]
+    try:
+        with pytest.raises(ToolError, match="unprojectable"):
+            await server.call_tool(
+                "continuum_record_progress",
+                {"run_id": "run_1", "completed": 75},
+                context=_ctx(TEST_CLIENT),
+            )
+    finally:
+        ctx.storage.read_events = real_read  # type: ignore[method-assign]
+
+    # The run survived the race: the log still folds, and the racing writer's
+    # own event is the one that stands.
+    state = project("run_1", ctx.storage.read_events("run_1"))
+    assert state.progress.total == 50
+    assert state.progress.completed == 10
+    assert await call(server, "continuum_resume", run_id="run_1")
+
+
+@pytest.mark.asyncio
 async def test_recording_progress_for_an_unknown_run_without_a_goal_fails(
     server_ctx: tuple[Any, Any],
 ) -> None:

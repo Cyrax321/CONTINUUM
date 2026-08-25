@@ -59,7 +59,7 @@ from typing import TYPE_CHECKING, Any
 from continuum.actions.ledger import ActionLedger
 from continuum.adapters.generic import GenericAgentAdapter
 from continuum.environment import StaticProvider, capture
-from continuum.events import EventType
+from continuum.events import Event, EventType
 from continuum.mcp.authz import (
     CONFIRM_ENV_VAR,
     AuthorizationPolicy,
@@ -77,6 +77,7 @@ from continuum.models import (
     EnvResource,
     Origin,
     Run,
+    SemanticState,
     UnknownSideEffect,
 )
 from continuum.recovery.contract import render_contract
@@ -242,6 +243,108 @@ def _refusal_reaches_the_caller() -> Iterator[None]:
         yield
     except (PermissionError, ValueError, RunNotFound, MalformedRunLog, LedgerError) as exc:
         raise ToolError(str(exc)) from exc
+
+
+def _project_candidate(
+    ctx: ContinuumMCP,
+    run_id: str,
+    event_type: EventType,
+    payload: Mapping[str, Any],
+) -> tuple[SemanticState, int]:
+    """Fold the log with ``payload`` appended, without committing it (issue #364).
+
+    The write path must reject exactly what the read path rejects, and the only
+    way to know what the read path will do is to run it. Validating a field in
+    isolation is not equivalent: a payload is legal or not *relative to the
+    state it lands on*, so a guard that inspects only the arguments is blind to
+    every invariant that spans events.
+
+    ``continuum_record_progress`` demonstrated the cost of getting this wrong.
+    It appended first and projected after, so a payload the fold refused was
+    already durable when the refusal arrived. Because the fold validates each
+    intermediate state, no later event could correct it, and every projecting
+    surface for that run stayed dead permanently: ``record_progress``,
+    ``checkpoint``, ``validate`` and ``resume`` over MCP, plus ``status``,
+    ``inspect``, ``replay``, ``show-contract`` and ``briefing`` over the CLI.
+    Meanwhile the action tools kept working, so the run could still authorise
+    real side effects while recovery was unable to say whether continuing was
+    safe. That inversion is what makes an unprojectable log worse than a
+    rejected call.
+
+    The candidate event is constructed in memory rather than written and rolled
+    back. There is no transaction spanning the append here, and a rollback that
+    fails would leave behind precisely the state this prevents.
+
+    Returns the projected state and the head sequence it was validated against.
+    The caller passes that sequence to ``append_event`` as ``expected_sequence``:
+    validation and append are two statements, so a second writer can advance the
+    run in between and two individually-legal payloads can compose into a log
+    neither of them would have been allowed to produce (for example ``total=50``
+    landing between the read and the write of a ``completed=75`` that omits
+    ``total``). One run has one owner by design, but the failure being guarded
+    here is unrecoverable, so it is worth not relying on that.
+    """
+    history = list(ctx.storage.read_events(run_id))
+    head = history[-1].sequence if history else 0
+    candidate = Event(
+        run_id=run_id,
+        sequence=head + 1,
+        type=event_type,
+        payload=dict(payload),
+        source=AGENT_SOURCE,
+    )
+    try:
+        return project(run_id, [*history, candidate]), head
+    except ValueError as exc:
+        # pydantic's ValidationError is a ValueError, so this covers both the
+        # model invariants and the projector's own checks. Re-raised with the
+        # payload named, because the bare pydantic message reports the folded
+        # figures without saying which call produced them.
+        raise ValueError(
+            f"{event_type.value} {dict(payload)} would leave run {run_id!r} unprojectable "
+            f"and was not recorded: {exc}"
+        ) from exc
+
+
+def _append_projectable(
+    ctx: ContinuumMCP,
+    run_id: str,
+    event_type: EventType,
+    payload: Mapping[str, Any],
+    *,
+    attempts: int = 3,
+) -> tuple[SemanticState, Event]:
+    """Commit ``payload`` only if the fold accepts it against the state it lands on.
+
+    Retries on ``ConcurrentWriteError`` rather than failing, because losing the
+    optimistic-concurrency race says nothing about whether the caller's update is
+    valid. Re-validation against the new head is the point: the update may still
+    be legal, and if the intervening write made it illegal that is exactly what
+    the next fold reports. Bounded, so a permanently busy run answers rather than
+    spinning.
+    """
+    from continuum.storage import ConcurrentWriteError
+
+    for remaining in range(attempts - 1, -1, -1):
+        state, expected = _project_candidate(ctx, run_id, event_type, payload)
+        try:
+            event = ctx.storage.append_event(
+                run_id,
+                event_type,
+                payload,
+                expected_sequence=expected,
+                source=AGENT_SOURCE,
+            )
+        except ConcurrentWriteError:
+            if remaining:
+                continue
+            raise ValueError(
+                f"run {run_id!r} is being written concurrently and this update lost the "
+                f"race {attempts} times; nothing was recorded. One run is meant to have "
+                f"one owner at a time, so check whether another agent holds this run."
+            ) from None
+        return state, event
+    raise AssertionError("unreachable: the loop either returns or raises")
 
 
 def _environment(run_id: str, env: Mapping[str, str] | None) -> EnvironmentSnapshot | None:
@@ -547,9 +650,14 @@ def build_server(
         """Record progress for a run."""
         # Reject impossible counters before anything is written, including the
         # run itself: a rejected call must not leave behind a runs row and a
-        # RUN_STARTED event (issue #203). The `Progress` model enforces the
-        # arithmetic at projection time; checking here keeps the bad value out
-        # of the event log in the first place.
+        # RUN_STARTED event (issue #203).
+        #
+        # These two checks are kept even though `_project_candidate` below would
+        # catch the same states, because they can answer without touching
+        # storage and they name the offending argument rather than the folded
+        # figures. They are not sufficient on their own: `total` is only known
+        # here when the caller passes it, and a call that omits it is still
+        # bounded by the `total` already on record (issue #364).
         if completed < 0 or failed < 0:
             raise ValueError("progress counters must be non-negative")
         if total is not None and completed + failed > total:
@@ -559,9 +667,13 @@ def build_server(
         if total is not None:
             payload["total"] = total
             payload["pending"] = max(total - completed - failed, 0)
-        ctx.storage.append_event(run_id, EventType.TASK_UPDATED, payload, source=AGENT_SOURCE)
 
-        state = project(run_id, ctx.storage.read_events(run_id))
+        # Fold with this payload appended before committing it, and commit under
+        # optimistic concurrency so the validated state is the one it lands on.
+        # Appending first and projecting after leaves a rejected event
+        # permanently in the log, which no later event can correct (issue #364).
+        state, event = _append_projectable(ctx, run_id, EventType.TASK_UPDATED, payload)
+
         return _json(
             {
                 "run_id": run_id,
@@ -569,7 +681,10 @@ def build_server(
                 "pending": state.progress.pending,
                 "failed": state.progress.failed,
                 "total": state.progress.total,
-                "source_sequence": state.source_sequence,
+                # From the committed event rather than the candidate: the two
+                # agree because the append is guarded by expected_sequence, and
+                # reporting the real sequence keeps the answer honest regardless.
+                "source_sequence": event.sequence,
             }
         )
 

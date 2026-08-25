@@ -736,6 +736,30 @@ All notable changes to this project are documented here. The format follows
   `action_key`. The unmatched-identifier message names both spaces and says how
   to list them.
 
+- **One `continuum_record_progress` call could permanently brick a run (#364).**
+  The `completed + failed > total` guard only fired when `total` was passed in
+  the same call. Omitting it skipped the guard while projection still folded the
+  `total` recorded earlier, so the invariant was evaluated against a limit the
+  call never mentioned. Worse, the handler appended before it projected, so the
+  rejected event was already durable when validation failed, and because the
+  fold validates each intermediate state no later event could correct it. Every
+  projecting surface for that run then stayed dead permanently: `record_progress`,
+  `checkpoint`, `validate` and `resume` over MCP, plus `status`, `inspect`,
+  `replay`, `show-contract` and `briefing` over the CLI. The action tools kept
+  working throughout, so the run could go on authorising real side effects while
+  recovery was unable to say whether continuing was safe, and `continuum verify`
+  still reported the chain as intact. The new `_project_candidate` helper folds
+  the log with the candidate payload appended and commits only if that succeeds,
+  so the write path now rejects exactly what the read path would reject rather
+  than approximating it one field at a time. The cheap argument checks are kept
+  ahead of it because they answer without touching storage and name the offending
+  argument. The commit passes `expected_sequence`, because validation and append
+  are two statements: a second writer landing `total=50` between the read and the
+  write of a `completed=75` that omits `total` would otherwise compose a log
+  neither payload would have been allowed to produce on its own. Losing that race
+  re-validates against the new head and retries, bounded, since losing it says
+  nothing about whether the update is valid.
+
 - **`ActionLedger` could not serialise concurrent claims on one key (#345).**
   `claim()` deduplicates by folding the log and then appending, with nothing
   between the read and the write, so processes racing on one key could each be
