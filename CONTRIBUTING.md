@@ -89,18 +89,17 @@ repos:
 Then install the git hook:
 
 ```bash
-pre-commit install
+pre-commit run --all-files
 ```
 
-Now `ruff check --fix` and `ruff format` will run automatically on every `git commit`.
-To run it manually against all files:
-
-```bash
-pre-commit run --all-files
-```  
+**Note on mypy:** mypy is intentionally not included in this pre-commit setup.
+Pre-commit hooks run in isolated environments without the project's installed
+dependencies, so mypy would produce inaccurate results there. Instead, mypy
+runs in CI (`mypy src/continuum`, strict mode) against a full environment with
+all dev dependencies installed. Always check `mypy` locally with `pip install
+-e ".[dev]"` completed, or rely on the CI check on your PR.
 
 ---
-
 ## Project Structure
 
 ```
