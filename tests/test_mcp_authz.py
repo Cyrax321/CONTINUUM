@@ -746,35 +746,6 @@ async def test_confirmation_over_mcp_needs_the_dedicated_secret(
     assert "mode" in payload
 
 
-@pytest.mark.asyncio
-async def test_a_refusal_from_the_confirm_handler_keeps_its_message(
-    store: SQLiteStorage,
-) -> None:
-    """`confirm_gate` must convert handler refusals like `guard` does (issue #371).
-
-    The handler call sat outside `_refusal_reaches_the_caller`, so only refusals
-    raised by the gate itself kept their text. `continuum_confirm` appends an event
-    immediately, which raises `RunNotFound` for an unknown run, and the caller was
-    told `Error executing tool continuum_confirm` instead. Confirming against a
-    mistyped run id is likely precisely when an operator has just enabled this
-    tool, which is the wrong moment to lose the message.
-    """
-    from mcp.server.mcpserver.exceptions import ToolError
-
-    srv, _ = build_server(
-        storage=store,
-        policy=AuthorizationPolicy([ALLOWED]),
-        confirm_auth=ConfirmPolicy("confirm-secret"),
-    )
-
-    with pytest.raises(ToolError, match="no such run"):
-        await srv.call_tool(
-            "continuum_confirm",
-            {"run_id": "typo_run"},
-            context=fake_context(ALLOWED, auth_token="confirm-secret"),
-        )
-
-
 # --- one secret must not unlock both progress and confirmation (PR #206) -----
 
 

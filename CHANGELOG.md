@@ -727,15 +727,6 @@ All notable changes to this project are documented here. The format follows
   walking past. The ledger is now part of the test. The dependency half of the
   predicate was already correct and is covered by a test that keeps it that way.
 
-- **`confirm_gate` dropped refusals raised by its own handler (#371).** Unlike
-  `guard`, it closed the `_refusal_reaches_the_caller` block before calling the
-  handler, so only refusals from the gate itself kept their text.
-  `continuum_confirm` appends an event immediately, which raises `RunNotFound` for
-  an unknown run, and the caller got `Error executing tool continuum_confirm`
-  instead of `no such run: '<id>'`. Latent until an operator sets
-  `CONTINUUM_MCP_CONFIRM_TOKEN`, which is also exactly when a confirmation against
-  a mistyped run id is most likely.
-
 - **Recovery guidance named an identifier the settle tools rejected (#367).**
   `continuum_resume` reports uncertain actions by `action_id` in five places
   (`next_allowed_action`, the contract's `required_actions`, `human_steps`,

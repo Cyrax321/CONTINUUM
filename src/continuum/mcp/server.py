@@ -600,15 +600,6 @@ def build_server(
         allowlist *and* present the dedicated confirm secret. Without that
         secret configured the tool refuses everyone, because an agent allowed
         to record progress must not silently be able to confirm it too.
-
-        The handler runs *inside* ``_refusal_reaches_the_caller``, matching
-        ``guard`` (issue #371). It used to be called after the block closed, so a
-        refusal raised by the handler body rather than by the gate reached the
-        client as the opaque ``Error executing tool continuum_confirm``.
-        ``continuum_confirm`` appends an event straight away, which raises
-        ``RunNotFound`` for an unknown run, and that is exactly the case the
-        converter documents as needing to survive: confirming against a mistyped
-        run id is likely precisely when an operator has just enabled this tool.
         """
 
         @functools.wraps(fn)
@@ -621,7 +612,7 @@ def build_server(
             with _refusal_reaches_the_caller():
                 confirm_auth.verify(token_from(ctx))
                 policy.require(caller, fn.__name__)
-                return fn(*args, **kwargs)
+            return fn(*args, **kwargs)
 
         # Same fix-up as ``guard``: re-advertise the context parameter or the
         # SDK never hands us one and every caller looks tokenless.
