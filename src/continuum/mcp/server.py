@@ -224,12 +224,23 @@ def _refusal_reaches_the_caller() -> Iterator[None]:
     Genuinely unexpected exceptions are deliberately not converted. Those should
     keep surfacing as unexpected, because a bug in this server is not a message
     to act on.
+
+    ``LedgerError`` belongs on the list even though it is a ``RuntimeError``
+    rather than one of the obvious refusal types. Every way the ledger raises it
+    is a deliberate answer: an identifier matching no action in either space, or
+    a settle call on an action whose status makes it a correction rather than a
+    settlement. Under mcp 2.0 its message happened to survive regardless, so the
+    omission was invisible locally; from 2.1.0 the caller was told only "Error
+    executing tool continuum_reconcile_action", which is the least useful possible
+    reply to being handed the wrong identifier (issue #367).
     """
     from mcp.server.mcpserver.exceptions import ToolError
 
+    from continuum.actions.ledger import LedgerError
+
     try:
         yield
-    except (PermissionError, ValueError, RunNotFound, MalformedRunLog) as exc:
+    except (PermissionError, ValueError, RunNotFound, MalformedRunLog, LedgerError) as exc:
         raise ToolError(str(exc)) from exc
 
 
