@@ -1246,6 +1246,52 @@ async def test_reconciling_an_unknown_outcome_records_that_it_was_a_correction(
 
 
 @pytest.mark.asyncio
+async def test_reconcile_can_store_the_evidence_it_was_given(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """The route `complete` points at must accept what `complete` accepted (#366).
+
+    `continuum_complete_action` takes `result`, and refusing an UNKNOWN action
+    sends the caller to `continuum_reconcile_action` instead. That tool had no
+    `result` parameter, so structured evidence from the external check had nowhere
+    to go over MCP even though `ActionLedger.reconcile` has always stored it.
+    """
+    server, _ = server_ctx
+    await seed_run(server)
+    claimed = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="card.charge",
+        arguments={"invoice": "INV-9001"},
+        key="charge:INV-9001",
+    )
+    await call(
+        server,
+        "continuum_fail_action",
+        run_id="run_1",
+        action_key=claimed["action_key"],
+        error="gateway timeout",
+        certain=False,
+    )
+    settled = await call(
+        server,
+        "continuum_reconcile_action",
+        run_id="run_1",
+        action_key=claimed["action_key"],
+        occurred=True,
+        external_id="txn-1",
+        result={"cents": 4200, "settled_at": "2026-08-25"},
+        note="found in the gateway ledger",
+    )
+
+    assert settled["status"] == "completed"
+    assert settled["result"] == {"cents": 4200, "settled_at": "2026-08-25"}
+    listed = await call(server, "continuum_list_actions", run_id="run_1")
+    assert listed["actions"][0]["external_id"] == "txn-1"
+
+
+@pytest.mark.asyncio
 async def test_the_identifier_resume_advertises_is_accepted_by_reconcile(
     server_ctx: tuple[Any, Any],
 ) -> None:

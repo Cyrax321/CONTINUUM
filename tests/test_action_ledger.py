@@ -306,6 +306,39 @@ def test_completing_an_already_completed_action_is_still_allowed(
     assert again.status is ActionStatus.COMPLETED
 
 
+def test_repeating_a_completion_without_arguments_keeps_the_receipt(
+    ledger: ActionLedger,
+) -> None:
+    """Omission must not erase the evidence the effect happened (issue #366).
+
+    A caller retrying after a dropped response usually sends only the key, and
+    overwriting `external_id` and `result` with None would destroy the receipt on
+    the action the fold reports. Same invariant `reconcile` already documents.
+    """
+    outcome = ledger.claim("payment.charge", {"amount": 100})
+    ledger.complete(outcome.key, external_id="txn-1", result={"cents": 100})
+
+    again = ledger.complete(outcome.key)
+    assert again.external_id == "txn-1"
+    assert again.result == {"cents": 100}
+    assert again.result_hash is not None
+    # And the folded view, which is what every reader sees, agrees.
+    folded = ledger.get(str(outcome.key))
+    assert folded is not None and folded.external_id == "txn-1"
+
+
+def test_a_completion_may_still_replace_the_receipt_it_supplies(
+    ledger: ActionLedger,
+) -> None:
+    """Preserving on omission must not block a caller that does supply values."""
+    outcome = ledger.claim("payment.charge", {"amount": 100})
+    ledger.complete(outcome.key, external_id="txn-1", result={"cents": 100})
+
+    corrected = ledger.complete(outcome.key, external_id="txn-2", result={"cents": 250})
+    assert corrected.external_id == "txn-2"
+    assert corrected.result == {"cents": 250}
+
+
 def test_a_definite_failure_is_distinguished_from_a_timeout(
     ledger: ActionLedger,
 ) -> None:

@@ -793,6 +793,13 @@ class ActionLedger:
         :meth:`reconcile` is the supported route for all of them. It takes the
         same decision, demands the caller stand behind it, and records
         ``ACTION_RECONCILED`` with a note so the correction is visible in the log.
+
+        Omitted arguments never erase what is on record. A caller repeating a
+        completion after a dropped response usually sends only the key, and
+        overwriting ``external_id`` and ``result`` with ``None`` would destroy the
+        receipt proving the effect happened. Same invariant :meth:`reconcile`
+        already documents, and a no-op on a first completion, where there is
+        nothing yet to preserve.
         """
         key, existing = self._require(key)
         if existing.status not in (ActionStatus.STARTED, ActionStatus.COMPLETED):
@@ -803,12 +810,16 @@ class ActionLedger:
                 f"(continuum_reconcile_action over MCP), which records the evidence "
                 f"and the note alongside the correction."
             )
+        settled_external = external_id if external_id is not None else existing.external_id
+        settled_result = dict(result) if result is not None else existing.result
         action = existing.model_copy(
             update={
                 "status": ActionStatus.COMPLETED,
-                "external_id": external_id,
-                "result": dict(result) if result is not None else None,
-                "result_hash": stable_hash(dict(result)) if result is not None else None,
+                "external_id": settled_external,
+                "result": dict(settled_result) if settled_result is not None else None,
+                "result_hash": (
+                    stable_hash(dict(settled_result)) if settled_result is not None else None
+                ),
                 "completed_at": utcnow(),
                 "side_effect_uncertain": False,
             }

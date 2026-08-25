@@ -1240,11 +1240,20 @@ def build_server(
         action_key: str,
         occurred: bool,
         external_id: str | None = None,
+        result: dict[str, Any] | None = None,
         note: str = "",
     ) -> str:
         """Resolve an uncertain action using external evidence."""
+        # `result` is accepted here because `complete` refuses an UNKNOWN action
+        # (issue #366) and this is the route it points at. Without it, structured
+        # evidence gathered by the probe had nowhere to go over MCP even though
+        # `ActionLedger.reconcile` has always stored it.
         action = ctx.ledger(run_id).reconcile(
-            action_key, occurred=occurred, external_id=external_id, note=note
+            action_key,
+            occurred=occurred,
+            external_id=external_id,
+            result=result,
+            note=note,
         )
         return _json(
             {
@@ -1252,6 +1261,7 @@ def build_server(
                 "action_id": action.action_id,
                 "status": action.status.value,
                 "external_id": action.external_id,
+                "result": dict(action.result) if action.result else None,
                 "side_effect_uncertain": action.side_effect_uncertain,
             }
         )
