@@ -740,8 +740,35 @@ class ActionLedger:
         external_id: str | None = None,
         result: Mapping[str, Any] | None = None,
     ) -> Action:
-        """Record that the effect succeeded."""
+        """Record that the effect succeeded.
+
+        Settles a claim that is still in flight. Re-reporting an action that is
+        already ``COMPLETED`` is allowed, because a caller repeating itself after
+        a dropped response is not asserting anything new.
+
+        Every other status is refused (issue #366). Those are not settlements, they
+        are corrections of a recorded outcome, and correcting an outcome needs
+        evidence about the outside world that this method neither takes nor
+        records. ``UNKNOWN`` is the case that matters: the action reached that
+        status precisely because nobody could say whether the effect happened, and
+        completing it here erased the recovery blocker, wrote no note, and left an
+        ``ACTION_RECORDED`` event indistinguishable from an ordinary first-time
+        success. An auditor could not tell that an uncertain charge had been
+        resolved by assertion.
+
+        :meth:`reconcile` is the supported route for all of them. It takes the
+        same decision, demands the caller stand behind it, and records
+        ``ACTION_RECONCILED`` with a note so the correction is visible in the log.
+        """
         existing = self._require(key)
+        if existing.status not in (ActionStatus.STARTED, ActionStatus.COMPLETED):
+            raise LedgerError(
+                f"action {existing.action_type!r} is {existing.status.value}, not in flight, so "
+                f"completing it would assert an outcome nothing has verified. "
+                f"Check the external system, then call reconcile(occurred=True) "
+                f"(continuum_reconcile_action over MCP), which records the evidence "
+                f"and the note alongside the correction."
+            )
         action = existing.model_copy(
             update={
                 "status": ActionStatus.COMPLETED,

@@ -714,6 +714,24 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`complete` could launder an `UNKNOWN` action into `COMPLETED` (#366).**
+  `ActionLedger.complete` had no status guard, so a side effect whose real-world
+  outcome nobody could determine, a charge that timed out after the request was
+  sent, could be recorded as a clean success in one call: no evidence, no note,
+  and an `ACTION_RECORDED` event indistinguishable from an ordinary first-time
+  completion. `continuum_list_actions` then reported `unresolved: 0` and the
+  recovery blocker was gone, with nothing in the log to show the decision had been
+  made by assertion. The incentives pointed straight at it, because
+  `continuum_complete_action` is the tool an agent is told to call routinely, sits
+  on the same mutation allowlist as everything else, and accepts the key already in
+  hand, while the evidence-gated route through `reconcile` was the harder one.
+  `complete` now settles only a claim still in flight, plus a repeat report of one
+  already `COMPLETED`, since a caller retrying after a dropped response asserts
+  nothing new. `UNKNOWN`, `FAILED`, `COMPENSATED` and `REQUIRES_REVIEW` are refused
+  with a message naming the status and pointing at `reconcile`, which takes the
+  same decision but demands the caller stand behind it and records
+  `ACTION_RECONCILED` with the note.
+
 - **`ActionLedger` could not serialise concurrent claims on one key (#345).**
   `claim()` deduplicates by folding the log and then appending, with nothing
   between the read and the write, so processes racing on one key could each be
