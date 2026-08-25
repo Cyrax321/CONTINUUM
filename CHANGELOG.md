@@ -714,6 +714,28 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Recovery guidance named an identifier the settle tools rejected (#367).**
+  `continuum_resume` reports uncertain actions by `action_id` in five places
+  (`next_allowed_action`, the contract's `required_actions`, `human_steps`,
+  `informed_retry.avoid` and the rendered report), and `human_steps` spelled out
+  a `continuum_reconcile_action(action_key=<action_id>)` call. The ledger keyed
+  only on the idempotency key, so following that instruction verbatim failed with
+  `no action recorded for key ...`, and no MCP surface exposed the value that
+  would have worked: `list_actions` and `uncertain_actions` reported `action_id`,
+  the `UnknownSideEffect` response omitted the key entirely and left a
+  12-character truncated prefix in free text as its only trace, `arguments_hash`
+  from `continuum actions --json` looks like a key but is a different hash, and
+  `continuum reconcile` needs a registered probe. An `UNKNOWN` action created
+  over MCP was therefore unreconcilable through every documented interface.
+  `ActionLedger.resolve_key` now accepts either space and `_require` returns the
+  resolved key, so `complete`, `fail`, `reconcile`, `compensate` and
+  `flag_for_review` all take an `action_id` or a key and settle under the fold's
+  own key either way. `UnknownSideEffect` carries `action_key` and `action_id`,
+  which `continuum_intercept_action` returns on the unknown path, and both
+  `continuum_list_actions` rows and `continuum_resume`'s `uncertain_actions` gain
+  `action_key`. The unmatched-identifier message names both spaces and says how
+  to list them.
+
 - **`ActionLedger` could not serialise concurrent claims on one key (#345).**
   `claim()` deduplicates by folding the log and then appending, with nothing
   between the read and the write, so processes racing on one key could each be

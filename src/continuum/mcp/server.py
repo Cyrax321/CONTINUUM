@@ -770,6 +770,12 @@ def build_server(
             probed_types=probed,
             gate_configured=Path(DEFAULT_GATE_CONFIG_PATH).exists(),
         )
+        # `next_allowed_action` and the plan name actions by `action_id`, which
+        # the settle tools accept only since #367. Carry the ledger key too, so a
+        # caller never has to guess which identifier space it is holding.
+        uncertain_keys = {
+            action.action_id: key for key, action in ctx.ledger(run_id).folded().items()
+        }
         return _json(
             {
                 "run_id": run_id,
@@ -792,6 +798,7 @@ def build_server(
                 "uncertain_actions": [
                     {
                         "action_id": a.action_id,
+                        "action_key": uncertain_keys.get(a.action_id),
                         "action_type": a.action_type,
                         "status": a.status.value,
                     }
@@ -986,12 +993,18 @@ def build_server(
                     "action_type": action_type,
                     "proceed": False,
                     "status": ActionStatus.UNKNOWN.value,
+                    # Both identifiers, because reconciling needs one and every
+                    # other surface reports the other. Omitting them left the
+                    # only copy of the key inside the truncated prefix in
+                    # `reason`, which no caller could act on (issue #367).
+                    "action_key": exc.action_key,
+                    "action_id": exc.action_id,
                     "reason": str(exc),
                     "guidance": (
                         "A previous attempt was interrupted and its outcome is "
                         "unknown. Do not retry. Verify with the external system "
                         "whether it happened, then report via "
-                        "continuum_reconcile_action."
+                        "continuum_reconcile_action with the action_key above."
                     ),
                 }
             )
@@ -1088,7 +1101,10 @@ def build_server(
             "Settle an action whose outcome was unknown, after checking the external "
             "system. occurred=true records it as done (never repeated); "
             "occurred=false frees it to be retried. Only call this with real "
-            "evidence — guessing here causes either a duplicate or lost work."
+            "evidence — guessing here causes either a duplicate or lost work.\n\n"
+            "'action_key' accepts either the action_key from continuum_intercept_action "
+            "or the action_id that continuum_resume and continuum_list_actions report, "
+            "so the identifier named in next_allowed_action can be passed as-is."
         ),
         annotations=mutating,
     )
@@ -1131,7 +1147,11 @@ def build_server(
         # a genuinely unknown run without writing anything.
         ctx.storage.get_run(run_id)
         ledger = ctx.ledger(run_id)
-        actions = ledger.all()
+        folded = ledger.folded()
+        actions = list(folded.values())
+        # The settle tools key on the idempotency key, so a row that omits it
+        # cannot be acted on from this listing alone (issue #367).
+        key_by_action_id = {action.action_id: key for key, action in folded.items()}
         unresolved = {a.action_id for a in ledger.pending()}
         return _json(
             {
@@ -1139,6 +1159,7 @@ def build_server(
                 "actions": [
                     {
                         "action_id": a.action_id,
+                        "action_key": key_by_action_id.get(a.action_id),
                         "action_type": a.action_type,
                         "status": a.status.value,
                         "external_id": a.external_id,

@@ -1023,6 +1023,111 @@ async def test_list_actions_marks_the_unresolved_row_itself(
     assert {a["action_id"] for a in payload["actions"] if a["outcome_unresolved"]} == unresolved_ids
 
 
+@pytest.mark.asyncio
+async def test_the_identifier_resume_advertises_is_accepted_by_reconcile(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """Recovery guidance must be executable exactly as written (issue #367).
+
+    ``next_allowed_action``, the contract's ``required_actions``, ``human_steps``
+    and the rendered report all name an ``action_id``, and ``human_steps`` spells
+    out a ``continuum_reconcile_action(action_key=<action_id>)`` call. The tool
+    keyed only on the idempotency key, so following the instruction verbatim
+    failed and no MCP surface exposed the value that would have worked.
+    """
+    server, _ = server_ctx
+    await seed_run(server)
+    await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="registry.publish",
+        arguments={"target": "registry://audit"},
+    )
+    resumed = await call(server, "continuum_resume", run_id="run_1")
+    advertised = resumed["next_allowed_action"].removeprefix("reconcile_action:")
+    assert advertised in resumed["human_steps"][0]
+
+    settled = await call(
+        server,
+        "continuum_reconcile_action",
+        run_id="run_1",
+        action_key=advertised,
+        occurred=False,
+        note="checked the registry, nothing landed",
+    )
+    assert settled["status"] == "failed"
+    assert (await call(server, "continuum_list_actions", run_id="run_1"))["unresolved"] == 0
+
+
+@pytest.mark.asyncio
+async def test_the_key_needed_to_reconcile_is_reported_not_truncated(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """Every surface naming an uncertain action must carry a usable key (#367).
+
+    The ``UnknownSideEffect`` response omitted ``action_key`` entirely, leaving a
+    12-character truncated prefix inside the free-text ``reason`` as the only
+    trace. ``list_actions`` and ``uncertain_actions`` reported ``action_id``
+    alone, and ``arguments_hash`` from the CLI looks like a key but is a
+    different hash.
+    """
+    server, _ = server_ctx
+    await seed_run(server)
+    claimed = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="card.charge",
+        arguments={"invoice": "INV-9001"},
+        key="charge:INV-9001",
+    )
+    escalated = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="card.charge",
+        arguments={"invoice": "INV-9001"},
+        key="charge:INV-9001",
+    )
+    assert escalated["proceed"] is False
+    assert escalated["status"] == "unknown"
+    assert escalated["action_key"] == claimed["action_key"]
+
+    listed = await call(server, "continuum_list_actions", run_id="run_1")
+    assert listed["actions"][0]["action_key"] == claimed["action_key"]
+    resumed = await call(server, "continuum_resume", run_id="run_1")
+    assert resumed["uncertain_actions"][0]["action_key"] == claimed["action_key"]
+
+    # Usable as reported, from any of the three.
+    settled = await call(
+        server,
+        "continuum_reconcile_action",
+        run_id="run_1",
+        action_key=escalated["action_key"],
+        occurred=True,
+        external_id="txn-1",
+    )
+    assert settled["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_an_unmatched_identifier_says_which_spaces_were_tried(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """`no action recorded for key <prefix>...` told the caller nothing (#367)."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, _ = server_ctx
+    await seed_run(server)
+    with pytest.raises(ToolError, match="idempotency key or an action_id"):
+        await server.call_tool(
+            "continuum_reconcile_action",
+            {"run_id": "run_1", "action_key": "not-an-identifier", "occurred": False},
+            context=_ctx(TEST_CLIENT),
+        )
+
+
 # --- storage configuration --------------------------------------------------- #
 
 
