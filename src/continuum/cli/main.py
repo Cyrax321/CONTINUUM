@@ -917,6 +917,21 @@ def cmd_complete(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     gates) and flips the run row to COMPLETED.
     """
     run = storage.get_run(args.run_id)  # raises RunNotFound -> NOT_FOUND
+    if run.status is RunStatus.COMPLETED:
+        _emit(
+            {
+                "run_id": args.run_id,
+                "status": run.status.value,
+                "summary": args.summary or "",
+                "already_completed": True,
+            },
+            f"Run {args.run_id} is already completed.",
+            as_json=args.json,
+            stream=out,
+            palette=getattr(args, "_palette", None),
+        )
+        return ExitCode.OK
+
     note = {"summary": args.summary} if args.summary else {}
     storage.append_event(
         args.run_id,

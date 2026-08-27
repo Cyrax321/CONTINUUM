@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Make `continuum complete` idempotent for runs that are already completed (#356).
+
 ## [0.1.0] - 2026-08-27
 
 ### Added

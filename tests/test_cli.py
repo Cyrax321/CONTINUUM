@@ -934,14 +934,23 @@ def test_complete_closes_a_run_and_clears_it_from_active_resolution(
         assert store.get_active_run() is None
 
 
-def test_complete_is_idempotent_enough_for_double_clicks(tmp_path: Path) -> None:
+def test_complete_is_idempotent_for_double_clicks(tmp_path: Path) -> None:
     path = str(tmp_path / "d.db")
     with SQLiteStorage(path) as store:
         store.create_run(Run(run_id="r", goal="g"))
     code, _, err = run("--db", path, "complete", "r")
     assert code == ExitCode.OK
-    code, _, err = run("--db", path, "complete", "r")
+    with SQLiteStorage(path) as store:
+        events_after_first = list(store.read_events("r"))
+
+    code, out, err = run("--db", path, "complete", "r")
     assert code == ExitCode.OK, err
+    assert "already completed" in out
+    code, out, err = run("--db", path, "--json", "complete", "r")
+    assert code == ExitCode.OK, err
+    assert json.loads(out)["already_completed"] is True
+    with SQLiteStorage(path) as store:
+        assert list(store.read_events("r")) == events_after_first
 
 
 def test_complete_unknown_run_is_not_found(tmp_path: Path) -> None:
