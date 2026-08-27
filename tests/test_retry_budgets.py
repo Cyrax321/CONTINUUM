@@ -20,7 +20,9 @@ from continuum.actions import ActionLedger
 from continuum.budgets import (
     BudgetConfigError,
     _process_umask,
-    _staged_mode,
+    _restore_ownership,
+    _staged_attributes,
+    _StagedAttributes,
     attempts_by_key,
     attempts_for_type,
     backoff_delay,
@@ -484,7 +486,7 @@ def test_the_directory_flush_follows_the_replace_and_targets_the_parent(
         lambda directory: calls.append(f"flush {directory}"),
     )
     save_budgets(tmp_path / "budgets.json", bound_registry())
-    assert calls == ["replace", f"flush {tmp_path}"]
+    assert calls == ["replace", f"flush {tmp_path.resolve()}"]
 
 
 @pytest.mark.parametrize(
@@ -538,7 +540,7 @@ def test_a_target_that_cannot_be_stated_keeps_the_tighter_default(
         raise PermissionError("the mode of this file is not readable")
 
     monkeypatch.setattr(Path, "stat", deny)
-    assert _staged_mode(p) is None
+    assert _staged_attributes(p) == (None, None, None)
 
 
 @posix_only
@@ -551,11 +553,168 @@ def test_a_save_whose_mode_cannot_be_determined_still_lands_and_stays_private(
     an operator can widen a file by hand, but cannot un-grant access a rewrite
     handed out, and cannot proceed at all if the save refuses.
     """
-    monkeypatch.setattr("continuum.budgets._staged_mode", lambda path: None)
+    monkeypatch.setattr(
+        "continuum.budgets._staged_attributes", lambda path: _StagedAttributes(None, None, None)
+    )
     p = tmp_path / "budgets.json"
     save_budgets(p, bound_registry())
     assert load_budgets(p) == bound_registry()
     assert stat.S_IMODE(p.stat().st_mode) == 0o600
+
+
+@posix_only
+def test_a_symlinked_registry_is_written_through_not_replaced(tmp_path: Path) -> None:
+    """A registry that is a symlink to a shared file must keep pointing at it.
+
+    ``write_text`` followed the link and wrote the target. ``os.replace`` swaps the
+    link itself for a regular file, so the save lands somewhere no other consumer
+    of the shared registry reads, and each of them keeps the counters from before.
+    Divergent budget counters are worse than a single stale one: every reader
+    believes a different number of attempts is left, which is the opposite of what
+    a shared registry is for. ``load_budgets`` reads through the link, so saving
+    has to write through it or the two halves of the module disagree.
+    """
+    shared = tmp_path / "shared" / "budgets.json"
+    shared.parent.mkdir()
+    save_budgets(shared, {"default_max_attempts": 1})
+    link = tmp_path / "run" / "budgets.json"
+    link.parent.mkdir()
+    link.symlink_to(shared)
+
+    save_budgets(link, bound_registry())
+
+    assert link.is_symlink(), "the link itself must survive the rewrite"
+    assert load_budgets(shared) == bound_registry()
+    assert load_budgets(link) == bound_registry()
+    assert [entry.name for entry in sorted(shared.parent.iterdir())] == ["budgets.json"], (
+        "staging belongs beside the real target, and must not outlive the rename"
+    )
+    assert [entry.name for entry in sorted(link.parent.iterdir())] == ["budgets.json"]
+
+
+@posix_only
+def test_save_keeps_the_group_the_registry_was_given(tmp_path: Path) -> None:
+    """Mode 0640 grants read to a *group*, and the mode alone does not say which.
+
+    ``mkstemp`` creates a fresh inode under the saving process's own uid and gid,
+    and ``os.replace`` installs it as it is, so copying 0640 across hands group
+    read to whichever group that process happens to sit in and takes it from the
+    one the operator chose. Preserving the bits is only half an answer to "who may
+    read this" until ownership comes with them.
+    """
+    p = tmp_path / "budgets.json"
+    save_budgets(p, bound_registry())
+    mine = p.stat().st_gid
+    others = [gid for gid in os.getgroups() if gid != mine]
+    if not others:
+        pytest.skip("the test user is in a single group, so there is nowhere to move the file")
+    os.chown(p, -1, others[0])
+    p.chmod(0o640)
+
+    save_budgets(p, {"default_max_attempts": 7})
+
+    assert p.stat().st_gid == others[0]
+    assert stat.S_IMODE(p.stat().st_mode) == 0o640
+    assert load_budgets(p) == {"default_max_attempts": 7}
+
+
+@posix_only
+def test_a_group_that_cannot_be_restored_does_not_fail_the_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A process cannot join a group it is not in, and must not refuse a save over it.
+
+    Aborting before the replace - the other available answer - converts a
+    permission that cannot be reproduced into a claim that cannot proceed, and a
+    budget gate that refuses to record an attempt refuses the attempt. Nothing this
+    call could have kept is lost by continuing: the replacement never had that
+    group's access to hand out in the first place.
+    """
+    p = tmp_path / "budgets.json"
+    save_budgets(p, bound_registry())
+    stranger = p.stat()
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise PermissionError("not a member of that group")
+
+    monkeypatch.setattr(os, "chown", refuse)
+    monkeypatch.setattr(
+        "continuum.budgets._staged_attributes",
+        lambda path: _StagedAttributes(0o640, stranger.st_uid + 1, stranger.st_gid + 1),
+    )
+
+    save_budgets(p, {"default_max_attempts": 7})
+    monkeypatch.undo()
+
+    assert load_budgets(p) == {"default_max_attempts": 7}
+    assert stat.S_IMODE(p.stat().st_mode) == 0o640, "the mode is still restored on its own"
+
+
+@posix_only
+def test_ownership_restore_falls_back_to_the_group_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Giving a file away takes root; putting it back in a group you are in does not.
+
+    So a refused ``(uid, gid)`` pair is worth retrying as the gid alone, because the
+    group is the half that grants access to anyone other than the owner. The owner
+    of the replacement is the process that wrote it, which already had access.
+    """
+    p = tmp_path / "budgets.json"
+    p.write_text("{}", encoding="utf-8")
+    mine = p.stat()
+    attempts: list[tuple[int, int]] = []
+    real_chown = os.chown
+
+    def only_the_group(target: object, uid: int, gid: int) -> None:
+        attempts.append((uid, gid))
+        if uid != -1:
+            raise PermissionError("only root may give a file away")
+        real_chown(target, uid, gid)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "chown", only_the_group)
+
+    _restore_ownership(str(p), _StagedAttributes(0o640, mine.st_uid + 1, mine.st_gid))
+
+    assert attempts == [(mine.st_uid + 1, mine.st_gid), (-1, mine.st_gid)]
+
+
+def test_a_registry_with_no_group_recorded_is_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing was read, so there is nothing to write back - and on Windows, no owner.
+
+    ``_restore_ownership`` has to be a no-op in that case rather than passing ``None``
+    to ``os.chown``, which would raise and lose a save that had already been staged.
+    """
+    p = tmp_path / "budgets.json"
+    p.write_text("{}", encoding="utf-8")
+
+    def unexpected(*args: object, **kwargs: object) -> None:
+        raise AssertionError("ownership must not be touched when none was recorded")
+
+    if hasattr(os, "chown"):
+        monkeypatch.setattr(os, "chown", unexpected)
+
+    _restore_ownership(str(p), _StagedAttributes(0o640, None, None))
+
+
+def test_a_platform_without_ownership_still_reproduces_the_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows has no POSIX owner for a replaced registry to lose, only bits to keep.
+
+    Reading ``st_uid`` there returns 0 for every file, so writing it back would be a
+    meaningless call that can only fail. The mode is still worth reproducing.
+    """
+    p = tmp_path / "budgets.json"
+    p.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("continuum.budgets._CAN_CHOWN", False)
+
+    attributes = _staged_attributes(p)
+
+    assert (attributes.uid, attributes.gid) == (None, None)
+    assert attributes.mode == stat.S_IMODE(p.stat().st_mode)
 
 
 def test_reading_the_umask_leaves_it_exactly_as_it_was() -> None:
@@ -589,11 +748,25 @@ def test_a_new_registry_takes_its_bits_from_the_umask_not_from_0600(
     group and other bits an operator's umask allows.
     """
     monkeypatch.setattr("continuum.budgets._process_umask", lambda: 0o027)
-    assert _staged_mode(tmp_path / "never-written.json") == 0o640
+    assert _staged_attributes(tmp_path / "never-written.json").mode == 0o640
     monkeypatch.setattr("continuum.budgets._process_umask", lambda: None)
-    assert _staged_mode(tmp_path / "never-written.json") is None, (
+    assert _staged_attributes(tmp_path / "never-written.json").mode is None, (
         "an unreadable umask must leave mkstemp's tighter 0600 alone, not guess wider"
     )
+
+
+def test_a_registry_being_created_has_no_previous_owner_to_put_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """There is no ownership to reproduce when the file does not exist yet.
+
+    ``None`` rather than the saving process's own uid and gid, so
+    :func:`_restore_ownership` can tell "nothing to restore" apart from "restore
+    these" and skip the ``chown`` entirely instead of setting what is already true.
+    """
+    monkeypatch.setattr("continuum.budgets._process_umask", lambda: 0o022)
+    attributes = _staged_attributes(tmp_path / "never-written.json")
+    assert (attributes.uid, attributes.gid) == (None, None)
 
 
 def test_get_remaining_and_refusal_math() -> None:
