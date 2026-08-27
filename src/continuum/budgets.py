@@ -382,7 +382,7 @@ def _restore_ownership(name: str, attributes: _StagedAttributes) -> None:
     the wrong direction for a fail-closed gate: the replacement never had that
     group's access to hand out, so nothing is lost that this call could keep.
     """
-    if sys.platform == "win32":
+    if sys.platform == "win32":  # pragma: no cover - one arm is dead on either platform
         # Named literally rather than through _CAN_CHOWN, which already keeps the
         # gid out of _staged_attributes here: os.chown does not exist on Windows,
         # so the calls below have to be unreachable to a type checker too.
