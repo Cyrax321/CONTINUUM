@@ -799,6 +799,21 @@ All notable changes to this project are documented here. The format follows
   loseable by the very crash it guards against. Both steps are best effort: a
   filesystem without permission bits keeps the tighter 0600, and Windows (which
   cannot open a directory as a descriptor) is left exactly as durable as before.
+  Swapping an inode for a rewritten one also changes two further things
+  `write_text` did not, so both are re-established: the path is resolved before
+  staging, because a `budgets.json` that is a symlink to a shared registry was
+  written *through* by `write_text` and would be *replaced* by `os.replace`,
+  leaving every other reader of the shared file - and `load_budgets`, which still
+  reads through the link - on the counters from before; and the replaced inode's
+  uid and gid are put back onto the staged file, because mode 0640 names a group
+  without saying which one, and a fresh `mkstemp` inode belongs to whichever group
+  the saving process sits in. Ownership is written before the mode, since `chown`
+  clears setuid and setgid on some systems and a `chmod` running second would
+  silently undo that. A refused `(uid, gid)` is retried as the gid alone, which is
+  the half that grants access to anyone but the owner, and a `chown` that cannot be
+  performed at all does not fail the save: as with the chmod and the flush, turning
+  an unreproducible permission into a refused claim is the wrong direction for a
+  fail-closed gate.
 
 - **Budget rejections named the rule but not the offending value, and one still
   named the config by relative path (#326, #426).** "needs a positive integer

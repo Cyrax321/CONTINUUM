@@ -40,10 +40,12 @@ Where the registry asks for an integer it means one: JSON ``true`` is refused
 rather than read as a silent cap of 1 (issue #429), and a rejection names the
 offending value and its type (issue #326). ``save_budgets`` stages and renames
 rather than truncating in place, so a process that dies mid-write costs at most
-the last increment, never the registry (issue #427); the staged file inherits
-the target's permissions and the rename is flushed, so replacing the registry
-neither locks other readers out of it nor can be lost by the crash it guards
-against.
+the last increment, never the registry (issue #427). Because that replaces an
+inode instead of rewriting one, the staged file inherits the target's
+permissions and ownership, a symlinked registry is written through rather than
+replaced, and the rename is flushed: swapping the file must not change who can
+read it, which file is written, or whether the write survives the crash it
+guards against.
 """
 
 from __future__ import annotations
@@ -51,10 +53,11 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import sys
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import Any, NamedTuple, TypeGuard
 
 __all__ = [
     "DEFAULT_BUDGETS_PATH",
@@ -82,6 +85,11 @@ FALLBACK_MAX_ATTEMPTS = 3
 #: Where Linux publishes the process umask (kernel 4.7+). Absent elsewhere, and
 #: named rather than inlined so a test can take the fallback path on any platform.
 _UMASK_STATUS_PATH = "/proc/self/status"
+
+#: Whether ownership can be written back at all. There is no POSIX owner or group
+#: on Windows for a replaced registry to lose in the first place, and ``os.chown``
+#: does not exist there.
+_CAN_CHOWN = sys.platform != "win32"
 
 
 class BudgetConfigError(ValueError):
@@ -304,13 +312,31 @@ def _process_umask() -> int | None:
     return mask
 
 
-def _staged_mode(path: Path) -> int | None:
-    """Permissions a rewritten registry should end up with, or ``None`` if unknown.
+class _StagedAttributes(NamedTuple):
+    """What a replaced registry's inode carried and a replacement must re-establish.
 
-    :func:`tempfile.mkstemp` creates its staging file 0600 and :func:`os.replace`
-    carries those bits onto the target, so an atomic rewrite would quietly narrow
-    a registry that :meth:`Path.write_text` left readable: overwriting preserved
-    whatever mode the file already had, and creating honoured the process umask.
+    :func:`os.replace` moves a *new* inode into place, so nothing the old file
+    carried survives on its own. Each field is ``None`` when there is nothing to
+    reproduce or no way to learn it, which the caller reads as "leave the tighter
+    default alone" rather than as a value to guess at.
+    """
+
+    mode: int | None
+    uid: int | None
+    gid: int | None
+
+
+_NOTHING_TO_RESTORE = _StagedAttributes(None, None, None)
+
+
+def _staged_attributes(path: Path) -> _StagedAttributes:
+    """Permissions and ownership a rewritten registry should end up with.
+
+    :func:`tempfile.mkstemp` creates its staging file 0600 under the saving
+    process's own uid and gid, and :func:`os.replace` installs that inode as it
+    is, so an atomic rewrite would quietly narrow a registry that
+    :meth:`Path.write_text` left readable: overwriting preserved the mode, the
+    owner and the group, because it reused the inode instead of replacing it.
     This registry is read by hooks, sidecars and CI steps that may run under
     another uid or gid, and #413 makes a write happen per claim attempt, so the
     first save would lock them out for the rest of the run. That is a worse
@@ -319,20 +345,58 @@ def _staged_mode(path: Path) -> int | None:
     An existing target's own bits win, because they are the operator's decision
     and resetting them on every save is the other half of the same bug. Only the
     permission bits are copied: setuid, setgid and sticky are not carried onto a
-    file the saving process newly owns.
+    file the saving process newly owns. Ownership is read only where it can be
+    written back, so a platform without :func:`os.chown` reports ``None`` rather
+    than a value nothing can act on.
     """
     try:
-        return path.stat().st_mode & 0o777
+        info = path.stat()
     except FileNotFoundError:
-        pass
+        mask = _process_umask()
+        if mask is None:
+            return _NOTHING_TO_RESTORE
+        # 0o666, not 0o644: that is the mode open() passes for a new text file, so
+        # a first save reproduces what write_text produced under the same umask.
+        # A file being created has no previous owner to put back.
+        return _StagedAttributes(0o666 & ~mask, None, None)
     except OSError:
-        return None
-    mask = _process_umask()
-    if mask is None:
-        return None
-    # 0o666, not 0o644: that is the mode open() passes for a new text file, so a
-    # first save reproduces what write_text produced under the same umask.
-    return 0o666 & ~mask
+        return _NOTHING_TO_RESTORE
+    if not _CAN_CHOWN:
+        return _StagedAttributes(info.st_mode & 0o777, None, None)
+    return _StagedAttributes(info.st_mode & 0o777, info.st_uid, info.st_gid)
+
+
+def _restore_ownership(name: str, attributes: _StagedAttributes) -> None:
+    """Put the replaced inode's owner and group onto the staged file.
+
+    The mode is only half of an answer to "who may read this". A registry an
+    operator set to ``0640`` with a shared group grants that group nothing once
+    the group becomes whichever one the saving process happens to sit in, so the
+    permission fix has to carry ownership too or it only looks complete.
+
+    Best effort, like the chmod: a process that is not root cannot give a file
+    away and cannot join a group it is not in, and the gid is attempted on its own
+    when the pair is refused, because the group is the half that grants access to
+    anyone else. Failing the save instead - as opposed to failing to reproduce a
+    group - would turn an unreproducible permission into a refused claim, which is
+    the wrong direction for a fail-closed gate: the replacement never had that
+    group's access to hand out, so nothing is lost that this call could keep.
+    """
+    if sys.platform == "win32":
+        # Named literally rather than through _CAN_CHOWN, which already keeps the
+        # gid out of _staged_attributes here: os.chown does not exist on Windows,
+        # so the calls below have to be unreachable to a type checker too.
+        return
+    if attributes.gid is None:
+        return
+    current = os.stat(name)
+    if (attributes.uid, attributes.gid) == (current.st_uid, current.st_gid):
+        return  # The common case: one process rewriting a registry it owns.
+    with contextlib.suppress(OSError):
+        os.chown(name, attributes.uid if attributes.uid is not None else -1, attributes.gid)
+        return
+    with contextlib.suppress(OSError):
+        os.chown(name, -1, attributes.gid)
 
 
 def _fsync_directory(directory: Path) -> None:
@@ -380,16 +444,27 @@ def save_budgets(path: Path, data: Mapping[str, Any]) -> None:
     increment on an abrupt exit is an acceptable price for a counter registry.
     Losing the registry is not, and #413 makes this a write per claim attempt.
 
-    Staging is not allowed to change *who can read* the registry
-    (:func:`_staged_mode`) or to leave the rename itself unflushed
-    (:func:`_fsync_directory`): a rewrite that survives a crash but locks a hook
-    out of the file, or that is lost by the crash it guards against, has not
-    delivered what the staging file was added for.
+    Staging replaces an inode rather than rewriting one, so three properties of
+    the old file have to be re-established deliberately or the rewrite quietly
+    changes something it was never asked to. Who may read it, owner and group
+    included (:func:`_staged_attributes`, :func:`_restore_ownership`). Which file
+    is written, when the registry is a symlink to a shared one: ``write_text``
+    followed the link and ``os.replace`` would swap the link itself for a regular
+    file, leaving every other consumer of the shared target on stale counters, so
+    the path is resolved first. And whether the rename survives a crash
+    (:func:`_fsync_directory`). A save that outlives a power cut but locks a hook
+    out of the file, or writes past a symlink, has not delivered what the staging
+    file was added for.
     """
+    # Resolved, so a symlinked registry is written through rather than replaced,
+    # matching both write_text and load_budgets, which reads through the link. It
+    # also puts the staging file beside the *real* target, keeping the rename
+    # inside one filesystem.
+    path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     body = json.dumps(data, indent=2) + "\n"
     # Read before the replace, while the target is still the file being replaced.
-    mode = _staged_mode(path)
+    attributes = _staged_attributes(path)
     # Same directory as the target: os.replace is only atomic within one
     # filesystem, and the system temp dir is routinely on another.
     handle, name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
@@ -399,11 +474,15 @@ def save_budgets(path: Path, data: Mapping[str, Any]) -> None:
             stream.write(body)
             stream.flush()
             os.fsync(stream.fileno())
-        if mode is not None:
+        # Ownership before the mode: the bits mean nothing until they apply to the
+        # identity they were set for, and chown clears setuid and setgid on some
+        # systems, which chmod running second would silently undo.
+        _restore_ownership(name, attributes)
+        if attributes.mode is not None:
             # A filesystem without permission bits keeps mkstemp's 0600: too
             # private is recoverable by hand, a failed save is not.
             with contextlib.suppress(OSError):
-                os.chmod(name, mode)
+                os.chmod(name, attributes.mode)
         os.replace(name, path)
         tmp = None  # Consumed by the replace; there is nothing left to clean up.
         _fsync_directory(path.parent)
