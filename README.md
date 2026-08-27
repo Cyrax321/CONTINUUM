@@ -464,6 +464,26 @@ Open an issue before submitting large PRs. See [CONTRIBUTING.md](CONTRIBUTING.md
 
 Also with merged contributions: [Adhi1-2](https://github.com/Adhi1-2), [yuki-fuyutsuki](https://github.com/yuki-fuyutsuki), and [okestroHjJeong](https://github.com/okestroHjJeong).
 
+## Sponsor
+
+If CONTINUUM helps your agents recover reliably, consider sponsoring to support long term maintenance.
+
+<p align="center">
+  <a href="https://github.com/sponsors/Cyrax321"><img src="https://img.shields.io/badge/Sponsor-❤-ff69b4?style=for-the-badge&logo=githubsponsors" alt="Sponsor Cyrax321" /></a>
+</p>
+
+<p align="center">
+  <iframe src="https://github.com/sponsors/Cyrax321/button" title="Sponsor Cyrax321" height="32" width="114" style="border: 0; border-radius: 6px;"></iframe>
+</p>
+
+<p align="center">
+  <iframe src="https://github.com/sponsors/Cyrax321/card" title="Sponsor Cyrax321" height="225" width="600" style="border: 0;"></iframe>
+</p>
+
+<p align="center">
+  <a href="https://github.com/sponsors/Cyrax321">Become a sponsor</a> — GitHub Sponsors, or add FUNDING.yml custom link if you prefer another platform.
+</p>
+
 ## License
 
 Apache 2.0 - see [LICENSE](LICENSE).
