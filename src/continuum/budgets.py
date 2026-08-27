@@ -79,6 +79,10 @@ AUTHORIZATION_BOUND_KEY = "authorization_bound"
 #: Fallback when neither the action type nor the registry sets a limit.
 FALLBACK_MAX_ATTEMPTS = 3
 
+#: Where Linux publishes the process umask (kernel 4.7+). Absent elsewhere, and
+#: named rather than inlined so a test can take the fallback path on any platform.
+_UMASK_STATUS_PATH = "/proc/self/status"
+
 
 class BudgetConfigError(ValueError):
     """The budget registry exists but cannot be honoured."""
@@ -279,13 +283,14 @@ def _process_umask() -> int | None:
     :func:`os.umask` is a swap, not a getter, so the portable read is
     set-then-restore, which publishes a different mask to every other thread for
     the width of two calls. Linux exposes the value in ``/proc/self/status``
-    (since 4.7), so prefer that and fall back to the swap. The placeholder in the
-    fallback is deliberately *narrower* than any plausible real umask: if another
-    thread does create a file inside that window, it lands too private rather
-    than world-writable.
+    (since 4.7), so prefer that and fall back to the swap. A missing or garbled
+    ``Umask:`` line takes the fallback rather than raising: this is a permission
+    hint, not the registry. The placeholder in the fallback is deliberately
+    *narrower* than any plausible real umask, so if another thread does create a
+    file inside that window it lands too private rather than world-writable.
     """
     try:
-        with open("/proc/self/status", encoding="ascii") as status:
+        with open(_UMASK_STATUS_PATH, encoding="ascii") as status:
             for line in status:
                 if line.startswith("Umask:"):
                     return int(line.split()[1], 8)

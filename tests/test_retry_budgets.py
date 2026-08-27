@@ -487,6 +487,77 @@ def test_the_directory_flush_follows_the_replace_and_targets_the_parent(
     assert calls == ["replace", f"flush {tmp_path}"]
 
 
+@pytest.mark.parametrize(
+    ("published", "why"),
+    [
+        pytest.param(None, "no such file", id="proc-absent"),
+        pytest.param("Umask:\tnot-octal\n", "unparseable value", id="value-garbled"),
+        pytest.param("Umask:\n", "no value at all", id="value-missing"),
+        pytest.param("Name:\tpython3\n", "no Umask line", id="line-absent"),
+    ],
+)
+def test_the_umask_read_falls_back_rather_than_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, published: str | None, why: str
+) -> None:
+    """Only Linux publishes the umask, and it is a hint rather than the registry.
+
+    Every other platform has no ``/proc/self/status`` to read, so the swap path
+    has to work; and a value that is there but unreadable must degrade to the same
+    fallback instead of turning a permission hint into a failed save. Pointing the
+    lookup at a temporary file exercises both on whichever platform runs the test.
+    """
+    if published is None:
+        target = tmp_path / "absent" / "status"
+    else:
+        target = tmp_path / "status"
+        target.write_text(published)
+    monkeypatch.setattr("continuum.budgets._UMASK_STATUS_PATH", str(target))
+    original = os.umask(0o022)
+    try:
+        recorded = os.umask(0o022)
+        assert _process_umask() == recorded, f"the fallback must answer when there is {why}"
+        assert os.umask(recorded) == recorded, "the fallback must not leave another mask behind"
+    finally:
+        os.umask(original)
+
+
+def test_a_target_that_cannot_be_stated_keeps_the_tighter_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing registry whose mode is unreadable must not be widened by guesswork.
+
+    ``FileNotFoundError`` means there is nothing to copy and the umask decides.
+    Any other stat failure means the bits exist but are hidden, and inventing a
+    mode for a file whose current one cannot be seen is how a rewrite hands out
+    access the operator never granted. ``None`` keeps ``mkstemp``'s 0600.
+    """
+    p = tmp_path / "budgets.json"
+    save_budgets(p, bound_registry())
+
+    def deny(*args: object, **kwargs: object) -> None:
+        raise PermissionError("the mode of this file is not readable")
+
+    monkeypatch.setattr(Path, "stat", deny)
+    assert _staged_mode(p) is None
+
+
+@posix_only
+def test_a_save_whose_mode_cannot_be_determined_still_lands_and_stays_private(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the mode is unknown the chmod is skipped, not guessed, and the save runs.
+
+    Skipping leaves ``mkstemp``'s 0600, which is the narrow end of the failure:
+    an operator can widen a file by hand, but cannot un-grant access a rewrite
+    handed out, and cannot proceed at all if the save refuses.
+    """
+    monkeypatch.setattr("continuum.budgets._staged_mode", lambda path: None)
+    p = tmp_path / "budgets.json"
+    save_budgets(p, bound_registry())
+    assert load_budgets(p) == bound_registry()
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+
+
 def test_reading_the_umask_leaves_it_exactly_as_it_was() -> None:
     """``os.umask`` is a swap, so reading it must put back what it took.
 
