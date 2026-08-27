@@ -40,11 +40,15 @@ Where the registry asks for an integer it means one: JSON ``true`` is refused
 rather than read as a silent cap of 1 (issue #429), and a rejection names the
 offending value and its type (issue #326). ``save_budgets`` stages and renames
 rather than truncating in place, so a process that dies mid-write costs at most
-the last increment, never the registry (issue #427).
+the last increment, never the registry (issue #427); the staged file inherits
+the target's permissions and the rename is flushed, so replacing the registry
+neither locks other readers out of it nor can be lost by the crash it guards
+against.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
@@ -269,6 +273,90 @@ def _validate_authorization_bound(raw: Mapping[str, Any], location: Path) -> Non
                 )
 
 
+def _process_umask() -> int | None:
+    """The process umask, or ``None`` when it cannot be read.
+
+    :func:`os.umask` is a swap, not a getter, so the portable read is
+    set-then-restore, which publishes a different mask to every other thread for
+    the width of two calls. Linux exposes the value in ``/proc/self/status``
+    (since 4.7), so prefer that and fall back to the swap. The placeholder in the
+    fallback is deliberately *narrower* than any plausible real umask: if another
+    thread does create a file inside that window, it lands too private rather
+    than world-writable.
+    """
+    try:
+        with open("/proc/self/status", encoding="ascii") as status:
+            for line in status:
+                if line.startswith("Umask:"):
+                    return int(line.split()[1], 8)
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        mask = os.umask(0o077)
+        os.umask(mask)
+    except OSError:  # pragma: no cover - os.umask exists on every supported platform
+        return None
+    return mask
+
+
+def _staged_mode(path: Path) -> int | None:
+    """Permissions a rewritten registry should end up with, or ``None`` if unknown.
+
+    :func:`tempfile.mkstemp` creates its staging file 0600 and :func:`os.replace`
+    carries those bits onto the target, so an atomic rewrite would quietly narrow
+    a registry that :meth:`Path.write_text` left readable: overwriting preserved
+    whatever mode the file already had, and creating honoured the process umask.
+    This registry is read by hooks, sidecars and CI steps that may run under
+    another uid or gid, and #413 makes a write happen per claim attempt, so the
+    first save would lock them out for the rest of the run. That is a worse
+    failure than the truncation the staging file exists to prevent.
+
+    An existing target's own bits win, because they are the operator's decision
+    and resetting them on every save is the other half of the same bug. Only the
+    permission bits are copied: setuid, setgid and sticky are not carried onto a
+    file the saving process newly owns.
+    """
+    try:
+        return path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return None
+    mask = _process_umask()
+    if mask is None:
+        return None
+    # 0o666, not 0o644: that is the mode open() passes for a new text file, so a
+    # first save reproduces what write_text produced under the same umask.
+    return 0o666 & ~mask
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Flush the directory entry a preceding :func:`os.replace` created.
+
+    Fsyncing the staged file commits its *contents*; the rename itself is a
+    change to the parent directory, so without this a crash immediately after a
+    successful save could still lose the new registry and leave the previous one
+    in place. Nothing is corrupted by that - the old file is complete and
+    loadable - but durability across power loss is the guarantee
+    :func:`save_budgets` exists to make.
+
+    Best effort. Windows cannot open a directory as a file descriptor, and some
+    filesystems refuse ``fsync`` on one; both cases leave the write no less
+    durable than it was before this call existed, so failing the save over it
+    would trade a narrow durability gap for a refused claim.
+    """
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def save_budgets(path: Path, data: Mapping[str, Any]) -> None:
     """Write ``data`` back to the registry as readable JSON, atomically.
 
@@ -286,9 +374,17 @@ def save_budgets(path: Path, data: Mapping[str, Any]) -> None:
     claim refused until an operator repaired the file by hand. Losing the last
     increment on an abrupt exit is an acceptable price for a counter registry.
     Losing the registry is not, and #413 makes this a write per claim attempt.
+
+    Staging is not allowed to change *who can read* the registry
+    (:func:`_staged_mode`) or to leave the rename itself unflushed
+    (:func:`_fsync_directory`): a rewrite that survives a crash but locks a hook
+    out of the file, or that is lost by the crash it guards against, has not
+    delivered what the staging file was added for.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     body = json.dumps(data, indent=2) + "\n"
+    # Read before the replace, while the target is still the file being replaced.
+    mode = _staged_mode(path)
     # Same directory as the target: os.replace is only atomic within one
     # filesystem, and the system temp dir is routinely on another.
     handle, name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
@@ -298,8 +394,14 @@ def save_budgets(path: Path, data: Mapping[str, Any]) -> None:
             stream.write(body)
             stream.flush()
             os.fsync(stream.fileno())
+        if mode is not None:
+            # A filesystem without permission bits keeps mkstemp's 0600: too
+            # private is recoverable by hand, a failed save is not.
+            with contextlib.suppress(OSError):
+                os.chmod(name, mode)
         os.replace(name, path)
         tmp = None  # Consumed by the replace; there is nothing left to clean up.
+        _fsync_directory(path.parent)
     finally:
         if tmp is not None:
             # A failed save leaves the previous registry in place and no litter.

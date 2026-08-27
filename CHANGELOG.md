@@ -748,6 +748,17 @@ All notable changes to this project are documented here. The format follows
   leaves the previous registry intact and no litter behind. Losing the last
   increment on an abrupt exit is an acceptable price for a counter registry;
   losing the registry is not, and #413 turns this into a write per claim attempt.
+  Two things the staging file must not change on its way in: `mkstemp` creates at
+  0600 and `os.replace` carries those bits onto the target, so the staged file is
+  chmod'ed to the existing registry's own mode first, or to `0o666 & ~umask` when
+  there is no existing file - matching what `write_text` produced, because hooks,
+  sidecars and CI steps read this registry under their own uid and a save that
+  locks them out is worse than the truncation staging prevents. And the rename
+  itself is a directory change, so the parent directory is fsynced after the
+  replace; flushing only the staged file's contents left the new registry
+  loseable by the very crash it guards against. Both steps are best effort: a
+  filesystem without permission bits keeps the tighter 0600, and Windows (which
+  cannot open a directory as a descriptor) is left exactly as durable as before.
 
 - **Budget rejections named the rule but not the offending value, and one still
   named the config by relative path (#326, #426).** "needs a positive integer

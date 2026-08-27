@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,8 @@ import pytest
 from continuum.actions import ActionLedger
 from continuum.budgets import (
     BudgetConfigError,
+    _process_umask,
+    _staged_mode,
     attempts_by_key,
     attempts_for_type,
     backoff_delay,
@@ -351,6 +354,175 @@ def test_a_failed_save_leaves_the_previous_registry_loadable(
     monkeypatch.undo()
     assert load_budgets(p) == before
     assert [entry.name for entry in sorted(tmp_path.iterdir())] == ["budgets.json"]
+
+
+# --- staging must not change who may read the registry, nor lose the rename ----------- #
+
+posix_only = pytest.mark.skipif(
+    os.name != "posix", reason="permission bits and directory descriptors are POSIX concepts"
+)
+
+
+@posix_only
+@pytest.mark.parametrize("existing", [0o644, 0o664, 0o640, 0o600])
+def test_save_keeps_the_permissions_the_registry_already_had(tmp_path: Path, existing: int) -> None:
+    """The mode an operator set on ``budgets.json`` must survive the atomic rewrite.
+
+    ``mkstemp`` stages at 0600 and ``os.replace`` carries those bits onto the
+    target, so switching to stage-and-rename silently narrowed a registry that
+    ``write_text`` had left alone: it preserved the existing mode on overwrite.
+    Hooks, sidecars and CI steps read this file under their own uid and gid, and
+    #413 makes the first claim attempt of a run the moment they get locked out.
+    """
+    p = tmp_path / "budgets.json"
+    save_budgets(p, bound_registry())
+    p.chmod(existing)
+    save_budgets(p, {"default_max_attempts": 4})
+    assert stat.S_IMODE(p.stat().st_mode) == existing
+    assert load_budgets(p) == {"default_max_attempts": 4}
+
+
+@posix_only
+@pytest.mark.parametrize(("mask", "expected"), [(0o022, 0o644), (0o002, 0o664), (0o077, 0o600)])
+def test_a_first_save_honours_the_umask_rather_than_forcing_0600(
+    tmp_path: Path, mask: int, expected: int
+) -> None:
+    """Creating the registry lands on the mode ``write_text`` would have given it.
+
+    With no prior file to copy bits from, the umask is the operator's only
+    statement about who may read the registry; pinning 0600 answers that question
+    for them. 0o666 is the mode ``open()`` passes for a new text file, so the
+    expectation here is exactly what the old code path produced under each mask.
+    """
+    p = tmp_path / "budgets.json"
+    previous = os.umask(mask)
+    try:
+        save_budgets(p, bound_registry())
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(p.stat().st_mode) == expected
+    assert load_budgets(p) == bound_registry()
+
+
+@posix_only
+def test_the_rename_is_flushed_not_only_the_staged_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fsyncing the staged file commits bytes; the rename lives in the directory.
+
+    Without a directory flush the save can return successfully and still be
+    undone by the very crash the staging file guards against, leaving the
+    previous registry behind. That is a durability gap against what the function
+    promises rather than corruption, but the promise is why staging exists.
+    """
+    synced_a_directory: list[bool] = []
+    real_fsync = os.fsync
+
+    def record(fd: int) -> None:
+        synced_a_directory.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", record)
+    save_budgets(tmp_path / "budgets.json", bound_registry())
+    assert synced_a_directory == [False, True]
+
+
+@pytest.mark.parametrize("failing", ["open", "fsync"])
+def test_a_directory_that_cannot_be_flushed_still_saves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    """The directory flush is best effort, because the save is worth more than it.
+
+    Windows cannot open a directory as a file descriptor at all, and some
+    filesystems refuse ``fsync`` on one. The registry is written either way and is
+    no less durable than before the flush was added, so raising here would trade a
+    narrow durability gap for a budget-gated claim that cannot proceed.
+    """
+    p = tmp_path / "budgets.json"
+    real_open, real_fsync = os.open, os.fsync
+
+    def refuse_open(target: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if isinstance(target, (str, bytes, os.PathLike)) and Path(os.fsdecode(target)) == tmp_path:
+            raise PermissionError("a directory is not openable here")
+        return real_open(target, flags, *args, **kwargs)
+
+    def refuse_fsync(fd: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("this filesystem does not fsync directories")
+        real_fsync(fd)
+
+    if failing == "open":
+        monkeypatch.setattr(os, "open", refuse_open)
+    else:
+        monkeypatch.setattr(os, "fsync", refuse_fsync)
+    save_budgets(p, bound_registry())
+    monkeypatch.undo()
+    assert load_budgets(p) == bound_registry()
+
+
+def test_the_directory_flush_follows_the_replace_and_targets_the_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Order matters: flushing before the rename would commit nothing about it.
+
+    The posix test above proves a real directory descriptor is what gets synced.
+    This one runs everywhere, including the platforms where a directory cannot be
+    opened at all, and pins the two things that are pure sequencing: the flush
+    happens after :func:`os.replace` has landed, and it is aimed at the directory
+    holding the registry rather than the registry itself.
+    """
+    calls: list[str] = []
+    real_replace = os.replace
+
+    def note_replace(src: Any, dst: Any) -> None:
+        calls.append("replace")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", note_replace)
+    monkeypatch.setattr(
+        "continuum.budgets._fsync_directory",
+        lambda directory: calls.append(f"flush {directory}"),
+    )
+    save_budgets(tmp_path / "budgets.json", bound_registry())
+    assert calls == ["replace", f"flush {tmp_path}"]
+
+
+def test_reading_the_umask_leaves_it_exactly_as_it_was() -> None:
+    """``os.umask`` is a swap, so reading it must put back what it took.
+
+    A leaked mask would silently change the permissions of every file the process
+    creates afterwards, which is a worse version of the bug being fixed. On Linux
+    the value is read from ``/proc/self/status`` and nothing is swapped at all;
+    elsewhere the fallback swaps and restores, and this holds it to the same
+    promise. The expectation is read back through ``os.umask`` rather than
+    hard-coded because Windows records only the write bit of whatever it is given.
+    """
+    original = os.umask(0o022)
+    try:
+        recorded = os.umask(0o022)
+        assert _process_umask() == recorded
+        assert os.umask(recorded) == recorded, "the read must not have left another mask behind"
+    finally:
+        os.umask(original)
+
+
+def test_a_new_registry_takes_its_bits_from_the_umask_not_from_0600(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no file to copy, the mode is ``0o666 & ~umask``: what ``open()`` would use.
+
+    Platform-independent cover for the arithmetic, since only POSIX actually
+    stores the result. 0o666 rather than 0o644 because that is the mode CPython
+    passes when creating a text file, so a first save reproduces what
+    ``write_text`` produced under the same mask instead of quietly dropping the
+    group and other bits an operator's umask allows.
+    """
+    monkeypatch.setattr("continuum.budgets._process_umask", lambda: 0o027)
+    assert _staged_mode(tmp_path / "never-written.json") == 0o640
+    monkeypatch.setattr("continuum.budgets._process_umask", lambda: None)
+    assert _staged_mode(tmp_path / "never-written.json") is None, (
+        "an unreadable umask must leave mkstemp's tighter 0600 alone, not guess wider"
+    )
 
 
 def test_get_remaining_and_refusal_math() -> None:
