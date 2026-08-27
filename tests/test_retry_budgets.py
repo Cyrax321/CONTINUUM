@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -186,8 +187,15 @@ def test_section_error_names_the_file(tmp_path: Path) -> None:
     assert str(excinfo.value) == f"{p.resolve()}: 'authorization_bound' must be an object"
 
 
-def test_old_malformations_keep_their_exact_message(tmp_path: Path) -> None:
-    """Pre-existing failures win: the classic message survives byte for byte."""
+def test_old_malformations_are_still_reported_first(tmp_path: Path) -> None:
+    """Pre-existing failures win: the classic check still raises before the new section.
+
+    The message now carries the offending value (issue #326), so the pin is on
+    the sentence plus that suffix rather than on the old bare sentence. What it
+    guards is unchanged: a registry that was malformed before #411 existed is
+    reported by the same check, naming the same field, not by the
+    authorization-bound validation that runs after it.
+    """
     body = {
         "action_types": {"x": 0},
         "authorization_bound": {
@@ -199,8 +207,150 @@ def test_old_malformations_keep_their_exact_message(tmp_path: Path) -> None:
     with pytest.raises(BudgetConfigError) as excinfo:
         load_budgets(p)
     assert str(excinfo.value) == (
-        f"{tmp_path / 'b.json'}: action type 'x' needs a positive integer 'max_attempts'"
+        f"{tmp_path / 'b.json'}: action type 'x' needs a positive integer "
+        f"'max_attempts', got 0 (int)"
     )
+
+
+def test_action_type_error_names_the_resolved_path_not_the_caller_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative input path must still name an absolute file (#426).
+
+    Hooks, sidecars and CI steps pass whatever cwd-relative spelling they hold;
+    the operator reading the error cannot reopen that. ``{path}`` and
+    ``{path.resolve()}`` coincide for an absolute input, which is how the lone
+    straggler survived #351 and the byte-for-byte pin above. A relative input is
+    the case that actually separates them, so it is the case that is pinned here.
+    """
+    p = tmp_path / "b.json"
+    p.write_text(json.dumps({"action_types": {"x": 0}}))
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(BudgetConfigError) as excinfo:
+        load_budgets(Path("b.json"))
+    assert str(excinfo.value) == (
+        f"{p.resolve()}: action type 'x' needs a positive integer 'max_attempts', got 0 (int)"
+    )
+
+
+# --- rejections name the offending value (issue #326) -------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("spec", "fragment"),
+    [
+        pytest.param({"max_attempts": 3.0}, "got 3.0 (float)", id="float-from-yaml"),
+        pytest.param({"max_attempts": "3"}, "got '3' (str)", id="quoted-int"),
+        pytest.param({}, "got None (NoneType)", id="field-missing"),
+        pytest.param("3", "got '3' (str)", id="shorthand-string"),
+    ],
+)
+def test_rejections_say_which_value_was_wrong(tmp_path: Path, spec: object, fragment: str) -> None:
+    """The message must name the token to change, not just the rule (#326).
+
+    A registry hand-converted from YAML arrives with ``3.0`` where ``3`` was
+    meant. "needs a positive integer 'max_attempts'" was the same sentence for a
+    float, a string and a missing field, so it never said which of those had
+    happened, and an operator re-read a line that looked correct.
+    """
+    p = tmp_path / "b.json"
+    p.write_text(json.dumps({"action_types": {"send_invoice": spec}}))
+    with pytest.raises(BudgetConfigError) as excinfo:
+        load_budgets(p)
+    message = str(excinfo.value)
+    assert "needs a positive integer 'max_attempts'" in message
+    assert fragment in message
+
+
+# --- booleans are not integers (issue #429) ------------------------------------------ #
+
+
+@pytest.mark.parametrize(
+    ("body", "fragment"),
+    [
+        pytest.param(
+            {"default_max_attempts": True},
+            "'default_max_attempts' must be >= 1, got True (bool)",
+            id="default-max",
+        ),
+        pytest.param(
+            {"action_types": {"send_invoice": True}},
+            "action type 'send_invoice' needs a positive integer 'max_attempts', got True (bool)",
+            id="per-type-shorthand",
+        ),
+        pytest.param(
+            {"action_types": {"send_invoice": {"max_attempts": True}}},
+            "action type 'send_invoice' needs a positive integer 'max_attempts', got True (bool)",
+            id="per-type-object",
+        ),
+        pytest.param(
+            {"authorization_bound": {"deploy": {"k": {"counter": True, "max_attempts": 2}}}},
+            "needs a non-negative integer 'counter', got True (bool)",
+            id="bound-counter",
+        ),
+        pytest.param(
+            {"authorization_bound": {"deploy": {"k": {"counter": 0, "max_attempts": True}}}},
+            "needs a positive integer 'max_attempts', got True (bool)",
+            id="bound-max",
+        ),
+    ],
+)
+def test_json_booleans_are_refused_wherever_an_integer_is_required(
+    tmp_path: Path, body: dict[str, Any], fragment: str
+) -> None:
+    """``isinstance(True, int)`` must not let JSON ``true`` mean a cap of 1 (#429).
+
+    Every integer check in the registry passed for a boolean, so a mis-typed
+    config did not fail loudly the way the rest of the file does: ``true`` quietly
+    acted as ``max_attempts`` of 1, and a ``counter`` of ``true`` became 2 after a
+    single increment. Rejecting is the fail-loud half of the registry's contract.
+    """
+    p = tmp_path / "b.json"
+    p.write_text(json.dumps(body))
+    with pytest.raises(BudgetConfigError) as excinfo:
+        load_budgets(p)
+    assert fragment in str(excinfo.value)
+
+
+# --- the registry is replaced, never truncated (issue #427) --------------------------- #
+
+
+def test_save_leaves_no_temporary_files_behind(tmp_path: Path) -> None:
+    """The staging file is consumed by the move, so the directory stays clean."""
+    p = tmp_path / "budgets.json"
+    save_budgets(p, bound_registry())
+    save_budgets(p, bound_registry())
+    assert [entry.name for entry in sorted(tmp_path.iterdir())] == ["budgets.json"]
+
+
+def test_a_failed_save_leaves_the_previous_registry_loadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A save that dies mid-flight must not cost the operator the registry (#427).
+
+    ``write_text`` opened the target with mode ``w``, truncating before writing,
+    so a crash between truncation and flush left a zero-length or half-written
+    ``budgets.json``. Every later load then raises, and because the gate is
+    fail-closed every budget-gated claim refused until someone repaired the file
+    by hand. Staging into a sibling file and moving it into place means the
+    target only ever holds a complete registry: the worst a dead save costs is
+    the last increment. #413 turns this into a write per claim attempt, which is
+    what widens the window.
+    """
+    p = tmp_path / "budgets.json"
+    before = bound_registry()
+    save_budgets(p, before)
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError("killed between staging and rename")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(OSError, match="killed between staging"):
+        save_budgets(p, {"default_max_attempts": 99})
+
+    monkeypatch.undo()
+    assert load_budgets(p) == before
+    assert [entry.name for entry in sorted(tmp_path.iterdir())] == ["budgets.json"]
 
 
 def test_get_remaining_and_refusal_math() -> None:

@@ -720,6 +720,48 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **JSON booleans passed every integer check in the budget registry (#429).**
+  `isinstance(True, int)` holds in Python, so `true` was accepted wherever
+  `.continuum/budgets.json` requires a positive integer: as
+  `default_max_attempts` or a per-type `max_attempts` it silently meant a cap of
+  1, and an authorization-bound `counter` of `true` became 2 after one
+  increment. A registry whose contract everywhere else is to fail loudly instead
+  quietly meant something other than what was written. `load_budgets` now
+  refuses booleans in all four positions with `BudgetConfigError`. This is a
+  deliberate behaviour change rather than a coercion: a config that contains
+  `true` in one of those positions loaded before and raises now, which is the
+  point, because the value it was silently taking was not the one the operator
+  wrote. Integer configs are unaffected. `evaluate_budget` also normalises a
+  per-type limit through `int()` so a hand-built mapping cannot leak a bool into
+  the `max_attempts` figure the `continuum budget` report renders.
+
+- **`save_budgets` rewrote the registry in place, so a crash mid-write could
+  truncate it (#427).** The write went through `Path.write_text`, which opens
+  the target with mode `w` and truncates before writing, with no staging file and
+  no `os.replace`. A crash, an OOM kill or power loss between truncation and
+  flush left a zero-length or half-written `budgets.json`, and every later
+  `load_budgets` then raised. Because the gate is fail-closed, that refused every
+  budget-gated claim until an operator repaired the file by hand. The bytes now
+  land in a sibling temporary file (same directory, so the rename stays within
+  one filesystem), get flushed and fsynced, and are moved over the target with
+  `os.replace`, which is atomic on POSIX and Windows alike. A save that dies
+  leaves the previous registry intact and no litter behind. Losing the last
+  increment on an abrupt exit is an acceptable price for a counter registry;
+  losing the registry is not, and #413 turns this into a write per claim attempt.
+
+- **Budget rejections named the rule but not the offending value, and one still
+  named the config by relative path (#326, #426).** "needs a positive integer
+  `'max_attempts'`" was the same sentence for a missing field, a float, a string
+  and a boolean, so a registry hand-converted from YAML with `3.0` where `3` was
+  meant sent the operator back to re-read a line that looked correct. Every
+  rejection now appends the value and its type (`got 3.0 (float)`), including the
+  authorization-bound `counter` and `max_attempts` checks. Separately, the
+  `action_types` failure interpolated the caller's `path` rather than the
+  resolved one, the single straggler #351 and #333 left behind: an absolute input
+  hid it, because the two spellings coincide there, but a hook, sidecar or CI
+  step passing a cwd-relative path produced a message naming a file the reader
+  could not open. It now resolves like every other message in the module.
+
 - **One unprojectable event bricked every projecting command, with no route back (#383).**
   A log whose fold fails is intact as a chain but dead as a run: because the fold
   validates each intermediate state, no later event could correct an earlier bad
