@@ -12,11 +12,13 @@
 
 <p align="center">
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+" /></a>
+  <a href="https://pypi.org/project/continuum-agent/"><img src="https://img.shields.io/pypi/v/continuum-agent?style=flat-square&label=PyPI" alt="PyPI" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue?style=flat-square" alt="License" /></a>
   <a href="https://pydantic.dev"><img src="https://img.shields.io/badge/pydantic-v2-E92063?style=flat-square&logo=pydantic&logoColor=white" alt="Pydantic v2" /></a>
   <a href="https://continuum-nu-six.vercel.app/"><img src="https://img.shields.io/badge/website-live_demo-E06D53?style=flat-square" alt="Website Demo" /></a>
   <a href="https://github.com/Cyrax321/CONTINUUM/actions/workflows/ci.yml"><img src="https://github.com/Cyrax321/CONTINUUM/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
   <a href="https://app.codecov.io/gh/Cyrax321/CONTINUUM"><img src="https://img.shields.io/codecov/c/github/Cyrax321/CONTINUUM?style=flat-square&logo=codecov" alt="Coverage" /></a>
+  <a href="https://github.com/sponsors/Cyrax321"><img src="https://img.shields.io/badge/sponsor-❤-ff69b4?style=flat-square&logo=githubsponsors" alt="Sponsor" /></a>
 </p>
 
 <p align="center">
@@ -43,12 +45,13 @@ CONTINUUM asks a narrower, harder question: can an agent resume from a compact s
 
 ## Quick Start
 
-Not published to PyPI yet, so everything below pulls straight from this repository. Release tags additionally ship built wheels attached to [GitHub Releases](https://github.com/Cyrax321/CONTINUUM/releases).
+Published to PyPI as `continuum-agent` 0.1.0 — `pip install continuum-agent` (`pip install continuum-agent==0.1.0` to pin). Release tags additionally ship built wheels attached to [GitHub Releases](https://github.com/Cyrax321/CONTINUUM/releases).
 
 Zero-setup paths (no clone, no install, nothing published anywhere):
 
 | Path | How |
 |:--|:--|
+| Install from PyPI | `pip install continuum-agent==0.1.0` — then `continuum --help` |
 | Watch crash recovery happen end to end | `docker run --rm ghcr.io/cyrax321/continuum` |
 | Use the CLI through Docker | `docker run --rm ghcr.io/cyrax321/continuum continuum --help` |
 | Run the CLI without cloning | `uvx --from git+https://github.com/Cyrax321/CONTINUUM.git continuum --help` |
@@ -266,7 +269,7 @@ CONTINUUM is organised around one invariant: **every fact carries its origin, an
 
 Any agent harness connects through exactly one of these; no framework cooperation is required.
 
-```
+```text
 Seam 1: In-process adapters     GenericAgentAdapter.intercept_action(...);
          Python frameworks       wrap_tool(key_fn=...) on LangChain/LangGraph,
                                  OpenAI Agents SDK hooks
@@ -284,7 +287,7 @@ Seam 5: OpenTelemetry bridge    make_span_processor(storage)
 
 The gate-to-observe pipeline closes the durability gap at the harness boundary:
 
-```
+```text
 PreToolUse hook                    PostToolUse hook
     |                                    |
     v                                    v
@@ -309,7 +312,7 @@ claim settled from reality
 
 The recovery engine evaluates signals in severity order and returns the maximum:
 
-```
+```text
 RESUME < REPAIR_AND_RESUME < REPLAN < WAIT < REQUEST_HUMAN < ROLLBACK < ABORT
 ```
 
@@ -435,7 +438,7 @@ CONTINUUM sits at the overlap of durable execution, idempotent side-effect track
 ## Status and limitations
 
 - **Tested**: 1,360 passed + 23 skipped in a full run at the 2026-08-24 audit of this tree; CI enforces the suite on Python 3.11, 3.12, and 3.13, and counts vary by platform and optional services such as Postgres (see [STATUS.md](STATUS.md)). The MCP surface has also been audited adversarially over the live protocol; see [test.md](test.md).
-- **Not on PyPI.** Install from a clone, a git URL, a release wheel, or Docker (see Quick Start).
+- **On PyPI as `continuum-agent` 0.1.0** (`pip install continuum-agent`; clone still works via `pip install .` see Quick Start).
 - **MCP caller authentication is opt-in per deployment.** When `CONTINUUM_MCP_TOKEN` is set, the server refuses every mutating tool unless the caller presents that shared secret in the `initialize` handshake's `_meta.authToken`; per-caller secrets are available via `CONTINUUM_MCP_CLIENT_TOKENS` (`name:secret` pairs). Without any token configured, authorization is by declared identity only (the historical default, preserved for local single-user use).
 - **Confirming self-reported state over MCP requires a separate secret.** `continuum_confirm` refuses every caller until the operator sets `CONTINUUM_MCP_CONFIRM_TOKEN`, because an agent allowed to record progress must not also be able to confirm it. The default path stays human-driven: run `continuum confirm <run_id>` on the host.
 - **Unbuilt components**: Cloud API (Phase 13).
@@ -460,6 +463,26 @@ Open an issue before submitting large PRs. See [CONTRIBUTING.md](CONTRIBUTING.md
   <a href="https://github.com/Parthipashok04"><img src="docs/contributors/parthipashok04.png" width="60" alt="Parthipashok04" /></a>
 
 Also with merged contributions: [Adhi1-2](https://github.com/Adhi1-2), [yuki-fuyutsuki](https://github.com/yuki-fuyutsuki), and [okestroHjJeong](https://github.com/okestroHjJeong).
+
+## Sponsor
+
+If CONTINUUM helps your agents recover reliably, consider sponsoring to support long term maintenance.
+
+<p align="center">
+  <a href="https://github.com/sponsors/Cyrax321"><img src="https://img.shields.io/badge/Sponsor-❤-ff69b4?style=for-the-badge&logo=githubsponsors" alt="Sponsor Cyrax321" /></a>
+</p>
+
+<p align="center">
+  <iframe src="https://github.com/sponsors/Cyrax321/button" title="Sponsor Cyrax321" height="32" width="114" style="border: 0; border-radius: 6px;"></iframe>
+</p>
+
+<p align="center">
+  <iframe src="https://github.com/sponsors/Cyrax321/card" title="Sponsor Cyrax321" height="225" width="600" style="border: 0;"></iframe>
+</p>
+
+<p align="center">
+  <a href="https://github.com/sponsors/Cyrax321">Become a sponsor</a> — GitHub Sponsors, or add FUNDING.yml custom link if you prefer another platform.
+</p>
 
 ## License
 

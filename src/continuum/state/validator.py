@@ -146,6 +146,7 @@ class StateValidator:
             self._check_approvals(state, entries)
             self._check_model(state, expected_model, entries)
             self._check_evidence(state, entries)
+            self._check_derived(state, entries)
         else:
             # Scoped re-validation: only the named dependency resources are
             # re-checked and only their derivation subtree is allowed to go
@@ -158,6 +159,7 @@ class StateValidator:
                 state, environment_diff, entries, scope=scope_set, observed=observed
             )
             state = self._propagate(state, broken, entries)
+            self._check_derived(state, entries)
 
         blocking = [
             e
@@ -517,6 +519,39 @@ class StateValidator:
                     detail=f"cited but unavailable: {', '.join(dangling)}",
                 )
             )
+
+    def _check_derived(self, state: SemanticState, entries: list[ComponentValidationEntry]) -> None:
+        """Derived artifacts must never amplify weak sources (issue #392)."""
+        for finding in state.findings:
+            if finding.provenance.origin.self_certified and finding.status is StateStatus.VALID:
+                entries.append(
+                    ComponentValidationEntry(
+                        component=Component.FINDING,
+                        component_id=finding.finding_id,
+                        status=StateStatus.REQUIRES_REVIEW,
+                        detail=f"derived from {finding.provenance.origin.value} and not independently verified",
+                    )
+                )
+        for decision in state.decisions:
+            if decision.provenance.origin.self_certified and decision.status is StateStatus.VALID:
+                entries.append(
+                    ComponentValidationEntry(
+                        component=Component.DECISION,
+                        component_id=decision.decision_id,
+                        status=StateStatus.REQUIRES_REVIEW,
+                        detail=f"derived from {decision.provenance.origin.value} and not independently verified",
+                    )
+                )
+        for ev in state.evidence:
+            if ev.provenance.origin.self_certified and ev.status is StateStatus.VALID:
+                entries.append(
+                    ComponentValidationEntry(
+                        component=Component.EVIDENCE,
+                        component_id=ev.evidence_id,
+                        status=StateStatus.REQUIRES_REVIEW,
+                        detail=f"derived from {ev.provenance.origin.value} and not independently verified",
+                    )
+                )
 
 
 def validate_state(

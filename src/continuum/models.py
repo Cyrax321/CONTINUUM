@@ -49,6 +49,7 @@ __all__ = [
     "ExternalDependency",
     "ConstraintPinned",
     "ConstraintRetracted",
+    "ConstraintPin",
     "ModelSpecificState",
     "ModelState",
     "Run",
@@ -453,6 +454,45 @@ class ConstraintRetracted(BaseModel):
         return _validated_constraint_id(value)
 
 
+class ConstraintPin(BaseModel):
+    """Projected view of an active constraint pin (issue #417).
+
+    A pin is the durable memory of a standing instruction. The text never
+    enters the log; only the digest does. The projector keeps the active set
+    in ``SemanticState.pins`` so downstream checks can ask which constraints
+    survive context reconstruction without re-reading the whole log.
+    """
+
+    model_config = Frozen
+
+    constraint_id: str = Field(strict=True)
+    """Label of the constraint, same charset as the pinned event."""
+
+    sha256: str = Field(strict=True)
+    """Digest of the exact constraint text, lowercase hex."""
+
+    status: str = "active"
+    """Lifecycle status, always ``active`` for members of the active set."""
+
+    provenance: Provenance = Field(default_factory=Provenance)
+    """Where the pin was asserted, carried from the pin event."""
+
+    pinned_at: datetime = Field(default_factory=utcnow)
+    """When the pin event was recorded."""
+
+    @field_validator("constraint_id")
+    @classmethod
+    def _pin_id_is_a_label(cls, value: str) -> str:
+        return _validated_constraint_id(value)
+
+    @field_validator("sha256")
+    @classmethod
+    def _pin_sha_is_lowercase_hex(cls, value: str) -> str:
+        if not _SHA256_PATTERN.fullmatch(value):
+            raise ValueError("sha256 must be exactly 64 lowercase hex characters")
+        return value
+
+
 class ModelSpecificState(BaseModel):
     """An assumption tied to a specific model; switching models must revalidate."""
 
@@ -499,6 +539,15 @@ class SemanticState(BaseModel):
     pending_work: list[PendingWork] = Field(default_factory=list)
     approvals: list[Approval] = Field(default_factory=list)
     external_dependencies: list[ExternalDependency] = Field(default_factory=list)
+    pins: dict[str, ConstraintPin] = Field(default_factory=dict)
+    """Active constraint pins, keyed by constraint id (issue #417)."""
+    unmatched_pin_retractions: list[str] = Field(default_factory=list)
+    """Constraint ids retracted without a matching active pin.
+
+    Retraction of an unknown id is not a crash; it degrades gracefully and
+    is noted here so the operator can see a mismatch without the fold
+    guessing whether the pin lived in an archived prefix or never existed.
+    """
     model: ModelState | None = None
     version: int = 0
     source_sequence: int = 0
@@ -543,6 +592,12 @@ class SemanticState(BaseModel):
 
     def dependency(self, resource: str) -> ExternalDependency | None:
         return next((d for d in self.external_dependencies if d.resource == resource), None)
+
+    def pin(self, constraint_id: str) -> ConstraintPin | None:
+        return self.pins.get(constraint_id)
+
+    def active_pins(self) -> tuple[ConstraintPin, ...]:
+        return tuple(self.pins.values())
 
     def evidence_ids(self) -> frozenset[str]:
         return frozenset(e.evidence_id for e in self.evidence)

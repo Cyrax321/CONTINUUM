@@ -33,7 +33,8 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from continuum.events import EventType
-from continuum.models import StateStatus
+from continuum.models import Origin, StateStatus
+from continuum.provenance_map import derived_provenance_for_events
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -127,6 +128,7 @@ def build_informed_retry(
 
     avoid = _avoid_rules(failures, uncertain_actions)
 
+    derived_origin = derived_provenance_for_events(events)
     block: dict[str, Any] = {
         "attempts": len(starts),
         "completed_recoveries": len(completions),
@@ -137,6 +139,7 @@ def build_informed_retry(
         "settled_effects": settled_entries,
         "current_failures": current_failures,
         "avoid": avoid,
+        "derived_origin": derived_origin.value,
     }
     return _fit(block)
 
@@ -202,9 +205,25 @@ def _fit(block: dict[str, Any]) -> dict[str, Any]:
     return candidate
 
 
+def _derived_label(block: dict[str, Any]) -> str | None:
+    raw = block.get("derived_origin")
+    if raw is None:
+        return "unverified (derived from unverified sources)"
+    try:
+        origin = Origin(raw)
+    except ValueError:
+        return "unverified (derived from unverified sources)"
+    if origin.self_certified:
+        return f"unverified (derived from {origin.value})"
+    return f"derived from {origin.value}"
+
+
 def render_informed_retry(block: dict[str, Any]) -> list[str]:
     """Human/agent-readable lines for briefing and resume output."""
     lines: list[str] = []
+    label = _derived_label(block)
+    if label:
+        lines.append(f"provenance: {label}")
     attempts = block.get("attempts", 0)
     if attempts:
         lines.append(f"previous attempt(s): {attempts}")

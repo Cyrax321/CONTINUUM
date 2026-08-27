@@ -37,6 +37,7 @@ __all__ = [
     "location_tokens",
     "locations_agree",
     "same_location",
+    "resolve_authorization_id",
     "IdempotencyKey",
 ]
 
@@ -415,3 +416,319 @@ def locations_agree(left: frozenset[str], right: frozenset[str]) -> bool:
     if not left or not right:
         return True
     return any(same_location(a, b) for a in left for b in right)
+
+
+# --- authorization identity (issue #412) ----------------------------------------- #
+
+# Extensions accepted as genuine file suffixes for the derivation rule;
+# kept in sync with ``continuum.actions.ledger._KNOWN_SUFFIXES``. A dotted
+# token is only treated as derived from its stem when the extension looks
+# like a real file suffix, so ``alice.smith`` stays distinct from ``alice``
+# while ``INV-001.sent`` collapses to ``INV-001``.
+_KNOWN_AUTHZ_SUFFIXES = frozenset(
+    {
+        "csv",
+        "tsv",
+        "json",
+        "jsonl",
+        "ndjson",
+        "parquet",
+        "pq",
+        "avro",
+        "orc",
+        "xlsx",
+        "xls",
+        "pdf",
+        "txt",
+        "md",
+        "html",
+        "htm",
+        "xml",
+        "yaml",
+        "yml",
+        "toml",
+        "ini",
+        "cfg",
+        "conf",
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "svg",
+        "webp",
+        "zip",
+        "gz",
+        "tar",
+        "tgz",
+        "bz2",
+        "rar",
+        "7z",
+        "db",
+        "sqlite",
+        "sql",
+        "arrow",
+        "feather",
+        "pkl",
+        "pickle",
+        "bin",
+        "log",
+        "dat",
+        "out",
+        "tmp",
+        "part",
+        "bak",
+        "old",
+        "eml",
+        "msg",
+        "wav",
+        "mp3",
+        "mp4",
+        "mov",
+        "sent",
+    }
+)
+
+
+def _authz_stem(token: str) -> str:
+    stem, _ = os.path.splitext(token)
+    return stem
+
+
+def _authz_superset_derives(subset: frozenset[str], superset: frozenset[str]) -> bool:
+    extra = superset - subset
+    if not extra:
+        return True
+    stems = {_authz_stem(t).lower() for t in subset}
+    for token in extra:
+        stem = _authz_stem(token).lower()
+        if stem not in stems:
+            return False
+        _, ext = os.path.splitext(token)
+        if ext.lstrip(".").lower() not in _KNOWN_AUTHZ_SUFFIXES:
+            return False
+    return True
+
+
+def _canonical_leaf_tokens(tokens: frozenset[str]) -> frozenset[str]:
+    """Collapse derived forms so equivalent renderings hash identically."""
+    if not tokens:
+        return tokens
+    lower_map = {t.lower(): t for t in tokens}
+    stems_lower = {_authz_stem(t).lower() for t in tokens}
+    result: set[str] = set()
+    for token in tokens:
+        stem_lower = _authz_stem(token).lower()
+        if token.lower() != stem_lower and stem_lower in lower_map:
+            _, ext = os.path.splitext(token)
+            if ext.lstrip(".").lower() in _KNOWN_AUTHZ_SUFFIXES:
+                continue
+        result.add(token)
+    if not result:
+        return tokens
+    _ = stems_lower
+    return frozenset(result)
+
+
+def resolve_authorization_id(
+    action_type: str,
+    key: str | None = None,
+    arguments: Mapping[str, Any] | None = None,
+    *,
+    volatile: Iterable[str] = (),
+    ledger: Any | None = None,
+) -> str | None:
+    """Stable identity for budget binding, derived from a key or tokens.
+
+    Deterministic across processes (``stable_hash``) so identical logical
+    operations map to one budget bucket even when callers mint fresh keys.
+
+    Precedence
+    ----------
+    1. Explicit stable key (``key`` is not None): the id is derived directly
+       from ``(action_type, key)``. Arguments are ignored and the same pair
+       always yields the same id on any machine.
+    2. Token fallback (no key, distinctive resource tokens present): the id
+       is derived from the action's resource tokens. When a ledger is
+       supplied, a *unique* completed or interrupted (STARTED/UNKNOWN) match
+       by shared identity tokens anchors the id, reusing the same containment,
+       derivation and location-agreement checks as ``ActionLedger.claim``'s
+       fallback; without a ledger the id is the hash of the canonical leaf
+       tokens of the incoming arguments. Weak tokens (counts, status words,
+       stopwords) never produce an id.
+    3. Unbound (neither key nor distinctive tokens, or an ambiguous
+       multi-match): ``None`` is returned. The caller keeps today's
+       behaviour (no authorization-bound budget) byte-identical.
+
+    Action-type drift is explicitly NOT bridged: the same resource tokens
+    under different ``action_type`` values produce different ids, because
+    different types are different operations. Two identity systems is a bug
+    nursery, so this reuses ``identity_tokens`` / ``leaf_tokens`` /
+    ``location_tokens`` and the stem/suffix derivation rule rather than
+    inventing a new scheme.
+    """
+    if not action_type.strip():
+        raise ValueError("action_type must be a non-empty string")
+    if key is not None:
+        if not key:
+            raise ValueError("explicit idempotency key must be a non-empty string")
+        return stable_hash({"type": action_type, "key": key})
+
+    if ledger is not None:
+        try:
+            resolved = _resolve_via_ledger(action_type, arguments, volatile, ledger)
+            if resolved is not None:
+                return resolved
+            has_any = False
+            try:
+                if hasattr(ledger, "_replay"):
+                    rep = ledger._replay()
+                    has_any = bool(rep)
+                elif hasattr(ledger, "folded"):
+                    rep = ledger.folded()
+                    has_any = bool(rep)
+                elif hasattr(ledger, "all"):
+                    rep = ledger.all()
+                    has_any = bool(rep)
+                else:
+                    has_any = True
+            except Exception:
+                has_any = True
+            if has_any:
+                return None
+        except Exception:
+            pass
+
+    tokens_all = identity_tokens(arguments, volatile=volatile)
+    leaves = leaf_tokens(tokens_all)
+    if not leaves:
+        return None
+    canonical = _canonical_leaf_tokens(leaves)
+    if not canonical:
+        return None
+    return stable_hash({"type": action_type, "tokens": sorted(canonical)})
+
+
+def _resolve_via_ledger(
+    action_type: str,
+    arguments: Mapping[str, Any] | None,
+    volatile: Iterable[str],
+    ledger: Any,
+) -> str | None:
+    """Ledger-anchored derivation: unique completed/interrupted match."""
+    try:
+        from continuum.models import ActionStatus
+    except Exception:
+        return None
+
+    incoming_all = identity_tokens(arguments, volatile=volatile)
+    incoming = leaf_tokens(incoming_all)
+    run_id = getattr(ledger, "run_id", None)
+    if run_id:
+        try:
+            plumbing = leaf_tokens(identity_tokens(external_id=str(run_id)))
+            incoming = incoming - plumbing
+        except Exception:
+            pass
+    incoming_where = location_tokens(incoming_all)
+    if not incoming:
+        return None
+
+    replay: dict[str, Any] | None = None
+    try:
+        if hasattr(ledger, "_replay"):
+            replay = ledger._replay()
+        elif hasattr(ledger, "folded"):
+            replay = ledger.folded()
+        elif hasattr(ledger, "all"):
+            items = ledger.all()
+            replay = {getattr(a, "action_id", str(i)): a for i, a in enumerate(items)}
+        elif isinstance(ledger, Mapping):
+            replay = dict(ledger)
+    except Exception:
+        replay = None
+    if not replay:
+        return None
+
+    completed: list[Any] = []
+    uncertain: list[Any] = []
+
+    for _stored_key, action in replay.items():
+        atype = getattr(action, "action_type", None)
+        if atype is None and isinstance(action, Mapping):
+            atype = action.get("action_type")
+        if atype != action_type:
+            continue
+        args = getattr(action, "arguments", None)
+        if args is None and isinstance(action, Mapping):
+            args = action.get("arguments", {})
+        args = args or {}
+        known_all = identity_tokens(args)
+        known = leaf_tokens(known_all)
+        if run_id:
+            try:
+                plumbing = leaf_tokens(identity_tokens(external_id=str(run_id)))
+                known = known - plumbing
+            except Exception:
+                pass
+        if not known:
+            continue
+        if not locations_agree(incoming_where, location_tokens(known_all)):
+            continue
+        if incoming <= known:
+            if not _authz_superset_derives(incoming, known):
+                continue
+        elif known <= incoming:
+            if not _authz_superset_derives(known, incoming):
+                continue
+        else:
+            continue
+        status = getattr(action, "status", None)
+        if status is None and isinstance(action, Mapping):
+            status = action.get("status")
+        status_val = getattr(status, "value", status)
+        status_str = str(status_val) if status_val is not None else ""
+        try:
+            if status is ActionStatus.COMPLETED:
+                completed.append(action)
+                continue
+            if status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
+                uncertain.append(action)
+                continue
+            if status_str == ActionStatus.COMPLETED.value:
+                completed.append(action)
+            elif status_str in (ActionStatus.STARTED.value, ActionStatus.UNKNOWN.value):
+                uncertain.append(action)
+        except Exception:
+            if status_str.lower() == "completed":
+                completed.append(action)
+            elif status_str.lower() in ("started", "unknown"):
+                uncertain.append(action)
+
+    target: Any | None = None
+    if len(completed) == 1:
+        target = completed[0]
+    elif len(completed) > 1:
+        return None
+    elif len(uncertain) == 1:
+        target = uncertain[0]
+    else:
+        return None
+
+    args = getattr(target, "arguments", None)
+    if args is None and isinstance(target, Mapping):
+        args = target.get("arguments", {})
+    args = args or {}
+    anchored_all = identity_tokens(args)
+    anchored_leaves = leaf_tokens(anchored_all)
+    if run_id:
+        try:
+            plumbing = leaf_tokens(identity_tokens(external_id=str(run_id)))
+            anchored_leaves = anchored_leaves - plumbing
+        except Exception:
+            pass
+    if not anchored_leaves:
+        return None
+    canonical = _canonical_leaf_tokens(anchored_leaves)
+    if not canonical:
+        return None
+    return stable_hash({"type": action_type, "tokens": sorted(canonical)})

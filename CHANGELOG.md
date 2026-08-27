@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Make `continuum complete` idempotent for runs that are already completed (#356).
+
+## [0.1.0] - 2026-08-27
+
 ### Added
 
 - **Wheel artifacts on every push to main (#279).** Wheels were built only on
@@ -664,6 +670,22 @@ All notable changes to this project are documented here. The format follows
   socket on shutdown. Three new tests pin the loopback default, honour an
   explicit `0.0.0.0`, and smoke GET / over a real socket.
 
+- **Seven-level testing guide (references/testing.md, #234).** New contributor-facing docs organize verification into seven escalating levels, from automated suite to live gateway, crash harness, benchmark and chaos matrix, so every seam has a reproducible test path. No runtime change.
+
+- **Fork semantics: audited divergent continuations at the tool boundary (#259, #286).** Completes the replay-or-fork triad. A post-restore call whose intent genuinely diverges from any journalled intent is now surfaced as a fork candidate with nearest neighbours. An approved fork records a `RUN_FORKED` event on the parent log and creates a linked child run with its own ledger frontier, both verifiable. This is the third outcome alongside replay (cache hit) and gate reject.
+
+- **Informed retry: engine-authored prior-attempt summaries (#265, #275).** After a non-trivial recovery, `continuum resume`, `continuum briefing` and the MCP and serve contracts include a bounded, engine-authored summary of what failed, what changed and what to avoid. The summary is deterministic (derived from validator findings, ledger reconciliations and planner steps), capped at 4 KB, informational only, and rides the hash chain. This implements the AgentRewind-informed retry loop without conflating agent-authored and engine-authored summaries.
+
+- **Consumed-grant tracking, authority-resurrection denial (#269, #287).** Single-use authorization grants can now be registered on `continuum_intercept_action` and the adapter claim path. Completing or failing the action marks the grant spent, and a post-restore claim that tries to reuse a grant whose consumption sequence is after the restore point is rejected with a dedicated reason and audit event. This closes the Authority Resurrection class from ACRFence alongside the replay half.
+
+- **Months-scale upgrade spec and live web synthesis (#339).** New docs `docs/UPGRADE_SPEC.md` plus supporting synthesis (`docs/ARCHITECTURE_EVOLUTION.md` section 19) and `STATUS.md` checklist make the months-long agent plan reviewable without re-deriving it. Docs-only, no runtime change.
+
+- **Authorization-bound budget registry (#390, #411, #424).** `.continuum/budgets.json` gains an optional `authorization_bound` map, validated on load, plus pure helpers for per-type and per-key budget evaluation. The registry is strictly additive and prepares the schema for the authorization-bound budgets track. No behaviour binds to it yet, so existing runs are byte-identical.
+
+- **Constraint pinning events with hash-only payloads (#391, #416, #425).** Two new event types `CONSTRAINT_PINNED` and `CONSTRAINT_RETRACTED` carry SHA-256 digests of constraint text and never the text itself. They are emitted through the normal event path, survive compaction and context reconstruction, and prepare the constraint-verified recovery track. Payloads are hash-only by construction.
+
+- **Pure precondition derivation over event prefixes (#389, #406, #428).** New read-only module `continuum.recovery.precondition` derives, from any event prefix, the preconditions an edit must satisfy (dependence results judged by completion inside the span, not just presence). The derivation is pure, deterministic and never mutates the log, and is the precondition half of the recovery and fork path.
+
 ### Changed
 
 - **Editable-install troubleshooting (#402).** `CONTRIBUTING.md` now explains
@@ -717,6 +739,24 @@ All notable changes to this project are documented here. The format follows
   map (LOC per layer) in the README Architecture section and added a codebase
   snapshot to STATUS.md. The suite is now 900 tests (up from the 740 recorded
   earlier; the Postgres backend's tests skip without `CONTINUUM_TEST_POSTGRES_DSN`).
+
+- **`docs/api/cli.md` now lists every CLI subcommand (#360).** The command
+  table was missing 14 shipped subcommands (`start`, `status`, `complete`,
+  `budget`, `tree`, `fork`, `compact`, `observe`, `gateway`, `briefing`,
+  `gate`, `hooks`, `reconcile`, `dashboard`), so a newcomer had no reference
+  for them even though README and the `--help` output list them. Each new row
+  mirrors the `help=` string from `src/continuum/cli/main.py:build_parser`;
+  the table now matches the parser exactly (33 rows, one per subcommand).
+
+- **README CI and Codecov badges (#199).** The README badge row gains CI status and Codecov badges linking to the workflow runs, so the health of `main` is visible without opening Actions. Repo chrome, docs-only, counted as a gap conservatively.
+
+- **README measured-count refresh and docs housekeeping (#273).** Corrects the README tool count, event-type count, test-suite size (about 1300 tests), lines-of-code recomputation and contributors list to match the live tree. Follow-up to the earlier ten-to-eleven correction, which already landed in the Changed section.
+
+- **README restructure and install/related-work split (#274).** The README is tightened from 597 to 361 lines, moving dependency tables, extras matrix, Postgres setup and verification commands into `references/install.md`, `references/adapters.md` and `references/related-work.md`. The change also removes em dashes repository-wide. Docs-only.
+
+- **STATUS full-gate audit and architecture docs (#299).** `STATUS.md` gains a dated full-gate audit section for `main` at 2026-08-24 (pytest, ruff, mypy, GHCR publish verification), the README measured counts are refreshed, and `docs/ARCHITECTURE_EVOLUTION.md` section 19 documents the #275 and #277 features otherwise unlogged. The citation-audit entry (#261) is unrelated and does not cover this.
+
+- **CONTRIBUTING pre-commit example with ruff hooks (#337, #341).** `CONTRIBUTING.md` documents a pre-commit setup using `astral-sh/ruff-pre-commit` (ruff check and ruff-format hooks) so contributors can auto-check lint and format before committing. Contributor-facing docs-only.
 
 ### Fixed
 
@@ -1457,6 +1497,28 @@ All notable changes to this project are documented here. The format follows
   *added/breaking*. This path (serialising `StateCheckpoint.environment` through the
   checkpoint `body` column and restoring it) had no coverage; this is added test
   coverage for an untested path, not a fix for a defect.
+
+- **RecoveryLedger gate, escalation and reconcile correctness (#176, #177, #178, #183).** Corrects three ledger findings: approval of one gate no longer clears later gates, escalation survives compaction, and the high-water drift mark is accurate, plus related cleanups. The Phase 5 ledger entry predated these fixes, so no Fixed entry existed until now.
+
+- **Five audit fixes from the 2026-08-22 sweep (#201, #202, #203, #204, #205, #206).** `continuum_confirm` over MCP now requires its own `CONTINUUM_MCP_CONFIRM_TOKEN`, closing the self-certification exploit reopened by #35. `continuum checkpoint` for a missing run now exits 2 with `no such run` instead of a projection error. `continuum_record_progress` validates counters before writing `RUN_STARTED`, so a rejected call writes nothing. `continuum start --goal` gives the CLI a way to create a run at all, fixing the dead-end hint. `STATUS.md` known-issues table is refreshed. Each fix carries regression tests.
+
+- **Windows portability for hooks, test suite and smoke script (#252).** `continuum hooks install` no longer writes silently dead commands on Windows (it previously joined via `shlex.quote`), and `shlex.split` parsing plus the smoke script are now portable. Existing Windows entries covered issues #81, #87 and #94, none matched this set, so no changelog entry existed.
+
+- **Postgres storage ships LangGraph tables (#251).** `PostgresStorage._SCHEMA` now includes the schema-v4 `lg_checkpoints` and `lg_stores` tables, so the Postgres backend matches the SQLite schema. The contract-suite rewrite that proved the gap landed in the same PR and was already covered under the Production server mode entry, but the silent schema gap for Postgres deployments was not stated anywhere.
+
+- **Retry budget no longer defeats idempotency, and diagnostics corrected (#309, #307, #308, #311).** The budget gate now runs after deduplication and is scoped per idempotency key, so an already-completed action returns `proceed: false` with the stored result even at budget, and a workflow with many distinct operations is no longer blocked at the default of three. The inverted diagnostic when `expected_model` is omitted and the `expected_model` silently inert case are also corrected. Each carries regression tests.
+
+- **Security and usability fixes: attest-verify, fork child, dashboard 404 (#348).** `continuum attest-verify` now recomputes the head hash instead of trusting the stored value, so a tampered chain no longer reports SIGNED. `continuum fork` produces a child run that readers can open, and the dashboard no longer answers 200 for a missing run. All three were silent failures with no keyword hit for attest.
+
+- **SQLiteStorage close is now idempotent (#320, #347).** Calling `close()` twice no longer raises or leaves the handle in an ambiguous state, so teardown in tests and server restart paths is safe. The behaviour fix was unlogged and had no #320 token until now.
+
+- **Gate config errors name an absolute path, first half (#333, #340).** `load_gate_config` now resolves the config path to absolute before `GateConfigError` messages, so a relative invocation from a subdirectory shows which file was read. This is the first half of #333, covering two of the gate loader's path-bearing messages.
+
+- **Every registry error names an absolute path, completing #333 (#351).** The remaining two gate-config messages plus the budgets, reconcilers and gateway registry loaders now include the resolved absolute path. Combined with #340, every registry load error meets the #333 bar.
+
+- **Use-after-close now says the database is closed (#320, #347, #352).** The regression from #347 that turned use-after-close into a generic error is restored to `database is closed`, and idempotent close is pinned by regression tests. The fix was unlogged.
+
+- **Authentication failures name token fields and stop echoing secrets (#318, #353).** MCP and serve auth errors now name the exact server and client token fields (`CONTINUUM_SERVE_TOKEN` and `auth_token` or `CONTINUUM_MCP_TOKEN`) and never echo the configured secret. Both auth paths carry regression tests asserting the hint is present.
 
 ### Added, Phase 12: CONTINUUM-Bench (minimal harness)
 

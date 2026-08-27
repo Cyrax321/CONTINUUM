@@ -32,6 +32,9 @@ from continuum.events import Event, EventType
 from continuum.models import (
     Approval,
     ApprovalStatus,
+    ConstraintPin,
+    ConstraintPinned,
+    ConstraintRetracted,
     Decision,
     Evidence,
     ExternalDependency,
@@ -87,9 +90,26 @@ def _provenance(event: Event) -> Provenance:
     Previously this hardcoded ``DETERMINISTIC``, which was true of the *fold*
     but said nothing about the event being folded — so an agent's self-report
     projected as indistinguishable from a verified fact.
+
+    For derived artifacts (issue #392) the payload may carry a stamped
+    ``derived_origin`` that is the minimum authority of all source events.
+    When present, that degraded origin is used, so the projection never
+    amplifies weak sources. Missing field degrades to unverified.
     """
+    raw_derived = event.payload.get("derived_origin")
+    if isinstance(raw_derived, str):
+        try:
+            from continuum.models import Origin
+
+            origin = Origin(raw_derived)
+        except ValueError:
+            from continuum.models import Origin
+
+            origin = Origin.EXTERNAL_AGENT
+    else:
+        origin = event.source
     return Provenance(
-        origin=event.source,
+        origin=origin,
         source_sequence=event.sequence,
         source_event_id=event.event_id,
         extractor="deterministic",
@@ -129,6 +149,10 @@ class _Accumulator:
         self.approvals: list[Approval] = list(base.approvals) if base else []
         self.dependencies: list[ExternalDependency] = (
             list(base.external_dependencies) if base else []
+        )
+        self.pins: dict[str, ConstraintPin] = dict(base.pins) if base else {}
+        self.unmatched_pin_retractions: list[str] = (
+            list(base.unmatched_pin_retractions) if base else []
         )
         self.model: ModelState | None = base.model if base else None
         self.created_at: datetime | None = base.created_at if base else None
@@ -387,6 +411,26 @@ class _Accumulator:
         assumptions.append(assumption)
         self.model = current.model_copy(update={"model_specific_state": assumptions})
 
+    def constraint_pinned(self, event: Event) -> None:
+        payload = ConstraintPinned.model_validate(event.payload)
+        pin = ConstraintPin(
+            constraint_id=payload.constraint_id,
+            sha256=payload.sha256,
+            status="active",
+            provenance=_provenance(event),
+            pinned_at=event.timestamp,
+        )
+        self.pins[payload.constraint_id] = pin
+
+    def constraint_retracted(self, event: Event) -> None:
+        payload = ConstraintRetracted.model_validate(event.payload)
+        constraint_id = payload.constraint_id
+        if constraint_id in self.pins:
+            del self.pins[constraint_id]
+        else:
+            if constraint_id not in self.unmatched_pin_retractions:
+                self.unmatched_pin_retractions.append(constraint_id)
+
     # -- finish ----------------------------------------------------------- #
 
     def build(self) -> SemanticState:
@@ -436,6 +480,8 @@ class _Accumulator:
             pending_work=self.pending_work,
             approvals=self.approvals,
             external_dependencies=self.dependencies,
+            pins=dict(self.pins),
+            unmatched_pin_retractions=list(self.unmatched_pin_retractions),
             model=self.model,
             version=self.version,
             source_sequence=self.source_sequence,
@@ -481,6 +527,10 @@ def _dispatch(acc: _Accumulator, event: Event) -> bool:
             acc.model_changed(event)
         case EventType.MODEL_ASSUMPTION_RECORDED:
             acc.model_assumption_recorded(event)
+        case EventType.CONSTRAINT_PINNED:
+            acc.constraint_pinned(event)
+        case EventType.CONSTRAINT_RETRACTED:
+            acc.constraint_retracted(event)
         case _:
             return False
     return True

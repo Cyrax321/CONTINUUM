@@ -133,7 +133,7 @@ To check locally, run `pip install -e ".[dev]"` once, then run
 
 ## Project Structure
 
-```
+```text
 src/continuum/
 ├── __init__.py          # Public API surface
 ├── models.py            # Immutable Pydantic data models
