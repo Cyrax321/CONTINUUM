@@ -19,6 +19,7 @@ import pytest
 from continuum.actions import ActionLedger
 from continuum.budgets import (
     BudgetConfigError,
+    _max_for,
     _process_umask,
     _restore_ownership,
     _staged_attributes,
@@ -1074,3 +1075,33 @@ def test_hand_built_authorization_max_attempts_bool_is_rejected() -> None:
         match=r"needs a positive integer 'max_attempts', got True \(bool\)",
     ):
         would_refuse(raw, "send_invoice", "authz:stripe-cust-1")
+
+
+def test_hand_built_action_type_bool_uses_fallback() -> None:
+    raw = {"default_max_attempts": 3, "action_types": {"send_invoice": True}}
+
+    assert _max_for("send_invoice", raw) == 3
+
+
+def test_hand_built_action_type_object_bool_uses_fallback() -> None:
+    raw = {
+        "default_max_attempts": 3,
+        "action_types": {"send_invoice": {"max_attempts": True}},
+    }
+
+    assert _max_for("send_invoice", raw) == 3
+
+
+def test_hand_built_action_type_int_is_used() -> None:
+    raw = {"default_max_attempts": 3, "action_types": {"send_invoice": 5}}
+
+    assert _max_for("send_invoice", raw) == 5
+
+
+def test_hand_built_action_type_object_int_is_used() -> None:
+    raw = {
+        "default_max_attempts": 3,
+        "action_types": {"send_invoice": {"max_attempts": 5}},
+    }
+
+    assert _max_for("send_invoice", raw) == 5

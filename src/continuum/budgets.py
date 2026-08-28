@@ -157,12 +157,12 @@ def load_budgets(path: Path) -> dict[str, Any]:
 def _max_for(action_type: str, raw: Mapping[str, Any]) -> int:
     per_type = raw.get("action_types", {})
     spec = per_type.get(action_type)
-    if isinstance(spec, int):
+    if _is_int(spec):
         # int(), not the value itself: :func:`load_budgets` refuses booleans, but
         # this stays reachable with a hand-built mapping, and a bool leaking out
         # here renders as JSON ``true`` in the `continuum budget` report.
         return int(spec)
-    if isinstance(spec, dict) and isinstance(spec.get("max_attempts"), int):
+    if isinstance(spec, dict) and _is_int(spec.get("max_attempts")):
         return int(spec["max_attempts"])
     fallback = raw.get("default_max_attempts", FALLBACK_MAX_ATTEMPTS)
     return int(fallback)
