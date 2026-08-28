@@ -151,7 +151,7 @@ jobs:
           /tmp/wheel-check/bin/continuum --version
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7
         with:
           name: dist-main
           path: dist/

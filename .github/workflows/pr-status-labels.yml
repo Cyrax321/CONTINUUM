@@ -80,7 +80,7 @@ jobs:
             fs.writeFileSync("intent.json", JSON.stringify(intent));
 
       - name: Upload intent artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pr-status-intent
           path: intent.json
