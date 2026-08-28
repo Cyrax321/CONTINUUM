@@ -72,6 +72,7 @@ __all__ = [
     "get_remaining",
     "increment",
     "would_refuse",
+    "ensure_authorization_entry",
 ]
 
 DEFAULT_BUDGETS_PATH = ".continuum/budgets.json"
@@ -608,3 +609,34 @@ def would_refuse(
         detail = f"{label} exhausted its authorization-bound budget"
         return True, f"{detail} ({used} of {maximum} attempts used)"
     return False, f"{label} has {maximum - used} of {maximum} attempts remaining"
+
+
+def ensure_authorization_entry(
+    raw: dict[str, Any],
+    action_type: str,
+    authorization_id: str,
+) -> dict[str, Any]:
+    """Ensure an authorization-bound entry exists, creating it with the type cap if needed.
+
+    Pure helper that mutates ``raw`` in place. When the authorization is unseen,
+    it is created with ``counter`` 0 and ``max_attempts`` derived from the
+    per-type budget (``_max_for``), so a fresh authorization starts with the
+    same allowance an operator configured for the type. Existing entries are
+    left untouched. This is the entry point for drawdown wiring: callers
+    ensure, then check ``would_refuse``, then ``increment`` and ``save_budgets``.
+    """
+    section = raw.setdefault(AUTHORIZATION_BOUND_KEY, {})
+    if not isinstance(section, dict):
+        raise BudgetConfigError(f"'{AUTHORIZATION_BOUND_KEY}' must be an object")
+    entries = section.setdefault(action_type, {})
+    if not isinstance(entries, dict):
+        raise BudgetConfigError(
+            f"authorization-bound entries for {action_type!r} must be an object"
+        )
+    entry = entries.get(authorization_id)
+    if isinstance(entry, dict):
+        return entry
+    max_attempts = _max_for(action_type, raw)
+    new_entry: dict[str, Any] = {"counter": 0, "max_attempts": max_attempts}
+    entries[authorization_id] = new_entry
+    return new_entry

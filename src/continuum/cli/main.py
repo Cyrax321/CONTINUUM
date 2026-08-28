@@ -779,11 +779,13 @@ def cmd_confirm(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
 
 
 def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
-    """Report retry-budget usage per action type (issue #240). Read-only."""
+    """Report retry-budget usage per action type (issue #240) and per
+    authorization (issue #413). Read-only."""
     from continuum.budgets import (
         DEFAULT_BUDGETS_PATH,
         attempts_for_type,
         evaluate_budget,
+        get_remaining,
         load_budgets,
     )
 
@@ -817,12 +819,48 @@ def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
                 "exhausted": remaining == 0,
             }
         )
-    payload = {"run_id": args.run_id, "budgets": rows}
+    # Authorization-bound budgets (issue #413): per (action_type, authorization_id)
+    # counters that survive fresh-key rotation. Visible here so a settlement's
+    # drawdown is observable without reading the raw JSON.
+    auth_rows: list[dict[str, Any]] = []
+    auth_section = raw.get("authorization_bound")
+    if isinstance(auth_section, dict):
+        for atype, by_auth in sorted(auth_section.items()):
+            if not isinstance(by_auth, dict):
+                continue
+            for auth_id, entry in sorted(by_auth.items()):
+                if not isinstance(entry, dict):
+                    continue
+                counter = int(entry.get("counter", 0))
+                max_attempts = int(entry.get("max_attempts", 0))
+                rem = get_remaining(raw, atype, auth_id)
+                remaining = rem if rem is not None else max(0, max_attempts - counter)
+            auth_rows.append(
+                {
+                    "action_type": atype,
+                    "authorization_id": auth_id,
+                    "counter": counter,
+                    "max_attempts": max_attempts,
+                    "remaining": remaining,
+                    "exhausted": remaining == 0,
+                }
+            )
+    payload: dict[str, Any] = {"run_id": args.run_id, "budgets": rows}
+    if auth_rows:
+        payload["authorization_budgets"] = auth_rows
     lines = [f"{'ACTION TYPE':<28} {'ATTEMPTS':>8} {'MAX':>4} {'REMAINING':>10}"]
     for r in rows:
         lines.append(
             f"{r['action_type']:<28} {r['attempts']:>8} {r['max_attempts']:>4} {r['remaining']:>10}"
         )
+    if auth_rows:
+        lines.append("")
+        lines.append(f"{'AUTHORIZATION':<48} {'COUNT':>5} {'MAX':>4} {'REMAINING':>10}")
+        for r in auth_rows:
+            label = f"{r['action_type']}/{r['authorization_id'][:12]}..."
+            lines.append(
+                f"{label:<48} {r['counter']:>5} {r['max_attempts']:>4} {r['remaining']:>10}"
+            )
     _emit(
         payload,
         "\n".join(lines) or "No budgets configured.",

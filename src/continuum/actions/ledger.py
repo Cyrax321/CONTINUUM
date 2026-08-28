@@ -48,6 +48,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from functools import wraps
 from heapq import merge
+from pathlib import Path
 from typing import Any, Concatenate, ParamSpec, TypeVar
 
 from continuum.actions.grants import GrantDenied, normalize_grant, scan_grants
@@ -59,6 +60,16 @@ from continuum.actions.idempotency import (
     leaf_tokens,
     location_tokens,
     locations_agree,
+    resolve_authorization_id,
+)
+from continuum.budgets import (
+    DEFAULT_BUDGETS_PATH,
+    BudgetConfigError,
+    ensure_authorization_entry,
+    increment,
+    load_budgets,
+    save_budgets,
+    would_refuse,
 )
 from continuum.concurrency.lease import LeaseCoordinator
 from continuum.events import EventType
@@ -372,6 +383,111 @@ class ActionLedger:
             yield
         finally:
             self._lease.release(self.run_id, self._holder_id)
+
+    # -- budget drawdown (issue #413) ------------------------------------- #
+
+    def _budget_path(self) -> Path:
+        """Registry path, overridable for tests via env."""
+        return Path(os.environ.get("CONTINUUM_BUDGETS_PATH", DEFAULT_BUDGETS_PATH))
+
+    def _budget_authorization_id(
+        self,
+        action_type: str,
+        key: str | None,
+        arguments: Mapping[str, Any] | None,
+        volatile: Sequence[str],
+    ) -> str | None:
+        """Stable authorization bucket for this operation, or None when unbound.
+
+        For budgets the bucket must survive fresh-key rotation (issue #390):
+        two attempts with different idempotency keys but the same resource
+        tokens (e.g. same invoice id) are the same authorization and must
+        draw down the same counter.  Passing the explicit key would give
+        each fresh key its own bucket and defeat the cap-amplification fix
+        (#413), so the helper ignores an explicit key and derives from
+        resource tokens alone. Ledger anchoring is not used here so a
+        prior failed attempt does not make a retry look unbound.
+        """
+        try:
+            return resolve_authorization_id(
+                action_type, None, arguments, volatile=volatile, ledger=None
+            )
+        except Exception:
+            return None
+
+    def _budget_consume_claim(
+        self,
+        action_type: str,
+        authorization_id: str,
+    ) -> None:
+        """Consume one authorization-bound budget slot for a fresh attempt.
+
+        Fail closed: an unreadable or malformed registry refuses the claim
+        rather than letting it proceed with no accounting. All writes go
+        through the pure helpers from ``budgets.py``.
+
+        When the registry file does not exist, budgets are treated as
+        unconfigured and no drawdown happens. This keeps runs and tests
+        without authorization data byte-identical to today while still
+        enforcing caps once an operator creates the file.
+        """
+        path = self._budget_path()
+        if not path.exists():
+            return
+        try:
+            raw = load_budgets(path)
+        except BudgetConfigError as exc:
+            raise LedgerError(f"budget registry invalid: {exc}") from exc
+        ensure_authorization_entry(raw, action_type, authorization_id)
+        refused, reason = would_refuse(raw, action_type, authorization_id)
+        if refused:
+            remaining = 0
+            try:
+                from continuum.budgets import get_remaining as _get_rem
+
+                remaining = _get_rem(raw, action_type, authorization_id) or 0
+            except Exception:
+                remaining = 0
+            raise LedgerError(
+                f"budget exhausted for {action_type!r} / {authorization_id!r} "
+                f"({reason}, remaining {remaining})"
+            )
+        increment(raw, action_type, authorization_id)
+        save_budgets(path, raw)
+
+    def _budget_consume_settlement(
+        self,
+        action_type: str,
+        authorization_id: str,
+    ) -> None:
+        """Consume one slot for a confirmation/settlement event.
+
+        Settlements share the same per-authorization counter as claims, so a
+        completed confirmation visibly draws down the budget and a rapid
+        complete/re-claim cannot amplify the cap. Failures to read or write
+        the registry are swallowed here: a settlement must land even if the
+        budget file is momentarily unreadable, otherwise the ledger would
+        refuse to record that an effect happened.
+        """
+        path = self._budget_path()
+        if not path.exists():
+            return
+        try:
+            raw = load_budgets(path)
+        except Exception:
+            return
+        try:
+            ensure_authorization_entry(raw, action_type, authorization_id)
+        except Exception:
+            return
+        try:
+            increment(raw, action_type, authorization_id)
+        except Exception:
+            return
+        try:
+            save_budgets(path, raw)
+        except Exception:
+            return
 
     # -- reading ---------------------------------------------------------- #
 
@@ -721,7 +837,18 @@ class ActionLedger:
                 )
                 raise denied
 
+        # Authorization-bound budget (issue #413): derive the stable
+        # authorization bucket for this attempt. Unbound (None) means no
+        # budget to enforce, which keeps runs without authorization data
+        # byte-identical to today. The bucket is token-derived and
+        # ledger-anchored, so distinct fresh idempotency keys for the same
+        # resource (same invoice id) share the same counter and cannot
+        # bypass the cap by minting new keys (the #390 amplification fix).
+        budget_auth_id = self._budget_authorization_id(action_type, None, arguments, volatile)
+
         if existing is None:
+            if budget_auth_id is not None:
+                self._budget_consume_claim(action_type, budget_auth_id)
             action = Action(
                 run_id=self.run_id,
                 action_type=action_type,
@@ -739,6 +866,8 @@ class ActionLedger:
 
         if existing.status is ActionStatus.COMPENSATED:
             # The effect was undone, so performing it again is legitimate.
+            if budget_auth_id is not None:
+                self._budget_consume_claim(action_type, budget_auth_id)
             action = existing.model_copy(
                 update={
                     "status": ActionStatus.STARTED,
@@ -752,6 +881,8 @@ class ActionLedger:
             return ActionOutcome(key=key, action=action, fresh=True)
 
         if existing.status is ActionStatus.FAILED:
+            if budget_auth_id is not None:
+                self._budget_consume_claim(action_type, budget_auth_id)
             action = existing.model_copy(
                 update={"status": ActionStatus.STARTED, "started_at": utcnow()}
             )
@@ -842,7 +973,15 @@ class ActionLedger:
                 "side_effect_uncertain": False,
             }
         )
-        return self._record(key, action)
+        recorded = self._record(key, action)
+        # Settlement drawdown (issue #413): same per-authorization bucket as claims.
+        if existing.status is ActionStatus.STARTED:
+            auth_settle = self._budget_authorization_id(
+                existing.action_type, None, dict(existing.arguments), ()
+            )
+            if auth_settle is not None:
+                self._budget_consume_settlement(existing.action_type, auth_settle)
+        return recorded
 
     @_single_writer
     def fail(self, key: str, error: str, *, certain: bool = True) -> Action:
@@ -925,7 +1064,14 @@ class ActionLedger:
                     "last_error": note or "reconciliation found no external effect",
                 }
             )
-        return self._record(key, action, EventType.ACTION_RECONCILED)
+        recorded = self._record(key, action, EventType.ACTION_RECONCILED)
+        # Settlement drawdown (issue #413): same bucket as claims.
+        auth_settle = self._budget_authorization_id(
+            existing.action_type, None, dict(existing.arguments), ()
+        )
+        if auth_settle is not None:
+            self._budget_consume_settlement(existing.action_type, auth_settle)
+        return recorded
 
     @_single_writer
     def compensate(self, key: str, *, note: str = "", by: str | None = None) -> Action:
