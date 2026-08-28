@@ -1,0 +1,23 @@
+# Minimal Postgres for the contract tests (issue #282).
+# Matches the CI service in .github/workflows/ci.yml so local runs mirror CI.
+# Core SQLite path stays dependency-free; this file is only for contributors
+# who want to exercise the optional [postgres] extra locally.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: continuum
+      POSTGRES_PASSWORD: continuum
+      POSTGRES_DB: continuum_test
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U continuum -d continuum_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

@@ -60,6 +60,30 @@ Combine freely: `[dev]` already includes `mcp`, `langgraph`, `langchain`, `opena
 
 No other runtime dependencies. The CLI, storage, recovery engine, and checkpointing use only the Python standard library.
 
+## Postgres contract tests (optional)
+
+The PostgreSQL backend is covered by the `[postgres]` extra and is exercised in CI via `CONTINUUM_TEST_POSTGRES_DSN`, but core development does not need it. The SQLite WAL store is the default and stays dependency-free.
+
+The repository ships a minimal `compose.yaml` that starts Postgres 16 with the same throwaway database CI uses. Fresh clone plus Docker: two commands to a running Postgres matching CI.
+
+```bash
+# 1. Start Postgres 16 in the background (same image, credentials and DB as CI)
+docker compose up -d --wait
+
+# 2. Point the contract tests at it and run with the postgres extra
+# Wait for the healthcheck (pg_isready) if --wait is not available on your Compose version:
+# until docker compose exec postgres pg_isready -U continuum -d continuum_test; do sleep 1; done
+export CONTINUUM_TEST_POSTGRES_DSN=postgresql://continuum:continuum@localhost:5432/continuum_test
+uv run --extra dev --extra postgres pytest tests/test_storage_postgres.py tests/test_action_index.py -q
+```
+
+Notes:
+
+- `compose.yaml` uses `postgres:16`, `POSTGRES_USER=continuum`, `POSTGRES_PASSWORD=continuum`, `POSTGRES_DB=continuum_test`, and host port `127.0.0.1:5432` bound to localhost, matching `.github/workflows/ci.yml`. The documented `CONTINUUM_TEST_POSTGRES_DSN` variable is exactly what `tests/test_storage_postgres.py` reads via `os.environ.get("CONTINUUM_TEST_POSTGRES_DSN")`.
+- Any Postgres 16 works, the compose file is just the shortest path. Manual equivalent: `docker run -d -p 127.0.0.1:5432:5432 -e POSTGRES_USER=continuum -e POSTGRES_PASSWORD=continuum -e POSTGRES_DB=continuum_test postgres:16`.
+- Tear down with `docker compose down` (add `-v` to drop the throwaway `pgdata` volume).
+- Compose is not required for any other workflow. All core tests run on the bundled SQLite store with no Docker.
+
 ## Verify the install
 
 ```bash
@@ -79,10 +103,6 @@ pytest tests/test_events.py -v   # single file
 ruff check src/ tests/ examples/
 ruff format --check src/ tests/ examples/
 mypy src/continuum
-
-# Live Postgres contract tests (needs a running Postgres)
-# docker run -d -p 5432:5432 -e POSTGRES_USER=continuum -e POSTGRES_PASSWORD=continuum -e POSTGRES_DB=continuum_test postgres:16
-# CONTINUUM_TEST_POSTGRES_DSN=postgresql://continuum:continuum@localhost:5432/continuum_test pytest tests/test_storage_postgres.py tests/test_action_index.py -q
 ```
 
 Two entrypoints are installed: `continuum` (CLI) and `continuum-mcp` (MCP server). See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full contributor workflow and `pyproject.toml` for the authoritative dependency list.
