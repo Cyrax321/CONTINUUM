@@ -299,3 +299,13 @@ def test_evaluate_does_not_write_anything(store: SQLiteStorage) -> None:
     assert manager.evaluate("run_1", explicit=True).should
     assert store.last_sequence("run_1") == before
     assert manager.history("run_1") == []
+
+
+def test_checkpoint_verify_detects_tampered_hash(store: SQLiteStorage) -> None:
+    cp = CheckpointManager(store).checkpoint("run_1", trigger="manual", reason="")
+    assert cp.verify()
+    bad = cp.model_copy(update={"integrity_hash": "bad"})
+    assert not bad.verify()
+    # Tampering with None also fails (covers the unset case)
+    tampered_none = cp.model_copy(update={"integrity_hash": None})
+    assert not tampered_none.verify()
