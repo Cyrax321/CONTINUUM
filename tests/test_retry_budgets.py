@@ -1028,3 +1028,49 @@ def test_cli_budget_exhausted_exit_is_reported_not_raised(db: str, tmp_path: Pat
     assert code == ExitCode.OK
     rows = json.loads(out)["budgets"]
     assert any(r["action_type"] == "deploy" and r["attempts"] >= 1 for r in rows)
+
+
+def test_hand_built_authorization_counter_bool_is_rejected() -> None:
+    raw = bound_registry()
+    raw["authorization_bound"]["send_invoice"]["authz:stripe-cust-1"]["counter"] = True
+
+    with pytest.raises(
+        BudgetConfigError,
+        match=r"needs a non-negative integer 'counter', got True \(bool\)",
+    ):
+        get_remaining(raw, "send_invoice", "authz:stripe-cust-1")
+
+    with pytest.raises(
+        BudgetConfigError,
+        match=r"needs a non-negative integer 'counter', got True \(bool\)",
+    ):
+        increment(raw, "send_invoice", "authz:stripe-cust-1")
+
+    with pytest.raises(
+        BudgetConfigError,
+        match=r"needs a non-negative integer 'counter', got True \(bool\)",
+    ):
+        would_refuse(raw, "send_invoice", "authz:stripe-cust-1")
+
+
+def test_hand_built_authorization_max_attempts_bool_is_rejected() -> None:
+    raw = bound_registry()
+    raw["authorization_bound"]["send_invoice"]["authz:stripe-cust-1"]["max_attempts"] = True
+
+    with pytest.raises(
+        BudgetConfigError,
+        match=r"needs a positive integer 'max_attempts', got True \(bool\)",
+    ):
+        get_remaining(raw, "send_invoice", "authz:stripe-cust-1")
+
+    with pytest.raises(
+        BudgetConfigError,
+        match=r"needs a positive integer 'max_attempts', got True \(bool\)",
+    ):
+        increment(raw, "send_invoice", "authz:stripe-cust-1")
+
+    with pytest.raises(
+        BudgetConfigError,
+        match=r"needs a positive integer 'max_attempts', got True \(bool\)",
+    ):
+        would_refuse(raw, "send_invoice", "authz:stripe-cust-1")

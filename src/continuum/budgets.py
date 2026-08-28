@@ -521,8 +521,22 @@ def get_remaining(
         entry = _bound_entry(raw, action_type, authorization_id)
     except KeyError:
         return None
-    used = int(entry.get("counter", 0))
-    return max(0, int(entry["max_attempts"]) - used)
+    counter = entry.get("counter", 0)
+    maximum = entry["max_attempts"]
+
+    if not _is_int(counter) or counter < 0:
+        raise BudgetConfigError(
+            f"authorization-bound budget needs a non-negative integer "
+            f"'counter'{_offending(counter)}"
+        )
+
+    if not _is_int(maximum) or maximum < 0:
+        raise BudgetConfigError(
+            f"authorization-bound budget needs a positive integer "
+            f"'max_attempts'{_offending(maximum)}"
+        )
+
+    return max(0, maximum - counter)
 
 
 def increment(
@@ -539,8 +553,25 @@ def increment(
     meaning anything.
     """
     entry = _bound_entry(raw, action_type, authorization_id)
-    entry["counter"] = int(entry.get("counter", 0)) + 1
-    return max(0, int(entry["max_attempts"]) - int(entry["counter"]))
+
+    counter = entry.get("counter", 0)
+    maximum = entry["max_attempts"]
+
+    if not _is_int(counter) or counter < 0:
+        raise BudgetConfigError(
+            f"authorization-bound budget needs a non-negative integer "
+            f"'counter'{_offending(counter)}"
+        )
+
+    if not _is_int(maximum) or maximum < 0:
+        raise BudgetConfigError(
+            f"authorization-bound budget needs a positive integer "
+            f"'max_attempts'{_offending(maximum)}"
+        )
+
+    counter += 1
+    entry["counter"] = counter
+    return max(0, maximum - counter)
 
 
 def would_refuse(
@@ -560,8 +591,19 @@ def would_refuse(
         entry = _bound_entry(raw, action_type, authorization_id)
     except KeyError:
         return False, f"no authorization-bound budget for {label}"
-    used = int(entry.get("counter", 0))
-    maximum = int(entry["max_attempts"])
+    used = entry.get("counter", 0)
+    maximum = entry["max_attempts"]
+
+    if not _is_int(used) or used < 0:
+        raise BudgetConfigError(
+            f"authorization-bound budget needs a non-negative integer 'counter'{_offending(used)}"
+        )
+
+    if not _is_int(maximum) or maximum < 0:
+        raise BudgetConfigError(
+            f"authorization-bound budget needs a positive integer "
+            f"'max_attempts'{_offending(maximum)}"
+        )
     if used >= maximum:
         detail = f"{label} exhausted its authorization-bound budget"
         return True, f"{detail} ({used} of {maximum} attempts used)"
