@@ -35,7 +35,7 @@ dev = [
     "pytest-cov>=5.0",
     "pytest-asyncio>=0.23",
     "hypothesis>=6.0",
-    "ruff==0.16.3",
+    "ruff==0.16.4",
     "mypy>=1.13",
     "mcp>=2.0",
     # The adapter packages are optional runtime dependencies (see [project.optional-dependencies])
