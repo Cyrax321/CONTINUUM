@@ -415,6 +415,9 @@ mcp = [
 openai = [
     { name = "openai-agents" },
 ]
+otel = [
+    { name = "opentelemetry-api" },
+]
 postgres = [
     { name = "psycopg" },
 ]
@@ -433,6 +436,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13" },
     { name = "openai-agents", marker = "extra == 'dev'", specifier = ">=0.2" },
     { name = "openai-agents", marker = "extra == 'openai'", specifier = ">=0.2" },
+    { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.20" },
     { name = "psycopg", marker = "extra == 'postgres'", specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
@@ -440,7 +444,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.3" },
 ]
-provides-extras = ["dev", "mcp", "langgraph", "openai", "langchain", "attest", "postgres"]
+provides-extras = ["dev", "mcp", "otel", "langgraph", "openai", "langchain", "attest", "postgres"]
 
 [[package]]
 name = "coverage"
@@ -1321,7 +1325,7 @@ wheels = [
 
 [[package]]
 name = "openai-agents"
-version = "0.21.1"
+version = "0.22.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "griffelib" },
@@ -1332,9 +1336,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/23/8a/c05a23ead7c349971505c4364e5dac139c26373c60609ce44d0fe450c2da/openai_agents-0.21.1.tar.gz", hash = "sha256:7d6519bed92542b2a7160cd50edca0721c64d5f06616d85c6de477f237b8423c", size = 6352641, upload-time = "2026-08-16T22:29:35.173Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1c/17/2a92451547a66d56bd5f10128aa64aa0fc282420421775c390902e7dfa42/openai_agents-0.22.0.tar.gz", hash = "sha256:6c3d7b9e34d3ca4bf763d4557d01ec844685290f0d80cb72e10a304029c0d7ee", size = 6390140, upload-time = "2026-08-19T13:45:22.482Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5f/af/a219a1f020ffa6bed3332c7bc4023ce5d0a1a922c843361b62f368286692/openai_agents-0.21.1-py3-none-any.whl", hash = "sha256:47cdc36c70aa1c0bd4337d040b605b1ea4ac598f178b59f4040208884785f0d0", size = 1107970, upload-time = "2026-08-16T22:29:33.011Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/88/220a5a9283fba72107db7cb549fd127a0e532dbcbc89dda82cd28b9765a1/openai_agents-0.22.0-py3-none-any.whl", hash = "sha256:985a74a8024123980c2d4dc329d19b2332a0f86919fa7b3f6b9c2abaae022680", size = 1117078, upload-time = "2026-08-19T13:45:19.876Z" },
 ]
 
 [[package]]
