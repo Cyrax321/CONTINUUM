@@ -182,6 +182,49 @@ def test_body_missing_template_field_denies_with_config_error(db: str, gateway: 
     assert "key template" in body["reason"]
 
 
+def _post_raw(addr: str, path: str, raw: str, host: str = "api.example.com"):
+    """POST a body verbatim, bypassing the JSON encoding of :func:`post`."""
+    conn = http.client.HTTPConnection(addr, timeout=10)
+    conn.request(
+        "POST",
+        path,
+        body=raw.encode(),
+        headers={"Host": host, "Content-Type": "application/json"},
+    )
+    resp = conn.getresponse()
+    data = json.loads(resp.read() or b"{}")
+    conn.close()
+    return resp.status, data
+
+
+def test_malformed_json_is_refused_with_400(db: str, gateway: str) -> None:
+    """Broken JSON must name itself, not masquerade as a missing field (#323).
+
+    ``_body`` swallowed ``JSONDecodeError`` and returned an empty mapping, so a
+    request whose body never parsed was carried on to the key derivation and
+    refused with ``key template 'invoice:{id}' needs body field(s) ['id']``.
+    The operator then goes looking for a field they did send, in a body the
+    gateway never read.
+    """
+    claim(db, "invoice:seed")
+    status, body = _post_raw(gateway, "/v1/invoices", '{"id": "I-5"')
+    assert status == 400
+    assert "invalid JSON" in body["error"]
+
+
+def test_an_empty_body_is_still_an_empty_mapping(db: str, gateway: str) -> None:
+    """Only broken JSON becomes a 400; absent is not the same as malformed.
+
+    A route whose template needs no fields is legitimately callable with no body,
+    so the empty case has to keep reaching the decision table rather than being
+    swept up by the new refusal.
+    """
+    claim(db, "invoice:seed")
+    status, body = _post_raw(gateway, "/v1/invoices", "")
+    assert status == 403
+    assert "key template" in body["reason"]
+
+
 # --- CLI ---------------------------------------------------------------------- #
 
 

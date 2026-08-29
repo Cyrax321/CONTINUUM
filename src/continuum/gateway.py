@@ -59,6 +59,10 @@ class _BodyTooLarge(Exception):
     """Internal signal: the request body exceeded the configured cap."""
 
 
+class _MalformedBody(Exception):
+    """Internal signal: the request body was not parseable JSON (issue #323)."""
+
+
 #: Requests larger than this are refused with 413 before the body is read.
 #: A proxy that reads unbounded bodies into memory is a denial-of-service
 #: surface against the very agent it protects.
@@ -246,11 +250,21 @@ class GatewayServer:
                     )
                     raise _BodyTooLarge
                 raw = self.rfile.read(length) if length else b""
-                try:
-                    parsed = json.loads(raw) if raw else {}
-                    return parsed if isinstance(parsed, dict) else {}
-                except json.JSONDecodeError:
+                if not raw:
+                    # A genuinely empty body stays an empty mapping: a route
+                    # whose template needs no fields is legitimately callable
+                    # with no body at all.
                     return {}
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    # Answering with an empty mapping instead would send the
+                    # request on to be refused for a missing template field,
+                    # naming the wrong problem: the body was never read as the
+                    # caller wrote it. Say so, in the status code too (#323).
+                    self._respond(400, {"error": f"invalid JSON in request body: {exc}"})
+                    raise _MalformedBody from exc
+                return parsed if isinstance(parsed, dict) else {}
 
             def _respond(self, code: int, payload: dict[str, Any]) -> None:
                 body = json.dumps(payload).encode()
@@ -266,7 +280,7 @@ class GatewayServer:
                 host = self.headers.get("Host", "")
                 try:
                     body = self._body()
-                except _BodyTooLarge:
+                except (_BodyTooLarge, _MalformedBody):
                     return
 
                 # Resolve the run lazily so hooks can precede any explicit start.
