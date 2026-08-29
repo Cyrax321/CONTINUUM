@@ -10,6 +10,19 @@ All notable changes to this project are documented here. The format follows
 
 - Make `continuum complete` idempotent for runs that are already completed (#356).
 
+- **`hooks install` no longer duplicates the SessionStart briefing hook (#484).**
+  The installer recognised an existing entry as its own only when the command
+  ended in `observe` or `gate`, so the briefing hook added alongside them was
+  appended afresh on every run: three `continuum hooks install` invocations left
+  three identical `SessionStart` groups, each reported as `installed`, and the
+  client ran `continuum briefing` once per copy on every session start. A moved
+  virtualenv was duplicated rather than repointed too, leaving the stale command
+  firing. The recognised kinds are now one list read by both the installer and
+  `hooks remove` (which already knew about `briefing`), and the kind is taken
+  from the command being installed, so an install of one kind cannot repoint
+  another. A settings file that already holds duplicates is cleaned by
+  `hooks remove` followed by `hooks install`.
+
 ## [0.1.0] - 2026-08-27
 
 ### Added

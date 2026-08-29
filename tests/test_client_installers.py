@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from continuum.cli import ExitCode, main
-from continuum.clienthooks import CLIENT_PROFILES
+from continuum.clienthooks import CLIENT_PROFILES, install_client_hook
 
 
 def run(*argv: str) -> tuple[int, str, str]:
@@ -178,3 +178,54 @@ def test_briefing_is_wired_on_session_start(tmp_path: Path, client: str) -> None
         and any(h.get("command", "").split()[-1] == "briefing" for h in g["hooks"])
     ]
     assert len(ours) == 1
+
+
+def _briefing_commands(settings: Path, event_name: str) -> list[str]:
+    """Every briefing command wired under ``event_name``, duplicates included."""
+    groups = json.loads(settings.read_text())["hooks"][event_name]
+    return [
+        h["command"]
+        for g in groups
+        if isinstance(g.get("hooks"), list)
+        for h in g["hooks"]
+        if h.get("command", "").split()[-1] == "briefing"
+    ]
+
+
+@pytest.mark.parametrize("client", ("claude-code", "gemini", "codex"))
+def test_reinstalling_does_not_duplicate_the_briefing_hook(tmp_path: Path, client: str) -> None:
+    """The SessionStart entry has to settle like the tool-event one (issue #484).
+
+    ``_install_hook`` recognised only the observe and gate kinds, so a briefing
+    command matched nothing already present and was appended afresh every run:
+    three installs left three byte-identical SessionStart groups, each reported
+    as "installed", and the client ran the briefing once per copy on every
+    session start. Idempotency was pinned only on the post-tool event, where a
+    duplicate cannot arise, so the whole accumulation went unnoticed.
+    """
+    profile = CLIENT_PROFILES[client]
+    settings = tmp_path / "settings.json"
+    statuses = []
+    for _ in range(3):
+        code, out, err = run("--json", "hooks", "install", client, "--settings", str(settings))
+        assert code == ExitCode.OK, err
+        statuses.append(
+            next(h["status"] for h in json.loads(out)["hooks"] if h["kind"] == "briefing")
+        )
+    assert statuses == ["installed", "present", "present"]
+    assert len(_briefing_commands(settings, profile["start_event"])) == 1
+
+
+def test_a_moved_briefing_command_is_repointed_not_duplicated(tmp_path: Path) -> None:
+    """A relocated virtualenv must not leave a stale briefing firing (issue #484).
+
+    The observe hook reports "updated" and keeps one entry; briefing reported
+    "installed" and kept both, so the old interpreter path went on running
+    alongside the new one until someone hand-edited the settings file.
+    """
+    settings = tmp_path / "settings.json"
+    old = "/old/venv/bin/continuum briefing"
+    new = "/new/venv/bin/continuum briefing"
+    assert install_client_hook(settings, old, event_name="SessionStart", matcher="") == "installed"
+    assert install_client_hook(settings, new, event_name="SessionStart", matcher="") == "updated"
+    assert _briefing_commands(settings, "SessionStart") == [new]
