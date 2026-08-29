@@ -298,6 +298,12 @@ class GatewayServer:
                 self.wfile.write(body)
 
             def _handle(self, method: str) -> None:
+                """Route one request through the gate and answer it.
+
+                The bare ``return`` on a body failure is not a swallowed error:
+                :meth:`_body` has already written the 413 or the 400, and going
+                on would put a second response on the same connection.
+                """
                 host = self.headers.get("Host", "")
                 try:
                     body = self._body()
