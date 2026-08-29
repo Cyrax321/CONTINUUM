@@ -226,6 +226,20 @@ class GatewayServer:
                 pass
 
             def _body(self, max_bytes: int = MAX_BODY_BYTES) -> dict[str, Any]:
+                """Read the request body as a mapping, or answer and raise.
+
+                Returns an empty mapping for a body that is absent, and for one
+                that parses to valid JSON of some other shape: neither can bind
+                a key template field, and the missing-field refusal downstream
+                names that correctly.
+
+                A body that cannot be read at all does not come back. This
+                writes the refusal itself and raises, 413 with
+                :class:`_BodyTooLarge` when it is longer than ``max_bytes``, 400
+                with :class:`_MalformedBody` when it is not JSON this proxy can
+                decode (issue #323). Callers catch both and return, since the
+                response is already on the wire.
+                """
                 length = int(self.headers.get("Content-Length") or 0)
                 if length > max_bytes:
                     # Drain (without buffering) so the client can finish
