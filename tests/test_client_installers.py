@@ -229,3 +229,25 @@ def test_a_moved_briefing_command_is_repointed_not_duplicated(tmp_path: Path) ->
     assert install_client_hook(settings, old, event_name="SessionStart", matcher="") == "installed"
     assert install_client_hook(settings, new, event_name="SessionStart", matcher="") == "updated"
     assert _briefing_commands(settings, "SessionStart") == [new]
+
+
+def test_a_command_of_no_known_kind_is_appended_never_matched(tmp_path: Path) -> None:
+    """The kind is read off the command, so an unknown one matches nothing (issue #484).
+
+    Deriving the kind is what stops an install of one kind repointing another, and
+    the flip side has to hold too: a command this module did not build -- including
+    one whose quoting cannot be parsed at all -- carries no kind, so it is appended
+    rather than mistaken for ours, and unparseable quoting does not raise.
+    """
+    settings = tmp_path / "settings.json"
+    unknown = "/venv/bin/continuum inspect"
+    malformed = '"C:\\no\\closing\\quote continuum briefing'
+    for command in (unknown, malformed, unknown):
+        status = install_client_hook(settings, command, event_name="SessionStart", matcher="")
+        assert status == "installed"
+    commands = [
+        hook["command"]
+        for group in json.loads(settings.read_text())["hooks"]["SessionStart"]
+        for hook in group["hooks"]
+    ]
+    assert commands == [unknown, malformed, unknown]
