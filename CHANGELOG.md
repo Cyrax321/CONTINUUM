@@ -10,6 +10,20 @@ All notable changes to this project are documented here. The format follows
 
 - Make `continuum complete` idempotent for runs that are already completed (#356).
 
+- **Derived keys ignore surrounding whitespace in argument values (#361).**
+  `render_key` substituted values verbatim, so a tool argument of `" 123 "` and
+  one of `"123"` produced two different ledger keys for one resource. LLM output
+  routinely carries a trailing space or newline, and with two keys the second
+  call found no record of itself: the gate answered with claim instructions
+  rather than the already-completed refusal, so the same side effect could fire
+  twice. String values are now stripped before substitution in both `gate` and
+  the enforcing `gateway`, which share one `normalize_key_value` rule so the
+  hook and the proxy cannot derive different keys for the same operation.
+  Non-string values are untouched, keeping templates that carry a format spec
+  such as `{amount:.2f}` working. Keys are unchanged for values without
+  surrounding whitespace; a run whose in-flight claim was recorded under a
+  padded key will not match the stripped key derived after upgrading.
+
 ## [0.1.0] - 2026-08-27
 
 ### Added

@@ -67,6 +67,30 @@ def test_render_key_refuses_a_template_the_call_cannot_satisfy() -> None:
         render_key("invoice:{invoice_id}", {"customer": "acme"})
 
 
+@pytest.mark.parametrize("padded", (" 123 ", "123\n", "\n123", "\t123 \r\n"))
+def test_render_key_strips_surrounding_whitespace_from_values(padded: str) -> None:
+    """Whitespace in an argument must not fork the key (issue #361).
+
+    Key templates are configuration, but the values substituted into them come
+    from the model, and an LLM routinely emits a trailing space or newline. Left
+    in, ``invoice: 123 `` and ``invoice:123`` are two ledger keys for one
+    invoice, which is the one thing the derived key exists to prevent.
+    """
+    assert render_key("invoice:{id}", {"id": padded}) == render_key("invoice:{id}", {"id": "123"})
+
+
+def test_render_key_leaves_non_strings_to_the_templates_format_spec() -> None:
+    """Only strings are stripped; a numeric value keeps its type (issue #361).
+
+    Stringifying every value before formatting would be simpler, and would break
+    any template carrying a format spec: ``{amount:.2f}`` against ``"1.5"``
+    raises rather than rendering, so a working configuration would start failing
+    closed on every gated call.
+    """
+    assert render_key("amount:{amount:.2f}", {"amount": 1.5}) == "amount:1.50"
+    assert render_key("invoice:{id}", {"id": 7}) == "invoice:7"
+
+
 def test_load_gate_config_returns_none_when_absent(tmp_path: Path) -> None:
     assert load_gate_config(tmp_path / "missing.json") is None
 
@@ -132,6 +156,22 @@ def test_a_completed_call_is_denied_even_though_a_record_exists(db: str) -> None
     effect the ledger knows already happened, claim or no claim."""
     _seed(db, "send_invoice", "invoice:acme:7", ActionStatus.COMPLETED)
     decision = _decide(db, {"customer": "acme", "invoice_id": 7})
+    assert decision.allow is False
+    assert "already completed" in decision.reason
+
+
+def test_a_padded_retry_hits_the_dedup_verdict_of_the_clean_claim(db: str) -> None:
+    """The harm whitespace stripping prevents, end to end (issue #361).
+
+    The record is for ``invoice:acme:7``. A retry whose arguments carry stray
+    whitespace means the same invoice, so it has to land on the same key and be
+    refused as already completed. Before the fix it derived
+    ``invoice: acme :7``, found no record of itself, and was allowed through --
+    a second send of one invoice, which is precisely what the ledger key exists
+    to make impossible.
+    """
+    _seed(db, "send_invoice", "invoice:acme:7", ActionStatus.COMPLETED)
+    decision = _decide(db, {"customer": " acme ", "invoice_id": "7\n"})
     assert decision.allow is False
     assert "already completed" in decision.reason
 

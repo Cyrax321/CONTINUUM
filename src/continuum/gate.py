@@ -41,6 +41,7 @@ __all__ = [
     "DEFAULT_GATE_CONFIG_PATH",
     "Decision",
     "load_gate_config",
+    "normalize_key_value",
     "render_key",
     "decide",
 ]
@@ -97,13 +98,34 @@ def load_gate_config(path: Path) -> dict[str, dict[str, Any]] | None:
     return tools
 
 
+def normalize_key_value(value: Any) -> Any:
+    """Surrounding whitespace stripped from a string value, others untouched.
+
+    Two calls that name the same resource must derive the same key, and an
+    LLM-authored argument routinely arrives as ``" 123 "`` or ``"123\\n"``. Left
+    alone, ``invoice: 123 `` and ``invoice:123`` are different ledger keys, so
+    the second call finds no live claim of its own and the dedup verdict the
+    gate exists to deliver never fires -- the same side effect can happen twice.
+
+    Only ``str`` is touched. A template may carry a format spec (``{amount:.2f}``),
+    and stringifying the value first would make that spec raise on the way to a
+    key, turning a working configuration into a hard error.
+
+    Public because the enforcing gateway derives keys from HTTP bodies the same
+    way (issue #361): one rule in one place, since two copies of an identity
+    rule drift into two different identities.
+    """
+    return value.strip() if isinstance(value, str) else value
+
+
 def render_key(template: str, tool_input: Mapping[str, Any]) -> str:
     """Substitute ``{field}`` placeholders from the call's arguments.
 
     Only top-level argument fields are supported in v1. A placeholder with no
     matching argument raises: a template the current call cannot satisfy is a
     configuration problem worth surfacing, not something to paper over with a
-    weaker identity.
+    weaker identity. String values are stripped of surrounding whitespace
+    (:func:`normalize_key_value`); the template itself is used verbatim.
     """
     import string
 
@@ -114,7 +136,7 @@ def render_key(template: str, tool_input: Mapping[str, Any]) -> str:
             f"key template {template!r} needs argument(s) {missing} "
             f"but the call supplied {sorted(tool_input)!r}"
         )
-    values = {f: tool_input[f] for f in fields}
+    values = {f: normalize_key_value(tool_input[f]) for f in fields}
     return template.format(**values)
 
 

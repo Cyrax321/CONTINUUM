@@ -138,6 +138,25 @@ def test_completed_effect_blocks_the_duplicate(db: str, gateway: str) -> None:
     assert "already completed" in body["reason"]
 
 
+def test_a_padded_body_field_still_hits_the_duplicate_verdict(db: str, gateway: str) -> None:
+    """The proxy has to derive the same key `gate` does (issue #361).
+
+    The effect on ``invoice:I-4`` is already completed and the retry body says
+    ``" I-4\\n"``, which names the same invoice. Before the fix the gateway
+    rendered ``invoice: I-4\\n``, found no record of itself, and answered with
+    claim instructions instead of the already-completed refusal -- so a client
+    following those instructions would have sent the invoice a second time.
+    """
+    key = claim(db, "invoice:I-4")
+    with SQLiteStorage(db) as store:
+        from continuum.actions.ledger import ActionLedger as AL
+
+        AL(store, "run_1").complete(key, external_id="sent")
+    status, body = post(gateway, "/v1/invoices", {"id": " I-4\n"})
+    assert status == 403
+    assert "already completed" in body["reason"]
+
+
 def test_unknown_host_is_refused_fail_closed(db: str, gateway: str) -> None:
     key = claim(db, "invoice:I-9")
     del key

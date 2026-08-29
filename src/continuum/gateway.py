@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from continuum.events import EventType
+from continuum.gate import normalize_key_value
 from continuum.models import Origin
 
 __all__ = [
@@ -121,13 +122,20 @@ def load_gateway_config(path: Path) -> list[Route]:
 
 
 def render_key(template: str, body: dict[str, Any]) -> str:
+    """Substitute ``{field}`` placeholders from the request body.
+
+    Values are normalised exactly as ``gate`` normalises tool arguments
+    (:func:`continuum.gate.normalize_key_value`): the proxy and the hook must
+    derive the same key for the same operation, or a call claimed through one
+    seam looks unclaimed at the other.
+    """
     import string
 
     fields = [f for _, f, _, _ in string.Formatter().parse(template) if f]
     missing = [f for f in fields if f not in body]
     if missing:
         raise GatewayConfigError(f"key template {template!r} needs body field(s) {missing}")
-    return template.format(**{f: body[f] for f in fields})
+    return template.format(**{f: normalize_key_value(body[f]) for f in fields})
 
 
 def match_route(
