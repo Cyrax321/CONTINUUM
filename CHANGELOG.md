@@ -27,11 +27,14 @@ All notable changes to this project are documented here. The format follows
 - **The gateway answers malformed JSON with 400 instead of hiding it (#323).**
   `_body` caught `JSONDecodeError` and returned an empty mapping, so a request
   whose body never parsed was carried on to key derivation and refused with
-  `key template 'invoice:{id}' needs body field(s) ['id']` — sending the operator
-  to look for a field they did send, in a body the gateway never read. Broken
-  JSON now returns `400 {"error": "invalid JSON in request body: ..."}` before
-  any routing or ledger work. A genuinely empty body still becomes an empty
-  mapping, so a route whose template needs no fields stays callable with no body.
+  `key template 'invoice:{id}' needs body field(s) ['id']`. That sent the
+  operator to look for a field they did send, in a body the gateway never read.
+  A body that is not valid UTF-8 was worse: `json.loads` decodes before it
+  parses, so `UnicodeDecodeError` escaped the handler and the connection closed
+  with no response at all. Both now return
+  `400 {"error": "invalid JSON in request body: ..."}` before any routing or
+  ledger work. A genuinely empty body still becomes an empty mapping, so a route
+  whose template needs no fields stays callable with no body.
 
 ## [0.1.0] - 2026-08-27
 

@@ -182,13 +182,17 @@ def test_body_missing_template_field_denies_with_config_error(db: str, gateway: 
     assert "key template" in body["reason"]
 
 
-def _post_raw(addr: str, path: str, raw: str, host: str = "api.example.com"):
-    """POST a body verbatim, bypassing the JSON encoding of :func:`post`."""
+def _post_raw(addr: str, path: str, raw: str | bytes, host: str = "api.example.com"):
+    """POST a body verbatim, bypassing the JSON encoding of :func:`post`.
+
+    Accepts ``bytes`` as well as ``str`` so a test can send a body that is not
+    valid UTF-8, which no encoding of a ``str`` can produce.
+    """
     conn = http.client.HTTPConnection(addr, timeout=10)
     conn.request(
         "POST",
         path,
-        body=raw.encode(),
+        body=raw.encode() if isinstance(raw, str) else raw,
         headers={"Host": host, "Content-Type": "application/json"},
     )
     resp = conn.getresponse()
@@ -208,6 +212,21 @@ def test_malformed_json_is_refused_with_400(db: str, gateway: str) -> None:
     """
     claim(db, "invoice:seed")
     status, body = _post_raw(gateway, "/v1/invoices", '{"id": "I-5"')
+    assert status == 400
+    assert "invalid JSON" in body["error"]
+
+
+def test_a_body_that_is_not_utf8_is_refused_with_400(db: str, gateway: str) -> None:
+    """The decode half of "cannot be read" answers the same way (#323).
+
+    ``json.loads`` decodes bytes before it parses them, so a body that is not
+    valid UTF-8 raises ``UnicodeDecodeError`` rather than ``JSONDecodeError``.
+    Uncaught, that escapes the handler and the connection closes with no
+    response at all, so the caller cannot tell a rejected body from a crashed
+    proxy.
+    """
+    claim(db, "invoice:seed")
+    status, body = _post_raw(gateway, "/v1/invoices", b'{"id": "\xff\xfe I-5"}')
     assert status == 400
     assert "invalid JSON" in body["error"]
 

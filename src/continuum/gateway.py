@@ -60,7 +60,7 @@ class _BodyTooLarge(Exception):
 
 
 class _MalformedBody(Exception):
-    """Internal signal: the request body was not parseable JSON (issue #323)."""
+    """Internal signal: the request body could not be read as JSON (issue #323)."""
 
 
 #: Requests larger than this are refused with 413 before the body is read.
@@ -257,11 +257,18 @@ class GatewayServer:
                     return {}
                 try:
                     parsed = json.loads(raw)
-                except json.JSONDecodeError as exc:
+                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                     # Answering with an empty mapping instead would send the
                     # request on to be refused for a missing template field,
                     # naming the wrong problem: the body was never read as the
                     # caller wrote it. Say so, in the status code too (#323).
+                    #
+                    # UnicodeDecodeError is the other half of "cannot be read":
+                    # json.loads decodes bytes before parsing them, so a body
+                    # that is not valid UTF-8 raises from the decode rather than
+                    # the parse. Left uncaught it escapes the handler entirely
+                    # and the connection closes with no response at all, which
+                    # is the same misreport as the missing field, only quieter.
                     self._respond(400, {"error": f"invalid JSON in request body: {exc}"})
                     raise _MalformedBody from exc
                 return parsed if isinstance(parsed, dict) else {}
