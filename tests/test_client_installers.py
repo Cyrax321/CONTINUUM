@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from continuum.cli import ExitCode, main
-from continuum.clienthooks import CLIENT_PROFILES
+from continuum.clienthooks import CLIENT_PROFILES, install_client_hook
 
 
 def run(*argv: str) -> tuple[int, str, str]:
@@ -248,3 +248,31 @@ def test_briefing_repoint_reuses_group(tmp_path: Path) -> None:
         )
         == "present"
     )
+
+
+def _installed_commands(settings: Path, event_name: str) -> list[str]:
+    """Every command wired under ``event_name``, in file order, duplicates included."""
+    groups = json.loads(settings.read_text())["hooks"][event_name]
+    return [h["command"] for g in groups if isinstance(g.get("hooks"), list) for h in g["hooks"]]
+
+
+def test_an_install_of_one_kind_does_not_repoint_another(tmp_path: Path) -> None:
+    """Only an entry of the same kind counts as the one being installed (#484).
+
+    The kinds used to be checked as a set, so any continuum entry sharing the
+    event and matcher matched: installing observe where a briefing was already
+    wired repointed the briefing and reported "updated", silently dropping a
+    hook the caller never named. Reading the kind off the command keeps the two
+    entries apart.
+    """
+    settings = tmp_path / "settings.json"
+    briefing = "/venv/bin/continuum briefing"
+    observe = "/venv/bin/continuum observe"
+    assert (
+        install_client_hook(settings, briefing, event_name="SessionStart", matcher="")
+        == "installed"
+    )
+    assert (
+        install_client_hook(settings, observe, event_name="SessionStart", matcher="") == "installed"
+    )
+    assert _installed_commands(settings, "SessionStart") == [briefing, observe]

@@ -36,6 +36,22 @@ All notable changes to this project are documented here. The format follows
   ledger work. A genuinely empty body still becomes an empty mapping, so a route
   whose template needs no fields stays callable with no body.
 
+- **One list of installed hook kinds, and the kind is read off the command
+  (#484).** `hooks install` duplicated the `SessionStart` briefing hook on
+  every run because the installer recognised an existing entry as its own only
+  when the command ended in `observe` or `gate`, while `hooks remove` already
+  knew about `briefing`: the two lists were written out separately, so the kind
+  added in 7c6248d reached one and missed the other. #526 fixed the
+  duplication by extending the installer's list. The kinds are now a single
+  `_INSTALLED_KINDS` read by both the installer and the remover, so a future
+  kind cannot be added to one and forgotten in the other, and the kind is
+  derived from the command being installed rather than checked as a set: an
+  install of one kind can no longer repoint an entry of another that happens
+  to share the event and matcher, which would drop a hook the caller never
+  named. A command this module did not build carries no kind and is appended,
+  as before. A settings file that already holds duplicates is cleaned by
+  `hooks remove` followed by `hooks install`.
+
 ## [0.1.0] - 2026-08-27
 
 ### Added
