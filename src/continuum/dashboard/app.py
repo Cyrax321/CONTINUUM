@@ -152,7 +152,11 @@ def render_run_detail_html(storage: Storage, run_id: str) -> str:
         advisory_html = ""
         pins_html = ""
     events = storage.read_events(run_id)
-    total = len(events)
+    try:
+        archived = storage.read_archived_events(run_id)
+    except Exception:
+        archived = []
+    total = len(events) + len(archived)
     hint = (
         f"<p>Showing last 20 of {total} events, see continuum events {html.escape(run_id)} for full log.</p>"
         if total > 20

@@ -69,6 +69,83 @@ def test_dashboard_no_pagination_hint_for_exactly_twenty() -> None:
     assert "Showing last 20 of" not in html
 
 
+def test_dashboard_pagination_hint_includes_archived_after_compaction() -> None:
+    """After compaction the hint must count archived events (Refs #520).
+
+    Before the fix total = len(live) so a run with 20 live but 80 archived
+    showed no hint even though the full log is 100. The fix counts both.
+    """
+    import html as html_lib
+
+    # Use html-sensitive run_id to verify escaping in the hint.
+    run_id = "run<1>&test"
+    storage = SQLiteStorage(":memory:")
+    storage.create_run_started(Run(run_id=run_id, goal="g"))
+    # 98 total before compact: 1 RUN_STARTED + 97 TOOL_CALLED
+    for i in range(97):
+        storage.append_event(run_id, EventType.TOOL_CALLED, {"i": i})
+    assert len(storage.read_events(run_id)) == 98
+    assert len(storage.read_archived_events(run_id)) == 0
+    # Compact so 80 archived, 20 live (18 tail + 2 anchor/checkpoint), 100 total.
+    storage.compact_run(run_id, through_sequence=80)
+    live = len(storage.read_events(run_id))
+    archived = len(storage.read_archived_events(run_id))
+    assert archived == 80
+    assert live == 20
+    assert live + archived == 100
+    html = render_run_detail_html(storage, run_id)
+    # Hint must show combined total, not just live (20 would be no hint).
+    assert "Showing last 20 of 100 events" in html
+    # HTML-escaped: run_id in hint is escaped, raw <>& must not appear.
+    assert html_lib.escape(run_id) in html
+    assert f"continuum events {html_lib.escape(run_id)} for full log" in html
+    # Old logic would have computed total = live = 20 and shown no hint.
+    assert live == 20
+
+
+def test_dashboard_no_hint_for_fifteen_events_no_compact() -> None:
+    """15 events with no anchor must not show the hint (Refs #520)."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run_started(Run(run_id="run_15", goal="g"))
+    for i in range(14):
+        storage.append_event("run_15", EventType.TOOL_CALLED, {"i": i})
+    assert len(storage.read_events("run_15")) == 15
+    assert len(storage.read_archived_events("run_15")) == 0
+    html = render_run_detail_html(storage, "run_15")
+    assert "Showing last 20 of" not in html
+
+
+def test_dashboard_no_hint_for_twenty_exact_no_compact() -> None:
+    """Exactly 20 combined events must not show the hint (Refs #520)."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run_started(Run(run_id="run_20", goal="g"))
+    for i in range(19):
+        storage.append_event("run_20", EventType.TOOL_CALLED, {"i": i})
+    assert len(storage.read_events("run_20")) == 20
+    html = render_run_detail_html(storage, "run_20")
+    assert "Showing last 20 of" not in html
+
+
+def test_dashboard_hint_for_twenty_one_with_one_archived() -> None:
+    """21 combined (20 live + 1 archived) must show hint for 21 (Refs #520)."""
+    run_id = "run_21"
+    storage = SQLiteStorage(":memory:")
+    storage.create_run_started(Run(run_id=run_id, goal="g"))
+    for i in range(18):
+        storage.append_event(run_id, EventType.TOOL_CALLED, {"i": i})
+    assert len(storage.read_events(run_id)) == 19
+    # Compact 1 archived, leaving 20 live (18 tail + 2 system) + 1 archived = 21 total.
+    storage.compact_run(run_id, through_sequence=1)
+    live = len(storage.read_events(run_id))
+    archived = len(storage.read_archived_events(run_id))
+    assert archived == 1
+    assert live == 20
+    assert live + archived == 21
+    html = render_run_detail_html(storage, run_id)
+    assert "Showing last 20 of 21 events" in html
+    assert f"continuum events {run_id} for full log" in html
+
+
 def test_dashboard_post_body_too_large_returns_413(tmp_path: Path) -> None:
     """Large POST bodies are refused with 413, matching gateway pattern (#317)."""
     # token needed for the small-body control, but the oversize check happens before auth
