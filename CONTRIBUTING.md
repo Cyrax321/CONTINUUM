@@ -27,6 +27,9 @@ source .venv/bin/activate        # macOS / Linux
 
 # 3. Install in editable mode with all dev extras
 pip install -e ".[dev]"
+
+# 4. Ignore local CONTINUUM data
+echo .continuum/ >> .gitignore
 ```
 
 ---
