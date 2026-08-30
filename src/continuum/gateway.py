@@ -240,7 +240,23 @@ class GatewayServer:
                 decode (issue #323). Callers catch both and return, since the
                 response is already on the wire.
                 """
-                length = int(self.headers.get("Content-Length") or 0)
+                te = self.headers.get("Transfer-Encoding", "").lower()
+                if "chunked" in te:
+                    self._respond(400, {"error": "chunked transfer encoding is not supported"})
+                    raise _MalformedBody
+
+                cl_header = self.headers.get("Content-Length")
+                if cl_header is not None:
+                    try:
+                        length = int(cl_header)
+                        if length < 0:
+                            raise ValueError("Content-Length must be non-negative")
+                    except ValueError as exc:
+                        self._respond(400, {"error": f"malformed Content-Length header: {exc}"})
+                        raise _MalformedBody from exc
+                else:
+                    length = 0
+
                 if length > max_bytes:
                     # Drain (without buffering) so the client can finish
                     # writing and read our 413, instead of dying on a broken

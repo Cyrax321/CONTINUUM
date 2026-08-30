@@ -279,3 +279,34 @@ def test_oversized_body_is_refused_with_413(db: str, gateway: str) -> None:
     conn.close()
     assert resp.status == 413
     assert "exceeds" in body["error"]
+
+
+def test_malformed_content_length_returns_400(db: str, gateway: str) -> None:
+    conn = http.client.HTTPConnection(gateway, timeout=10)
+    conn.request(
+        "POST",
+        "/v1/invoices",
+        body=b'{"id": "1"}',
+        headers={"Host": "api.example.com", "Content-Type": "application/json", "Content-Length": "invalid"},
+    )
+    resp = conn.getresponse()
+    body = json.loads(resp.read())
+    conn.close()
+    assert resp.status == 400
+    assert "malformed Content-Length" in body["error"]
+
+
+def test_chunked_transfer_encoding_returns_400(db: str, gateway: str) -> None:
+    conn = http.client.HTTPConnection(gateway, timeout=10)
+    conn.request(
+        "POST",
+        "/v1/invoices",
+        body=b'e\r\n{"id": "1"}\r\n0\r\n\r\n',
+        headers={"Host": "api.example.com", "Content-Type": "application/json", "Transfer-Encoding": "chunked"},
+    )
+    resp = conn.getresponse()
+    body = json.loads(resp.read())
+    conn.close()
+    assert resp.status == 400
+    assert "chunked transfer encoding is not supported" in body["error"]
+

@@ -118,6 +118,34 @@ def test_dashboard_post_body_too_large_returns_413(tmp_path: Path) -> None:
         conn.close()
         assert resp.status == 200
         assert "goal and progress confirmed" in data
+
+        # Malformed Content-Length returns 400 without crashing (#522)
+        conn = http.client.HTTPConnection(addr, timeout=10)
+        conn.request(
+            "POST",
+            "/action/confirm",
+            body=b"x",
+            headers={"Content-Length": "abc"},
+        )
+        resp = conn.getresponse()
+        data = resp.read().decode(errors="ignore")
+        conn.close()
+        assert resp.status == 400
+        assert "400 Bad Request" in data
+
+        # Chunked Transfer-Encoding returns 400 (#522)
+        conn = http.client.HTTPConnection(addr, timeout=10)
+        conn.request(
+            "POST",
+            "/action/confirm",
+            body=b"1\r\nx\r\n0\r\n\r\n",
+            headers={"Transfer-Encoding": "chunked"},
+        )
+        resp = conn.getresponse()
+        data = resp.read().decode(errors="ignore")
+        conn.close()
+        assert resp.status == 400
+        assert "chunked transfer encoding is not supported" in data
     finally:
         server.shutdown()
         server.server_close()
