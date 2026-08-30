@@ -265,15 +265,13 @@ def _install_hook(
     event_name: str,
     matcher: str,
 ) -> str:
-    """Add a continuum hook entry to a Claude Code settings file.
+    """Add a continuum hook entry to a client settings file.
 
-    ``kind`` selects which hook this is ("observe" or "gate"); it must equal
-    the final word of ``command``. Existing settings are preserved; only the
-    matching list under ``hooks`` gains (or updates) our single entry.
-    Returns ``"installed"`` when the entry was added, ``"updated"`` when an
-    existing entry of the same kind pointed somewhere else (a moved
-    virtualenv, say) and was repointed, ``"present"`` when nothing needed to
-    change.
+    Existing settings are preserved; only the matching list under ``hooks``
+    gains (or updates) our single entry. Returns ``"installed"`` when the
+    entry was added, ``"updated"`` when an existing entry pointed somewhere
+    else (a moved virtualenv, say) and was repointed, ``"present"`` when
+    nothing needed to change.
 
     A settings file that exists but is unreadable raises rather than being
     overwritten: a file someone edited by hand is a statement of intent, and
@@ -308,8 +306,8 @@ def _install_hook(
         if not isinstance(entries, list):
             continue
         for hook in entries:
-            ours = isinstance(hook, dict) and (
-                _is_continuum_hook(hook, "observe") or _is_continuum_hook(hook, "gate")
+            ours = isinstance(hook, dict) and any(
+                _is_continuum_hook(hook, k) for k in ("observe", "gate", "briefing")
             )
             if ours:
                 entry_found = True

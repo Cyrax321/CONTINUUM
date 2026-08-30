@@ -57,8 +57,9 @@ def test_install_is_idempotent_per_client(tmp_path: Path, client: str) -> None:
         code, _, err = run("--json", "hooks", "install", client, "--settings", str(settings))
         assert code == ExitCode.OK, err
     data = json.loads(settings.read_text())
-    event = CLIENT_PROFILES[client]["post_event"]
-    assert len(data["hooks"][event]) == 1
+    profile = CLIENT_PROFILES[client]
+    assert len(data["hooks"][profile["post_event"]]) == 1
+    assert len(data["hooks"][profile["start_event"]]) == 1
 
 
 def test_gemini_gate_uses_before_tool(tmp_path: Path) -> None:
@@ -196,3 +197,54 @@ def test_briefing_is_wired_on_session_start(tmp_path: Path, client: str) -> None
         and any(h.get("command", "").split()[-1] == "briefing" for h in g["hooks"])
     ]
     assert len(ours) == 1
+
+
+@pytest.mark.parametrize("client", ("claude-code", "gemini", "codex"))
+def test_three_installs_leave_one_start_group(tmp_path: Path, client: str) -> None:
+    """Repro for #484: briefing was duplicated on every install. Three runs
+    must leave exactly one SessionStart group and the third reports present."""
+    profile = CLIENT_PROFILES[client]
+    settings = tmp_path / "settings.json"
+    last_payload: dict[str, object] | None = None
+    for _ in range(3):
+        code, out, err = run("--json", "hooks", "install", client, "--settings", str(settings))
+        assert code == ExitCode.OK, err
+        last_payload = json.loads(out)  # type: ignore[assignment]
+    assert last_payload is not None
+    data = json.loads(settings.read_text())
+    assert len(data["hooks"][profile["post_event"]]) == 1
+    assert len(data["hooks"][profile["start_event"]]) == 1
+    statuses = {str(h["kind"]): str(h["status"]) for h in last_payload["hooks"]}  # type: ignore[union-attr]
+    assert statuses["briefing"] == "present"
+    assert statuses["observe"] == "present"
+
+
+def test_briefing_repoint_reuses_group(tmp_path: Path) -> None:
+    """Repro for #484 repointing path: a moved venv must repoint briefing
+    rather than duplicate it; old command gone, count stays 1, present after."""
+    from continuum.clienthooks import install_client_hook
+
+    s = tmp_path / "settings.json"
+    assert (
+        install_client_hook(
+            s, "/old/venv/bin/continuum briefing", event_name="SessionStart", matcher=""
+        )
+        == "installed"
+    )
+    assert (
+        install_client_hook(
+            s, "/new/venv/bin/continuum briefing", event_name="SessionStart", matcher=""
+        )
+        == "updated"
+    )
+    data = json.loads(s.read_text())
+    groups = data["hooks"]["SessionStart"]
+    assert len(groups) == 1
+    assert groups[0]["hooks"][0]["command"] == "/new/venv/bin/continuum briefing"
+    assert "/old/venv" not in json.dumps(data)
+    assert (
+        install_client_hook(
+            s, "/new/venv/bin/continuum briefing", event_name="SessionStart", matcher=""
+        )
+        == "present"
+    )

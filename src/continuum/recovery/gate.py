@@ -55,6 +55,7 @@ __all__ = [
     "ForkPreconditionError",
     "EditType",
     "check_preconditions",
+    "check_merge_preconditions",
     "enforce",
     "render_preserved_summary",
     "render_refusal_text",
@@ -276,6 +277,303 @@ def _filtered_depended_for_edit(
         if item.key in survivors or item.action_id in survivors
     )
     return restored_set | derived_surviving
+
+
+def _derive_single(
+    storage: Storage,
+    run_id: str,
+    anchor: int,
+    *,
+    candidate: int | None = None,
+    edit_type: EditType = "fork",
+) -> Any:
+    """Derive a single-run DerivationResult with per-edit filtering applied."""
+    from continuum.recovery.preconditions import DerivationResult, EditPoint, derive
+
+    head = candidate if candidate is not None else storage.last_sequence(run_id)
+    if anchor > head:
+        head = anchor
+    point = EditPoint(
+        run_id=run_id,
+        anchor_sequence=anchor,
+        candidate_sequence=head,
+    )
+    raw_derivation = derive(storage, point)
+    filtered_depended = _filtered_depended_for_edit(
+        raw_derivation, storage, run_id, anchor, edit_type
+    )
+    return DerivationResult(
+        unsettled_authorizations=raw_derivation.unsettled_authorizations,
+        depended_results=filtered_depended,
+        uncertain_slots=raw_derivation.uncertain_slots,
+    )
+
+
+def _all_strings_up_to(storage: Storage, run_id: str, head: int) -> frozenset[str]:
+    """All string payload values in ``[1, head]`` for cross-run checks."""
+    strings: set[str] = set()
+    from heapq import merge
+
+    stream = merge(
+        storage.read_archived_events(run_id),
+        storage.read_events(run_id),
+        key=lambda e: e.sequence,
+    )
+    for event in stream:
+        if event.sequence > head:
+            break
+        strings.update(_payload_strings_local(event.payload))
+    return frozenset(strings)
+
+
+def _collect_completions(storage: Storage, run_id: str, anchor: int, head: int) -> dict[str, Any]:
+    """Completed actions inside ``(anchor, head]`` keyed by ledger key."""
+    from heapq import merge
+
+    from continuum.events import EventType
+    from continuum.models import Action, ActionStatus
+
+    completions: dict[str, Any] = {}
+    stream = merge(
+        storage.read_archived_events(run_id),
+        storage.read_events(run_id),
+        key=lambda e: e.sequence,
+    )
+    for event in stream:
+        if event.sequence <= anchor:
+            continue
+        if event.sequence > head:
+            break
+        if event.type not in (
+            EventType.ACTION_RECORDED,
+            EventType.ACTION_RECONCILED,
+            EventType.ACTION_COMPENSATED,
+        ):
+            continue
+        raw_key = event.payload.get("key")
+        if not raw_key:
+            continue
+        try:
+            action = Action.model_validate(event.payload["action"])
+        except Exception:
+            continue
+        if action.status is not ActionStatus.COMPLETED:
+            continue
+        from continuum.recovery.preconditions import DependedResult
+
+        completions[str(raw_key)] = DependedResult(
+            key=str(raw_key),
+            action_id=action.action_id,
+            action_type=action.action_type,
+            sequence=event.sequence,
+        )
+    return completions
+
+
+def _cross_depended_for_merge(
+    storage: Storage,
+    target_run_id: str,
+    target_anchor: int,
+    target_head: int,
+    source_run_id: str,
+    source_anchor: int,
+    source_head: int,
+) -> frozenset[Any]:
+    """Completions on one side referenced by the other side's log."""
+    cross: set[Any] = set()
+    completions_source = _collect_completions(storage, source_run_id, source_anchor, source_head)
+    if completions_source:
+        target_strings = _all_strings_up_to(storage, target_run_id, target_head)
+        for key, item in completions_source.items():
+            if key in target_strings or item.action_id in target_strings:
+                cross.add(item)
+    completions_target = _collect_completions(storage, target_run_id, target_anchor, target_head)
+    if completions_target:
+        source_strings = _all_strings_up_to(storage, source_run_id, source_head)
+        for key, item in completions_target.items():
+            if key in source_strings or item.action_id in source_strings:
+                cross.add(item)
+    return frozenset(cross)
+
+
+def check_merge_preconditions(
+    storage: Storage,
+    target_run_id: str,
+    target_anchor: int,
+    *,
+    source_run_id: str | None = None,
+    source_anchor: int | None = None,
+    carry_forward: Collection[str] | None = None,
+) -> tuple[Any, set[str], dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    """Derive and enforce preconditions for both sides of a merge.
+
+    Target span is ``(target_anchor, target_head]`` where ``target_head`` is
+    ``last_sequence(target_run_id)``. Source span is
+    ``(source_anchor, source_head]`` where ``source_anchor`` is the explicit
+    ancestor or, when None, ``storage.latest_version(source_run_id).source_sequence``
+    (fallback 0). If ``source_run_id`` is None only the target side is checked
+    for backward compatibility.
+
+    Returns ``(union_derivation, carry_set, union_summary, target_summary, source_summary)``
+    where the union blocks if either side has unaccounted items. Raises
+    :class:`EditPreconditionError` with rationale naming both sides' sequences.
+    """
+    from continuum.recovery.preconditions import DerivationResult
+
+    target_head = storage.last_sequence(target_run_id)
+    if target_anchor > target_head:
+        target_head = target_anchor
+    target_derivation = _derive_single(
+        storage, target_run_id, target_anchor, candidate=target_head, edit_type="merge"
+    )
+    target_summary = summary_payload(target_derivation)
+
+    if source_run_id is None:
+        carry_set = {str(x) for x in (carry_forward or ())}
+        unaccounted = _unaccounted_sets(target_derivation, carry_set)
+        if (
+            unaccounted.unsettled_authorizations
+            or unaccounted.depended_results
+            or unaccounted.uncertain_slots
+        ):
+            check_preconditions(
+                storage,
+                target_run_id,
+                target_anchor,
+                candidate=target_head,
+                edit_type="merge",
+                carry_forward=carry_forward,
+            )
+            raise AssertionError("check_preconditions should have raised")
+        return target_derivation, carry_set, target_summary, target_summary, None
+
+    storage.get_run(source_run_id)
+    if source_anchor is None:
+        latest = storage.latest_version(source_run_id)
+        source_anchor_val = latest.source_sequence if latest is not None else 0
+    else:
+        source_anchor_val = int(source_anchor)
+    source_head = storage.last_sequence(source_run_id)
+    if source_anchor_val > source_head:
+        source_head = source_anchor_val
+    source_derivation = _derive_single(
+        storage, source_run_id, source_anchor_val, candidate=source_head, edit_type="merge"
+    )
+    source_summary = summary_payload(source_derivation)
+
+    cross = _cross_depended_for_merge(
+        storage,
+        target_run_id,
+        target_anchor,
+        target_head,
+        source_run_id,
+        source_anchor_val,
+        source_head,
+    )
+
+    union_depended = frozenset(
+        set(target_derivation.depended_results)
+        | set(source_derivation.depended_results)
+        | set(cross)
+    )
+    union = DerivationResult(
+        unsettled_authorizations=frozenset(
+            set(target_derivation.unsettled_authorizations)
+            | set(source_derivation.unsettled_authorizations)
+        ),
+        depended_results=union_depended,
+        uncertain_slots=frozenset(
+            set(target_derivation.uncertain_slots) | set(source_derivation.uncertain_slots)
+        ),
+    )
+    carry_set = {str(x) for x in (carry_forward or ())}
+    unaccounted = _unaccounted_sets(union, carry_set)
+
+    if (
+        unaccounted.unsettled_authorizations
+        or unaccounted.depended_results
+        or unaccounted.uncertain_slots
+    ):
+        parts: list[str] = []
+        rationale: dict[str, Any] = {
+            "edit_type": "merge",
+            "anchor_sequence": target_anchor,
+            "candidate_sequence": target_head,
+            "divergence_sequence": target_anchor,
+            "target_anchor_sequence": target_anchor,
+            "target_candidate_sequence": target_head,
+            "source_run_id": source_run_id,
+            "source_anchor_sequence": source_anchor_val,
+            "source_candidate_sequence": source_head,
+            "unsettled_authorizations": [
+                {
+                    "approval_id": item.approval_id,
+                    "sequence": item.sequence,
+                    "subject": item.subject,
+                }
+                for item in sorted(unaccounted.unsettled_authorizations, key=lambda x: x.sequence)
+            ],
+            "depended_results": [
+                {
+                    "key": item.key,
+                    "action_id": item.action_id,
+                    "action_type": item.action_type,
+                    "sequence": item.sequence,
+                }
+                for item in sorted(unaccounted.depended_results, key=lambda x: x.sequence)
+            ],
+            "uncertain_slots": [
+                {
+                    "key": item.key,
+                    "action_id": item.action_id,
+                    "action_type": item.action_type,
+                    "status": item.status,
+                    "sequence": item.sequence,
+                }
+                for item in sorted(unaccounted.uncertain_slots, key=lambda x: x.sequence)
+            ],
+            "carry_forward": sorted(carry_set),
+            "target_preconditions": target_summary,
+            "source_preconditions": source_summary,
+        }
+        if unaccounted.unsettled_authorizations:
+            ids = ", ".join(
+                f"{item.approval_id} at sequence {item.sequence}"
+                for item in sorted(unaccounted.unsettled_authorizations, key=lambda x: x.sequence)
+            )
+            parts.append(
+                f"{len(unaccounted.unsettled_authorizations)} unsettled authorization(s): {ids}"
+            )
+        if unaccounted.depended_results:
+            ids = ", ".join(
+                f"{item.action_id} (key {item.key}) at sequence {item.sequence}"
+                for item in sorted(unaccounted.depended_results, key=lambda x: x.sequence)
+            )
+            parts.append(
+                f"{len(unaccounted.depended_results)} depended result(s) would be stranded: {ids}"
+            )
+        if unaccounted.uncertain_slots:
+            ids = ", ".join(
+                f"{item.action_id} (key {item.key}, status {item.status}) at sequence {item.sequence}"
+                for item in sorted(unaccounted.uncertain_slots, key=lambda x: x.sequence)
+            )
+            parts.append(f"{len(unaccounted.uncertain_slots)} uncertain slot(s) still open: {ids}")
+        message = (
+            "merge refused: preconditions in target (anchor "
+            f"{target_anchor}, head {target_head}] and source (anchor "
+            f"{source_anchor_val}, head {source_head}] are unaccounted for: "
+            + "; ".join(parts)
+            + ". Pass carry_forward with the identifiers you intend to carry, or reconcile first."
+        )
+        raise EditPreconditionError(
+            message,
+            edit_type="merge",
+            derivation=union,
+            unaccounted=unaccounted,
+            rationale=rationale,
+        )
+    union_summary = summary_payload(union)
+    return union, carry_set, union_summary, target_summary, source_summary
 
 
 def check_preconditions(
