@@ -64,6 +64,12 @@ name must match `vX.Y.Z`: the release workflow triggers on tags shaped like
 `v[0-9]+.[0-9]+.[0-9]+`.
 
 ```bash
+# Pre-tag guard: working tree must be clean and remote tag must not exist.
+# Fail closed, do not create a local tag if either check fails.
+git diff --quiet || (echo "dirty working tree: commit or stash before tagging" && exit 1)
+test -z "$(git status --porcelain)" || (echo "untracked files present" && git status --porcelain && exit 1)
+if git ls-remote --exit-code origin refs/tags/v0.1.0 >/dev/null 2>&1; then echo "remote tag v0.1.0 already exists, do not delete or move it, cut v0.1.1 instead per the rollback section" && exit 1; fi
+
 git rev-parse --short HEAD              # record the commit being tagged
 
 git tag -a v0.1.0 -m "CONTINUUM 0.1.0
