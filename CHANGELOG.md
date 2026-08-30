@@ -52,6 +52,20 @@ All notable changes to this project are documented here. The format follows
   as before. A settings file that already holds duplicates is cleaned by
   `hooks remove` followed by `hooks install`.
 
+- **`continuum tree --limit` truncates the child list instead of being ignored
+  (#321).** The flag was registered with `help=argparse.SUPPRESS` and never
+  read, so `--limit 5` was accepted and printed every child anyway: an operator
+  with a wide family got the full wall of output and no error saying why. The
+  flag now shows the newest `n` children and reports what it hid
+  (`... 3 of 40 children hidden by --limit 5`), because a truncated tree that
+  says nothing is indistinguishable from a small family. `--json` gained
+  `children_total` and `children_hidden` alongside the truncated `children`
+  list; output without `--limit` is unchanged. The truncation is display-only:
+  `children_of` still returns every child, so the family safety roll-up behind
+  `resume` cannot lose an uncertain child that scrolled off the printed list.
+  A limit below `1` is refused with exit code 1 rather than clamped, since
+  `--limit 0` would render a family with children as childless.
+
 ## [0.1.0] - 2026-08-27
 
 ### Added

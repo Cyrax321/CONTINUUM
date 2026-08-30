@@ -1191,8 +1191,23 @@ def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
 
 def cmd_tree(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
-    """Show a parent run and its children with recovery states (issue #243)."""
+    """Show a parent run and its children with recovery states (issue #243).
+
+    ``--limit`` truncates the child list for display only (issue #321). The
+    family safety roll-up behind ``resume`` reads every child regardless, so a
+    truncated tree can never make a blocked family look resumable; the count of
+    what was hidden is printed and carried in the JSON so a reader can tell the
+    difference between "no more children" and "not shown".
+    """
     from continuum.recovery.family import children_of
+
+    limit = getattr(args, "limit", None)
+    if limit is not None and limit < 1:
+        # Refuse rather than clamp: --limit 0 would print a childless-looking
+        # tree for a family that has children, which is the one reading this
+        # command must never produce.
+        print(f"--limit must be 1 or more (got {limit})", file=err)
+        return ExitCode.ERROR
 
     parent_id = args.run_id
     storage.get_run(parent_id)
@@ -1208,9 +1223,11 @@ def cmd_tree(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> 
         lines.append(f"{parent_id}  [assess error: {exc}]")
 
     children = children_of(storage, parent_id)
+    shown = children if limit is None else children[:limit]
+    hidden = len(children) - len(shown)
     if not children:
         lines.append("  (no children)")
-    for child in children:
+    for child in shown:
         fork_mark = "[fork] " if str(child.metadata.get("fork", "")) == "true" else ""
         try:
             d = engine.assess(child.run_id)
@@ -1221,15 +1238,22 @@ def cmd_tree(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> 
             )
         except Exception as exc:
             lines.append(f"  !! {fork_mark}{child.run_id}  [assess error: {exc}]")
+    if hidden:
+        lines.append(
+            f"  ... {hidden} of {len(children)} children hidden by --limit {limit}; "
+            "run without it to see the whole family"
+        )
     a2a = [
-        (c.run_id, c.metadata.get("a2a_task_id")) for c in children if c.metadata.get("a2a_task_id")
+        (c.run_id, c.metadata.get("a2a_task_id")) for c in shown if c.metadata.get("a2a_task_id")
     ]
     for rid, task in a2a:
         lines.append(f"  a2a: {rid} -> {task}")
     _emit(
         {
             "parent": args.run_id,
-            "children": [{"run_id": c.run_id, "status": c.status.value} for c in children],
+            "children": [{"run_id": c.run_id, "status": c.status.value} for c in shown],
+            "children_total": len(children),
+            "children_hidden": hidden,
         },
         "\n".join(lines),
         as_json=args.json,
@@ -2948,7 +2972,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     tree_parser = with_run(add("tree", cmd_tree, "Show a parent run and its children."))
-    tree_parser.add_argument("--limit", type=int, default=None, help=argparse.SUPPRESS)
+    tree_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="show at most this many children, newest first (default: all).",
+    )
 
     fork_cmd = with_run(
         add("fork", cmd_fork, "Approve a divergent continuation as a child run. Mutates storage.")
