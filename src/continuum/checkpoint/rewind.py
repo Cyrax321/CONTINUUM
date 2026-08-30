@@ -179,7 +179,7 @@ def rewind_to_checkpoint(
         raise RewindError(
             f"rewind to {to!r} has {len(conflicts)} conflict(s) and {len(unrecoverable)} unrecoverable file(s); use --force to proceed anyway or resolve conflicts. Conflicts: {conflicts[:3]} Unrecoverable: {unrecoverable[:3]}"
         )
-    if not dry_run:
+    if not dry_run and not conflicts and not unrecoverable:
         from continuum.recovery.gate import stamp_lineage
 
         stamp_lineage(
