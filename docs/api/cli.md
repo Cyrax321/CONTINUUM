@@ -5,8 +5,9 @@ codes are a safety contract: only a verified-safe run exits `0`, so
 `continuum resume "$RUN" && ./start-agent.sh` cannot launch onto stale state.
 
 ```bash
-continuum --db continuum.db <command> [args]
-continuum --json <command>      # machine-readable output
+continuum <command> [args]                    # storage defaults to ./continuum.db
+continuum --db <url-or-path> <command>        # storage URL or path (default: continuum.db)
+continuum --json <command>                    # machine-readable output
 ```
 
 ## Commands
@@ -60,9 +61,17 @@ continuum diff run_42 1 2
 continuum verify run_42
 continuum attest run_42 --key signer.pem --out run_42.attest.json
 continuum attest-verify run_42 --attest run_42.attest.json
+
+# Same data, machine-readable: --json goes before the command, not after it
+continuum --json runs | jq '.runs[] | {run_id, status}'
+continuum --json resume run_42 | jq '{safe, mode}'
 ```
 
-Most commands accept `--db` (storage path or URL) and `--json` (machine-readable output, also available as `continuum <command> --help` for each subcommand). Colour is
+`--db` (storage URL or path, default `continuum.db`) and `--json`
+(machine-readable output) are global flags, so they go before the command:
+`continuum --json runs`, not `continuum runs --json`, which is rejected as an
+unrecognised argument. Most commands emit JSON with it, and
+`continuum <command> --help` lists that command's own flags. Colour is
 TTY-aware and respects `NO_COLOR`; piped output is byte-identical to uncoloured
 output.
 
