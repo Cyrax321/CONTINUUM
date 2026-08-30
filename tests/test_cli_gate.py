@@ -79,6 +79,25 @@ def test_render_key_strips_surrounding_whitespace_from_values(padded: str) -> No
     assert render_key("invoice:{id}", {"id": padded}) == render_key("invoice:{id}", {"id": "123"})
 
 
+def test_render_key_handles_whitespace_only_value() -> None:
+    """A whitespace-only value normalizes to an empty string (issue #512).
+
+    When an LLM supplies whitespace-only for an argument, normalize_key_value
+    strips it to empty. The template still renders and decide handles the
+    resulting key gracefully without error.
+    """
+    assert render_key("invoice:{id}", {"id": "   "}) == "invoice:"
+    decision = decide(
+        {"send_invoice": {"key_template": "invoice:{id}"}},
+        "send_invoice",
+        {"id": "   "},
+        run_id="run_1",
+        actions_by_key={},
+    )
+    assert decision.allow is False
+    assert "invoice:" in decision.reason
+
+
 def test_render_key_leaves_non_strings_to_the_templates_format_spec() -> None:
     """Only strings are stripped; a numeric value keeps its type (issue #361).
 
