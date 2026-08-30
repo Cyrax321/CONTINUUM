@@ -651,7 +651,12 @@ def cmd_history(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
 
 def cmd_events(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     storage.get_run(args.run_id)  # raises RunNotFound for a run that was never created
-    events = storage.read_events(args.run_id, after_sequence=args.after, upto=args.upto)
+    # Full log: archived prefix plus live tail, matching the dashboard hint (issue #532).
+    events = [
+        event
+        for event in storage.read_all_events(args.run_id)
+        if event.sequence > args.after and (args.upto is None or event.sequence <= args.upto)
+    ]
     payload = [
         {
             "sequence": e.sequence,
