@@ -167,8 +167,9 @@ def test_fork_child_is_independently_resumable(db: str) -> None:
         child = approve_fork(store, "run_1", reason="new terms")
         # The child's own log is startable with no help from this test.
         events = store.read_events(child.run_id)
-        assert [e.type for e in events] == [EventType.RUN_STARTED]
+        assert events[0].type == EventType.RUN_STARTED
         assert events[0].source is Origin.HUMAN
+        assert all(e.type in (EventType.RUN_STARTED, EventType.ATTEMPT_LESSON) for e in events)
 
     code, out, _ = run("--db", db, "resume", child.run_id)
     # Resume reaches its own verdict about the CHILD, independent of the parent.

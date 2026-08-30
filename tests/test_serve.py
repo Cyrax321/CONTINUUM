@@ -298,10 +298,13 @@ def test_stdio_resume_needs_no_params_at_all() -> None:
 
 
 def test_auth_refuses_without_token_when_required(monkeypatch) -> None:
-    monkeypatch.setenv("CONTINUUM_SERVE_TOKEN", "secret")
+    monkeypatch.setenv("CONTINUUM_SERVE_TOKEN", "actual-token-value")
     srv = make_server()
-    with pytest.raises(NotAuthorized):
+    with pytest.raises(NotAuthorized) as exc_info:
         srv.dispatch("record_progress", {"run_id": "r1", "completed": 1})
+    assert "CONTINUUM_SERVE_TOKEN" in str(exc_info.value)
+    assert "auth_token" in str(exc_info.value)
+    assert "actual-token-value" not in str(exc_info.value)
 
 
 def test_auth_allows_the_correct_token(monkeypatch) -> None:

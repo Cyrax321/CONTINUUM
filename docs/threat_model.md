@@ -19,6 +19,9 @@ This document scopes what CONTINUUM protects against, what it detects, and what 
 - **Duplicate side effects**  
   `ActionLedger` with stable idempotency keys and drift recognition prevents duplicate external effects. See `src/continuum/actions/ledger.py:1` and `tests/test_adapter_result_fuzz.py:1`.
 
+- **Silent constraint drops**  
+  `CONSTRAINT_PINNED` hash-only pins verified across compaction and briefing via `account_pins_in_context` (#391, #418). A summary that omits a pinned constraint is flagged as `absent` past grace, `unverifiable` when truncated, and escalates to `REQUIRES_REVIEW` in strict mode. See `docs/guides/constraint-pinning.md` and `docs/concepts/constraint-pinning.md` and `src/continuum/state/semantic.py:account_pins_in_context`.
+
 ## What CONTINUUM does NOT protect against
 
 - **Full disk access by a remote attacker**  
@@ -32,6 +35,9 @@ This document scopes what CONTINUUM protects against, what it detects, and what 
 
 - **Malicious local process impersonating another agent**  
   `MCP` authorization is by declared `clientInfo`, not authenticated identity. See `docs/CONTINUUM_MASTER_PLAN.md:6` for the explicit limitation. It keeps honestly named agents apart, it does not stop a deliberately impersonating local process.
+
+- **Forged constraint presence markers**  
+  A summarizer that forges `[pin:id:hash8]` without honoring the constraint will appear `present`. Pinning detects silent drops, not adversarial forgeries. Out of scope for v1, detectable by external detector in SNAGLINE companion repo #90. See `docs/guides/constraint-pinning.md` honest scope list.
 
 ## Assumptions
 

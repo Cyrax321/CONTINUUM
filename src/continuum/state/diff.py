@@ -180,6 +180,14 @@ def diff_states(before: SemanticState, after: SemanticState) -> StateDiff:
         fields=("description", "status", "prerequisite"),
     )
     entries += _compare_collection(
+        before.plan,
+        after.plan,
+        component=Component.PLAN,
+        key=lambda p: p.step_id,
+        describe=lambda p: str(p.description),
+        fields=("description", "status", "depends_on"),
+    )
+    entries += _compare_collection(
         before.approvals,
         after.approvals,
         component=Component.APPROVAL,

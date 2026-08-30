@@ -30,14 +30,15 @@ def render_dashboard_html(storage: Storage) -> str:
             safe = "unknown"
         rows.append(
             f"<tr><td>{html.escape(run.run_id)}</td>"
+            f"<td>{html.escape(run.goal)}</td>"
             f"<td>{html.escape(run.status.value)}</td>"
             f"<td>{mode}</td><td>{safe}</td></tr>"
         )
-    body = "\n".join(rows) if rows else "<tr><td colspan=4>No runs</td></tr>"
+    body = "\n".join(rows) if rows else "<tr><td colspan=5>No runs</td></tr>"
     return f"""<!doctype html>
 <html><head><meta charset=\"utf-8\"><title>CONTINUUM Dashboard</title></head>
 <body><h1>CONTINUUM Dashboard</h1>
-<table border=\"1\" cellpadding=\"6\"><tr><th>Run</th><th>Status</th><th>Recovery</th><th>Safe</th></tr>
+<table border=\"1\" cellpadding=\"6\"><tr><th>Run</th><th>Goal</th><th>Status</th><th>Recovery</th><th>Safe</th></tr>
 {body}
 </table></body></html>"""
 
@@ -53,12 +54,82 @@ def _run_exists(storage: Storage, run_id: str) -> bool:
     return True
 
 
+def _advisory_trust_html(storage: Storage, run_id: str) -> str:
+    """Small read-only advisory display for prefix trust (issue #401)."""
+    try:
+        from continuum.analysis.prefix_trust import trust_over_prefix
+        from continuum.state.semantic import project
+
+        # Use the latest version if present, else project the raw events
+        state = storage.latest_version(run_id)
+        if state is None:
+            try:
+                state = project(run_id, storage.read_events(run_id))
+            except Exception:
+                return ""
+        advisory = trust_over_prefix(state)
+        breakdown = advisory.get("breakdown", {})
+        score = advisory.get("trust_score", 1.0)
+        return (
+            f'<div style="margin:8px 0;padding:8px;border:1px solid #ccc">'
+            f"<b>Advisory prefix trust:</b> {score:.3f} "
+            f"(role={breakdown.get('role', 1.0):.3f} "
+            f"goal={breakdown.get('goal', 1.0):.3f} "
+            f"evidence={breakdown.get('evidence', 1.0):.3f})"
+            f"</div>"
+        )
+    except Exception:
+        return ""
+
+
+def _pins_html(storage: Storage, run_id: str) -> str:
+    """Read-only advisory display for constraint pins (issue #419)."""
+    try:
+        from continuum.checkpoint.context import build_recovery_context
+        from continuum.state.semantic import constraint_pins_payload, project
+
+        state = storage.latest_version(run_id)
+        if state is None:
+            try:
+                state = project(run_id, storage.read_events(run_id))
+            except Exception:
+                return ""
+        if not state.pins:
+            return ""
+        ctx = build_recovery_context(state).render()
+        block = constraint_pins_payload(state, ctx)
+        pins = block.get("pins", {})
+        flagged = block.get("flagged", [])
+        if not pins:
+            return ""
+        rows = ""
+        for pin_id in sorted(pins.keys()):
+            info = pins[pin_id]
+            status = html.escape(str(info.get("status", "")))
+            prefix = html.escape(str(info.get("sha256_prefix", "")))
+            is_flagged = " flagged" if pin_id in flagged else ""
+            rows += (
+                f"<tr><td>{html.escape(pin_id)}</td>"
+                f"<td>{status}</td><td>{prefix}</td><td>{is_flagged}</td></tr>"
+            )
+        flagged_str = ", ".join(html.escape(p) for p in flagged) if flagged else "none"
+        return (
+            f'<div style="margin:8px 0;padding:8px;border:1px solid #c00">'
+            f"<b>Constraint pins:</b> flagged: {flagged_str}"
+            f'<table border="1" cellpadding="4"><tr><th>Pin</th><th>Status</th>'
+            f"<th>Prefix</th><th>Flag</th></tr>{rows}</table></div>"
+        )
+    except Exception:
+        return ""
+
+
 def render_run_detail_html(storage: Storage, run_id: str) -> str:
     try:
         run = storage.get_run(run_id)
     except Exception as exc:
         return f"""<!doctype html><html><body><h1>Run not found</h1><p>{html.escape(str(exc))}</p></body></html>"""
     engine = RecoveryEngine(storage)
+    decision = None
     try:
         decision = engine.assess(run_id)
         contract_html = html.escape(decision.contract.model_dump_json(indent=2))
@@ -68,9 +139,13 @@ def render_run_detail_html(storage: Storage, run_id: str) -> str:
         )
         ledger_html = f"<pre>{contract_html}</pre>"
         validation_html = f'<table border="1" cellpadding="4"><tr><th>Component</th><th>Status</th><th>Detail</th></tr>{validation_rows}</table>'
+        advisory_html = _advisory_trust_html(storage, run_id)
+        pins_html = _pins_html(storage, run_id)
     except Exception as exc:
         ledger_html = f"<p>{html.escape(str(exc))}</p>"
         validation_html = ""
+        advisory_html = ""
+        pins_html = ""
     events = storage.read_events(run_id)
     events_rows = "".join(
         f"<tr><td>{e.sequence}</td><td>{html.escape(e.type.value)}</td><td>{html.escape(str(e.payload))}</td></tr>"
@@ -85,7 +160,7 @@ def render_run_detail_html(storage: Storage, run_id: str) -> str:
         from continuum.dashboard.hitl import pending_actions_with_keys
 
         pending = pending_actions_with_keys(storage, run_id)
-        needs_confirm = decision.mode.value == "request_human"
+        needs_confirm = decision is not None and decision.mode.value == "request_human"
         if pending or needs_confirm:
             rows = []
             if needs_confirm:
@@ -133,6 +208,8 @@ def render_run_detail_html(storage: Storage, run_id: str) -> str:
 <html><head><meta charset=\"utf-8\"><title>Run {html.escape(run_id)}</title></head>
 <body><h1>Run {html.escape(run_id)}</h1>
 <p>Goal: {html.escape(run.goal)} | Status: {html.escape(run.status.value)}</p>
+{advisory_html}
+{pins_html}
 {hitl_html}
 <h2>Contract</h2>{ledger_html}
 <h2>Validation</h2>{validation_html}

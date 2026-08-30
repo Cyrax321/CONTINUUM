@@ -225,7 +225,9 @@ def _run_one(method: str, spec: ScenarioSpec, total: int, workdir: Path) -> Meth
         if method == "replay":
             done = 0
         elif method == "naive_checkpoint":
-            done = project(run_id, store.read_events(run_id)).progress.completed
+            done = project(
+                run_id, store.read_events(run_id), on_unprojectable="degrade"
+            ).progress.completed
         else:  # continuum
             assert manager is not None
             restored = manager.restore(run_id)

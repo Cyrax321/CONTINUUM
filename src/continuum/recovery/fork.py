@@ -1,4 +1,4 @@
-"""Fork semantics: audited divergent continuations (issue #259).
+"""Fork semantics: audited divergent continuations (issue #259) with precondition gate (#407).
 
 The replay-safety triad has three outcomes at the tool boundary. REPLAY
 exists (#237, ``protected_call`` returns the journalled result). REJECT
@@ -25,20 +25,57 @@ Approval-first is deliberate: automatic branching would let an injected
 prompt steer topology silently. A human names the reason, and the reason
 is the audit. Forks parent onto the named run; a fork of a fork is just a
 deeper hierarchy, which the #243 roll-up already understands.
+
+Precondition gate (#407, epic #389)
+-----------------------------------
+
+Before the fork is recorded, the module derives what the edit must account
+for (``src/continuum/recovery/preconditions.py``). The derivation is pure
+and read-only; this module is the decision point that enforces it
+fail-closed:
+
+* any ``unsettled_authorizations``, ``depended_results`` or
+  ``uncertain_slots`` reported in ``(divergence, head]`` blocks the fork
+  unless the caller explicitly asserts ``carry_forward`` for that exact
+  item;
+* refusals carry a machine-readable rationale naming the offending
+  sequence numbers and action or approval ids;
+* allowed forks stamp the derivation summary and the explicit
+  carry-forward assertion onto the ``RUN_FORKED`` lineage event so the
+  audit shows why the edit was safe.
+
+Gate reuse (#408)
+-----------------
+
+The precondition enforcement is now the shared gate in
+``src/continuum/recovery/gate.py``, reused by restore and merge with
+identical refusal shape and lineage stamping. Fork delegates to that gate
+with ``edit_type="fork"`` so all three edits share one decision point.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from continuum.actions.idempotency import identity_tokens
 from continuum.events import EventType
 from continuum.models import Action, Origin, Run
+from continuum.recovery.gate import (
+    ForkPreconditionError as _GateForkError,
+)
+from continuum.recovery.gate import check_preconditions as _gate_check
 from continuum.storage.base import Storage
 
-__all__ = ["ForkNeighbour", "detect_fork_candidates", "approve_fork"]
+__all__ = [
+    "ForkNeighbour",
+    "ForkPreconditionError",
+    "detect_fork_candidates",
+    "approve_fork",
+]
+
+ForkPreconditionError = _GateForkError
 
 
 @dataclass(frozen=True)
@@ -66,11 +103,7 @@ def detect_fork_candidates(
     tool_input: Mapping[str, Any],
     actions_by_key: Mapping[str, Action],
 ) -> list[ForkNeighbour]:
-    """Journalled same-type actions sharing a resource token with this call.
-
-    Deterministic: candidates sort by (number of shared tokens desc, key),
-    so identical ledgers yield identical refusal envelopes.
-    """
+    """Journalled same-type actions sharing a resource token with this call."""
     incoming = identity_tokens(arguments=dict(tool_input))
     if not incoming:
         return []
@@ -96,21 +129,32 @@ def detect_fork_candidates(
     return neighbours
 
 
+def _raise_if_blocked(
+    storage: Storage,
+    parent_run_id: str,
+    divergence: int,
+    *,
+    carry_forward: Collection[str] | None,
+) -> tuple[Any, set[str], dict[str, Any]]:
+    """Derive preconditions for ``(divergence, head]`` and raise if blocked."""
+    return _gate_check(
+        storage,
+        parent_run_id,
+        divergence,
+        edit_type="fork",
+        carry_forward=carry_forward,
+    )
+
+
 def approve_fork(
     storage: Storage,
     parent_run_id: str,
     *,
     reason: str,
     child_run_id: str | None = None,
+    carry_forward: Collection[str] | None = None,
 ) -> Run:
-    """Create an approved divergent continuation of ``parent_run_id``.
-
-    Writes ``RUN_FORKED`` to the parent log (Origin.HUMAN: a human approved
-    this branch) and creates the linked child run with ``parent_run_id``
-    set, so #243's aggregation and ``continuum tree`` see it without any new
-    machinery. The child starts empty: it inherits nothing mutable from the
-    parent, by the same rule that keeps siblings independent.
-    """
+    """Create an approved divergent continuation of ``parent_run_id``."""
     parent = storage.get_run(parent_run_id)
     if not reason or not reason.strip():
         raise ValueError("a fork needs a stated reason; the reason is the audit")
@@ -137,6 +181,13 @@ def approve_fork(
     latest = storage.latest_version(parent_run_id)
     divergence = latest.source_sequence if latest else 0
 
+    derivation, carry_set, summary = _raise_if_blocked(
+        storage,
+        parent_run_id,
+        divergence,
+        carry_forward=carry_forward,
+    )
+
     child = Run(
         run_id=child_run_id,
         goal=parent.goal,
@@ -147,26 +198,78 @@ def approve_fork(
             "fork_parent_sequence": divergence,
         },
     )
-    # create_run_started, not create_run: the child needs its own RUN_STARTED or
-    # it has a row and an empty log, which nothing downstream can read. project()
-    # refuses a log that never recorded RUN_STARTED, so `resume`, `tree`,
-    # `replay` and `inspect` all fail on the child -- including the exact command
-    # this function's own caller prints as the next step. Same defect class as
-    # #47, which fixed it for the OpenAI adapter. The row and its first event are
-    # one fact, so they are written in one transaction.
-    #
-    # Origin.HUMAN matches the RUN_FORKED event below: a person approved this
-    # branch, and the child's goal is inherited from a run a human already
-    # stated, so it is not an agent self-report.
     storage.create_run_started(child, source=Origin.HUMAN)
+    payload: dict[str, Any] = {
+        "child_run_id": child.run_id,
+        "reason": reason.strip(),
+        "divergence_sequence": divergence,
+        "preconditions": summary,
+        "precondition_summary": summary,
+        "derivation": summary,
+        "derivation_summary": summary,
+        "carry_forward": sorted(carry_set),
+    }
+    payload["edit_type"] = "fork"
+    payload["anchor_sequence"] = divergence
+    payload["candidate_sequence"] = storage.last_sequence(parent_run_id)
     storage.append_event(
         parent_run_id,
         EventType.RUN_FORKED,
-        {
-            "child_run_id": child.run_id,
-            "reason": reason.strip(),
-            "divergence_sequence": divergence,
-        },
+        payload,
         source=Origin.HUMAN,
     )
+    try:
+        from continuum.models import AttemptLesson
+        from continuum.recovery.summary import ATTEMPT_LESSON_FIELD_CAP
+        from continuum.security.hashing import stable_hash
+
+        def _trunc(text: str) -> str:
+            return text[:ATTEMPT_LESSON_FIELD_CAP] if len(text) > ATTEMPT_LESSON_FIELD_CAP else text
+
+        scar_ids = [str(item.get("action_id", "")) for item in summary.get("uncertain_slots", [])]
+        scar_ids = [sid for sid in scar_ids if sid][:16]
+        evidence: list[str] = []
+        for item in summary.get("unsettled_authorizations", []):
+            evidence.append(f"{item.get('approval_id', '')}: {item.get('subject', '')}".strip(": "))
+        for item in summary.get("depended_results", []):
+            evidence.append(f"{item.get('action_id', '')} ({item.get('key', '')})")
+        evidence = [_trunc(str(ev)) for ev in evidence if ev][:8]
+        attempt_id = stable_hash(
+            {"parent": parent_run_id, "child": child.run_id, "divergence": divergence}
+        )[:16]
+        lesson = AttemptLesson(
+            attempt_id=_trunc(attempt_id),
+            falsified=_trunc(reason.strip()),
+            env_delta="",
+            scar_action_ids=scar_ids,
+            next_avoid="",
+            source_evidence=evidence,
+            created_at=storage.get_run(parent_run_id).updated_at,
+        )
+        import json as _json
+
+        while len(_json.dumps(lesson.model_dump(mode="json"), sort_keys=True).encode()) > 2048:
+            if lesson.source_evidence:
+                lesson = lesson.model_copy(update={"source_evidence": lesson.source_evidence[:-1]})
+                continue
+            if lesson.falsified:
+                lesson = lesson.model_copy(
+                    update={"falsified": lesson.falsified[: max(len(lesson.falsified) // 2, 0)]}
+                )
+                continue
+            break
+        storage.append_event(
+            parent_run_id,
+            EventType.ATTEMPT_LESSON,
+            lesson.model_dump(mode="json"),
+            source=Origin.DETERMINISTIC,
+        )
+        storage.append_event(
+            child.run_id,
+            EventType.ATTEMPT_LESSON,
+            lesson.model_dump(mode="json"),
+            source=Origin.DETERMINISTIC,
+        )
+    except Exception:
+        pass
     return child

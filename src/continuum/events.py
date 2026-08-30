@@ -59,6 +59,8 @@ class EventType(StrEnum):
 
     # lineage (issue #259): a divergent continuation was approved off this run
     RUN_FORKED = "RUN_FORKED"
+    RUN_RESTORED = "RUN_RESTORED"
+    RUN_MERGED = "RUN_MERGED"
 
     # tools
     TOOL_CALLED = "TOOL_CALLED"
@@ -74,6 +76,10 @@ class EventType(StrEnum):
     WORK_ADDED = "WORK_ADDED"
     WORK_COMPLETED = "WORK_COMPLETED"
     DEPENDENCY_DECLARED = "DEPENDENCY_DECLARED"
+
+    # constraints (issue #416): first-class pins carrying hashes, never text
+    CONSTRAINT_PINNED = "CONSTRAINT_PINNED"
+    CONSTRAINT_RETRACTED = "CONSTRAINT_RETRACTED"
 
     # approvals
     APPROVAL_REQUESTED = "APPROVAL_REQUESTED"
@@ -110,6 +116,15 @@ class EventType(StrEnum):
 
     # authority (issue #269): a claim tried to reuse a consumed single-use grant
     GRANT_DENIED = "GRANT_DENIED"
+
+    # structured attempt memory (issue #313): durable falsification lesson
+    ATTEMPT_LESSON = "ATTEMPT_LESSON"
+
+    # sleep-time trajectory reports (issue #393): distilled from archived history
+    TRAJECTORY_REPORT = "TRAJECTORY_REPORT"
+
+    # structured plan (issue #312): durable milestones for long-horizon recovery
+    PLAN_UPSERT = "PLAN_UPSERT"
 
 
 class AppendOnlyViolation(RuntimeError):

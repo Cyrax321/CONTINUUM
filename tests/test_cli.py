@@ -934,14 +934,23 @@ def test_complete_closes_a_run_and_clears_it_from_active_resolution(
         assert store.get_active_run() is None
 
 
-def test_complete_is_idempotent_enough_for_double_clicks(tmp_path: Path) -> None:
+def test_complete_is_idempotent_for_double_clicks(tmp_path: Path) -> None:
     path = str(tmp_path / "d.db")
     with SQLiteStorage(path) as store:
         store.create_run(Run(run_id="r", goal="g"))
     code, _, err = run("--db", path, "complete", "r")
     assert code == ExitCode.OK
-    code, _, err = run("--db", path, "complete", "r")
+    with SQLiteStorage(path) as store:
+        events_after_first = list(store.read_events("r"))
+
+    code, out, err = run("--db", path, "complete", "r")
     assert code == ExitCode.OK, err
+    assert "already completed" in out
+    code, out, err = run("--db", path, "--json", "complete", "r")
+    assert code == ExitCode.OK, err
+    assert json.loads(out)["already_completed"] is True
+    with SQLiteStorage(path) as store:
+        assert list(store.read_events("r")) == events_after_first
 
 
 def test_complete_unknown_run_is_not_found(tmp_path: Path) -> None:
@@ -950,3 +959,233 @@ def test_complete_unknown_run_is_not_found(tmp_path: Path) -> None:
         pass
     code, _, err = run("--db", path, "complete", "ghost")
     assert code == ExitCode.NOT_FOUND
+
+
+# --- verify reports coherence, not only integrity (issue #382) --------------- #
+
+
+def _poison(path: str) -> None:
+    """Append a TASK_UPDATED the fold rejects, through the normal write path.
+
+    Mirrors what #364 allowed before it was fixed: `completed` past the `total`
+    already on record. The event is hashed like any other, so the chain stays
+    intact and only the projection breaks, which is the whole point here.
+    """
+    with SQLiteStorage(path) as store:
+        store.append_event("run_1", EventType.TASK_UPDATED, {"completed": 999, "failed": 0})
+
+
+def test_verify_reports_a_run_whose_log_cannot_be_projected(db: str) -> None:
+    """`verify` certified a run no projecting command could read (issue #382).
+
+    An unprojectable log is perfectly intact, so the chain audit passes it and is
+    right to. Reporting only that verdict meant the one command an operator
+    reaches for during an incident was the one that could not see the incident.
+    """
+    _poison(db)
+    code, out, _ = run("--db", db, "verify", "run_1")
+
+    assert "no violations" in out, "the chain really is intact; do not hide that"
+    assert "PROJECTION FAILURE" in out
+    assert "sequence" in out and "TASK_UPDATED" in out
+    assert "exceeds total" in out, "name the constraint, not just the pydantic header"
+    assert code == ExitCode.CORRUPTED, "verify $RUN && resume must short-circuit"
+
+
+def test_verify_still_passes_a_healthy_run(db: str) -> None:
+    """The new check must not fail a run that folds; that would be worse."""
+    code, out, _ = run("--db", db, "verify", "run_1")
+    assert code == ExitCode.OK
+    assert "PROJECTION FAILURE" not in out
+
+
+def test_verify_json_names_the_offending_event(db: str) -> None:
+    """Scripts read the payload, not the prose."""
+    _poison(db)
+    code, out, _ = run("--db", db, "--json", "verify", "run_1")
+    payload = json.loads(out)
+
+    assert payload["ok"] is True, "chain integrity is unaffected"
+    assert payload["projectable"] is False
+    assert payload["projection_failed_at"]["type"] == "TASK_UPDATED"
+    assert payload["projection_failed_at"]["sequence"] > 0
+    assert code == ExitCode.CORRUPTED
+
+
+def test_verify_json_marks_a_healthy_run_projectable(db: str) -> None:
+    payload = json.loads(run("--db", db, "--json", "verify", "run_1")[1])
+    assert payload["projectable"] is True
+    assert "projection_failed_at" not in payload
+
+
+def test_a_tampered_chain_is_not_also_projected(db: str, tmp_path: Path) -> None:
+    """Do not describe events that cannot be trusted to say anything.
+
+    Same reasoning the action-index repair already uses: folding a tampered log
+    to report where it stops projecting would launder its contents into a
+    diagnosis the operator might act on.
+    """
+    _poison(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE events SET payload = ? WHERE sequence = 2", ('{"tampered": true}',))
+
+    code, out, _ = run("--db", db, "verify", "run_1")
+    assert code == ExitCode.CORRUPTED
+    assert "INTEGRITY FAILURE" in out
+    assert "PROJECTION FAILURE" not in out, "integrity comes first; do not fold a tampered log"
+
+
+def test_first_unprojectable_event_finds_the_earliest_break(db: str) -> None:
+    """Two bad events must report the first, or a repair fixes the wrong one."""
+    from continuum.state.semantic import first_unprojectable_event
+
+    _poison(db)
+    _poison(db)
+    with SQLiteStorage(db) as store:
+        events = list(store.read_events("run_1"))
+        broken = first_unprojectable_event("run_1", events)
+
+    assert broken is not None
+    sequence, event_type, reason = broken
+    bad = [e.sequence for e in events if e.type is EventType.TASK_UPDATED]
+    assert sequence == min(bad)
+    assert event_type == "TASK_UPDATED"
+    assert "\n" not in reason, "the reason is rendered on one line"
+
+
+def test_first_unprojectable_event_returns_none_for_a_sound_log(db: str) -> None:
+    from continuum.state.semantic import first_unprojectable_event
+
+    with SQLiteStorage(db) as store:
+        assert first_unprojectable_event("run_1", store.read_events("run_1")) is None
+
+
+def test_verify_projects_a_compacted_run_from_its_archive(db: str) -> None:
+    """After compaction the live log starts at the anchor (issue #239).
+
+    It no longer contains RUN_STARTED, so folding only the live tail reports
+    every compacted run as unprojectable. The archive holds the prefix verbatim
+    from sequence 1, so the two streams are folded together, the same merge
+    `ActionLedger._replay` does.
+    """
+    assert run("--db", db, "compact", "run_1", "--force")[0] == ExitCode.OK
+
+    code, out, err = run("--db", db, "verify", "run_1")
+    assert code == ExitCode.OK, f"a healthy compacted run must still verify: {out}{err}"
+    assert "PROJECTION FAILURE" not in out
+    assert json.loads(run("--db", db, "--json", "verify", "run_1")[1])["projectable"] is True
+
+
+# --- degrade instead of raise (issue #383) ----------------------------------- #
+
+
+def test_resume_on_an_unprojectable_run_answers_instead_of_crashing(db: str) -> None:
+    """resume is the command a crashed session reaches for first; on a poisoned
+    log it used to die with the same pydantic traceback as everything else,
+    while the action tools kept authorising side effects."""
+    _poison(db)
+    code, out, err = run("--db", db, "resume", "run_1", "--env", "dataset=v3")
+
+    assert code == ExitCode.REQUIRES_HUMAN, out
+    assert "stops folding at sequence" in out, "name where the log stops folding"
+    assert "exceeds total" in out, "name the constraint, not just the pydantic header"
+    assert "Traceback" not in out and "Traceback" not in err
+
+    payload = json.loads(run("--db", db, "--json", "resume", "run_1", "--env", "dataset=v3")[1])
+    assert payload["mode"] == "request_human"
+    assert payload["safe"] is False
+    assert payload["contract"]["recovery_status"] != "safe_to_resume"
+
+
+def test_show_contract_on_an_unprojectable_run_carries_the_break(db: str) -> None:
+    """The contract is the machine-readable artifact; it must not read clean.
+
+    The prose rationale named the break from day one, but required_actions was
+    empty and next_allowed rendered as "continue" over a requires_human
+    verdict (#385 review): a caller keying on the structure saw nothing to do.
+    """
+    _poison(db)
+    code, out, err = run("--db", db, "show-contract", "run_1")
+
+    assert code == ExitCode.REQUIRES_HUMAN, out
+    assert "repair_log:" in out, "required_actions must name real work"
+    assert "next_allowed:      repair_log:" in out
+    assert "continue" not in out
+    assert "(through sequence " in out, "verified entries are qualified, not unqualified"
+    assert "projection (invalid" in out
+
+
+def test_status_on_an_unprojectable_run_names_the_break_and_fails(db: str) -> None:
+    _poison(db)
+    code, out, err = run("--db", db, "status", "run_1")
+
+    # Not OK: the figures describe a prefix of the log, and exit 0 would wave
+    # a poisoned run through a pipeline.
+    assert code == ExitCode.CORRUPTED
+    assert "PROJECTION FAILURE" in out
+    assert "TASK_UPDATED" in out
+    assert "Traceback" not in out and "Traceback" not in err
+
+
+def test_inspect_on_an_unprojectable_run_reports_the_known_prefix(db: str) -> None:
+    _poison(db)
+    code, out, _ = run("--db", db, "inspect", "run_1")
+
+    assert code == ExitCode.CORRUPTED
+    assert "PROJECTION FAILURE" in out
+    assert "0 completed" in out, "prefix figures, not the poisoned ones"
+
+
+def test_replay_on_an_unprojectable_run_does_not_certify(db: str) -> None:
+    _poison(db)
+    code, out, err = run("--db", db, "replay", "run_1")
+
+    assert code == ExitCode.CORRUPTED
+    assert "PROJECTION FAILURE" in out
+    assert "Traceback" not in out and "Traceback" not in err
+
+
+def test_a_healthy_run_is_unaffected_in_both_modes(db: str) -> None:
+    """No poison: status stays a clean exit 0 and resume still answers RESUME."""
+    from continuum.state.semantic import project
+
+    with SQLiteStorage(db) as store:
+        raised = project("run_1", store.read_events("run_1"))
+        degraded = project("run_1", store.read_events("run_1"), on_unprojectable="degrade")
+
+    assert degraded == raised
+    assert degraded.status.value == "valid"
+
+    code, out, err = run("--db", db, "status", "run_1")
+    assert code == ExitCode.OK, f"{out}{err}"
+    assert "PROJECTION FAILURE" not in out
+
+    code, out, err = run("--db", db, "resume", "run_1", "--env", "dataset=v3")
+    assert code == ExitCode.OK, f"{out}{err}"
+    assert (
+        json.loads(run("--db", db, "--json", "resume", "run_1", "--env", "dataset=v3")[1])["mode"]
+        == "resume"
+    )
+
+
+def test_a_healthy_compacted_run_still_resumes_after_degrade_landed(db: str) -> None:
+    """Regression guard for constraint 5 (compaction).
+
+    After compaction the live log has no RUN_STARTED; restore works only
+    because the anchor checkpoint covers the prefix. The degrade wiring must
+    not change that, and folding the post-anchor tail must merge nothing less
+    than archive+live when it does run.
+    """
+    assert run("--db", db, "compact", "run_1", "--force")[0] == ExitCode.OK
+
+    code, out, err = run("--db", db, "status", "run_1")
+    assert code == ExitCode.OK, f"a healthy compacted run must read cleanly: {out}{err}"
+    assert "PROJECTION FAILURE" not in out
+
+    # The anchor checkpoint carries no environment snapshot, so the dataset
+    # cannot be re-verified and resume lands on request_human; that is
+    # pre-existing behaviour and must not turn into a projection failure.
+    code, out, err = run("--db", db, "resume", "run_1", "--env", "dataset=v3")
+    assert code in (ExitCode.OK, ExitCode.REQUIRES_HUMAN), f"{out}{err}"
+    assert "PROJECTION FAILURE" not in out
+    assert "Traceback" not in err

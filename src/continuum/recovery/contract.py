@@ -94,12 +94,27 @@ def build_contract(
     verified: list[str] = []
     invalidated: list[str] = []
 
+    # A degraded fold (issue #383) changes what "verified" can claim: those
+    # components were checked against the last-good prefix only, so an
+    # unqualified list would assert an assurance the run cannot support, and a
+    # machine keying on verified/invalidated would read the contract as clean
+    # over a log that stops folding. Qualify every entry and record the break.
+    state = validation.state
+    projection_broken = (
+        state.status is StateStatus.INVALID and state.unprojectable_at_sequence is not None
+    )
     for entry in validation.report.statuses:
         name = _identifier(entry.component, entry.component_id)
         if entry.status is StateStatus.VALID:
+            if projection_broken:
+                name = f"{name} (through sequence {state.source_sequence})"
             verified.append(name)
         else:
             invalidated.append(f"{name} ({entry.status.value})")
+    if projection_broken:
+        invalidated.append(
+            f"projection (invalid: log stops folding at sequence {state.unprojectable_at_sequence})"
+        )
 
     next_action = plan.first.action_name if plan.first else None
 
@@ -107,6 +122,14 @@ def build_contract(
         reason = validation.report.reason
     if evidence is None:
         evidence = _validation_evidence(validation.report)
+    if projection_broken:
+        # The validation details describe the prefix and cannot name the break;
+        # without this the contract's evidence would read as a complete audit.
+        evidence = [
+            *evidence,
+            f"projection stopped at sequence {state.unprojectable_at_sequence} "
+            f"({state.unprojectable_event_type}): {state.unprojectable_reason}",
+        ]
     if scope is not None:
         named = sorted(set(scope))
         if named:
@@ -158,7 +181,15 @@ def render_contract(contract: RecoveryContract) -> str:
     if contract.required_actions:
         lines.append("required_actions:")
         lines += [f"  - {a}" for a in contract.required_actions]
-    lines.append(f"next_allowed:      {contract.next_allowed_action or 'continue'}")
+    # "continue" is only honest when resuming is actually permitted. A
+    # requires_human contract with no next step must not render permission
+    # into prose the gate never issued (issue #385 review).
+    fallback = (
+        "continue"
+        if contract.recovery_status is RecoverySafety.SAFE_TO_RESUME
+        else "none (settle required_actions first)"
+    )
+    lines.append(f"next_allowed:      {contract.next_allowed_action or fallback}")
     if contract.reason:
         lines.append(f"reason:            {contract.reason}")
     if contract.evidence:

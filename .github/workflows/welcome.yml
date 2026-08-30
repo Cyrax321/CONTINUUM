@@ -13,7 +13,39 @@ jobs:
       issues: write
       pull-requests: write
     steps:
+      - name: Check if first contribution
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const login = context.payload.sender.login;
+            const currentNumber = context.issue.number;
+            const isIssueEvent = !!context.payload.issue && !context.payload.pull_request;
+            // Check prior issues by this user
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              creator: login,
+              state: 'all',
+              per_page: 100
+            });
+            const priorIssues = issues.filter(i => !i.pull_request && i.number < currentNumber);
+            const isFirstIssue = priorIssues.length === 0;
+            // Check prior PRs by this user, correctly filtered by creator
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              per_page: 100
+            });
+            const priorPRs = pulls.filter(p => p.user && p.user.login === login && p.number < currentNumber);
+            const isFirstPR = priorPRs.length === 0;
+            // For each event type only consider the relevant history
+            const shouldWelcome = isIssueEvent ? isFirstIssue : isFirstPR;
+            core.setOutput('should_welcome', shouldWelcome ? 'true' : 'false');
+            console.log(`Welcome check for ${login}: isFirstIssue=${isFirstIssue} isFirstPR=${isFirstPR} shouldWelcome=${shouldWelcome}`);
       - uses: actions/first-interaction@v3
+        if: steps.check.outputs.should_welcome == 'true'
         with:
           # v3 of the action reads snake_case inputs; the older hyphenated
           # names are rejected as unexpected and issue_message then fails

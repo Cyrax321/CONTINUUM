@@ -667,3 +667,36 @@ def test_postgres_url_is_routed_to_postgres_backend() -> None:
 def test_an_unknown_scheme_is_rejected() -> None:
     with pytest.raises(ValueError, match="unsupported storage URL scheme"):
         open_storage("mysql://localhost/continuum")
+
+
+# --- parent directory creation (issue #358) ---------------------------------- #
+
+
+def test_open_storage_creates_parent_directories(tmp_path: Path) -> None:
+    path = tmp_path / "a" / "b" / "c.db"
+    storage = SQLiteStorage(f"sqlite://{path}")
+    storage.close()
+    assert path.exists()
+
+
+def test_open_storage_existing_directory_still_works(tmp_path: Path) -> None:
+    path = tmp_path / "existing" / "db.db"
+    path.parent.mkdir(parents=True)
+    storage = SQLiteStorage(f"sqlite://{path}")
+    storage.close()
+    assert path.exists()
+
+
+def test_open_storage_memory_still_works() -> None:
+    first = SQLiteStorage(":memory:")
+    first.close()
+    second = open_storage(":memory:")
+    second.close()
+    assert True
+
+
+def test_open_storage_creates_parent_for_plain_path(tmp_path: Path) -> None:
+    path = tmp_path / "x" / "y" / "plain.db"
+    storage = SQLiteStorage(f"sqlite://{path}")
+    storage.close()
+    assert path.exists()

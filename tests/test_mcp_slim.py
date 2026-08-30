@@ -7,7 +7,7 @@ def test_slim_mode_exposes_only_resume_subset(monkeypatch) -> None:
     monkeypatch.setenv("CONTINUUM_MCP_SLIM", "1")
     server, _ = build_server(storage=storage)
     names = {tool.name for tool in server._tool_manager._tools.values()}
-    assert names == {"continuum_resume", "continuum_validate", "continuum_confirm"}
+    assert names == {"continuum_resume", "continuum_validate", "continuum_list_actions"}
 
 
 def test_full_mode_exposes_all_tools(monkeypatch) -> None:
@@ -17,4 +17,4 @@ def test_full_mode_exposes_all_tools(monkeypatch) -> None:
     names = {tool.name for tool in server._tool_manager._tools.values()}
     assert "continuum_record_progress" in names
     assert "continuum_checkpoint" in names
-    assert len(names) == 11
+    assert len(names) == 12

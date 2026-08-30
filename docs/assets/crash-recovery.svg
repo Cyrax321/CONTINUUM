@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="1784" viewBox="0 0 920 1784" role="img" aria-label="Crash recovery: hard kill, refusal, reconcile, resume">
+<rect width="100%" height="100%" rx="12" fill="#0B1220"/>
+<rect x="12" y="12" width="896" height="1760" rx="10" fill="#0F1A2E" stroke="#1F2F4A" stroke-width="1.2"/>
+<text x="18" y="28" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="11" fill="#8A9BA8" letter-spacing="0.6">CONTINUUM - crash recovery (real os._exit 9, real side effect)</text>
+<text x="902" y="28" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="10" fill="#6B7D8D" text-anchor="end">regenerable via demo-run/generate_crash_visual.py</text>
+<line x1="18" y1="38" x2="902" y2="38" stroke="#1F2F4A" stroke-width="0.8" stroke-dasharray="4 6"/>
+<text x="18" y="60" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#5EE9FF" xml:space="preserve">$ python demo-run/worker.py  # dataset v3, will hard-kill at doc 399</text>
+<text x="18" y="76" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">    created GitHub issue #481</text>
+<text x="18" y="92" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">    PROCESS TERMINATED</text>
+<text x="18" y="108" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#FF8A5B" xml:space="preserve">[exit code 9 - hard kill, no cleanup]  // os._exit(9)</text>
+<text x="18" y="140" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#5EE9FF" xml:space="preserve">$ continuum inspect run_4821  # what survived the kill</text>
+<text x="18" y="156" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">run:         run_4821</text>
+<text x="18" y="172" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">goal:        Analyze 1,000 documents (v1)</text>
+<text x="18" y="188" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">version:     v2  (events 1..408)</text>
+<text x="18" y="204" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">progress:    400 completed, 600 pending, 0 failed</text>
+<text x="18" y="220" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">decisions:   0 (0 valid)</text>
+<text x="18" y="236" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">findings:    1</text>
+<text x="18" y="252" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">evidence:    1</text>
+<text x="18" y="268" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">pending:     0 task(s)</text>
+<text x="18" y="284" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">plan:       (none)</text>
+<text x="18" y="300" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">dependencies:</text>
+<text x="18" y="316" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  - dataset: v3 [valid]</text>
+<text x="18" y="348" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#5EE9FF" xml:space="preserve">$ continuum resume run_4821 --env dataset=v4  # dataset moved while down</text>
+<text x="18" y="364" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">CONTINUUM RECOVERY</text>
+<text x="18" y="396" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">Run: run_4821</text>
+<text x="18" y="412" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">Checkpoint: v2</text>
+<text x="18" y="444" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">State validation:</text>
+<text x="18" y="460" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  [!!] external dependency dataset - v3 -&gt; v4</text>
+<text x="18" y="476" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  [!!] evidence paper_128 - source &#x27;dataset&#x27; changed</text>
+<text x="18" y="492" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  [!!] finding finding_17 - rests on changed evidence: paper_128</text>
+<text x="18" y="508" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  [ok] goal - v1</text>
+<text x="18" y="524" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  [ok] progress - 400 completed</text>
+<text x="18" y="556" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">Action ledger:</text>
+<text x="18" y="572" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  [!!] github.create_issue: outcome unknown (id action_009a7fc)</text>
+<text x="18" y="604" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#FF8A5B" xml:space="preserve">Recovery decision: REQUEST_HUMAN</text>
+<text x="18" y="620" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  because 1 external side effect(s) have unknown outcomes</text>
+<text x="18" y="636" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  because at least one repair needs a person</text>
+<text x="18" y="668" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">Repairs required:</text>
+<text x="18" y="684" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  1. [human] reconcile_action action_009a7fca6636c9f534335fd7db4d22e9 - github.create_issue was interrupted; the si...</text>
+<text x="18" y="700" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  2. [auto]  revalidate_dependency dataset - v3 -&gt; v4</text>
+<text x="18" y="716" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  3. [auto]  rederive_evidence paper_128 - source &#x27;dataset&#x27; changed</text>
+<text x="18" y="732" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  4. [auto]  rederive_finding finding_17 - rests on changed evidence: paper_128</text>
+<text x="18" y="764" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">Next permitted action: reconcile_action:action_009a7fca6636c9f534335fd7db4d22e9</text>
+<text x="18" y="796" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">Next steps:</text>
+<text x="18" y="812" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  1. check whether &#x27;github.create_issue&#x27; actually reached the outside world, then call continuum_reconcil...</text>
+<text x="18" y="828" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  2. re-pin dependency &#x27;dataset&#x27;: rerun with `--env dataset=&lt;current version&gt;` after confirming its...</text>
+<text x="18" y="844" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  3. re-derive paper_128 from its source, then re-validate</text>
+<text x="18" y="860" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  4. re-derive finding_17 from its source, then re-validate</text>
+<text x="18" y="892" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">What previous attempts changed (informed retry):</text>
+<text x="18" y="908" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  provenance: derived from deterministic</text>
+<text x="18" y="924" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  still failing: external_dependency:dataset (v3 -&gt; v4)</text>
+<text x="18" y="940" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  still failing: evidence:paper_128 (source &#x27;dataset&#x27; changed)</text>
+<text x="18" y="956" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  still failing: finding:finding_17 (rests on changed evidence: paper_128)</text>
+<text x="18" y="972" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  avoid repeating: evidence:paper_128: stale; re-derive from its source before citing it again</text>
+<text x="18" y="988" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  avoid repeating: external_dependency:dataset: changed under the run; re-pin with --env before trusting cached res...</text>
+<text x="18" y="1004" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  avoid repeating: finding:finding_17: stale; re-derive from its source before citing it again</text>
+<text x="18" y="1020" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  avoid repeating: github.create_issue (action_009a7fc): outcome unknown; reconcile before any retry</text>
+<text x="18" y="1052" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">Run with --repair to record the repair plan, or resolve the items above first.</text>
+<text x="18" y="1068" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#FF8A5B" xml:space="preserve">[exit code 20 - refusal path, safe:false]</text>
+<text x="18" y="1100" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#5EE9FF" xml:space="preserve">$ # reconcile the uncertain side effect (probe asks the real system)</text>
+<text x="18" y="1116" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">unresolved before: 1</text>
+<text x="18" y="1132" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">    confirmed as performed: github.create_issue</text>
+<text x="18" y="1148" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">    unresolved after:  0</text>
+<text x="18" y="1180" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#5EE9FF" xml:space="preserve">$ python demo-run/worker.py  # fresh process, same DB, dataset v3</text>
+<text x="18" y="1196" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">    resumed at 400 documents (nothing reprocessed)</text>
+<text x="18" y="1212" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">    finished at 1000 documents</text>
+<text x="18" y="1228" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#FFD166" xml:space="preserve">[exit code 0]</text>
+<text x="18" y="1260" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#5EE9FF" xml:space="preserve">$ continuum resume run_4821 --env dataset=v3  # now safe to continue</text>
+<text x="18" y="1276" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">CONTINUUM RECOVERY</text>
+<text x="18" y="1308" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">Run: run_4821</text>
+<text x="18" y="1324" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">Checkpoint: v6</text>
+<text x="18" y="1356" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">State validation:</text>
+<text x="18" y="1372" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  [ok] external dependency dataset - verified unchanged</text>
+<text x="18" y="1388" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  [ok] goal - v1</text>
+<text x="18" y="1404" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  [ok] progress - 1000 completed</text>
+<text x="18" y="1436" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">Action ledger:  [ok] no uncertain side effects</text>
+<text x="18" y="1468" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#2ECC71" xml:space="preserve">Recovery decision: RESUME</text>
+<text x="18" y="1484" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  because all state verified against the environment</text>
+<text x="18" y="1516" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">Next permitted action: continue</text>
+<text x="18" y="1548" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">What previous attempts changed (informed retry):</text>
+<text x="18" y="1564" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  provenance: derived from deterministic</text>
+<text x="18" y="1580" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">  settled github.create_issue: effect confirmed present</text>
+<text x="18" y="1596" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#FFD166" xml:space="preserve">[exit code 0 - allow path when safe]</text>
+<text x="18" y="1628" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#5EE9FF" xml:space="preserve">$ # final audit: did we repeat work or duplicate the side effect?</text>
+<text x="18" y="1644" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">documents processed      1000</text>
+<text x="18" y="1660" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">    duplicates               0</text>
+<text x="18" y="1676" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">    GitHub issues created    1</text>
+<text x="18" y="1692" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">    progress recovered       1000/1000</text>
+<text x="18" y="1708" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#E6E8EB" xml:space="preserve">    event chain verified     True</text>
+<text x="18" y="1740" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#2ECC71" xml:space="preserve">    No work repeated. No side effect duplicated.</text>
+<text x="18" y="1772" font-family="JetBrains Mono, SF Mono, Menlo, monospace" font-size="12" fill="#8A9BA8" xml:space="preserve"># Regenerate: python demo-run/generate_crash_visual.py</text>
+<text x="18" y="1774" font-family="Inter, system-ui, sans-serif" font-size="9" fill="#6B7D8D">Exit codes are a safety contract: only a verified-safe run exits 0. Refusal is the correct behavior when the ledger holds uncertainty or the environment moved.</text>
+</svg>

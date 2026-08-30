@@ -138,6 +138,25 @@ def test_completed_effect_blocks_the_duplicate(db: str, gateway: str) -> None:
     assert "already completed" in body["reason"]
 
 
+def test_a_padded_body_field_still_hits_the_duplicate_verdict(db: str, gateway: str) -> None:
+    """The proxy has to derive the same key `gate` does (issue #361).
+
+    The effect on ``invoice:I-4`` is already completed and the retry body says
+    ``" I-4\\n"``, which names the same invoice. Before the fix the gateway
+    rendered ``invoice: I-4\\n``, found no record of itself, and answered with
+    claim instructions instead of the already-completed refusal -- so a client
+    following those instructions would have sent the invoice a second time.
+    """
+    key = claim(db, "invoice:I-4")
+    with SQLiteStorage(db) as store:
+        from continuum.actions.ledger import ActionLedger as AL
+
+        AL(store, "run_1").complete(key, external_id="sent")
+    status, body = post(gateway, "/v1/invoices", {"id": " I-4\n"})
+    assert status == 403
+    assert "already completed" in body["reason"]
+
+
 def test_unknown_host_is_refused_fail_closed(db: str, gateway: str) -> None:
     key = claim(db, "invoice:I-9")
     del key
@@ -159,6 +178,68 @@ def test_method_mismatch_is_refused(db: str, gateway: str) -> None:
 def test_body_missing_template_field_denies_with_config_error(db: str, gateway: str) -> None:
     claim(db, "invoice:seed")
     status, body = post(gateway, "/v1/invoices", {})
+    assert status == 403
+    assert "key template" in body["reason"]
+
+
+def _post_raw(addr: str, path: str, raw: str | bytes, host: str = "api.example.com"):
+    """POST a body verbatim, bypassing the JSON encoding of :func:`post`.
+
+    Accepts ``bytes`` as well as ``str`` so a test can send a body that is not
+    valid UTF-8, which no encoding of a ``str`` can produce.
+    """
+    conn = http.client.HTTPConnection(addr, timeout=10)
+    conn.request(
+        "POST",
+        path,
+        body=raw.encode() if isinstance(raw, str) else raw,
+        headers={"Host": host, "Content-Type": "application/json"},
+    )
+    resp = conn.getresponse()
+    data = json.loads(resp.read() or b"{}")
+    conn.close()
+    return resp.status, data
+
+
+def test_malformed_json_is_refused_with_400(db: str, gateway: str) -> None:
+    """Broken JSON must name itself, not masquerade as a missing field (#323).
+
+    ``_body`` swallowed ``JSONDecodeError`` and returned an empty mapping, so a
+    request whose body never parsed was carried on to the key derivation and
+    refused with ``key template 'invoice:{id}' needs body field(s) ['id']``.
+    The operator then goes looking for a field they did send, in a body the
+    gateway never read.
+    """
+    claim(db, "invoice:seed")
+    status, body = _post_raw(gateway, "/v1/invoices", '{"id": "I-5"')
+    assert status == 400
+    assert "invalid JSON" in body["error"]
+
+
+def test_a_body_that_is_not_utf8_is_refused_with_400(db: str, gateway: str) -> None:
+    """The decode half of "cannot be read" answers the same way (#323).
+
+    ``json.loads`` decodes bytes before it parses them, so a body that is not
+    valid UTF-8 raises ``UnicodeDecodeError`` rather than ``JSONDecodeError``.
+    Uncaught, that escapes the handler and the connection closes with no
+    response at all, so the caller cannot tell a rejected body from a crashed
+    proxy.
+    """
+    claim(db, "invoice:seed")
+    status, body = _post_raw(gateway, "/v1/invoices", b'{"id": "\xff\xfe I-5"}')
+    assert status == 400
+    assert "invalid JSON" in body["error"]
+
+
+def test_an_empty_body_is_still_an_empty_mapping(db: str, gateway: str) -> None:
+    """Only broken JSON becomes a 400; absent is not the same as malformed.
+
+    A route whose template needs no fields is legitimately callable with no body,
+    so the empty case has to keep reaching the decision table rather than being
+    swept up by the new refusal.
+    """
+    claim(db, "invoice:seed")
+    status, body = _post_raw(gateway, "/v1/invoices", "")
     assert status == 403
     assert "key template" in body["reason"]
 

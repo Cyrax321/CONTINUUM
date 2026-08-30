@@ -64,6 +64,9 @@ tools are gated by the allowlist (see Security).
 
 Eleven tools: three read-only, eight mutating.
 
+Read-only responses `continuum_resume` and `continuum_validate` include a
+`constraint_pins` block: per-pin status (`present`, `absent`, `unverifiable`), grace deadline, and flagged set derived from reconstruction accounting (hash-tagged markers in the recovery context, issue #419). The CLI renders flagged pins prominently with TTY-aware colour while piped output stays byte-identical modulo colour codes. No gating changes live here; strict escalation remains in the accounting layer.
+
 ## build_server
 
 `continuum.mcp.server.build_server(database=None, *, policy=None, auth=None) -> tuple[Server, Storage]`

@@ -103,6 +103,20 @@ jobs:
       - name: mypy, strict type-check
         run: mypy src/continuum
 
+  markdownlint:
+    name: Markdown lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DavidAnson/markdownlint-cli2-action@v18
+        with:
+          globs: |
+            CONTRIBUTING.md
+            README.md
+            SECURITY.md
+            CODE_OF_CONDUCT.md
+          config: .markdownlint-cli2.jsonc
+
   # Issue #279: wheels were built only on release tags, so nobody could install
   # current main without cloning. Every push to main now produces a wheel and
   # sdist artifact, smoke-tested into a clean venv before upload.
@@ -137,7 +151,7 @@ jobs:
           /tmp/wheel-check/bin/continuum --version
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7
         with:
           name: dist-main
           path: dist/

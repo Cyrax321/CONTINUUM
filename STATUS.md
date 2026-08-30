@@ -17,6 +17,22 @@ believed, and what is neither.
 
 ---
 
+## In flight: unprojectable logs degrade instead of dying (#383, PR #385)
+
+As of 2026-08-25, PR #383's fix is open on `fix/degrade-unprojectable-fold`
+(three commits), reviewed through two rounds. The fold accepts
+`on_unprojectable="raise"|"degrade"` (default byte-for-byte unchanged);
+degrade returns the last-good prefix marked `SemanticState.status=INVALID`
+naming where folding stopped; recovery decides REQUEST_HUMAN and the contract
+carries a `repair_log` step. Checkpoint digests and persisted bodies exclude
+the projection-bookkeeping fields, so databases written before or after the
+change load either way (cross-version tests pin serialised fixtures in
+`tests/test_checkpoint_compat.py`). Verified on the branch: 1425 passed,
+23 skipped, ruff clean, strict mypy clean on 104 files. Repair/amend (option
+2) and fork-from-last-good-prefix (option 3) remain unbuilt by design.
+
+---
+
 ## Full-gate audit (2026-08-24)
 
 Ran against `main` at `8013f6a` in a clean worktree, Python 3.13
@@ -270,7 +286,7 @@ A module-by-module audit filed seven issues, each reproduced against clean
 | [#18](https://github.com/Cyrax321/CONTINUUM/issues/18) | **`events` breaks the exit-code contract.** `continuum events $MISSING` exits 0 with "No events.", while every other run-scoped command exits 2; `events` is absent from the enforcing parametrised test. Tagged `good first issue`. | Medium | Resolved: `1bcc933` gates `cmd_events` on `get_run` (which raises `RunNotFound`, mapped to `NOT_FOUND` by the dispatcher) and adds `events` to the missing-run parametrised test. |
 | Orphaned-WAL startup crash | **MCP server fails to connect after a hard-kill.** A killed server leaves `<db>-wal`/`<db>-shm` sidecars that make `PRAGMA journal_mode=WAL` throw `disk I/O error` on the next launch. | Medium | Resolved: `_open_server_storage` in `src/continuum/mcp/server.py` clears orphaned sidecars and retries the open once on `OperationalError` (re-raising when there was nothing to clear), with two regression tests in `tests/test_mcp_server.py`. See the MCP server section. |
 | Issue #6 e2e dedup defect | **`continuum_intercept_action` deduplicated on raw argument formatting, not resource identity.** Three real Claude Code e2e runs showed session 2 getting `proceed: true` for invoices session 1 already sent, because relative-path vs absolute-path arguments hashed to different idempotency keys. Correctness survived only because the agents cross-checked the outbox and refused the flag. | High | Resolved twice over: the tool accepts a stable `key` (e.g. `invoice:INV-001`) that is what makes two attempts the same action, and a defensive layer now covers the no-key and argument-drift cases (path canonicalization plus a token-based identity fallback in `ActionLedger.claim`). Regression tests: `test_a_stable_key_deduplicates_across_argument_shape_changes` plus the identity-match and canonicalization tests in `tests/test_action_ledger.py`. |
-| Stale editable metadata | `pip show continuum-agent` reports its editable location as `Desktop/untitled folder 2` (the pre-move path); imports still resolve correctly, so it is cosmetic. A clean `pip install -e ".[mcp]"` from the current project root fixes it. | Low | Open |
+| Stale editable metadata | `pip show continuum-agent` reported its editable location as `Desktop/untitled folder 2` (the pre-move path); imports still resolved correctly, so it was cosmetic. A clean-venv reproduction at `b7d07b8` reported the current repository root as the editable location and imported `continuum` from its `src` tree, confirming the package configuration is correct. | Low | Resolved: uninstall/reinstall remediation documented in `CONTRIBUTING.md`. |
 
 ### Launch audit (2026-08-14)
 

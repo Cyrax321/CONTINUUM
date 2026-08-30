@@ -92,6 +92,51 @@ def test_human_review_points_at_confirm(db: str) -> None:
         assert confirm
 
 
+# --- the self-report note --------------------------------------------------------- #
+
+
+def test_self_report_note_is_withheld_while_an_action_is_unresolved(db: str) -> None:
+    """ "Nothing is wrong" must not be said over an unreconciled side effect (#369).
+
+    An uncertain action reaches `request_human` through
+    `decision.uncertain_actions`, never through `report.statuses`, so a predicate
+    that scanned only the validation report saw goal and progress alone and
+    emitted the note beside a contract blocked on an unknown outcome. The agent
+    was told "Work is not blocked" and pointed straight past the one thing this
+    system exists to stop it walking past.
+    """
+    from continuum.recovery.guidance import self_report_guidance
+
+    seed_uncertain(db)
+    decision = assess(db)
+    assert decision.uncertain_actions, "fixture must leave an unresolved action"
+    assert self_report_guidance(decision) == {}
+
+
+def test_self_report_note_is_given_when_only_provenance_blocks(db: str) -> None:
+    """The note exists for a real case, so keep proving it still appears.
+
+    A run whose only fault is that an agent reported its own goal and progress is
+    not blocked, and the obvious next move (`continuum_confirm`) is refused by
+    design, so without this note the caller is stranded with no legal way forward.
+    """
+    from continuum.models import Origin
+    from continuum.recovery.guidance import self_report_guidance
+
+    with SQLiteStorage(db) as store:
+        store.append_event(
+            "run_1",
+            EventType.TASK_UPDATED,
+            {"completed": 1, "total": 4, "pending": 3, "failed": 0},
+            source=Origin.EXTERNAL_AGENT,
+        )
+    decision = assess(db)
+    assert not decision.uncertain_actions
+    note = self_report_guidance(decision)
+    assert note, decision.mode
+    assert "Nothing is wrong with this run" in note["self_report_guidance"]
+
+
 # --- CLI + MCP surfaces ------------------------------------------------------------ #
 
 

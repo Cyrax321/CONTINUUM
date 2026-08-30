@@ -33,7 +33,8 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from continuum.events import EventType
-from continuum.models import StateStatus
+from continuum.models import Origin, StateStatus
+from continuum.provenance_map import derived_provenance_for_events
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -44,13 +45,22 @@ if TYPE_CHECKING:
 
 __all__ = [
     "INFORMED_RETRY_CAP_BYTES",
+    "ATTEMPT_LESSON_FIELD_CAP",
+    "ATTEMPT_LESSON_TOTAL_CAP",
     "build_informed_retry",
     "render_informed_retry",
+    "build_attempt_lesson",
+    "render_attempt_lesson",
+    "record_attempt_lesson",
 ]
 
 #: Serialized blocks larger than this are shrunk deterministically rather
 #: than allowed to grow with run history (same spirit as the #235 cap).
 INFORMED_RETRY_CAP_BYTES = 4096
+
+#: Per-field cap for AttemptLesson (issue #313) - 512 chars per field, 2KB total.
+ATTEMPT_LESSON_FIELD_CAP = 512
+ATTEMPT_LESSON_TOTAL_CAP = 2048
 
 _MAX_STEPS = 8
 _MAX_SETTLED = 5
@@ -127,6 +137,7 @@ def build_informed_retry(
 
     avoid = _avoid_rules(failures, uncertain_actions)
 
+    derived_origin = derived_provenance_for_events(events)
     block: dict[str, Any] = {
         "attempts": len(starts),
         "completed_recoveries": len(completions),
@@ -137,6 +148,7 @@ def build_informed_retry(
         "settled_effects": settled_entries,
         "current_failures": current_failures,
         "avoid": avoid,
+        "derived_origin": derived_origin.value,
     }
     return _fit(block)
 
@@ -202,9 +214,183 @@ def _fit(block: dict[str, Any]) -> dict[str, Any]:
     return candidate
 
 
+def _derived_label(block: dict[str, Any]) -> str | None:
+    raw = block.get("derived_origin")
+    if raw is None:
+        return "unverified (derived from unverified sources)"
+    try:
+        origin = Origin(raw)
+    except ValueError:
+        return "unverified (derived from unverified sources)"
+    if origin.self_certified:
+        return f"unverified (derived from {origin.value})"
+    return f"derived from {origin.value}"
+
+
+def _truncate(text: str, cap: int = ATTEMPT_LESSON_FIELD_CAP) -> str:
+    if len(text) <= cap:
+        return text
+    return text[:cap]
+
+
+def _lesson_total_bytes(lesson: Any) -> int:
+    import json
+
+    return len(json.dumps(lesson.model_dump(mode="json"), sort_keys=True).encode())
+
+
+def build_attempt_lesson(
+    decision: Any,
+    *,
+    uncertain_actions: Any | None = None,
+    ledger_entries: Any | None = None,
+    now: Any | None = None,
+) -> Any:
+    from continuum.security.hashing import stable_hash
+
+    run_id = getattr(decision, "run_id", "unknown")
+    rationale = list(getattr(decision, "rationale", []) or [])
+    scars = (
+        uncertain_actions
+        if uncertain_actions is not None
+        else getattr(decision, "uncertain_actions", [])
+    )
+    scars = list(scars or [])
+    validation = getattr(decision, "validation", None)
+    report = getattr(validation, "report", None) if validation else None
+    statuses = list(getattr(report, "statuses", []) or []) if report else []
+    source_evidence = [
+        str(getattr(entry, "detail", "") or "")
+        for entry in statuses
+        if getattr(entry, "detail", "")
+    ]
+    source_evidence = [s for s in source_evidence if s]
+    falsified_raw = str(rationale[0]) if rationale else "attempt did not achieve its goal"
+    falsified = _truncate(falsified_raw.strip(), ATTEMPT_LESSON_FIELD_CAP)
+    env_delta = ""
+    for entry in statuses:
+        component = getattr(getattr(entry, "component", None), "value", "")
+        if component == "external_dependency":
+            env_delta = _truncate(str(getattr(entry, "detail", "") or ""), ATTEMPT_LESSON_FIELD_CAP)
+            break
+    if not env_delta:
+        for entry in statuses:
+            detail = str(getattr(entry, "detail", "") or "")
+            if detail:
+                env_delta = _truncate(detail, ATTEMPT_LESSON_FIELD_CAP)
+                break
+    scar_ids = [str(getattr(action, "action_id", "") or "") for action in scars]
+    scar_ids = [sid for sid in scar_ids if sid]
+    from continuum.recovery.summary import _avoid_rules
+
+    avoid_rules = _avoid_rules(statuses, scars)
+    next_avoid = _truncate(str(avoid_rules[0]) if avoid_rules else "", ATTEMPT_LESSON_FIELD_CAP)
+    source_evidence = [_truncate(str(s), ATTEMPT_LESSON_FIELD_CAP) for s in source_evidence[:8]]
+    ledger_len = len(list(ledger_entries or []))
+    attempt_id_raw = stable_hash(
+        {
+            "run_id": str(run_id),
+            "rationale": sorted(rationale),
+            "scars": sorted(scar_ids),
+            "ledger_len": ledger_len,
+        }
+    )
+    attempt_id = _truncate(attempt_id_raw[:16], ATTEMPT_LESSON_FIELD_CAP)
+    if not attempt_id:
+        attempt_id = "attempt_1"
+    created = (
+        now if now is not None else __import__("continuum.models", fromlist=["utcnow"]).utcnow()
+    )
+    lesson = __import__("continuum.models", fromlist=["AttemptLesson"]).AttemptLesson(
+        attempt_id=attempt_id,
+        falsified=falsified,
+        env_delta=env_delta,
+        scar_action_ids=scar_ids[:16],
+        next_avoid=next_avoid,
+        source_evidence=source_evidence,
+        created_at=created,
+    )
+    while _lesson_total_bytes(lesson) > 2048:
+        fields = ["falsified", "env_delta", "next_avoid"]
+        largest = max(fields, key=lambda name: len(getattr(lesson, name)))
+        current = getattr(lesson, largest)
+        if not current:
+            if lesson.source_evidence:
+                trimmed = list(lesson.source_evidence)
+                trimmed = (
+                    trimmed[:-1]
+                    if len(trimmed) > 1
+                    else [trimmed[0][: max(len(trimmed[0]) // 2, 0)]]
+                )
+                lesson = lesson.model_copy(update={"source_evidence": trimmed})
+                continue
+            break
+        truncated = current[: max(len(current) // 2, 0)]
+        lesson = lesson.model_copy(update={largest: truncated})
+        if _lesson_total_bytes(lesson) <= 2048:
+            break
+        if all(len(getattr(lesson, name)) == 0 for name in fields) and not lesson.source_evidence:
+            break
+    return lesson
+
+
+def render_attempt_lesson(lesson: Any) -> list[str]:
+    if isinstance(lesson, dict):
+        attempt_id = str(lesson.get("attempt_id", ""))
+        falsified = str(lesson.get("falsified", ""))
+        env_delta = str(lesson.get("env_delta", ""))
+        scars = list(lesson.get("scar_action_ids", []) or [])
+        next_avoid = str(lesson.get("next_avoid", ""))
+        evidence = list(lesson.get("source_evidence", []) or [])
+    else:
+        attempt_id = str(getattr(lesson, "attempt_id", ""))
+        falsified = str(getattr(lesson, "falsified", ""))
+        env_delta = str(getattr(lesson, "env_delta", ""))
+        scars = list(getattr(lesson, "scar_action_ids", []) or [])
+        next_avoid = str(getattr(lesson, "next_avoid", ""))
+        evidence = list(getattr(lesson, "source_evidence", []) or [])
+    lines = []
+    if attempt_id:
+        lines.append(f"attempt {attempt_id}: {falsified}" if falsified else f"attempt {attempt_id}")
+    elif falsified:
+        lines.append(f"falsified: {falsified}")
+    if env_delta:
+        lines.append(f"env delta: {env_delta}")
+    if scars:
+        lines.append(f"scar actions: {', '.join(scars[:5])}")
+    if next_avoid:
+        lines.append(f"next avoid: {next_avoid}")
+    for ev in evidence[:3]:
+        lines.append(f"evidence: {ev}")
+    return lines
+
+
+def record_attempt_lesson(
+    storage: Any,
+    run_id: str,
+    decision: Any,
+    *,
+    uncertain_actions: Any | None = None,
+    ledger_entries: Any | None = None,
+) -> Any:
+    lesson = build_attempt_lesson(
+        decision, uncertain_actions=uncertain_actions, ledger_entries=ledger_entries
+    )
+    storage.append_event(
+        run_id,
+        __import__("continuum.events", fromlist=["EventType"]).EventType.ATTEMPT_LESSON,
+        lesson.model_dump(mode="json"),
+        source=__import__("continuum.models", fromlist=["Origin"]).Origin.DETERMINISTIC,
+    )
+    return lesson
+
+
 def render_informed_retry(block: dict[str, Any]) -> list[str]:
     """Human/agent-readable lines for briefing and resume output."""
     lines: list[str] = []
+    label = _derived_label(block)
+    if label:
+        lines.append(f"provenance: {label}")
     attempts = block.get("attempts", 0)
     if attempts:
         lines.append(f"previous attempt(s): {attempts}")

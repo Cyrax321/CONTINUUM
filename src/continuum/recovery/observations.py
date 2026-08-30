@@ -60,7 +60,7 @@ def _entry_from_event(event: Event, root: Path) -> dict[str, Any] | None:
     if not isinstance(tool, str) or not isinstance(path, str) or not path:
         return None
     sha = payload.get("sha256") if isinstance(payload.get("sha256"), str) else None
-    size = payload.get("bytes") if isinstance(payload.get("bytes"), int) else None
+    size = payload.get("bytes") if type(payload.get("bytes")) is int else None
     resolved = Path(path)
     if not resolved.is_absolute():
         resolved = root / resolved

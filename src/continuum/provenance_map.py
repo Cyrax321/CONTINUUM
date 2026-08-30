@@ -51,6 +51,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 from continuum.models import Origin, StateStatus
 from continuum.security.provenance import TrustLevel
@@ -168,6 +169,60 @@ def summarize(
     return ProvenanceView(origin=origin, state_status=state_status, trust=trust)
 
 
+# Authority ranking for the non-amplification invariant (issue #392).
+_AUTHORITY_RANK: dict[CanonicalProvenance, int] = {
+    CanonicalProvenance.AGENT_ASSERTED: 0,
+    CanonicalProvenance.INFERRED: 1,
+    CanonicalProvenance.UNKNOWN: 2,
+    CanonicalProvenance.CONTRADICTED: 3,
+    CanonicalProvenance.STALE: 4,
+    CanonicalProvenance.REQUIRES_REVIEW: 5,
+    CanonicalProvenance.OBSERVED: 6,
+    CanonicalProvenance.VERIFIED: 7,
+}
+
+_CANONICAL_TO_ORIGIN: dict[CanonicalProvenance, Origin] = {
+    CanonicalProvenance.AGENT_ASSERTED: Origin.EXTERNAL_AGENT,
+    CanonicalProvenance.INFERRED: Origin.IMPORTED,
+    CanonicalProvenance.UNKNOWN: Origin.IMPORTED,
+    CanonicalProvenance.CONTRADICTED: Origin.EXTERNAL_AGENT,
+    CanonicalProvenance.STALE: Origin.EXTERNAL_AGENT,
+    CanonicalProvenance.REQUIRES_REVIEW: Origin.EXTERNAL_AGENT,
+    CanonicalProvenance.OBSERVED: Origin.DETERMINISTIC,
+    CanonicalProvenance.VERIFIED: Origin.HUMAN,
+}
+
+
+def min_canonical(provenances: list[CanonicalProvenance]) -> CanonicalProvenance:
+    if not provenances:
+        return CanonicalProvenance.AGENT_ASSERTED
+    return min(provenances, key=lambda p: _AUTHORITY_RANK[p])
+
+
+def derived_origin(origins: list[Origin]) -> Origin:
+    if not origins:
+        return Origin.EXTERNAL_AGENT
+    canonicals = [canonical_origin(o) for o in origins]
+    weakest = min_canonical(canonicals)
+    return _CANONICAL_TO_ORIGIN[weakest]
+
+
+def derived_provenance_for_events(events: Any) -> Origin:
+    origins: list[Origin] = []
+    for e in events:
+        src = getattr(e, "source", None)
+        if isinstance(src, Origin):
+            origins.append(src)
+        elif isinstance(src, str):
+            try:
+                origins.append(Origin(src))
+            except ValueError:
+                origins.append(Origin.EXTERNAL_AGENT)
+        else:
+            origins.append(Origin.EXTERNAL_AGENT)
+    return derived_origin(origins)
+
+
 __all__ = [
     "CanonicalProvenance",
     "ProvenanceView",
@@ -175,4 +230,7 @@ __all__ = [
     "canonical_state_status",
     "canonical_trust",
     "summarize",
+    "min_canonical",
+    "derived_origin",
+    "derived_provenance_for_events",
 ]

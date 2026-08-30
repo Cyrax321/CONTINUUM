@@ -24,12 +24,13 @@ continuum gate                                   # pre-tool-use verdict: allow o
 continuum briefing                               # session-start context injection
 continuum gateway --port 8765                    # enforcing proxy for registered upstreams
 continuum hooks install <client> [--with-gate]   # wire a coding CLI (claude-code, gemini, codex)
+continuum rewind <run_id> --to <checkpoint>      # revert workspace and projection to checkpoint [--force] [--dry-run]
 ```
 
 Every command accepts `--json`. `inspect`, `history`, `events`, `diff`, `validate`, `resume`,
 `verify`, `actions`, `show-contract`, `replay`, `gate` and `briefing` never write, so they are safe
 against a live database while an agent is mid-run. The mutating commands (`start`, `checkpoint`,
-`confirm`, `complete`, `observe`, `reconcile`, `gateway`) say so in their help.
+`confirm`, `complete`, `observe`, `reconcile`, `gateway`, `rewind`) say so in their help.
 
 #### Registries are executable configuration
 

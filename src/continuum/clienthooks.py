@@ -139,6 +139,12 @@ def observe_event_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
         return payload
     payload["bytes"] = size
     payload["sha256"] = digest.hexdigest()
+    try:
+        from continuum.environment.file_snapshot import snapshot_file
+
+        snapshot_file(path, sha256=payload["sha256"])
+    except Exception:
+        pass
     return payload
 
 

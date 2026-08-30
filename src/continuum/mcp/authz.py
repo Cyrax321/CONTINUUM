@@ -152,7 +152,31 @@ class AuthPolicy:
             expected = self.expected
         # An empty expected secret cannot be presented, so it must refuse.
         if not expected or not token or token != expected:
-            raise NotAuthenticated("the caller did not present the expected shared secret")
+            if self.tokens is not None:
+                if self.source == CLIENT_TOKENS_ENV_VAR:
+                    guidance = (
+                        "expected the secret registered for this caller "
+                        f"(set {CLIENT_TOKENS_ENV_VAR} on the server and pass the "
+                        "matching value in _meta.authToken during initialize)"
+                    )
+                else:
+                    guidance = (
+                        "expected the secret registered for this caller "
+                        "(configure the per-client token mapping in the embedding "
+                        "application and pass the matching value in _meta.authToken "
+                        "during initialize)"
+                    )
+            elif self.source == "argument":
+                guidance = (
+                    "expected the secret configured by the embedding application "
+                    "(pass it in _meta.authToken during initialize)"
+                )
+            else:
+                guidance = (
+                    f"expected shared secret (set {AUTH_ENV_VAR} on the server "
+                    "and pass _meta.authToken during initialize)"
+                )
+            raise NotAuthenticated(guidance)
 
 
 #: Confirmation of self-reported state over MCP is gated behind its own secret

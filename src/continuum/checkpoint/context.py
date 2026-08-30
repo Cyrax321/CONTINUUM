@@ -31,6 +31,7 @@ from continuum.models import (
     SemanticState,
     StateStatus,
 )
+from continuum.state.semantic import account_pins_in_context
 
 __all__ = [
     "RecoveryContext",
@@ -105,6 +106,24 @@ class RecoveryContext:
 
     def __str__(self) -> str:
         return self.render()
+
+
+def _pins_section(state: SemanticState) -> ContextSection:
+    """Active constraint pins with hash-tagged markers (issue #418).
+
+    Each active pin emits a marker like [pin:constraint_id:abc12345] where
+    abc12345 is the first 8 chars of the sha256. The marker is the source
+    of truth for accounting, not a summarizer's self-report.
+    """
+    if not state.pins:
+        return ContextSection("ACTIVE CONSTRAINTS", (), priority=1)
+    from continuum.state.semantic import _pin_marker
+
+    lines = []
+    for pin in sorted(state.pins.values(), key=lambda p: p.constraint_id):
+        marker = _pin_marker(pin)
+        lines.append(f"{pin.constraint_id}:{pin.sha256[:8]} {marker}")
+    return ContextSection("ACTIVE CONSTRAINTS", tuple(lines), priority=1)
 
 
 def _goal_section(state: SemanticState) -> ContextSection:
@@ -209,6 +228,8 @@ def build_recovery_context(
     max_items: int = 10,
     next_action: str | None = None,
     environment_changes: Sequence[str] = (),
+    pin_grace_seconds: int | None = None,
+    pin_strict: bool = False,
 ) -> RecoveryContext:
     """Assemble a bounded briefing for a resuming agent.
 
@@ -219,6 +240,7 @@ def build_recovery_context(
     """
     sections = [
         _goal_section(state),
+        _pins_section(state),
         _progress_section(state),
         _stale_section(state),
         _review_section(state),
@@ -239,7 +261,24 @@ def build_recovery_context(
     populated.sort(key=lambda s: s.priority)
 
     if token_budget is None:
-        return RecoveryContext(run_id=state.run_id, sections=tuple(populated))
+        ctx = RecoveryContext(run_id=state.run_id, sections=tuple(populated))
+        # Accounting: check if any active pin is absent past grace
+        if state.pins:
+            rendered = ctx.render()
+            accounting = account_pins_in_context(
+                state, rendered, grace_seconds=pin_grace_seconds, strict=pin_strict
+            )
+            flags = [info["flag"] for info in accounting.values() if info["flag"]]
+            if flags:
+                # Advisory flag: add to notes, strict escalation is handled by caller
+                ctx = RecoveryContext(
+                    run_id=ctx.run_id,
+                    sections=ctx.sections,
+                    dropped_sections=ctx.dropped_sections,
+                    truncated=ctx.truncated,
+                    notes=tuple(list(ctx.notes) + flags),
+                )
+        return ctx
 
     kept: list[ContextSection] = []
     dropped: list[str] = []
@@ -256,9 +295,25 @@ def build_recovery_context(
         else:
             dropped.append(section.title)
 
-    return RecoveryContext(
+    ctx = RecoveryContext(
         run_id=state.run_id,
         sections=tuple(kept),
         dropped_sections=tuple(dropped),
         truncated=bool(dropped),
     )
+    # Accounting for budgeted context
+    if state.pins:
+        rendered = ctx.render()
+        accounting = account_pins_in_context(
+            state, rendered, grace_seconds=pin_grace_seconds, strict=pin_strict
+        )
+        flags = [info["flag"] for info in accounting.values() if info["flag"]]
+        if flags:
+            ctx = RecoveryContext(
+                run_id=ctx.run_id,
+                sections=ctx.sections,
+                dropped_sections=ctx.dropped_sections,
+                truncated=ctx.truncated,
+                notes=tuple(list(ctx.notes) + flags),
+            )
+    return ctx

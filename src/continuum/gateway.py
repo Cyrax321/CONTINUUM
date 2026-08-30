@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from continuum.events import EventType
+from continuum.gate import normalize_key_value
 from continuum.models import Origin
 
 __all__ = [
@@ -56,6 +57,10 @@ DEFAULT_GATEWAY_CONFIG_PATH = ".continuum/gateway.json"
 
 class _BodyTooLarge(Exception):
     """Internal signal: the request body exceeded the configured cap."""
+
+
+class _MalformedBody(Exception):
+    """Internal signal: the request body could not be read as JSON (issue #323)."""
 
 
 #: Requests larger than this are refused with 413 before the body is read.
@@ -121,13 +126,20 @@ def load_gateway_config(path: Path) -> list[Route]:
 
 
 def render_key(template: str, body: dict[str, Any]) -> str:
+    """Substitute ``{field}`` placeholders from the request body.
+
+    Values are normalised exactly as ``gate`` normalises tool arguments
+    (:func:`continuum.gate.normalize_key_value`): the proxy and the hook must
+    derive the same key for the same operation, or a call claimed through one
+    seam looks unclaimed at the other.
+    """
     import string
 
     fields = [f for _, f, _, _ in string.Formatter().parse(template) if f]
     missing = [f for f in fields if f not in body]
     if missing:
         raise GatewayConfigError(f"key template {template!r} needs body field(s) {missing}")
-    return template.format(**{f: body[f] for f in fields})
+    return template.format(**{f: normalize_key_value(body[f]) for f in fields})
 
 
 def match_route(
@@ -214,6 +226,20 @@ class GatewayServer:
                 pass
 
             def _body(self, max_bytes: int = MAX_BODY_BYTES) -> dict[str, Any]:
+                """Read the request body as a mapping, or answer and raise.
+
+                Returns an empty mapping for a body that is absent, and for one
+                that parses to valid JSON of some other shape: neither can bind
+                a key template field, and the missing-field refusal downstream
+                names that correctly.
+
+                A body that cannot be read at all does not come back. This
+                writes the refusal itself and raises, 413 with
+                :class:`_BodyTooLarge` when it is longer than ``max_bytes``, 400
+                with :class:`_MalformedBody` when it is not JSON this proxy can
+                decode (issue #323). Callers catch both and return, since the
+                response is already on the wire.
+                """
                 length = int(self.headers.get("Content-Length") or 0)
                 if length > max_bytes:
                     # Drain (without buffering) so the client can finish
@@ -238,11 +264,28 @@ class GatewayServer:
                     )
                     raise _BodyTooLarge
                 raw = self.rfile.read(length) if length else b""
-                try:
-                    parsed = json.loads(raw) if raw else {}
-                    return parsed if isinstance(parsed, dict) else {}
-                except json.JSONDecodeError:
+                if not raw:
+                    # A genuinely empty body stays an empty mapping: a route
+                    # whose template needs no fields is legitimately callable
+                    # with no body at all.
                     return {}
+                try:
+                    parsed = json.loads(raw)
+                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    # Answering with an empty mapping instead would send the
+                    # request on to be refused for a missing template field,
+                    # naming the wrong problem: the body was never read as the
+                    # caller wrote it. Say so, in the status code too (#323).
+                    #
+                    # UnicodeDecodeError is the other half of "cannot be read":
+                    # json.loads decodes bytes before parsing them, so a body
+                    # that is not valid UTF-8 raises from the decode rather than
+                    # the parse. Left uncaught it escapes the handler entirely
+                    # and the connection closes with no response at all, which
+                    # is the same misreport as the missing field, only quieter.
+                    self._respond(400, {"error": f"invalid JSON in request body: {exc}"})
+                    raise _MalformedBody from exc
+                return parsed if isinstance(parsed, dict) else {}
 
             def _respond(self, code: int, payload: dict[str, Any]) -> None:
                 body = json.dumps(payload).encode()
@@ -255,10 +298,16 @@ class GatewayServer:
                 self.wfile.write(body)
 
             def _handle(self, method: str) -> None:
+                """Route one request through the gate and answer it.
+
+                The bare ``return`` on a body failure is not a swallowed error:
+                :meth:`_body` has already written the 413 or the 400, and going
+                on would put a second response on the same connection.
+                """
                 host = self.headers.get("Host", "")
                 try:
                     body = self._body()
-                except _BodyTooLarge:
+                except (_BodyTooLarge, _MalformedBody):
                     return
 
                 # Resolve the run lazily so hooks can precede any explicit start.

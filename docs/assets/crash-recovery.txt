@@ -1,0 +1,108 @@
+$ python demo-run/worker.py  # dataset v3, will hard-kill at doc 399
+    created GitHub issue #481
+    PROCESS TERMINATED
+[exit code 9 - hard kill, no cleanup]  // os._exit(9)
+
+$ continuum inspect run_4821  # what survived the kill
+run:         run_4821
+goal:        Analyze 1,000 documents (v1)
+version:     v2  (events 1..408)
+progress:    400 completed, 600 pending, 0 failed
+decisions:   0 (0 valid)
+findings:    1
+evidence:    1
+pending:     0 task(s)
+plan:       (none)
+dependencies:
+  - dataset: v3 [valid]
+
+$ continuum resume run_4821 --env dataset=v4  # dataset moved while down
+CONTINUUM RECOVERY
+
+Run: run_4821
+Checkpoint: v2
+
+State validation:
+  [!!] external dependency dataset - v3 -> v4
+  [!!] evidence paper_128 - source 'dataset' changed
+  [!!] finding finding_17 - rests on changed evidence: paper_128
+  [ok] goal - v1
+  [ok] progress - 400 completed
+
+Action ledger:
+  [!!] github.create_issue: outcome unknown (id action_009a7fc)
+
+Recovery decision: REQUEST_HUMAN
+  because 1 external side effect(s) have unknown outcomes
+  because at least one repair needs a person
+
+Repairs required:
+  1. [human] reconcile_action action_009a7fca6636c9f534335fd7db4d22e9 - github.create_issue was interrupted; the side effect may or may not have occurred
+  2. [auto]  revalidate_dependency dataset - v3 -> v4
+  3. [auto]  rederive_evidence paper_128 - source 'dataset' changed
+  4. [auto]  rederive_finding finding_17 - rests on changed evidence: paper_128
+
+Next permitted action: reconcile_action:action_009a7fca6636c9f534335fd7db4d22e9
+
+Next steps:
+  1. check whether 'github.create_issue' actually reached the outside world, then call continuum_reconcile_action(run_id=run_4821, action_key=action_009a7fca6636c9f534335fd7db4d22e9, occurred=true|false)  (no probe registered in .continuum/reconcilers.json)
+  2. re-pin dependency 'dataset': rerun with `--env dataset=<current version>` after confirming its real version
+  3. re-derive paper_128 from its source, then re-validate
+  4. re-derive finding_17 from its source, then re-validate
+
+What previous attempts changed (informed retry):
+  provenance: derived from deterministic
+  still failing: external_dependency:dataset (v3 -> v4)
+  still failing: evidence:paper_128 (source 'dataset' changed)
+  still failing: finding:finding_17 (rests on changed evidence: paper_128)
+  avoid repeating: evidence:paper_128: stale; re-derive from its source before citing it again
+  avoid repeating: external_dependency:dataset: changed under the run; re-pin with --env before trusting cached results
+  avoid repeating: finding:finding_17: stale; re-derive from its source before citing it again
+  avoid repeating: github.create_issue (action_009a7fc): outcome unknown; reconcile before any retry
+
+Run with --repair to record the repair plan, or resolve the items above first.
+[exit code 20 - refusal path, safe:false]
+
+$ # reconcile the uncertain side effect (probe asks the real system)
+unresolved before: 1
+    confirmed as performed: github.create_issue
+    unresolved after:  0
+
+$ python demo-run/worker.py  # fresh process, same DB, dataset v3
+    resumed at 400 documents (nothing reprocessed)
+    finished at 1000 documents
+[exit code 0]
+
+$ continuum resume run_4821 --env dataset=v3  # now safe to continue
+CONTINUUM RECOVERY
+
+Run: run_4821
+Checkpoint: v6
+
+State validation:
+  [ok] external dependency dataset - verified unchanged
+  [ok] goal - v1
+  [ok] progress - 1000 completed
+
+Action ledger:  [ok] no uncertain side effects
+
+Recovery decision: RESUME
+  because all state verified against the environment
+
+Next permitted action: continue
+
+What previous attempts changed (informed retry):
+  provenance: derived from deterministic
+  settled github.create_issue: effect confirmed present
+[exit code 0 - allow path when safe]
+
+$ # final audit: did we repeat work or duplicate the side effect?
+documents processed      1000
+    duplicates               0
+    GitHub issues created    1
+    progress recovered       1000/1000
+    event chain verified     True
+
+    No work repeated. No side effect duplicated.
+
+# Regenerate: python demo-run/generate_crash_visual.py

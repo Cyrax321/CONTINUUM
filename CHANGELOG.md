@@ -6,6 +6,38 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Make `continuum complete` idempotent for runs that are already completed (#356).
+
+- **Derived keys ignore surrounding whitespace in argument values (#361).**
+  `render_key` substituted values verbatim, so a tool argument of `" 123 "` and
+  one of `"123"` produced two different ledger keys for one resource. LLM output
+  routinely carries a trailing space or newline, and with two keys the second
+  call found no record of itself: the gate answered with claim instructions
+  rather than the already-completed refusal, so the same side effect could fire
+  twice. String values are now stripped before substitution in both `gate` and
+  the enforcing `gateway`, which share one `normalize_key_value` rule so the
+  hook and the proxy cannot derive different keys for the same operation.
+  Non-string values are untouched, keeping templates that carry a format spec
+  such as `{amount:.2f}` working. Keys are unchanged for values without
+  surrounding whitespace; a run whose in-flight claim was recorded under a
+  padded key will not match the stripped key derived after upgrading.
+
+- **The gateway answers malformed JSON with 400 instead of hiding it (#323).**
+  `_body` caught `JSONDecodeError` and returned an empty mapping, so a request
+  whose body never parsed was carried on to key derivation and refused with
+  `key template 'invoice:{id}' needs body field(s) ['id']`. That sent the
+  operator to look for a field they did send, in a body the gateway never read.
+  A body that is not valid UTF-8 was worse: `json.loads` decodes before it
+  parses, so `UnicodeDecodeError` escaped the handler and the connection closed
+  with no response at all. Both now return
+  `400 {"error": "invalid JSON in request body: ..."}` before any routing or
+  ledger work. A genuinely empty body still becomes an empty mapping, so a route
+  whose template needs no fields stays callable with no body.
+
+## [0.1.0] - 2026-08-27
+
 ### Added
 
 - **Wheel artifacts on every push to main (#279).** Wheels were built only on
@@ -664,7 +696,29 @@ All notable changes to this project are documented here. The format follows
   socket on shutdown. Three new tests pin the loopback default, honour an
   explicit `0.0.0.0`, and smoke GET / over a real socket.
 
+- **Seven-level testing guide (references/testing.md, #234).** New contributor-facing docs organize verification into seven escalating levels, from automated suite to live gateway, crash harness, benchmark and chaos matrix, so every seam has a reproducible test path. No runtime change.
+
+- **Fork semantics: audited divergent continuations at the tool boundary (#259, #286).** Completes the replay-or-fork triad. A post-restore call whose intent genuinely diverges from any journalled intent is now surfaced as a fork candidate with nearest neighbours. An approved fork records a `RUN_FORKED` event on the parent log and creates a linked child run with its own ledger frontier, both verifiable. This is the third outcome alongside replay (cache hit) and gate reject.
+
+- **Informed retry: engine-authored prior-attempt summaries (#265, #275).** After a non-trivial recovery, `continuum resume`, `continuum briefing` and the MCP and serve contracts include a bounded, engine-authored summary of what failed, what changed and what to avoid. The summary is deterministic (derived from validator findings, ledger reconciliations and planner steps), capped at 4 KB, informational only, and rides the hash chain. This implements the AgentRewind-informed retry loop without conflating agent-authored and engine-authored summaries.
+
+- **Consumed-grant tracking, authority-resurrection denial (#269, #287).** Single-use authorization grants can now be registered on `continuum_intercept_action` and the adapter claim path. Completing or failing the action marks the grant spent, and a post-restore claim that tries to reuse a grant whose consumption sequence is after the restore point is rejected with a dedicated reason and audit event. This closes the Authority Resurrection class from ACRFence alongside the replay half.
+
+- **Months-scale upgrade spec and live web synthesis (#339).** New docs `docs/UPGRADE_SPEC.md` plus supporting synthesis (`docs/ARCHITECTURE_EVOLUTION.md` section 19) and `STATUS.md` checklist make the months-long agent plan reviewable without re-deriving it. Docs-only, no runtime change.
+
+- **Authorization-bound budget registry (#390, #411, #424).** `.continuum/budgets.json` gains an optional `authorization_bound` map, validated on load, plus pure helpers for per-type and per-key budget evaluation. The registry is strictly additive and prepares the schema for the authorization-bound budgets track. No behaviour binds to it yet, so existing runs are byte-identical.
+
+- **Constraint pinning events with hash-only payloads (#391, #416, #425).** Two new event types `CONSTRAINT_PINNED` and `CONSTRAINT_RETRACTED` carry SHA-256 digests of constraint text and never the text itself. They are emitted through the normal event path, survive compaction and context reconstruction, and prepare the constraint-verified recovery track. Payloads are hash-only by construction.
+
+- **Pure precondition derivation over event prefixes (#389, #406, #428).** New read-only module `continuum.recovery.precondition` derives, from any event prefix, the preconditions an edit must satisfy (dependence results judged by completion inside the span, not just presence). The derivation is pure, deterministic and never mutates the log, and is the precondition half of the recovery and fork path.
+
 ### Changed
+
+- **Editable-install troubleshooting (#402).** `CONTRIBUTING.md` now explains
+  that moving or renaming a clone leaves the old path in editable-install
+  metadata and gives uninstall/reinstall commands to refresh it. `STATUS.md`
+  records the clean-venv result confirming the package configuration already
+  resolves the current repository correctly.
 
 - **`continuum dashboard` binds 127.0.0.1 by default** (#270); pass
   `--host 0.0.0.0` to opt into network exposure. The previous
@@ -712,11 +766,261 @@ All notable changes to this project are documented here. The format follows
   snapshot to STATUS.md. The suite is now 900 tests (up from the 740 recorded
   earlier; the Postgres backend's tests skip without `CONTINUUM_TEST_POSTGRES_DSN`).
 
+- **`docs/api/cli.md` now lists every CLI subcommand (#360).** The command
+  table was missing 14 shipped subcommands (`start`, `status`, `complete`,
+  `budget`, `tree`, `fork`, `compact`, `observe`, `gateway`, `briefing`,
+  `gate`, `hooks`, `reconcile`, `dashboard`), so a newcomer had no reference
+  for them even though README and the `--help` output list them. Each new row
+  mirrors the `help=` string from `src/continuum/cli/main.py:build_parser`;
+  the table now matches the parser exactly (33 rows, one per subcommand).
+
+- **README CI and Codecov badges (#199).** The README badge row gains CI status and Codecov badges linking to the workflow runs, so the health of `main` is visible without opening Actions. Repo chrome, docs-only, counted as a gap conservatively.
+
+- **README measured-count refresh and docs housekeeping (#273).** Corrects the README tool count, event-type count, test-suite size (about 1300 tests), lines-of-code recomputation and contributors list to match the live tree. Follow-up to the earlier ten-to-eleven correction, which already landed in the Changed section.
+
+- **README restructure and install/related-work split (#274).** The README is tightened from 597 to 361 lines, moving dependency tables, extras matrix, Postgres setup and verification commands into `references/install.md`, `references/adapters.md` and `references/related-work.md`. The change also removes em dashes repository-wide. Docs-only.
+
+- **STATUS full-gate audit and architecture docs (#299).** `STATUS.md` gains a dated full-gate audit section for `main` at 2026-08-24 (pytest, ruff, mypy, GHCR publish verification), the README measured counts are refreshed, and `docs/ARCHITECTURE_EVOLUTION.md` section 19 documents the #275 and #277 features otherwise unlogged. The citation-audit entry (#261) is unrelated and does not cover this.
+
+- **CONTRIBUTING pre-commit example with ruff hooks (#337, #341).** `CONTRIBUTING.md` documents a pre-commit setup using `astral-sh/ruff-pre-commit` (ruff check and ruff-format hooks) so contributors can auto-check lint and format before committing. Contributor-facing docs-only.
+
 ### Fixed
 
 - **`continuum_confirm` hid handler refusals (#371).** `confirm_gate` now
   invokes the handler inside `_refusal_reaches_the_caller`, so domain errors
   such as a missing run retain their useful `ToolError` message.
+
+- **JSON booleans passed every integer check in the budget registry (#429).**
+  `isinstance(True, int)` holds in Python, so `true` was accepted wherever
+  `.continuum/budgets.json` requires a positive integer: as
+  `default_max_attempts` or a per-type `max_attempts` it silently meant a cap of
+  1, and an authorization-bound `counter` of `true` became 2 after one
+  increment. A registry whose contract everywhere else is to fail loudly instead
+  quietly meant something other than what was written. `load_budgets` now
+  refuses booleans in all four positions with `BudgetConfigError`. This is a
+  deliberate behaviour change rather than a coercion: a config that contains
+  `true` in one of those positions loaded before and raises now, which is the
+  point, because the value it was silently taking was not the one the operator
+  wrote. Integer configs are unaffected. `evaluate_budget` also normalises a
+  per-type limit through `int()` so a hand-built mapping cannot leak a bool into
+  the `max_attempts` figure the `continuum budget` report renders.
+
+- **`save_budgets` rewrote the registry in place, so a crash mid-write could
+  truncate it (#427).** The write went through `Path.write_text`, which opens
+  the target with mode `w` and truncates before writing, with no staging file and
+  no `os.replace`. A crash, an OOM kill or power loss between truncation and
+  flush left a zero-length or half-written `budgets.json`, and every later
+  `load_budgets` then raised. Because the gate is fail-closed, that refused every
+  budget-gated claim until an operator repaired the file by hand. The bytes now
+  land in a sibling temporary file (same directory, so the rename stays within
+  one filesystem), get flushed and fsynced, and are moved over the target with
+  `os.replace`, which is atomic on POSIX and Windows alike. A save that dies
+  leaves the previous registry intact and no litter behind. Losing the last
+  increment on an abrupt exit is an acceptable price for a counter registry;
+  losing the registry is not, and #413 turns this into a write per claim attempt.
+  Two things the staging file must not change on its way in: `mkstemp` creates at
+  0600 and `os.replace` carries those bits onto the target, so the staged file is
+  chmod'ed to the existing registry's own mode first, or to `0o666 & ~umask` when
+  there is no existing file - matching what `write_text` produced, because hooks,
+  sidecars and CI steps read this registry under their own uid and a save that
+  locks them out is worse than the truncation staging prevents. And the rename
+  itself is a directory change, so the parent directory is fsynced after the
+  replace; flushing only the staged file's contents left the new registry
+  loseable by the very crash it guards against. Both steps are best effort: a
+  filesystem without permission bits keeps the tighter 0600, and Windows (which
+  cannot open a directory as a descriptor) is left exactly as durable as before.
+  Swapping an inode for a rewritten one also changes two further things
+  `write_text` did not, so both are re-established: the path is resolved before
+  staging, because a `budgets.json` that is a symlink to a shared registry was
+  written *through* by `write_text` and would be *replaced* by `os.replace`,
+  leaving every other reader of the shared file - and `load_budgets`, which still
+  reads through the link - on the counters from before; and the replaced inode's
+  uid and gid are put back onto the staged file, because mode 0640 names a group
+  without saying which one, and a fresh `mkstemp` inode belongs to whichever group
+  the saving process sits in. Ownership is written before the mode, since `chown`
+  clears setuid and setgid on some systems and a `chmod` running second would
+  silently undo that. A refused `(uid, gid)` is retried as the gid alone, which is
+  the half that grants access to anyone but the owner, and a `chown` that cannot be
+  performed at all does not fail the save: as with the chmod and the flush, turning
+  an unreproducible permission into a refused claim is the wrong direction for a
+  fail-closed gate.
+
+- **Budget rejections named the rule but not the offending value, and one still
+  named the config by relative path (#326, #426).** "needs a positive integer
+  `'max_attempts'`" was the same sentence for a missing field, a float, a string
+  and a boolean, so a registry hand-converted from YAML with `3.0` where `3` was
+  meant sent the operator back to re-read a line that looked correct. Every
+  rejection now appends the value and its type (`got 3.0 (float)`), including the
+  authorization-bound `counter` and `max_attempts` checks. Separately, the
+  `action_types` failure interpolated the caller's `path` rather than the
+  resolved one, the single straggler #351 and #333 left behind: an absolute input
+  hid it, because the two spellings coincide there, but a hook, sidecar or CI
+  step passing a cwd-relative path produced a message naming a file the reader
+  could not open. It now resolves like every other message in the module.
+
+- **One unprojectable event bricked every projecting command, with no route back (#383).**
+  A log whose fold fails is intact as a chain but dead as a run: because the fold
+  validates each intermediate state, no later event could correct an earlier bad
+  one, so `status`, `resume`, `inspect`, `replay`, `show-contract`, `validate`,
+  `briefing` and `compact` all raised on precisely the runs that needed them,
+  while the action tools (which fold only ACTION_* events) kept authorising real
+  side effects that recovery could not assess. The fold can now degrade instead
+  of raising: `project` and `project_incremental` accept
+  `on_unprojectable="raise"|"degrade"`, defaulting to `"raise"` so every existing
+  caller sees byte-for-byte today's behaviour. Degrade mode stops at the earliest
+  refused event and returns the last-good prefix marked
+  `SemanticState.status = INVALID` with `unprojectable_at_sequence`,
+  `unprojectable_event_type` and a condensed `unprojectable_reason`; it never
+  skips past the break, and if nothing folds before the break it still raises,
+  since a partial answer invented from nothing would be worse than an error. The
+  recovery engine folds with degrade enabled, so a poisoned log yields a
+  `request_human` verdict naming where folding stopped instead of a pydantic
+  traceback, and CLI `status`, `inspect` and `replay` report the same break and
+  exit non-zero. The break also reaches the machine-readable contract instead of
+  living only in prose: a new `repair_log` repair step makes `required_actions`
+  name real work, `next_allowed_action` points at it rather than falling through
+  to a rendered "continue" over a `requires_human` verdict, `verified` entries
+  are qualified with the last-good sequence, and `invalidated` records the
+  projection itself. The diagnostic call sites opted in are the engine's restore
+  path, the CLI status/inspect/replay surfaces, the serve sidecar's progress
+  report and dependency dedup, and the benchmark's strategy readout; the MCP
+  write-path guard `_project_candidate` and the checkpoint capture surfaces
+  deliberately keep raising, because accepting or pinning a partial fold would
+  launder it into authoritative state. Repair/amend and fork-from-last-good-prefix
+  remain future work and are not attempted here.
+
+- **`MODEL_CHANGED` had no writer, so `expected_model` could never validate (#370).**
+  The event type was defined, treated as checkpoint-worthy by the trigger policy and
+  projected into `SemanticState.model`, but nothing in `src/` ever emitted it. The
+  validator's model component could therefore only ever answer "no model recorded
+  for this run, cannot compare against ...", the `expected_model` parameter on
+  `continuum_resume` and `continuum_validate` could never do anything, and
+  `RepairKind.REVALIDATE_MODEL_STATE` with its "pass `--model <name>`" guidance was
+  unreachable. A parameter that cannot be satisfied is worse than an absent one,
+  because its presence implies the check is covered, and a different model resuming
+  another model's work is exactly the drift the surrounding architecture exists to
+  catch. `continuum_checkpoint` gains optional `model_id` and `provider`, emitting
+  `MODEL_CHANGED` when the value actually changes, so drift now reports
+  `requires_review` naming both models instead of `unknown`. Attached to
+  checkpointing because it is the same kind of statement as `env`: here is what the
+  world looked like when this state was saved. Recorded as `EXTERNAL_AGENT`, since
+  an agent naming its own model is self-reporting, but the comparison against a
+  later `expected_model` stays independent of that claim. `provider` carries forward
+  when omitted, so naming the model alone cannot erase a provider recorded earlier,
+  and omitting `model_id` records nothing rather than asserting absence.
+
+- **The retry budget counted per action type, blocking work that never failed (#368).**
+  `attempts_for_type` folded on `action_type` and ignored the idempotency key, so
+  the limit capped a run's distinct unsettled work of a type rather than retries of
+  one operation. Three different recipients each failing once, with zero retries
+  anywhere, exhausted the default budget of three and refused a fourth that had
+  never been attempted, so any fan-out with more failures than the limit deadlocked
+  mid-run. The default applies with no config file present, so this was live in any
+  project that had never configured budgets. New `attempts_by_key` counts per
+  idempotency key, which is the operation's identity and is stable across retries
+  because re-claiming after FAILED or COMPENSATED copies the existing action.
+  `attempts_for_type` now reports the worst single operation, which is the figure
+  the claim site compares against the limit, so `continuum budget` agrees with what
+  is enforced; it is deliberately not the sum across keys, since that measures
+  distinct work and nothing here caps that. The limit stays configured per type,
+  because that is the unit an operator thinks in. The exhaustion message also fits
+  the state it fires in: it names the specific operation, drops the advice to
+  reconcile existing attempts (useless when every prior attempt is settled FAILED),
+  and says the registry file may need creating rather than raising.
+
+- **Same-named files in different directories collapsed into one action (#365).**
+  With no explicit `key` the exact argument hash misses on two differently-spelled
+  paths, so the identity fallback decides, and it compared basenames.
+  `/tenants/acme/report.csv` and `/tenants/globex/report.csv` both reduced to
+  `{report.csv, report}`, containment held both ways, and the second claim was
+  answered `proceed=false` carrying acme's `external_id` and the guidance "Already
+  performed. Reuse the previous result; do not repeat it." Globex was never
+  notified, which is the silent swallow the fallback exists to prevent, and
+  per-directory files with conventional names are a common fan-out shape. Leaf
+  comparison was introduced so a re-rendered path (`invoices/INV-5.pdf` for
+  `/data/invoices/INV-5.pdf`) would still deduplicate, so the container is now set
+  aside rather than discarded: new `location_tokens` returns exactly what
+  `leaf_tokens` drops, and `_identity_match` additionally requires the locations to
+  agree. `same_location` compares by path suffix rather than equality, which is the
+  shape drift actually takes, so the re-rendering case still matches while two
+  fully-qualified paths agreeing on nothing but the filename do not. A side that
+  names no path at all makes no claim about location and so contradicts nothing,
+  which keeps the field-rename case working. Comparison stays purely lexical, with
+  no filesystem or working-directory resolution, so the answer is identical on
+  every machine.
+
+- **`complete` could launder an `UNKNOWN` action into `COMPLETED` (#366).**
+  `ActionLedger.complete` had no status guard, so a side effect whose real-world
+  outcome nobody could determine, a charge that timed out after the request was
+  sent, could be recorded as a clean success in one call: no evidence, no note,
+  and an `ACTION_RECORDED` event indistinguishable from an ordinary first-time
+  completion. `continuum_list_actions` then reported `unresolved: 0` and the
+  recovery blocker was gone, with nothing in the log to show the decision had been
+  made by assertion. The incentives pointed straight at it, because
+  `continuum_complete_action` is the tool an agent is told to call routinely, sits
+  on the same mutation allowlist as everything else, and accepts the key already in
+  hand, while the evidence-gated route through `reconcile` was the harder one.
+  `complete` now settles only a claim still in flight, plus a repeat report of one
+  already `COMPLETED`, since a caller retrying after a dropped response asserts
+  nothing new. `UNKNOWN`, `FAILED`, `COMPENSATED` and `REQUIRES_REVIEW` are refused
+  with a message naming the status and pointing at `reconcile`, which takes the
+  same decision but demands the caller stand behind it and records
+  `ACTION_RECONCILED` with the note.
+
+- **`continuum verify` certified a run whose log could not be projected (#382).**
+  `verify` re-audits the hash chain, which is a statement about integrity, and an
+  unprojectable log is perfectly intact: the offending event was written through
+  the normal path and hashed like any other. Nothing in that audit evaluates
+  whether the fold satisfies its own invariants, so the one health-shaped command
+  an operator reaches for during an incident answered "13 events, no violations"
+  for a run on which `resume`, `status`, `inspect`, `replay`, `validate` and
+  `briefing` all failed. `verify` now reports both verdicts and exits non-zero
+  when the fold fails, so `continuum verify "$RUN" && ./resume.sh` short-circuits.
+  New `first_unprojectable_event` names the sequence, event type and the specific
+  constraint that failed, folding one event at a time onto the previous state so
+  the scan is a single linear pass rather than a re-projection per prefix.
+  Archived events are folded alongside the live ones, because after compaction
+  (#239) the live log starts at the anchor and no longer contains `RUN_STARTED`;
+  reading only the tail would report every compacted run as broken. The
+  projection is attempted only once the chain verifies, since folding a tampered
+  log to say where it stops projecting would describe events that cannot be
+  trusted to say anything. Repairing such a log is a separate gap, tracked in
+  #383.
+
+- **`self_report_guidance` said nothing was wrong over an unresolved action (#369).**
+  The note exists to explain a `request_human` caused only by unverified
+  self-reporting, and it is deliberately withheld when anything else is also
+  blocking. Its predicate scanned `decision.validation.report.statuses`, but an
+  uncertain action reaches `request_human` through `decision.uncertain_actions` and
+  never appears in the report, so the check saw goal and progress alone and stayed
+  true. The result was a single `continuum_resume` response whose contract read
+  `recovery_status: requires_human` because a side effect's outcome was unknown,
+  next to guidance reading "Nothing is wrong with this run" and "Work is not
+  blocked", pointing the agent past the one thing the system exists to stop it
+  walking past. The ledger is now part of the test. The dependency half of the
+  predicate was already correct and is covered by a test that keeps it that way.
+
+- **Recovery guidance named an identifier the settle tools rejected (#367).**
+  `continuum_resume` reports uncertain actions by `action_id` in five places
+  (`next_allowed_action`, the contract's `required_actions`, `human_steps`,
+  `informed_retry.avoid` and the rendered report), and `human_steps` spelled out
+  a `continuum_reconcile_action(action_key=<action_id>)` call. The ledger keyed
+  only on the idempotency key, so following that instruction verbatim failed with
+  `no action recorded for key ...`, and no MCP surface exposed the value that
+  would have worked: `list_actions` and `uncertain_actions` reported `action_id`,
+  the `UnknownSideEffect` response omitted the key entirely and left a
+  12-character truncated prefix in free text as its only trace, `arguments_hash`
+  from `continuum actions --json` looks like a key but is a different hash, and
+  `continuum reconcile` needs a registered probe. An `UNKNOWN` action created
+  over MCP was therefore unreconcilable through every documented interface.
+  `ActionLedger.resolve_key` now accepts either space and `_require` returns the
+  resolved key, so `complete`, `fail`, `reconcile`, `compensate` and
+  `flag_for_review` all take an `action_id` or a key and settle under the fold's
+  own key either way. `UnknownSideEffect` carries `action_key` and `action_id`,
+  which `continuum_intercept_action` returns on the unknown path, and both
+  `continuum_list_actions` rows and `continuum_resume`'s `uncertain_actions` gain
+  `action_key`. The unmatched-identifier message names both spaces and says how
+  to list them.
 
 - **One `continuum_record_progress` call could permanently brick a run (#364).**
   The `completed + failed > total` guard only fired when `total` was passed in
@@ -742,7 +1046,7 @@ All notable changes to this project are documented here. The format follows
   re-validates against the new head and retries, bounded, since losing it says
   nothing about whether the update is valid.
 
-
+- **`ActionLedger` could not serialise concurrent claims on one key (#345).**
   `claim()` deduplicates by folding the log and then appending, with nothing
   between the read and the write, so processes racing on one key could each be
   told to proceed: eight threads, eight go-aheads, eight charges. The outcome was
@@ -1238,6 +1542,28 @@ All notable changes to this project are documented here. The format follows
   *added/breaking*. This path (serialising `StateCheckpoint.environment` through the
   checkpoint `body` column and restoring it) had no coverage; this is added test
   coverage for an untested path, not a fix for a defect.
+
+- **RecoveryLedger gate, escalation and reconcile correctness (#176, #177, #178, #183).** Corrects three ledger findings: approval of one gate no longer clears later gates, escalation survives compaction, and the high-water drift mark is accurate, plus related cleanups. The Phase 5 ledger entry predated these fixes, so no Fixed entry existed until now.
+
+- **Five audit fixes from the 2026-08-22 sweep (#201, #202, #203, #204, #205, #206).** `continuum_confirm` over MCP now requires its own `CONTINUUM_MCP_CONFIRM_TOKEN`, closing the self-certification exploit reopened by #35. `continuum checkpoint` for a missing run now exits 2 with `no such run` instead of a projection error. `continuum_record_progress` validates counters before writing `RUN_STARTED`, so a rejected call writes nothing. `continuum start --goal` gives the CLI a way to create a run at all, fixing the dead-end hint. `STATUS.md` known-issues table is refreshed. Each fix carries regression tests.
+
+- **Windows portability for hooks, test suite and smoke script (#252).** `continuum hooks install` no longer writes silently dead commands on Windows (it previously joined via `shlex.quote`), and `shlex.split` parsing plus the smoke script are now portable. Existing Windows entries covered issues #81, #87 and #94, none matched this set, so no changelog entry existed.
+
+- **Postgres storage ships LangGraph tables (#251).** `PostgresStorage._SCHEMA` now includes the schema-v4 `lg_checkpoints` and `lg_stores` tables, so the Postgres backend matches the SQLite schema. The contract-suite rewrite that proved the gap landed in the same PR and was already covered under the Production server mode entry, but the silent schema gap for Postgres deployments was not stated anywhere.
+
+- **Retry budget no longer defeats idempotency, and diagnostics corrected (#309, #307, #308, #311).** The budget gate now runs after deduplication and is scoped per idempotency key, so an already-completed action returns `proceed: false` with the stored result even at budget, and a workflow with many distinct operations is no longer blocked at the default of three. The inverted diagnostic when `expected_model` is omitted and the `expected_model` silently inert case are also corrected. Each carries regression tests.
+
+- **Security and usability fixes: attest-verify, fork child, dashboard 404 (#348).** `continuum attest-verify` now recomputes the head hash instead of trusting the stored value, so a tampered chain no longer reports SIGNED. `continuum fork` produces a child run that readers can open, and the dashboard no longer answers 200 for a missing run. All three were silent failures with no keyword hit for attest.
+
+- **SQLiteStorage close is now idempotent (#320, #347).** Calling `close()` twice no longer raises or leaves the handle in an ambiguous state, so teardown in tests and server restart paths is safe. The behaviour fix was unlogged and had no #320 token until now.
+
+- **Gate config errors name an absolute path, first half (#333, #340).** `load_gate_config` now resolves the config path to absolute before `GateConfigError` messages, so a relative invocation from a subdirectory shows which file was read. This is the first half of #333, covering two of the gate loader's path-bearing messages.
+
+- **Every registry error names an absolute path, completing #333 (#351).** The remaining two gate-config messages plus the budgets, reconcilers and gateway registry loaders now include the resolved absolute path. Combined with #340, every registry load error meets the #333 bar.
+
+- **Use-after-close now says the database is closed (#320, #347, #352).** The regression from #347 that turned use-after-close into a generic error is restored to `database is closed`, and idempotent close is pinned by regression tests. The fix was unlogged.
+
+- **Authentication failures name token fields and stop echoing secrets (#318, #353).** MCP and serve auth errors now name the exact server and client token fields (`CONTINUUM_SERVE_TOKEN` and `auth_token` or `CONTINUUM_MCP_TOKEN`) and never echo the configured secret. Both auth paths carry regression tests asserting the hint is present.
 
 ### Added, Phase 12: CONTINUUM-Bench (minimal harness)
 

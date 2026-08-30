@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from continuum.environment.diff import EnvironmentDiff, ResourceChange, diff_environments
 from continuum.models import (
@@ -105,13 +106,25 @@ class StateValidator:
     starts; a caller who genuinely tolerates uncertainty can opt out.
     """
 
-    def __init__(self, *, strict_unknown: bool = True, confirmed: bool = False) -> None:
+    def __init__(
+        self, *, strict_unknown: bool = True, confirmed: bool | Iterable[str] = False
+    ) -> None:
         self.strict_unknown = strict_unknown
         # Set when a human has explicitly confirmed the run's self-reported
         # goal/progress (via a REVIEW_CONFIRMED event). Confirmation clears the
         # REQUIRES_REVIEW that self-certified origins would otherwise force, so
         # an externally-driven run can be resumed after a human has eyeballed it.
-        self.confirmed = confirmed
+        # Scoped confirm (issue #394) narrows this to named components only;
+        # a boolean True still means both goal and progress, while an iterable
+        # names the confirmed subset.
+        if isinstance(confirmed, bool):
+            self.confirmed: set[str] = {"goal", "progress"} if confirmed else set()
+        else:
+            # Back-compat: a future caller may pass an iterable directly.
+            self.confirmed = set(confirmed)
+        # Keep the legacy boolean attribute for any external reader that
+        # checks truthiness, but the per-component checks below use the set.
+        self._legacy_confirmed = bool(self.confirmed)
 
     def validate(
         self,
@@ -121,10 +134,14 @@ class StateValidator:
         checkpoint_environment: EnvironmentSnapshot | None = None,
         checkpoint_version: int = 0,
         expected_model: str | None = None,
-        confirmed: bool = False,
+        confirmed: bool | Iterable[str] = False,
         scope: Iterable[str] | None = None,
     ) -> ValidationOutcome:
-        self.confirmed = confirmed
+        if isinstance(confirmed, bool):
+            self.confirmed = {"goal", "progress"} if confirmed else set()
+        else:
+            self.confirmed = set(confirmed)
+        self._legacy_confirmed = bool(self.confirmed)
         environment_diff = diff_environments(checkpoint_environment, current_environment)
         entries: list[ComponentValidationEntry] = []
 
@@ -143,9 +160,11 @@ class StateValidator:
             state = self._propagate(state, broken, entries)
             self._check_goal(state, entries)
             self._check_progress(state, entries)
+            self._check_plan(state, entries)
             self._check_approvals(state, entries)
             self._check_model(state, expected_model, entries)
             self._check_evidence(state, entries)
+            self._check_derived(state, entries)
         else:
             # Scoped re-validation: only the named dependency resources are
             # re-checked and only their derivation subtree is allowed to go
@@ -158,6 +177,7 @@ class StateValidator:
                 state, environment_diff, entries, scope=scope_set, observed=observed
             )
             state = self._propagate(state, broken, entries)
+            self._check_derived(state, entries)
 
         blocking = [
             e
@@ -343,7 +363,7 @@ class StateValidator:
 
     def _check_goal(self, state: SemanticState, entries: list[ComponentValidationEntry]) -> None:
         origin = state.goal.provenance.origin
-        if origin.self_certified and not self.confirmed:
+        if origin.self_certified and "goal" not in self.confirmed:
             entries.append(
                 ComponentValidationEntry(
                     component=Component.GOAL,
@@ -375,7 +395,7 @@ class StateValidator:
         # it, so it cannot count as verified state. A human confirmation
         # (REVIEW_CONFIRMED) clears this so the run can resume.
         origin = progress.provenance.origin
-        if origin.self_certified and not self.confirmed:
+        if origin.self_certified and "progress" not in self.confirmed:
             status = StateStatus.REQUIRES_REVIEW
             detail = (
                 f"{progress.completed} completed, self-reported by {origin.value} "
@@ -395,6 +415,128 @@ class StateValidator:
                 detail=detail or f"{progress.completed} completed",
             )
         )
+
+    def _check_plan(self, state: SemanticState, entries: list[ComponentValidationEntry]) -> None:
+        if not state.plan:
+            return
+        seen: set[str] = set()
+        by_id: dict[str, Any] = {}
+        for step in state.plan:
+            if not step.step_id or not step.step_id.strip():
+                entries.append(
+                    ComponentValidationEntry(
+                        component=Component.PLAN,
+                        component_id=step.step_id,
+                        status=StateStatus.CONFLICTED,
+                        detail="plan unit id must be non-empty",
+                    )
+                )
+                continue
+            if step.step_id in seen:
+                entries.append(
+                    ComponentValidationEntry(
+                        component=Component.PLAN,
+                        component_id=step.step_id,
+                        status=StateStatus.CONFLICTED,
+                        detail=f"duplicate plan unit id {step.step_id!r}",
+                    )
+                )
+            seen.add(step.step_id)
+            by_id[step.step_id] = step
+        for step in state.plan:
+            for dep in step.depends_on:
+                if dep not in by_id:
+                    entries.append(
+                        ComponentValidationEntry(
+                            component=Component.PLAN,
+                            component_id=step.step_id,
+                            status=StateStatus.CONFLICTED,
+                            detail=f"depends_on {dep!r} not in plan",
+                        )
+                    )
+        visiting: set[str] = set()
+        visited: set[str] = set()
+        stack: list[str] = []
+        cycle: list[str] | None = None
+
+        def dfs(node: str) -> bool:
+            nonlocal cycle
+            if node in visited:
+                return False
+            if node in visiting:
+                idx = stack.index(node) if node in stack else 0
+                cycle = stack[idx:] + [node]
+                return True
+            if node not in by_id:
+                return False
+            visiting.add(node)
+            stack.append(node)
+            for dep in by_id[node].depends_on:
+                if dfs(dep):
+                    return True
+            stack.pop()
+            visiting.remove(node)
+            visited.add(node)
+            return False
+
+        for sid in list(by_id):
+            if sid not in visited and dfs(sid):
+                break
+        if cycle:
+            detail = f"cycle detected: {' -> '.join(cycle)}"
+            for sid in cycle:
+                entries.append(
+                    ComponentValidationEntry(
+                        component=Component.PLAN,
+                        component_id=sid,
+                        status=StateStatus.CONFLICTED,
+                        detail=detail,
+                    )
+                )
+        for step in state.plan:
+            if step.provenance.origin.self_certified:
+                entries.append(
+                    ComponentValidationEntry(
+                        component=Component.PLAN,
+                        component_id=step.step_id,
+                        status=StateStatus.REQUIRES_REVIEW,
+                        detail=f"plan unit {step.step_id!r} asserted by {step.provenance.origin.value}",
+                    )
+                )
+        stale_ids: set[str] = set()
+        for e in entries:
+            if (
+                e.component is Component.PLAN
+                and e.status
+                in (
+                    StateStatus.STALE,
+                    StateStatus.CONFLICTED,
+                    StateStatus.REQUIRES_REVIEW,
+                    StateStatus.INVALID,
+                )
+                and e.component_id
+            ):
+                stale_ids.add(e.component_id)
+        changed = True
+        while changed:
+            changed = False
+            for step in state.plan:
+                if step.step_id in stale_ids:
+                    continue
+                for dep in step.depends_on:
+                    if dep in stale_ids:
+                        if step.step_id not in stale_ids:
+                            stale_ids.add(step.step_id)
+                            entries.append(
+                                ComponentValidationEntry(
+                                    component=Component.PLAN,
+                                    component_id=step.step_id,
+                                    status=StateStatus.STALE,
+                                    detail=f"depends on stale plan unit {dep!r}",
+                                )
+                            )
+                            changed = True
+                        break
 
     @staticmethod
     def _check_approvals(state: SemanticState, entries: list[ComponentValidationEntry]) -> None:
@@ -458,8 +600,8 @@ class StateValidator:
             # silently here reads as "no drift" and is indistinguishable from a
             # clean comparison, so a caller passing expected_model believes it
             # got an assurance it never received (issue #308). Report the gap
-            # instead. Note no MCP tool records a model today, so this is the
-            # normal outcome for MCP-originated runs.
+            # instead. Reached whenever no writer named the model: pass model_id
+            # to continuum_checkpoint to make the comparison answerable (#370).
             entries.append(
                 ComponentValidationEntry(
                     component=Component.MODEL,
@@ -518,6 +660,39 @@ class StateValidator:
                 )
             )
 
+    def _check_derived(self, state: SemanticState, entries: list[ComponentValidationEntry]) -> None:
+        """Derived artifacts must never amplify weak sources (issue #392)."""
+        for finding in state.findings:
+            if finding.provenance.origin.self_certified and finding.status is StateStatus.VALID:
+                entries.append(
+                    ComponentValidationEntry(
+                        component=Component.FINDING,
+                        component_id=finding.finding_id,
+                        status=StateStatus.REQUIRES_REVIEW,
+                        detail=f"derived from {finding.provenance.origin.value} and not independently verified",
+                    )
+                )
+        for decision in state.decisions:
+            if decision.provenance.origin.self_certified and decision.status is StateStatus.VALID:
+                entries.append(
+                    ComponentValidationEntry(
+                        component=Component.DECISION,
+                        component_id=decision.decision_id,
+                        status=StateStatus.REQUIRES_REVIEW,
+                        detail=f"derived from {decision.provenance.origin.value} and not independently verified",
+                    )
+                )
+        for ev in state.evidence:
+            if ev.provenance.origin.self_certified and ev.status is StateStatus.VALID:
+                entries.append(
+                    ComponentValidationEntry(
+                        component=Component.EVIDENCE,
+                        component_id=ev.evidence_id,
+                        status=StateStatus.REQUIRES_REVIEW,
+                        detail=f"derived from {ev.provenance.origin.value} and not independently verified",
+                    )
+                )
+
 
 def validate_state(
     state: SemanticState,
@@ -527,7 +702,7 @@ def validate_state(
     checkpoint_version: int = 0,
     expected_model: str | None = None,
     strict_unknown: bool = True,
-    confirmed: bool = False,
+    confirmed: bool | Iterable[str] = False,
     scope: Iterable[str] | None = None,
 ) -> ValidationOutcome:
     """Validate a state against the current environment.
@@ -535,6 +710,9 @@ def validate_state(
     When ``scope`` names specific dependency resources, only those resources are
     re-checked and only their derivation subtree may go stale; the rest of the
     state keeps its recorded status (localized recovery).
+
+    ``confirmed`` may be a boolean (True means both goal and progress) or an
+    iterable of component names for scoped confirm (issue #394).
     """
     return StateValidator(strict_unknown=strict_unknown, confirmed=confirmed).validate(
         state,

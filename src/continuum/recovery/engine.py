@@ -47,6 +47,7 @@ from continuum.models import (
     Action,
     ActionStatus,
     EnvironmentSnapshot,
+    Origin,
     RecoveryContract,
     RecoveryMode,
     RecoverySafety,
@@ -161,7 +162,12 @@ class RecoveryDecision:
         if self.plan:
             lines += ["", "Repairs required:", self.plan.render()]
 
-        lines += ["", f"Next permitted action: {self.next_allowed_action or 'continue'}"]
+        permitted = self.next_allowed_action or (
+            "continue"
+            if self.mode is RecoveryMode.RESUME
+            else "none (settle the repairs above first)"
+        )
+        lines += ["", f"Next permitted action: {permitted}"]
         return "\n".join(lines)
 
 
@@ -207,16 +213,44 @@ class RecoveryEngine:
         :mod:`continuum.analysis`) records on the returned decision every file
         whose imports belong to a scoped dependency.
         """
-        restored = self._manager.restore(run_id, replay=replay)
+        # Degrade, not raise (issue #383): the engine's whole job is to answer
+        # "where does this run stand", and a poisoned log is precisely the run
+        # that needs an answer. An unprojectable tail yields the last-good
+        # prefix marked INVALID; _decide turns that into request_human rather
+        # than letting it pass for a complete state.
+        restored = self._manager.restore(run_id, replay=replay, on_unprojectable="degrade")
         checkpoint_environment = restored.checkpoint.environment if restored.checkpoint else None
         checkpoint_version = restored.checkpoint.version if restored.checkpoint else 0
 
         # A human confirmation (REVIEW_CONFIRMED event) clears the self_certified
         # REQUIRES_REVIEW on goal/progress, unblocking an otherwise permanent
         # request_human for externally-driven runs. See issue #35.
-        has_confirmation = any(
-            e.type is EventType.REVIEW_CONFIRMED for e in self.storage.read_events(run_id)
-        )
+        # Scoped confirm (issue #394) narrows this to named components only;
+        # the payload may carry "components" or "scope" as a list, a single
+        # string, or be absent (legacy full confirm of both).
+        confirmed_components: set[str] = set()
+        for _ev in self.storage.read_events(run_id):
+            if _ev.type is not EventType.REVIEW_CONFIRMED:
+                continue
+            # Only human confirmations clear self-certification; an agent
+            # must not be able to confirm its own work (issue #201).
+            if _ev.source != Origin.HUMAN:
+                continue
+            raw_scope = _ev.payload.get("components")
+            if raw_scope is None:
+                raw_scope = _ev.payload.get("scope")
+            if not raw_scope:
+                confirmed_components.update(["goal", "progress"])
+            elif isinstance(raw_scope, str):
+                confirmed_components.add(raw_scope.strip().lower())
+            elif isinstance(raw_scope, (list, tuple, set)):
+                for _c in raw_scope:
+                    if isinstance(_c, str) and _c.strip():
+                        confirmed_components.add(_c.strip().lower())
+                    elif _c is not None:
+                        confirmed_components.add(str(_c).strip().lower())
+            else:
+                confirmed_components.update(["goal", "progress"])
 
         validation = self.validator.validate(
             restored.state,
@@ -224,7 +258,7 @@ class RecoveryEngine:
             checkpoint_environment=checkpoint_environment,
             checkpoint_version=checkpoint_version,
             expected_model=expected_model,
-            confirmed=has_confirmation,
+            confirmed=confirmed_components,
             scope=scope,
         )
 
@@ -254,10 +288,24 @@ class RecoveryEngine:
                 for path in source_graph.files_using(resource)
             )
 
+        # The degraded fold must reach the plan (issue #383): without a step,
+        # required_actions is empty and the contract's next_allowed falls
+        # through to "continue" over a requires_human verdict.
+        broken = restored.state
+        unprojectable = (
+            (
+                broken.unprojectable_at_sequence,
+                broken.unprojectable_event_type or "unknown event",
+                broken.unprojectable_reason or "unknown projection failure",
+            )
+            if broken.status is StateStatus.INVALID and broken.unprojectable_at_sequence is not None
+            else None
+        )
         plan = plan_repairs(
             validation.report.statuses,
             uncertain_actions=uncertain,
             strict_unknown=self.validator.strict_unknown,
+            unprojectable=unprojectable,
         )
         mode, rationale = self._decide(validation, uncertain, plan, restored, self.strict_unknown)
 
@@ -350,6 +398,26 @@ class RecoveryEngine:
     ) -> tuple[RecoveryMode, tuple[str, ...]]:
         """Collect a proposal per signal and return the most cautious."""
         proposals: list[tuple[RecoveryMode, str]] = []
+
+        # A degraded fold (issue #383) outranks every signal computed below,
+        # which is why it is proposed unconditionally rather than guarded: the
+        # validation below ran on the last-good prefix, so its statuses describe
+        # only what was known before the break. REQUEST_HUMAN, not ABORT: the
+        # log is not necessarily dead (a human can confirm or rewrite the
+        # offending event), and declaring the run permanently unanswerable is
+        # exactly the terminal state #383 exists to remove.
+        state = restored.state
+        if state.unprojectable_at_sequence is not None and state.status is StateStatus.INVALID:
+            proposals.append(
+                (
+                    RecoveryMode.REQUEST_HUMAN,
+                    f"the event log stops folding at sequence "
+                    f"{state.unprojectable_at_sequence} "
+                    f"({state.unprojectable_event_type}: {state.unprojectable_reason}); "
+                    f"this verdict covers events through sequence "
+                    f"{state.source_sequence} only",
+                )
+            )
 
         if validation.safe and not uncertain:
             proposals.append((RecoveryMode.RESUME, "all state verified against the environment"))

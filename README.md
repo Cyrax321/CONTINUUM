@@ -12,11 +12,13 @@
 
 <p align="center">
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+" /></a>
+  <a href="https://pypi.org/project/continuum-agent/"><img src="https://img.shields.io/pypi/v/continuum-agent?style=flat-square&label=PyPI" alt="PyPI" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue?style=flat-square" alt="License" /></a>
   <a href="https://pydantic.dev"><img src="https://img.shields.io/badge/pydantic-v2-E92063?style=flat-square&logo=pydantic&logoColor=white" alt="Pydantic v2" /></a>
   <a href="https://continuum-nu-six.vercel.app/"><img src="https://img.shields.io/badge/website-live_demo-E06D53?style=flat-square" alt="Website Demo" /></a>
   <a href="https://github.com/Cyrax321/CONTINUUM/actions/workflows/ci.yml"><img src="https://github.com/Cyrax321/CONTINUUM/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
   <a href="https://app.codecov.io/gh/Cyrax321/CONTINUUM"><img src="https://img.shields.io/codecov/c/github/Cyrax321/CONTINUUM?style=flat-square&logo=codecov" alt="Coverage" /></a>
+  <a href="https://github.com/sponsors/Cyrax321"><img src="https://img.shields.io/badge/sponsor-❤-ff69b4?style=flat-square&logo=githubsponsors" alt="Sponsor" /></a>
 </p>
 
 <p align="center">
@@ -27,7 +29,7 @@
 
 ## Contents
 
-[Why](#why) · [Quick Start](#quick-start) · [How it works](#how-it-works) · [Features](#features) · [Security Extension](#security-extension) · [Empirical Verification](#empirical-verification) · [MCP Integration](#mcp-integration) · [Framework Integration](#framework-integration) · [Core Concepts](#core-concepts) · [Architecture](#architecture) · [API and CLI](#api-and-cli) · [Roadmap](#roadmap) · [What CONTINUUM Is Not](#what-continuum-is-not) · [Related work](#related-work) · [Status and limitations](#status-and-limitations) · [Contributing](#contributing) · [License](#license)
+[Why](#why) · [Quick Start](#quick-start) · [How it works](#how-it-works) · [Where CONTINUUM sits](#where-continuum-sits) · [Features](#features) · [Security Extension](#security-extension) · [Empirical Verification](#empirical-verification) · [MCP Integration](#mcp-integration) · [Framework Integration](#framework-integration) · [Core Concepts](#core-concepts) · [Architecture](#architecture) · [API and CLI](#api-and-cli) · [Roadmap](#roadmap) · [What CONTINUUM Is Not](#what-continuum-is-not) · [Related work](#related-work) · [Status and limitations](#status-and-limitations) · [Contributing](#contributing) · [License](#license)
 
 ---
 
@@ -43,12 +45,13 @@ CONTINUUM asks a narrower, harder question: can an agent resume from a compact s
 
 ## Quick Start
 
-Not published to PyPI yet, so everything below pulls straight from this repository. Release tags additionally ship built wheels attached to [GitHub Releases](https://github.com/Cyrax321/CONTINUUM/releases).
+Published to PyPI as `continuum-agent` 0.1.0 — `pip install continuum-agent` (`pip install continuum-agent==0.1.0` to pin). Release tags additionally ship built wheels attached to [GitHub Releases](https://github.com/Cyrax321/CONTINUUM/releases).
 
 Zero-setup paths (no clone, no install, nothing published anywhere):
 
 | Path | How |
 |:--|:--|
+| Install from PyPI | `pip install continuum-agent==0.1.0` — then `continuum --help` |
 | Watch crash recovery happen end to end | `docker run --rm ghcr.io/cyrax321/continuum` |
 | Use the CLI through Docker | `docker run --rm ghcr.io/cyrax321/continuum continuum --help` |
 | Run the CLI without cloning | `uvx --from git+https://github.com/Cyrax321/CONTINUUM.git continuum --help` |
@@ -135,6 +138,34 @@ CONTINUUM separates **LLM context** (temporary) from **durable task state** (per
 ![CONTINUUM how it works](docs/assets/architecture.svg)
 
 The detailed explanation, the projection model, and the recovery context are in [references/architecture.md](references/architecture.md).
+
+## Where CONTINUUM sits
+
+Four concerns overlap in every long-running agent. CONTINUUM owns only the last one and touches the other three through explicit seams. No competitor is named and no claim is made without a shipped module or a published suite that already prints it.
+
+| Layer | Answers | How it connects (shipped modules or published output) |
+|:--|:--|:--|
+| Harness | How does the agent call tools and make progress toward a goal? | Outside CONTINUUM. Wiring points ship in `src/continuum/adapters/generic.py` (`GenericAgentAdapter`), `src/continuum/adapters/thin.py` (CrewAI, AutoGen, Pydantic AI hooks), `src/continuum/mcp/server.py` (MCP stdio), `src/continuum/hooks.py` and `src/continuum/clienthooks.py` (coding-CLI lifecycle hooks), `src/continuum/gateway.py` (enforcing HTTP proxy for any language), and `src/continuum/otel.py` (OpenTelemetry bridge). Recipes are in `docs/recipes/` and `references/adapters.md`. |
+| Durable execution | What happened before a crash and what can be replayed without losing work? | Hash-chained event log `src/continuum/events.py` with `verify()` and `trusted_through`, durable storage `src/continuum/storage/sqlite.py` (WAL, `synchronous=FULL`, schema v6) and `src/continuum/storage/postgres.py` plus `src/continuum/storage/migrations.py`, policy-driven checkpoints `src/continuum/checkpoint/manager.py` and `src/continuum/checkpoint/policy.py` that replay the gap on `restore()`. Walkthrough is in `docs/recovery_walkthrough.md` (output of `examples/recovery_walkthrough.py`). |
+| Control plane | Which run is active, who may act on it, and where does output go? | Run registry and parent/child hierarchy `src/continuum/storage/` and `src/continuum/recovery/family.py` (`continuum tree`), allowlist authz `src/continuum/mcp/authz.py` (`CONTINUUM_MCP_MUTATING_CLIENTS` / `CONTINUUM_MCP_TOKEN`), presentation surfaces `src/continuum/dashboard/app.py` and `src/continuum/serve/server.py`, CLI `src/continuum/cli/main.py` (`continuum runs`, `continuum tree`, `continuum health`). |
+| Verification substrate | Given the checkpoint at time T and the world as it is now, is it still safe and correct to continue? | `src/continuum/state/validator.py` (staleness `dependency -> evidence -> finding -> decision` plus `PlanStep.depends_on`), `src/continuum/provenance_map.py` (`Origin` to `REQUIRES_REVIEW` until `REVIEW_CONFIRMED`), `src/continuum/actions/ledger.py` with `src/continuum/actions/idempotency.py` and `src/continuum/gate.py` / `src/continuum/gateway.py` (claim-before-fire, refuses duplicates, raises `UnknownSideEffect` for reconciliation), `src/continuum/replayguard.py` (portable guard), `src/continuum/pinning.py` and `src/continuum/replay_similarity.py` (replay correctness), `src/continuum/budgets.py` (retry caps), `src/continuum/recovery/engine.py` + `src/continuum/recovery/contract.py` + `src/continuum/recovery/planner.py` + `src/continuum/recovery/observations.py` (max-severity `RESUME < ... < ABORT`, sealed contract with `evidence` / `reason` / `next_allowed_action` / `human_steps`), `src/continuum/checkpoint/rewind.py` (atomic dual-state rewind), `src/continuum/analysis/prefix_trust.py` (advisory trust). Published checks: `docs/recovery_walkthrough.md`, `benchmarks/fault_injection/` (suite that prints `detection_rate` / `unsafe_resume_rate`), `src/continuum/benchmark/phase6/` (recovery-correctness suite), `docs/RESULTS.md`, and the regenerable visual below. |
+
+Every row above is traceable to a path that exists on `main` at the tagged commit. Nothing in this table restates a benchmark number, benchmarks live only in the suite output they already print. See `docs/research.md` for the full list of published suites and design docs.
+
+### Crash recovery, for real
+
+The image below is not a mock. It is the output of `python demo-run/generate_crash_visual.py`, which runs `demo-run/worker.py` until `os._exit(9)` at document 399, calls `continuum resume --env dataset=v4` and shows the refusal path (`REQUEST_HUMAN`, `safe:false`, exit 20), reconciles the uncertain side effect with a probe, then resumes from the same database and finishes with no duplicate work. The transcript is also saved as `docs/assets/crash-recovery.txt` for audit.
+
+Regenerate it:
+
+```bash
+python demo-run/generate_crash_visual.py
+# or: python scripts/generate_crash_visual.py
+```
+
+![Crash recovery: hard kill mid-batch, refusal, reconcile, resume](docs/assets/crash-recovery.svg)
+
+Full walkthrough with code is in `docs/recovery_walkthrough.md` (`examples/recovery_walkthrough.py`). The minimal bench harness is in `references/bench.md` (`continuum benchmark`).
 
 ## Features
 
@@ -266,7 +297,7 @@ CONTINUUM is organised around one invariant: **every fact carries its origin, an
 
 Any agent harness connects through exactly one of these; no framework cooperation is required.
 
-```
+```text
 Seam 1: In-process adapters     GenericAgentAdapter.intercept_action(...);
          Python frameworks       wrap_tool(key_fn=...) on LangChain/LangGraph,
                                  OpenAI Agents SDK hooks
@@ -284,7 +315,7 @@ Seam 5: OpenTelemetry bridge    make_span_processor(storage)
 
 The gate-to-observe pipeline closes the durability gap at the harness boundary:
 
-```
+```text
 PreToolUse hook                    PostToolUse hook
     |                                    |
     v                                    v
@@ -309,7 +340,7 @@ claim settled from reality
 
 The recovery engine evaluates signals in severity order and returns the maximum:
 
-```
+```text
 RESUME < REPAIR_AND_RESUME < REPLAN < WAIT < REQUEST_HUMAN < ROLLBACK < ABORT
 ```
 
@@ -435,7 +466,7 @@ CONTINUUM sits at the overlap of durable execution, idempotent side-effect track
 ## Status and limitations
 
 - **Tested**: 1,360 passed + 23 skipped in a full run at the 2026-08-24 audit of this tree; CI enforces the suite on Python 3.11, 3.12, and 3.13, and counts vary by platform and optional services such as Postgres (see [STATUS.md](STATUS.md)). The MCP surface has also been audited adversarially over the live protocol; see [test.md](test.md).
-- **Not on PyPI.** Install from a clone, a git URL, a release wheel, or Docker (see Quick Start).
+- **On PyPI as `continuum-agent` 0.1.0** (`pip install continuum-agent`; clone still works via `pip install .` see Quick Start).
 - **MCP caller authentication is opt-in per deployment.** When `CONTINUUM_MCP_TOKEN` is set, the server refuses every mutating tool unless the caller presents that shared secret in the `initialize` handshake's `_meta.authToken`; per-caller secrets are available via `CONTINUUM_MCP_CLIENT_TOKENS` (`name:secret` pairs). Without any token configured, authorization is by declared identity only (the historical default, preserved for local single-user use).
 - **Confirming self-reported state over MCP requires a separate secret.** `continuum_confirm` refuses every caller until the operator sets `CONTINUUM_MCP_CONFIRM_TOKEN`, because an agent allowed to record progress must not also be able to confirm it. The default path stays human-driven: run `continuum confirm <run_id>` on the host.
 - **Unbuilt components**: Cloud API (Phase 13).
@@ -460,6 +491,26 @@ Open an issue before submitting large PRs. See [CONTRIBUTING.md](CONTRIBUTING.md
   <a href="https://github.com/Parthipashok04"><img src="docs/contributors/parthipashok04.png" width="60" alt="Parthipashok04" /></a>
 
 Also with merged contributions: [Adhi1-2](https://github.com/Adhi1-2), [yuki-fuyutsuki](https://github.com/yuki-fuyutsuki), and [okestroHjJeong](https://github.com/okestroHjJeong).
+
+## Sponsor
+
+If CONTINUUM helps your agents recover reliably, consider sponsoring to support long term maintenance.
+
+<p align="center">
+  <a href="https://github.com/sponsors/Cyrax321"><img src="https://img.shields.io/badge/Sponsor-❤-ff69b4?style=for-the-badge&logo=githubsponsors" alt="Sponsor Cyrax321" /></a>
+</p>
+
+<p align="center">
+  <iframe src="https://github.com/sponsors/Cyrax321/button" title="Sponsor Cyrax321" height="32" width="114" style="border: 0; border-radius: 6px;"></iframe>
+</p>
+
+<p align="center">
+  <iframe src="https://github.com/sponsors/Cyrax321/card" title="Sponsor Cyrax321" height="225" width="600" style="border: 0;"></iframe>
+</p>
+
+<p align="center">
+  <a href="https://github.com/sponsors/Cyrax321">Become a sponsor</a> — GitHub Sponsors, or add FUNDING.yml custom link if you prefer another platform.
+</p>
 
 ## License
 

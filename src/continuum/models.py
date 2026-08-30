@@ -17,6 +17,7 @@ Conventions
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -46,6 +47,10 @@ __all__ = [
     "PendingWork",
     "Approval",
     "ExternalDependency",
+    "ConstraintPinned",
+    "ConstraintRetracted",
+    "ConstraintPin",
+    "AttemptLesson",
     "ModelSpecificState",
     "ModelState",
     "Run",
@@ -363,6 +368,200 @@ class ExternalDependency(BaseModel):
     provenance: Provenance = Field(default_factory=Provenance)
 
 
+# --------------------------------------------------------------------------- #
+# Constraint pins (issues #391, #416)
+# --------------------------------------------------------------------------- #
+
+#: A constraint id is a machine label, never prose: 1 to 128 characters from
+#: ASCII letters, digits and ``.`` ``_`` ``:`` ``-``. The tight charset and
+#: bound are deliberate. Hashing exists so the constraint text is never
+#: stored, which leaves the id as the only free-text-shaped field on the
+#: event; restricting it to labels keeps that field unusable as a side
+#: channel for the very text the hash replaces.
+_CONSTRAINT_ID_PATTERN = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+
+#: Digests are recorded exactly as hashlib produces them: 64 lowercase hex
+#: characters. Anything else (uppercase, short, prefixed, non-hex) is refused
+#: at the boundary rather than normalised, so every stored pin compares equal
+#: byte for byte against a recomputed digest.
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+
+
+def _validated_constraint_id(value: str) -> str:
+    if not _CONSTRAINT_ID_PATTERN.fullmatch(value):
+        raise ValueError("constraint_id must be 1-128 chars from ASCII letters, digits and . _ : -")
+    return value
+
+
+class ConstraintPinned(BaseModel):
+    """Payload of ``CONSTRAINT_PINNED``: a standing constraint, pinned by digest.
+
+    Constraints are issued once at session start and vanish precisely when
+    they matter most: context reconstruction (briefing, compaction, resume).
+    Pinning makes them first-class events while storing only the SHA-256 of
+    the constraint text (issue #391). The plaintext is forgettable at pin
+    time by everyone except the pinner; verification later compares digests.
+    """
+
+    model_config = Frozen
+
+    constraint_id: str = Field(strict=True)
+    """Stable label for the constraint within the run.
+
+    1-128 chars from ASCII letters, digits and ``.`` ``_`` ``:`` ``-`` (see
+    ``_CONSTRAINT_ID_PATTERN`` for why it is deliberately narrow). Strict
+    typing: labels are strings, and silently decoding bytes into one would
+    blur the boundary that keeps ids out of the content business.
+    """
+
+    sha256: str = Field(strict=True)
+    """SHA-256 of the exact constraint text (UTF-8 bytes), lowercase hex.
+
+    Never the text itself. The full text lives nowhere in CONTINUUM: not in
+    payloads, logs or reprs, and callers are encouraged to forget it too.
+    Strict typing so a bytes argument is refused rather than decoded into a
+    digest that then looks validated.
+    """
+
+    @field_validator("constraint_id")
+    @classmethod
+    def _constraint_id_is_a_label(cls, value: str) -> str:
+        return _validated_constraint_id(value)
+
+    @field_validator("sha256")
+    @classmethod
+    def _sha256_is_lowercase_hex(cls, value: str) -> str:
+        if not _SHA256_PATTERN.fullmatch(value):
+            raise ValueError("sha256 must be exactly 64 lowercase hex characters")
+        return value
+
+
+class ConstraintRetracted(BaseModel):
+    """Payload of ``CONSTRAINT_RETRACTED``: a previously pinned constraint withdrawn.
+
+    Retraction records the id alone. It is storable even when the id was never
+    pinned in this log (for instance across an anchored prefix); how an
+    unmatched retraction projects is decided downstream (#417), not here.
+    """
+
+    model_config = Frozen
+
+    constraint_id: str = Field(strict=True)
+    """Id of the retracted constraint, same rules as on ``ConstraintPinned``."""
+
+    @field_validator("constraint_id")
+    @classmethod
+    def _constraint_id_is_a_label(cls, value: str) -> str:
+        return _validated_constraint_id(value)
+
+
+class ConstraintPin(BaseModel):
+    """Projected view of an active constraint pin (issue #417).
+
+    A pin is the durable memory of a standing instruction. The text never
+    enters the log; only the digest does. The projector keeps the active set
+    in ``SemanticState.pins`` so downstream checks can ask which constraints
+    survive context reconstruction without re-reading the whole log.
+    """
+
+    model_config = Frozen
+
+    constraint_id: str = Field(strict=True)
+    """Label of the constraint, same charset as the pinned event."""
+
+    sha256: str = Field(strict=True)
+    """Digest of the exact constraint text, lowercase hex."""
+
+    status: str = "active"
+    """Lifecycle status, always ``active`` for members of the active set."""
+
+    provenance: Provenance = Field(default_factory=Provenance)
+    """Where the pin was asserted, carried from the pin event."""
+
+    pinned_at: datetime = Field(default_factory=utcnow)
+    """When the pin event was recorded."""
+
+    @field_validator("constraint_id")
+    @classmethod
+    def _pin_id_is_a_label(cls, value: str) -> str:
+        return _validated_constraint_id(value)
+
+    @field_validator("sha256")
+    @classmethod
+    def _pin_sha_is_lowercase_hex(cls, value: str) -> str:
+        if not _SHA256_PATTERN.fullmatch(value):
+            raise ValueError("sha256 must be exactly 64 lowercase hex characters")
+        return value
+
+
+class AttemptLesson(BaseModel):
+    """Durable lesson from a failed attempt (issue #313).
+
+    System-derived from RecoveryDecision.rationale, RecoveryLedger and
+    ActionLedger, never from LLM. Bounded to 512 chars per field and 2KB
+    total so it survives as an artifact without becoming a transcript dump.
+    Origin.DETERMINISTIC, hash-chained via ATTEMPT_LESSON event.
+    """
+
+    model_config = Frozen
+
+    attempt_id: str = Field(min_length=1)
+    falsified: str = Field(default="")
+    env_delta: str = Field(default="")
+    scar_action_ids: list[str] = Field(default_factory=list)
+    next_avoid: str = Field(default="")
+    source_evidence: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utcnow)
+
+    @field_validator("falsified", "env_delta", "next_avoid")
+    @classmethod
+    def _field_bounded(cls, value: str) -> str:
+        if len(value) > 512:
+            return value[:512]
+        return value
+
+    @field_validator("source_evidence")
+    @classmethod
+    def _evidence_bounded(cls, value: list[str]) -> list[str]:
+        return [str(v)[:512] for v in value]
+
+    @field_validator("scar_action_ids")
+    @classmethod
+    def _scar_bounded(cls, value: list[str]) -> list[str]:
+        return [str(v) for v in value]
+
+
+class TrajectoryReport(BaseModel):
+    """Deterministic sleep-time report distilled from archived history (issue #393).
+
+    Computed from the archive plus ledger, no LLM, no network. Bounded size,
+    one per compaction window, digest-auditable via TRAJECTORY_REPORT event.
+    Stored alongside attempt lessons but derived from a different window, so
+    the two never compete for authority.
+    """
+
+    model_config = Frozen
+
+    report_id: str = Field(min_length=1)
+    window_start: int = Field(ge=0)
+    window_end: int = Field(ge=0)
+    compaction_seq: int = Field(ge=0)
+    attempts: int = Field(ge=0)
+    scar_rate: float = Field(ge=0.0, le=1.0)
+    stall_sites: list[str] = Field(default_factory=list)
+    top_failure_action_types: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utcnow)
+    derived_origin: str = Field(default="")
+
+    @field_validator("stall_sites", "top_failure_action_types")
+    @classmethod
+    def _list_bounded(cls, value: list[str]) -> list[str]:
+        trimmed = [str(v)[:128] for v in value]
+        if len(trimmed) > 5:
+            trimmed = trimmed[:5]
+        return trimmed
+
+
 class ModelSpecificState(BaseModel):
     """An assumption tied to a specific model; switching models must revalidate."""
 
@@ -390,6 +589,11 @@ class SemanticState(BaseModel):
     A state is a *projection* of an event prefix. ``source_sequence`` records
     how far into the log the projection consumed, which makes the state
     reproducible: folding the same prefix again must yield an equal state.
+
+    A state whose log stopped folding partway (issue #383) is marked
+    ``status=INVALID`` and names the break in the ``unprojectable_*`` fields.
+    Such a state reports what was known through its last good event; it must
+    never be read as a complete picture of the run.
     """
 
     model_config = Frozen
@@ -404,10 +608,33 @@ class SemanticState(BaseModel):
     pending_work: list[PendingWork] = Field(default_factory=list)
     approvals: list[Approval] = Field(default_factory=list)
     external_dependencies: list[ExternalDependency] = Field(default_factory=list)
+    pins: dict[str, ConstraintPin] = Field(default_factory=dict)
+    """Active constraint pins, keyed by constraint id (issue #417)."""
+    unmatched_pin_retractions: list[str] = Field(default_factory=list)
+    """Constraint ids retracted without a matching active pin.
+
+    Retraction of an unknown id is not a crash; it degrades gracefully and
+    is noted here so the operator can see a mismatch without the fold
+    guessing whether the pin lived in an archived prefix or never existed.
+    """
+    attempt_lessons: list[AttemptLesson] = Field(default_factory=list)
+    """Structured lessons from failed attempts (issue #313), sorted by created_at."""
+    trajectory_reports: list[TrajectoryReport] = Field(default_factory=list)
+    """Sleep-time trajectory reports distilled from archived history (issue #393), sorted by window."""
     model: ModelState | None = None
     version: int = 0
     source_sequence: int = 0
     """Highest event sequence folded into this state (0 = nothing consumed)."""
+    status: StateStatus = StateStatus.VALID
+    """VALID for a complete fold. INVALID marks a degraded projection that
+    stopped at ``unprojectable_at_sequence``."""
+    unprojectable_at_sequence: int | None = None
+    """Sequence of the earliest event the fold refused, or None when the whole
+    log folded."""
+    unprojectable_event_type: str | None = None
+    """Type of the refused event, as ``unprojectable_reason`` alone may not name it."""
+    unprojectable_reason: str | None = None
+    """Single-line statement of the constraint the refused event violated."""
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -438,6 +665,12 @@ class SemanticState(BaseModel):
 
     def dependency(self, resource: str) -> ExternalDependency | None:
         return next((d for d in self.external_dependencies if d.resource == resource), None)
+
+    def pin(self, constraint_id: str) -> ConstraintPin | None:
+        return self.pins.get(constraint_id)
+
+    def active_pins(self) -> tuple[ConstraintPin, ...]:
+        return tuple(self.pins.values())
 
     def evidence_ids(self) -> frozenset[str]:
         return frozenset(e.evidence_id for e in self.evidence)
@@ -498,7 +731,25 @@ class UnknownSideEffect(RuntimeError):
     """Raised when CONTINUUM cannot determine whether an external side effect occurred.
 
     The caller must reconcile (do not blindly retry).
+
+    ``action_key`` and ``action_id`` carry the identity of the action needing
+    reconciliation, when the raiser knows it. Telling a caller to reconcile
+    without telling it *what* to reconcile is not actionable, and a recovering
+    session is by definition the one least able to reconstruct that identity for
+    itself (issue #367). Both are optional: a cross-run refusal is raised about
+    another run's record, which this ledger has no standing to settle.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        action_key: str | None = None,
+        action_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.action_key = action_key
+        self.action_id = action_id
 
 
 # --------------------------------------------------------------------------- #
@@ -606,6 +857,21 @@ class Run(BaseModel):
         return self.model_copy(update={"updated_at": utcnow(), **overrides})
 
 
+#: Fields that describe how an event log was *read*, not what a run's state
+#: is (issue #383). They live on SemanticState so a degraded fold can carry
+#: its diagnosis, but they are outside every durable identity of a state:
+#: excluded from the version fingerprint and from checkpoint integrity hashes
+#: (both predate #383; hashing them would brand every existing record as
+#: tampered), and omitted from persisted bodies so readers built before #383,
+#: whose SemanticState forbids extra inputs, can still load newer databases.
+PROJECTION_BOOKKEEPING: set[str] = {
+    "status",
+    "unprojectable_at_sequence",
+    "unprojectable_event_type",
+    "unprojectable_reason",
+}
+
+
 class StateCheckpoint(BaseModel):
     model_config = Frozen
 
@@ -620,8 +886,28 @@ class StateCheckpoint(BaseModel):
     integrity_hash: str | None = None
 
     def content(self) -> dict[str, Any]:
-        """The sealed portion of the checkpoint (everything but the hash)."""
-        return self.model_dump(mode="json", exclude={"integrity_hash"})
+        """The sealed portion of the checkpoint (everything but the hash).
+
+        Projection bookkeeping is excluded beside the hash itself: it was added
+        after these checkpoints existed (#383), it is default in anything that
+        can be persisted (every capture path refuses a degraded fold), and
+        hashing it would report every checkpoint written by earlier builds as
+        tampered, which is exactly the alarm this hash exists to mean.
+        """
+        return self.model_dump(
+            mode="json", exclude={"integrity_hash": True, "state": PROJECTION_BOOKKEEPING}
+        )
+
+    def canonical_json(self) -> str:
+        """The serialised form written to storage.
+
+        Omits projection bookkeeping for the same reasons ``content`` does,
+        plus one more: readers built before #383 validate ``SemanticState``
+        with ``extra="forbid"`` and would refuse a body carrying fields they
+        have never heard of. Omitting them costs nothing, since they are
+        always default in anything persistable.
+        """
+        return self.model_dump_json(exclude={"state": PROJECTION_BOOKKEEPING})
 
     def digest(self) -> str:
         return stable_hash(self.content())

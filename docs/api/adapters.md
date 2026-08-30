@@ -82,6 +82,36 @@ can capture state or intercept its own side effects.
 Subclass of `GenericAgentAdapter` wrapping LCEL runnable pipelines and the
 `langchain.agents.create_agent` tool-calling loop.
 
+## Crash recovery in under ten minutes
+
+Each adapter recovers the same way. The generic path needs no extra
+install; the three framework adapters need their optional extra. Total time
+from a fresh checkout with a warm pip cache is under two minutes; a cold
+install stays inside ten.
+
+```python
+from continuum.adapters.generic import GenericAgentAdapter
+from continuum.storage import SQLiteStorage
+store = SQLiteStorage(":memory:")
+adapter = GenericAgentAdapter(store)
+run_id = "demo"
+adapter.start_run(goal="trial", run_id=run_id)
+res = adapter.intercept_action(run_id, "slack.notify", lambda: "sent", arguments={"channel": "#x"})
+from continuum.state.semantic import project
+state = project(run_id, store.read_events(run_id))
+adapter.capture_state(run_id, state, reason="pre-kill")
+# kill -9 here, then in a fresh process:
+decision = adapter.resume(run_id)
+assert decision.safe and decision.mode.value == "resume"
+```
+
+If the kill lands between claim and complete, `decision.mode` is
+`request_human` with `next_allowed_action: reconcile_action:...` and
+`safe` is false. LangChain and LangGraph use the same `wrap_tool`
+with `key` or `key_fn` so LLM argument drift does not defeat dedup;
+OpenAI uses `wrap_function_tool` and `ContinuumContext`. Live hard-kill proofs
+exist per adapter: `examples/crash_recovery_agent.py` (generic), `examples/langchain_real_llm_crash.py`, `examples/langgraph_real_llm_crash.py`, and `examples/openai_real_llm_crash.py` each drive a real kill with `os._exit(137)` and assert the contract blocks resume.
+
 ## Availability flags
 
 `langgraph_available`, `openai_agents_available`, and `langchain_available` are
