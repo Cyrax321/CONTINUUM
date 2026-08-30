@@ -1359,7 +1359,7 @@ def cmd_fork(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> 
     except EditPreconditionError as exc:
         rationale: dict[str, Any] = dict(exc.rationale)
         refusal_text = _precondition_refusal_text(rationale, args.run_id)
-        payload: dict[str, Any] = {
+        refusal_payload: dict[str, Any] = {
             "run_id": args.run_id,
             "edit_type": exc.edit_type,
             "refused": True,
@@ -1367,7 +1367,7 @@ def cmd_fork(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> 
             "error": str(exc),
         }
         _emit(
-            payload,
+            refusal_payload,
             refusal_text,
             as_json=args.json,
             stream=out,
@@ -1452,7 +1452,7 @@ def cmd_restore(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     except EditPreconditionError as exc:
         rationale: dict[str, Any] = dict(exc.rationale)
         refusal_text = _precondition_refusal_text(rationale, args.run_id)
-        payload = {
+        refusal_payload: dict[str, Any] = {
             "run_id": args.run_id,
             "edit_type": exc.edit_type,
             "refused": True,
@@ -1460,7 +1460,7 @@ def cmd_restore(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
             "error": str(exc),
         }
         _emit(
-            payload,
+            refusal_payload,
             refusal_text,
             as_json=args.json,
             stream=out,
@@ -1530,7 +1530,7 @@ def cmd_merge(args: argparse.Namespace, storage: Storage, out: Any, err: Any) ->
     except EditPreconditionError as exc:
         rationale: dict[str, Any] = dict(exc.rationale)
         refusal_text = _precondition_refusal_text(rationale, args.run_id)
-        payload = {
+        refusal_payload: dict[str, Any] = {
             "run_id": args.run_id,
             "edit_type": exc.edit_type,
             "refused": True,
@@ -1538,7 +1538,7 @@ def cmd_merge(args: argparse.Namespace, storage: Storage, out: Any, err: Any) ->
             "error": str(exc),
         }
         _emit(
-            payload,
+            refusal_payload,
             refusal_text,
             as_json=args.json,
             stream=out,
@@ -1615,14 +1615,39 @@ def cmd_checkpoint(args: argparse.Namespace, storage: Storage, out: Any, err: An
 
 
 def cmd_rewind(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
-    """Rewind workspace and projection to a checkpoint (issue #292)."""
+    """Rewind workspace and projection to a checkpoint (issue #292, gated in #408, carry-forward in #493)."""
     from continuum.checkpoint.rewind import RewindError, rewind_to_checkpoint
+    from continuum.recovery.gate import EditPreconditionError
 
     storage.get_run(args.run_id)
+    carry_forward = list(getattr(args, "carry_forward", None) or [])
     try:
         result = rewind_to_checkpoint(
-            storage, args.run_id, args.to, force=args.force, dry_run=args.dry_run
+            storage,
+            args.run_id,
+            args.to,
+            force=args.force,
+            dry_run=args.dry_run,
+            carry_forward=carry_forward,
         )
+    except EditPreconditionError as exc:
+        rationale: dict[str, Any] = dict(exc.rationale)
+        refusal_text = _precondition_refusal_text(rationale, args.run_id)
+        refusal_payload: dict[str, Any] = {
+            "run_id": args.run_id,
+            "edit_type": exc.edit_type,
+            "refused": True,
+            "rationale": rationale,
+            "error": str(exc),
+        }
+        _emit(
+            refusal_payload,
+            refusal_text,
+            as_json=args.json,
+            stream=out,
+            palette=getattr(args, "_palette", None),
+        )
+        return ExitCode.ERROR
     except RewindError as exc:
         print(f"error: {exc}", file=err)
         return ExitCode.ERROR
@@ -1630,7 +1655,7 @@ def cmd_rewind(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         print(f"error: rewind failed: {exc}", file=err)
         return ExitCode.ERROR
     if args.dry_run:
-        payload: dict[str, Any] = {
+        dry_payload: dict[str, Any] = {
             "run_id": result.run_id,
             "target_checkpoint": result.target_checkpoint.checkpoint_id,
             "target_version": result.target_checkpoint.version,
@@ -1659,7 +1684,7 @@ def cmd_rewind(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
                 f"unrecoverable ({len(result.unrecoverable)}): {'; '.join(result.unrecoverable[:3])}"
             )
         _emit(
-            payload,
+            dry_payload,
             "\n".join(lines) or "Dry run: nothing to revert.",
             as_json=args.json,
             stream=out,
@@ -1667,7 +1692,7 @@ def cmd_rewind(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         )
         return ExitCode.OK
     if result.conflicts or result.unrecoverable:
-        payload = {
+        conflict_payload: dict[str, Any] = {
             "run_id": result.run_id,
             "target_checkpoint": result.target_checkpoint.checkpoint_id,
             "target_version": result.target_checkpoint.version,
@@ -1687,14 +1712,32 @@ def cmd_rewind(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             )
         lines.append("Use --force to proceed or resolve conflicts and retry.")
         _emit(
-            payload,
+            conflict_payload,
             "\n".join(lines),
             as_json=args.json,
             stream=out,
             palette=getattr(args, "_palette", None),
         )
         return ExitCode.ERROR
-    payload = {
+    lineage_payload: dict[str, Any] = {}
+    summary: dict[str, Any] = {}
+    carry_set: set[str] = set(carry_forward)
+    anchor_val = result.target_checkpoint.state.source_sequence
+    try:
+        events = storage.read_events(args.run_id)
+        lineage = [e for e in events if e.type is EventType.RUN_RESTORED]
+        if lineage:
+            last = lineage[-1]
+            lineage_payload = dict(last.payload)
+            summary = dict(lineage_payload.get("preconditions", {}) or {})
+            carry_set = set(lineage_payload.get("carry_forward", []) or carry_forward)
+            anchor_val = int(lineage_payload.get("anchor_sequence", anchor_val) or anchor_val)
+    except Exception:
+        pass
+    preserved_line = _precondition_preserved_line(
+        summary, carry_set, anchor=anchor_val, edit_type="restore"
+    )
+    payload: dict[str, Any] = {
         "run_id": result.run_id,
         "target_checkpoint": result.target_checkpoint.checkpoint_id,
         "target_version": result.target_checkpoint.version,
@@ -1703,11 +1746,16 @@ def cmd_rewind(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         "deleted_files": list(result.deleted_files),
         "resume_mode": result.resume_mode,
         "resume_safe": result.resume_safe,
+        "carry_forward": sorted(carry_set),
+        "preconditions": summary,
+        "preserved_summary": preserved_line,
+        "lineage_event": lineage_payload,
     }
     lines = [
         f"Rewound {result.run_id} to checkpoint {result.target_checkpoint.checkpoint_id} (v{result.target_checkpoint.version})",
         f"  reverted {len(result.reverted_files)} file(s), deleted {len(result.deleted_files)} file(s)",
         f"  state now at v{result.state_version}, resume mode {result.resume_mode} (safe={result.resume_safe})",
+        f"[ok] {preserved_line}",
     ]
     _emit(
         payload,
@@ -2968,6 +3016,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="report what would be reverted without touching files.",
+    )
+    rewind.add_argument(
+        "--carry-forward",
+        dest="carry_forward",
+        action="append",
+        default=None,
+        help="identifier to carry forward (repeatable: approval_id, key, action_id or sequence).",
     )
 
     record_plan = with_run(

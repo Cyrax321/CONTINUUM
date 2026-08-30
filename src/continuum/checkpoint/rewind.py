@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -68,21 +69,28 @@ def rewind_to_checkpoint(
     *,
     force: bool = False,
     dry_run: bool = False,
+    carry_forward: Collection[str] | None = None,
 ) -> RewindResult:
     target = resolve_checkpoint(storage, run_id, to)
     # Gate wiring (#408): restore must pass the shared precondition gate
     # before it discards (anchor, head]. The rewind discards history, so the
     # same unsettled-authorization and uncertain-slot checks that block fork
     # must block rewind, with per-edit filtering for depended_results.
-    from continuum.recovery.gate import check_preconditions
+    # Carry-forward (#493): legitimate audited rewind may explicitly carry
+    # unsettled authorizations or uncertain slots, so the flag is threaded
+    # through to the gate. Omit it and the gate refuses as before (fail-closed).
+    from continuum.recovery.gate import EditPreconditionError, check_preconditions
 
     try:
-        check_preconditions(
+        _derivation, _carry_set, _summary = check_preconditions(
             storage,
             run_id,
             target.state.source_sequence,
             edit_type="restore",
+            carry_forward=carry_forward,
         )
+    except EditPreconditionError:
+        raise
     except Exception as exc:
         raise RewindError(str(exc)) from exc
     _ = project(run_id, storage.read_events(run_id), upto=target.state.source_sequence)
@@ -170,6 +178,18 @@ def rewind_to_checkpoint(
     if not force and not dry_run and (conflicts or unrecoverable):
         raise RewindError(
             f"rewind to {to!r} has {len(conflicts)} conflict(s) and {len(unrecoverable)} unrecoverable file(s); use --force to proceed anyway or resolve conflicts. Conflicts: {conflicts[:3]} Unrecoverable: {unrecoverable[:3]}"
+        )
+    if not dry_run:
+        from continuum.recovery.gate import stamp_lineage
+
+        stamp_lineage(
+            storage,
+            run_id,
+            edit_type="restore",
+            anchor=target.state.source_sequence,
+            summary=_summary,
+            carry_set=_carry_set,
+            extra={"target": target.checkpoint_id, "reason": f"rewind to {to}"},
         )
     try:
         engine = RecoveryEngine(storage)
