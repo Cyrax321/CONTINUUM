@@ -42,6 +42,7 @@ Deterministic tokenizer note (issue #293a, #568):
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
@@ -159,6 +160,32 @@ class MethodResult:
 def _render_log(events: Sequence[Event]) -> str:
     """Compact, reproducible rendering of the event log (for token accounting)."""
     return "\n".join(f"{e.type.value}: {e.payload}" for e in events)
+
+
+def _event_payload_bytes(events: Sequence[Event]) -> int:
+    """Total bytes of event payloads, deterministic via json dumps.
+
+    Uses ``json.dumps(payload, sort_keys=True)`` exactly as storage does,
+    then utf-8 length. No compression or tokenizer, purely byte count.
+    """
+    return sum(len(json.dumps(dict(e.payload), sort_keys=True).encode("utf-8")) for e in events)
+
+
+def _checkpoint_bytes(checkpoint: Any) -> int:
+    """Bytes of a checkpoint body, deterministic via canonical_json."""
+    try:
+        return len(checkpoint.canonical_json().encode("utf-8"))
+    except Exception:
+        return 0
+
+
+def _estimate_resume_tokens(text: str) -> int:
+    """Deterministic token estimate, same heuristic as context budget.
+
+    Uses ``estimate_tokens`` (len // 4) so counts are stable and vendor
+    independent. Documented as estimate everywhere.
+    """
+    return estimate_tokens(text)
 
 
 def _write_effect(path: Path) -> None:
