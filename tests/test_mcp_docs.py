@@ -60,10 +60,13 @@ async def test_the_table_lists_every_served_tool_with_its_kind(server: Any) -> N
     """A row per tool, and the Kind column reads off the declared annotation.
 
     Failing here means the table and ``tools/list`` disagree; the sentence of
-    totals directly under the table is part of the same edit.
+    totals directly under the table is part of the same edit. Duplicate rows
+    are rejected before the comparison, or a second row for one tool would
+    silently decide its kind.
     """
-    documented = dict(ROW.findall(MCP_DOC.read_text(encoding="utf-8")))
-    assert documented == kinds(await server.list_tools())
+    rows = ROW.findall(MCP_DOC.read_text(encoding="utf-8"))
+    assert len(rows) == len({name for name, _ in rows}), "a tool is documented twice"
+    assert dict(rows) == kinds(await server.list_tools())
 
 
 def test_the_page_carries_no_em_dashes() -> None:
