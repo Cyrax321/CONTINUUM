@@ -117,6 +117,9 @@ class EventType(StrEnum):
     # authority (issue #269): a claim tried to reuse a consumed single-use grant
     GRANT_DENIED = "GRANT_DENIED"
 
+    # authority lifecycle (issue #289/#555): one-time credential was consumed
+    AUTHORITY_CONSUMED = "AUTHORITY_CONSUMED"
+
     # structured attempt memory (issue #313): durable falsification lesson
     ATTEMPT_LESSON = "ATTEMPT_LESSON"
 
