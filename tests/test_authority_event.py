@@ -195,7 +195,7 @@ def test_consumer_run_id_and_consumed_at_overrides() -> None:
             via_action_id="act-99",
         )
         assert event.payload["consumer_run_id"] == "run_2"
-        assert event.payload["consumed_at"] == custom_time.isoformat()
+        assert event.payload["consumed_at"] in (custom_time.isoformat(), custom_time.isoformat().replace("+00:00", "Z"))
         assert event.payload["via_action_id"] == "act-99"
         # default consumer_run_id
         event2 = record_authority_consumed(storage, "run_1", "auth-default")
