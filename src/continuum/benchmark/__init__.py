@@ -306,7 +306,7 @@ def _run_one(method: str, spec: ScenarioSpec, total: int, workdir: Path) -> Meth
             pre_events = store.read_events(run_id)
             bytes_read_at_resume = _event_payload_bytes(pre_events)
         elif method == "naive_checkpoint":
-            bytes_read_at_resume = len(f"resume from {done}".encode("utf-8"))
+            bytes_read_at_resume = len(f"resume from {done}".encode())
 
         t0 = time.perf_counter()
         if method == "replay":

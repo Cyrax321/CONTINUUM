@@ -16,7 +16,6 @@ import json
 from pathlib import Path
 
 from continuum.benchmark import METHODS, SCENARIOS, MethodResult, run_benchmark
-from continuum.checkpoint.context import estimate_tokens
 
 
 def test_method_result_has_byte_count_fields() -> None:
@@ -80,7 +79,10 @@ def test_continuum_reports_checkpoint_bytes_and_revalidation() -> None:
     assert cont.bytes_read_at_resume > 0
     assert replay.bytes_read_at_resume > 0
     assert naive.bytes_read_at_resume > 0
-    assert naive.bytes_read_at_resume < cont.bytes_read_at_resume or naive.bytes_read_at_resume < replay.bytes_read_at_resume
+    assert (
+        naive.bytes_read_at_resume < cont.bytes_read_at_resume
+        or naive.bytes_read_at_resume < replay.bytes_read_at_resume
+    )
     # Revalidation calls: continuum validates once, others do not
     assert cont.revalidation_calls == 1
     assert replay.revalidation_calls == 0
@@ -158,6 +160,10 @@ def test_resume_tokens_use_deterministic_estimate() -> None:
 
 def test_no_em_dash_in_harness() -> None:
     # House rule: no em dashes anywhere
-    for path in ("src/continuum/benchmark/__init__.py", "benchmarks/run.py", "tests/test_benchmark_counters.py"):
+    for path in (
+        "src/continuum/benchmark/__init__.py",
+        "benchmarks/run.py",
+        "tests/test_benchmark_counters.py",
+    ):
         content = Path(path).read_text(encoding="utf-8")
         assert "\u2014" not in content, f"em dash found in {path}"
