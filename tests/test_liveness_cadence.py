@@ -169,3 +169,40 @@ def test_liveness_text_ok_and_breached() -> None:
         "phase": "otherwise",
     }
     assert "no events" in _liveness_text(advisory_none).lower()
+
+
+def test_cli_validate_includes_liveness_advisory(tmp_path: Path) -> None:
+    from continuum.cli.main import main
+    import io
+
+    db = str(tmp_path / "cli_liveness.db")
+    run_id = "run_cli_liveness"
+    # Create run via CLI
+    out, err = io.StringIO(), io.StringIO()
+    code = main(["--db", db, "start", run_id, "--goal", "test liveness"], out=out, err=err)
+    assert code == 0
+    # Validate should include liveness advisory
+    out2, err2 = io.StringIO(), io.StringIO()
+    code2 = main(["--db", db, "validate", run_id, "--json"], out=out2, err=err2)
+    assert code2 == 0
+    payload = json.loads(out2.getvalue())
+    assert "liveness" in payload
+    assert "breached" in payload["liveness"]
+    assert "threshold_seconds" in payload["liveness"]
+
+
+def test_cli_resume_includes_liveness_advisory(tmp_path: Path) -> None:
+    from continuum.cli.main import main
+    import io
+
+    db = str(tmp_path / "cli_liveness2.db")
+    run_id = "run_cli_liveness2"
+    out, err = io.StringIO(), io.StringIO()
+    main(["--db", db, "start", run_id, "--goal", "test resume liveness"], out=out, err=err)
+    out2, err2 = io.StringIO(), io.StringIO()
+    code2 = main(["--db", db, "resume", run_id, "--json"], out=out2, err=err2)
+    # Resume should be safe (no staleness) but include liveness
+    assert code2 == 0
+    payload = json.loads(out2.getvalue())
+    assert "liveness" in payload
+    assert payload["liveness"]["phase"] in ("open_claim", "otherwise")
