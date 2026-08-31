@@ -497,14 +497,15 @@ def render(results: list[MethodResult]) -> str:
     """Render the results as a plain-text table plus a short reading."""
     header = (
         f"{'scenario':<18} {'method':<18} {'dup_work':>9} {'dup_side':>9} "
-        f"{'stale':>6} {'ctx_tok':>8} {'compress':>9}"
+        f"{'stale':>6} {'ctx_tok':>8} {'compress':>9} {'ckpt_b':>8} {'read_b':>8} {'reval':>5} {'resume_tok':>10}"
     )
     lines = [header, "-" * len(header)]
     for r in results:
         lines.append(
             f"{r.scenario:<18} {r.method:<18} {r.duplicate_work_ratio:>9.3f} "
             f"{r.duplicate_side_effects:>9} {str(r.detected_stale):>6} "
-            f"{r.context_tokens:>8} {str(r.compression_ratio):>9}"
+            f"{r.context_tokens:>8} {str(r.compression_ratio):>9} {r.checkpoint_bytes_written:>8} "
+            f"{r.bytes_read_at_resume:>8} {r.revalidation_calls:>5} {r.resume_tokens:>10}"
         )
     lines.append("")
     lines.append("Reading:")
