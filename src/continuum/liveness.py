@@ -24,6 +24,8 @@ __all__ = [
     "evaluate",
     "load_cadence_contract",
     "silence_seconds",
+    "advisory_for_storage",
+    "advisory_text",
 ]
 
 DEFAULT_MAX_SILENCE_SECONDS: int = 3600
@@ -174,6 +176,73 @@ def load_cadence_contract(path: Path | None = None) -> CadenceContract:
     if not isinstance(data, dict):
         raise ValueError(f"liveness contract {target} must be a JSON object")
     return CadenceContract.model_validate(data)
+
+
+def _last_event_ts(storage: Any, run_id: str) -> datetime | None:
+    """Return timestamp of the last event for ``run_id``, or None."""
+    try:
+        events = storage.read_events(run_id)
+    except Exception:
+        return None
+    if not events:
+        return None
+    return events[-1].timestamp  # type: ignore[no-any-return]
+
+
+def _has_open_claim(storage: Any, run_id: str) -> bool:
+    """Whether the run has an open claim (STARTED or UNKNOWN)."""
+    try:
+        from continuum.actions import ActionLedger
+
+        ledger = ActionLedger(storage, run_id)
+        return bool(ledger.pending())
+    except Exception:
+        return False
+
+
+def advisory_for_storage(storage: Any, run_id: str, *, now: datetime | None = None) -> dict[str, Any]:
+    """Compute liveness advisory for a run, injected clock.
+
+    Shared by CLI, dashboard, MCP and sidecar read paths so every surface
+    surfaces the same advisory with the same semantics. Breach is advisory
+    only, never moves recovery mode.
+    """
+    try:
+        contract = load_cadence_contract()
+    except Exception:
+        contract = CadenceContract()
+    last_ts = _last_event_ts(storage, run_id)
+    has_claim = _has_open_claim(storage, run_id)
+    now_ts = now or datetime.now(UTC)
+    try:
+        result = evaluate(now_ts, last_ts, contract=contract, has_open_claim=has_claim)
+    except Exception:
+        return {"breached": False, "silence_seconds": None, "threshold_seconds": None}
+    return {
+        "breached": result.breached,
+        "silence_seconds": result.silence_seconds,
+        "threshold_seconds": result.threshold_seconds,
+        "phase": result.phase,
+        "has_open_claim": has_claim,
+        "last_event_ts": result.last_event_ts.isoformat() if result.last_event_ts else None,
+        "now": result.now.isoformat(),
+    }
+
+
+def advisory_text(advisory: dict[str, Any]) -> str:
+    """Render advisory as human text, never affects exit code."""
+    breached = advisory.get("breached")
+    silence = advisory.get("silence_seconds")
+    threshold = advisory.get("threshold_seconds")
+    phase = advisory.get("phase") or "otherwise"
+    if silence is None:
+        return "Liveness: no events yet, no silence to evaluate."
+    if breached:
+        return (
+            f"Liveness: BREACHED, silence {silence:.1f}s exceeds threshold "
+            f"{threshold}s (phase {phase}). Advisory only."
+        )
+    return f"Liveness: ok, silence {silence:.1f}s within threshold {threshold}s (phase {phase})."
 
 
 # Liveness cadence contract is advisory only, never moves mode

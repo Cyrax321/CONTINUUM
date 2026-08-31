@@ -87,6 +87,26 @@ def _advisory_trust_html(storage: Storage, run_id: str) -> str:
         return ""
 
 
+def _liveness_html(storage: Storage, run_id: str) -> str:
+    """Read-only advisory display for liveness cadence (issue #561)."""
+    try:
+        from continuum.liveness import advisory_for_storage, advisory_text
+
+        advisory = advisory_for_storage(storage, run_id)
+        text = advisory_text(advisory)
+        breached = bool(advisory.get("breached"))
+        border = "#c00" if breached else "#090"
+        return (
+            f'<div style="margin:8px 0;padding:8px;border:1px solid {border}">'
+            f"<b>Liveness:</b> {html.escape(text)} "
+            f"(phase={html.escape(str(advisory.get('phase', '')))}, "
+            f"threshold={html.escape(str(advisory.get('threshold_seconds', '')))}s)"
+            f"</div>"
+        )
+    except Exception:
+        return ""
+
+
 def _pins_html(storage: Storage, run_id: str) -> str:
     """Read-only advisory display for constraint pins (issue #419)."""
     try:
@@ -146,11 +166,13 @@ def render_run_detail_html(storage: Storage, run_id: str) -> str:
         validation_html = f'<table border="1" cellpadding="4"><tr><th>Component</th><th>Status</th><th>Detail</th></tr>{validation_rows}</table>'
         advisory_html = _advisory_trust_html(storage, run_id)
         pins_html = _pins_html(storage, run_id)
+        liveness_html = _liveness_html(storage, run_id)
     except Exception as exc:
         ledger_html = f"<p>{html.escape(str(exc))}</p>"
         validation_html = ""
         advisory_html = ""
         pins_html = ""
+        liveness_html = ""
     events = storage.read_events(run_id)
     try:
         archived = storage.read_archived_events(run_id)
@@ -225,6 +247,7 @@ def render_run_detail_html(storage: Storage, run_id: str) -> str:
 <p>Goal: {html.escape(run.goal)} | Status: {html.escape(run.status.value)}</p>
 {advisory_html}
 {pins_html}
+{liveness_html}
 {hitl_html}
 <h2>Contract</h2>{ledger_html}
 <h2>Validation</h2>{validation_html}

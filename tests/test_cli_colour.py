@@ -179,7 +179,7 @@ def test_stripping_colour_reproduces_plain_output_exactly(db: str, argv: tuple[s
     """Colour is presentational: strip the codes and you get the plain text."""
     _, plain, _ = run("--db", db, *argv)
     _, coloured, _ = run("--db", db, "--color", *argv)
-    assert ANSI.sub("", coloured) == plain
+    assert _normalize_liveness(ANSI.sub("", coloured)) == _normalize_liveness(plain)
 
 
 @pytest.mark.parametrize(
@@ -266,6 +266,18 @@ def test_for_stream_infers_from_the_stream() -> None:
 # --- as a real process ------------------------------------------------------ #
 
 
+def _normalize_liveness(text: str) -> str:
+    """Normalize wall-clock liveness line for byte-equality checks.
+
+    Liveness is ``now - last_event_ts`` against a cadence contract, so two
+    back-to-back renders legitimately differ by a few hundred milliseconds.
+    The invariant under test is colour presentationality, not clock stability,
+    so normalize the variable ``silence X.Xs`` fragment before comparing.
+    Breach status and threshold remain asserted elsewhere.
+    """
+    return re.sub(r"silence \d+(?:\.\d+)?s", "silence X.Xs", text)
+
+
 def test_a_real_piped_process_emits_no_colour(db: str) -> None:
     # The uncoloured in-process render is the reference: a real piped process
     # must produce it byte for byte, exit code included.
@@ -283,6 +295,6 @@ def test_a_real_piped_process_emits_no_colour(db: str) -> None:
     # Assert the CLI actually ran. Checking only for absent escape sequences
     # would pass for a process that died before producing any output at all.
     assert result.returncode == expected_code, result.stderr
-    assert result.stdout == expected_out
+    assert _normalize_liveness(result.stdout) == _normalize_liveness(expected_out)
     assert not ANSI.search(result.stdout)
     assert not ANSI.search(result.stderr)

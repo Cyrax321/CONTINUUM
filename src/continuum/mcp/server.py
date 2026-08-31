@@ -963,6 +963,12 @@ def build_server(
             constraint_pins = constraint_pins_payload(decision.state, ctx_rendered)
         except Exception:
             constraint_pins = {"pins": {}, "flagged": [], "grace_seconds": None}
+        try:
+            from continuum.liveness import advisory_for_storage
+
+            liveness = advisory_for_storage(ctx.storage, run_id)
+        except Exception:
+            liveness = {"breached": False, "silence_seconds": None, "threshold_seconds": None}
         return _json(
             {
                 "run_id": run_id,
@@ -981,6 +987,7 @@ def build_server(
                 ],
                 "environment_changes": [d.render() for d in decision.environment_diff.breaking],
                 "constraint_pins": constraint_pins,
+                "liveness": liveness,
             }
         )
 
@@ -1060,6 +1067,12 @@ def build_server(
             constraint_pins = constraint_pins_payload(decision.state, ctx_rendered)
         except Exception:
             constraint_pins = {"pins": {}, "flagged": [], "grace_seconds": None}
+        try:
+            from continuum.liveness import advisory_for_storage
+
+            liveness = advisory_for_storage(ctx.storage, run_id)
+        except Exception:
+            liveness = {"breached": False, "silence_seconds": None, "threshold_seconds": None}
         return _json(
             {
                 "run_id": run_id,
@@ -1104,6 +1117,7 @@ def build_server(
                 "report": decision.render(),
                 **self_report_guidance(decision),
                 "constraint_pins": constraint_pins,
+                "liveness": liveness,
             }
         )
 
