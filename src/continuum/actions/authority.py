@@ -75,4 +75,4 @@ def record_authority_consumed(
         payload,
         source=Origin.DETERMINISTIC,
     )
-    return event
+    return event  # type: ignore[no-any-return]

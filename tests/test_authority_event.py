@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 
 from continuum.actions.authority import record_authority_consumed
-from continuum.events import Event, EventType
+from continuum.events import EventType
 from continuum.models import AuthorityConsumed, Origin, Run
 from continuum.storage import SQLiteStorage
 
@@ -41,9 +41,7 @@ def test_helper_appends_deterministic_hash_chained_event() -> None:
         assert "consumed_at" in event.payload
         assert event.payload["via_action_id"] is None
         # via_action_id variant
-        event2 = record_authority_consumed(
-            storage, "run_1", "auth-456", via_action_id="action_1"
-        )
+        event2 = record_authority_consumed(storage, "run_1", "auth-456", via_action_id="action_1")
         assert event2.payload["via_action_id"] == "action_1"
         assert event2.source == Origin.DETERMINISTIC
     finally:
@@ -195,7 +193,10 @@ def test_consumer_run_id_and_consumed_at_overrides() -> None:
             via_action_id="act-99",
         )
         assert event.payload["consumer_run_id"] == "run_2"
-        assert event.payload["consumed_at"] in (custom_time.isoformat(), custom_time.isoformat().replace("+00:00", "Z"))
+        assert event.payload["consumed_at"] in (
+            custom_time.isoformat(),
+            custom_time.isoformat().replace("+00:00", "Z"),
+        )
         assert event.payload["via_action_id"] == "act-99"
         # default consumer_run_id
         event2 = record_authority_consumed(storage, "run_1", "auth-default")
@@ -216,7 +217,9 @@ def test_model_validation_strips_and_bounds() -> None:
     assert m.consumer_run_id == "run_1"
     assert m.via_action_id == "act"
     with pytest.raises(ValueError):
-        AuthorityConsumed(authority_id="   ", consumer_run_id="run_1", consumed_at=datetime.now(UTC))
+        AuthorityConsumed(
+            authority_id="   ", consumer_run_id="run_1", consumed_at=datetime.now(UTC)
+        )
     with pytest.raises(ValueError):
         AuthorityConsumed(authority_id="auth", consumer_run_id="   ", consumed_at=datetime.now(UTC))
 
