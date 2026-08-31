@@ -212,6 +212,10 @@ def _run_one(method: str, spec: ScenarioSpec, total: int, workdir: Path) -> Meth
     with SQLiteStorage(str(db)) as store:
         run_id = "run_bench"
         env_v3 = capture_environment(run_id, StaticProvider(dataset="v3"))
+        checkpoint_bytes_written = 0
+        bytes_read_at_resume = 0
+        revalidation_calls = 0
+        stored_checkpoint = None
 
         # --- phase 1: first half of the run, up to the crash ------------------- #
         crash_at = max(1, int(total * spec.crash_frac))
@@ -259,7 +263,8 @@ def _run_one(method: str, spec: ScenarioSpec, total: int, workdir: Path) -> Meth
             _attempt_side_effect(ledger, effects, spec)
 
         if manager is not None:
-            manager.checkpoint(run_id, environment=env_v3)
+            stored_checkpoint = manager.checkpoint(run_id, environment=env_v3)
+            checkpoint_bytes_written = _checkpoint_bytes(stored_checkpoint)
 
         env_after = (
             capture_environment(run_id, StaticProvider(dataset="v4")) if spec.env_change else env_v3
@@ -275,19 +280,33 @@ def _run_one(method: str, spec: ScenarioSpec, total: int, workdir: Path) -> Meth
                 run_id, store.read_events(run_id), on_unprojectable="degrade"
             ).progress.completed
         else:  # continuum
-            assert manager is not None
+            assert manager is not None and stored_checkpoint is not None
             restored = manager.restore(run_id)
             restored_state = restored.state
             done = restored_state.progress.completed
+            # bytes read at resume is checkpoint body plus pending payloads
+            pending_after = store.read_events(
+                run_id, after_sequence=stored_checkpoint.state.source_sequence
+            )
+            bytes_read_at_resume = checkpoint_bytes_written + _event_payload_bytes(pending_after)
+            # revalidation is a single validate_state call for continuum
             validation = validate_state(
                 restored_state, current_environment=env_after, checkpoint_environment=env_v3
             )
+            revalidation_calls = 1
             detected = not validation.safe
             if ledger.pending():
                 reconcile_pending(
                     ledger,
                     ProbeReconciler(lambda action: Resolution(occurred=True, external_id="481")),
                 )
+
+        # bytes read for the non-continuum strategies, computed at recovery time
+        if method == "replay":
+            pre_events = store.read_events(run_id)
+            bytes_read_at_resume = _event_payload_bytes(pre_events)
+        elif method == "naive_checkpoint":
+            bytes_read_at_resume = len(f"resume from {done}".encode("utf-8"))
 
         t0 = time.perf_counter()
         if method == "replay":
@@ -325,6 +344,14 @@ def _run_one(method: str, spec: ScenarioSpec, total: int, workdir: Path) -> Meth
         else:
             compression = round(full_log_tokens / context_tokens, 2) if context_tokens else None
 
+        resume_tokens = context_tokens
+        # replay_tokens_to_productive is the token cost to become productive
+        # For replay it is the full log, for continuum it is the briefing, deterministic
+        if method == "replay":
+            replay_tokens_to_productive = _estimate_resume_tokens(_render_log(events))
+        else:
+            replay_tokens_to_productive = resume_tokens
+
         return MethodResult(
             method=method,
             scenario=spec.name,
@@ -338,6 +365,11 @@ def _run_one(method: str, spec: ScenarioSpec, total: int, workdir: Path) -> Meth
             full_log_tokens=full_log_tokens,
             compression_ratio=compression,
             elapsed_seconds=round(elapsed, 6),
+            checkpoint_bytes_written=checkpoint_bytes_written,
+            bytes_read_at_resume=bytes_read_at_resume,
+            revalidation_calls=revalidation_calls,
+            resume_tokens=resume_tokens,
+            replay_tokens_to_productive=replay_tokens_to_productive,
         )
 
 
