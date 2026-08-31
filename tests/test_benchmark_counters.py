@@ -160,4 +160,4 @@ def test_no_em_dash_in_harness() -> None:
     # House rule: no em dashes anywhere
     for path in ("src/continuum/benchmark/__init__.py", "benchmarks/run.py", "tests/test_benchmark_counters.py"):
         content = Path(path).read_text(encoding="utf-8")
-        assert "—" not in content, f"em dash found in {path}"
+        assert "\u2014" not in content, f"em dash found in {path}"

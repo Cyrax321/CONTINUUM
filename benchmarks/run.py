@@ -210,7 +210,7 @@ def main() -> None:
     # Append continuum byte-count bench (issue #568) without breaking the suite
     _append_continuum_bench(out_dir)
 
-    # Fault-injection chaos suite (#397) — shares the emitter schema with #398
+    # Fault-injection chaos suite (#397), shares the emitter schema with #398
     try:
         from benchmarks.fault_injection.emitter import emit_fault_injection_report
         from benchmarks.fault_injection.runner import run_benchmark_suite
@@ -229,7 +229,7 @@ def main() -> None:
         print(f"fault-injection benchmark failed: {exc}")
         fault_report = None
 
-    # Horizon-scale suite (#398) — years of simulated time, judge-scored
+    # Horizon-scale suite (#398), years of simulated time, judge-scored
     try:
         from benchmarks.horizon.emitter import emit_horizon_report
         from benchmarks.horizon.runner import run_horizon_suite
