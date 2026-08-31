@@ -51,6 +51,7 @@ __all__ = [
     "ConstraintRetracted",
     "ConstraintPin",
     "AttemptLesson",
+    "AuthorityConsumed",
     "ModelSpecificState",
     "ModelState",
     "Run",
@@ -529,6 +530,53 @@ class AttemptLesson(BaseModel):
     @classmethod
     def _scar_bounded(cls, value: list[str]) -> list[str]:
         return [str(v) for v in value]
+
+
+class AuthorityConsumed(BaseModel):
+    """Payload of AUTHORITY_CONSUMED: one-time authority was consumed (issue #289/#555).
+
+    Each consumption is a distinct hash-chained row with Origin.DETERMINISTIC,
+    so replay never deduplicates and the audit trail is append-only. The
+    authority_id is bounded to 1-128 characters and carried in the hash,
+    keeping the event size small and deterministic.
+    """
+
+    model_config = Frozen
+
+    authority_id: str = Field(min_length=1, max_length=128)
+    consumer_run_id: str = Field(min_length=1)
+    consumed_at: datetime = Field(default_factory=utcnow)
+    via_action_id: str | None = None
+
+    @field_validator("authority_id")
+    @classmethod
+    def _authority_id_valid(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("authority_id must be non-empty")
+        if len(cleaned) > 128:
+            raise ValueError("authority_id must be 1-128 characters")
+        return cleaned
+
+    @field_validator("consumer_run_id")
+    @classmethod
+    def _consumer_run_id_valid(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("consumer_run_id must be non-empty")
+        return cleaned
+
+    @field_validator("via_action_id")
+    @classmethod
+    def _via_action_id_valid(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("via_action_id must be non-empty when provided")
+        if len(cleaned) > 256:
+            raise ValueError("via_action_id must be at most 256 characters")
+        return cleaned
 
 
 class TrajectoryReport(BaseModel):
