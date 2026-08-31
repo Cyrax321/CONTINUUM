@@ -1058,6 +1058,8 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     pins_text = _constraint_pins_text(constraint_pins)
     if pins_text:
         text += "\n\n" + pins_text
+    liveness = _liveness_advisory(storage, run_id)
+    text += "\n\n" + _liveness_text(liveness)
     payload = {
         "run_id": decision.run_id,
         "goal": storage.get_run(run_id).goal,
@@ -1081,6 +1083,7 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         },
         "advisory": advisory,
         "constraint_pins": constraint_pins,
+        "liveness": liveness,
     }
     _emit(
         payload,
