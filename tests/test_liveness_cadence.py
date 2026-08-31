@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from continuum.actions import ActionLedger
-from continuum.cli.main import _liveness_advisory, _liveness_text
+from continuum.cli.main import _liveness_advisory, _liveness_text, main
 from continuum.events import EventType
 from continuum.liveness import CadenceContract, evaluate, load_cadence_contract
 from continuum.models import Run
@@ -172,18 +172,15 @@ def test_liveness_text_ok_and_breached() -> None:
 
 
 def test_cli_validate_includes_liveness_advisory(tmp_path: Path) -> None:
-    from continuum.cli.main import main
     import io
 
     db = str(tmp_path / "cli_liveness.db")
     run_id = "run_cli_liveness"
-    # Create run via CLI
     out, err = io.StringIO(), io.StringIO()
     code = main(["--db", db, "start", run_id, "--goal", "test liveness"], out=out, err=err)
     assert code == 0
-    # Validate should include liveness advisory
     out2, err2 = io.StringIO(), io.StringIO()
-    code2 = main(["--db", db, "validate", run_id, "--json"], out=out2, err=err2)
+    code2 = main(["--db", db, "--json", "validate", run_id], out=out2, err=err2)
     assert code2 == 0
     payload = json.loads(out2.getvalue())
     assert "liveness" in payload
@@ -192,7 +189,6 @@ def test_cli_validate_includes_liveness_advisory(tmp_path: Path) -> None:
 
 
 def test_cli_resume_includes_liveness_advisory(tmp_path: Path) -> None:
-    from continuum.cli.main import main
     import io
 
     db = str(tmp_path / "cli_liveness2.db")
@@ -200,8 +196,7 @@ def test_cli_resume_includes_liveness_advisory(tmp_path: Path) -> None:
     out, err = io.StringIO(), io.StringIO()
     main(["--db", db, "start", run_id, "--goal", "test resume liveness"], out=out, err=err)
     out2, err2 = io.StringIO(), io.StringIO()
-    code2 = main(["--db", db, "resume", run_id, "--json"], out=out2, err=err2)
-    # Resume should be safe (no staleness) but include liveness
+    code2 = main(["--db", db, "--json", "resume", run_id], out=out2, err=err2)
     assert code2 == 0
     payload = json.loads(out2.getvalue())
     assert "liveness" in payload
