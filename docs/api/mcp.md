@@ -53,6 +53,7 @@ tools are gated by the allowlist (see Security).
 | `continuum_record_progress` | mutate | Record goal progress (completed/total). |
 | `continuum_checkpoint` | mutate | Force a state checkpoint. |
 | `continuum_record_summary` | mutate | Record where reasoning stands (plan stack, decisions, open questions, working set) so a fresh session inherits the plan instead of guessing. Capped at 4096 serialized characters; informational only, never moves mode or safety. |
+| `continuum_record_plan` | mutate | Record a structured plan milestone, one call per unit status change, so a resumed session knows the exact remaining work. Units carry `id`, `title`, `status` (`pending`, `working`, `done`, `blocked`) and optional `depends_on`. |
 | `continuum_intercept_action` | mutate | Claim a side effect; returns whether to proceed. |
 | `continuum_complete_action` | mutate | Record a side effect succeeded. |
 | `continuum_fail_action` | mutate | Record a side effect did not happen. |
@@ -62,7 +63,7 @@ tools are gated by the allowlist (see Security).
 | `continuum_resume` | read | Assess and describe how the run may resume. Omit `run_id` to target the most recently active (interrupted) run. Returns the run's `goal` so a resumed session knows what to continue. |
 | `continuum_list_actions` | read | List recorded side effects and their outcomes. |
 
-Eleven tools: three read-only, eight mutating.
+Twelve tools: three read-only, nine mutating.
 
 Read-only responses `continuum_resume` and `continuum_validate` include a
 `constraint_pins` block: per-pin status (`present`, `absent`, `unverifiable`), grace deadline, and flagged set derived from reconstruction accounting (hash-tagged markers in the recovery context, issue #419). The CLI renders flagged pins prominently with TTY-aware colour while piped output stays byte-identical modulo colour codes. No gating changes live here; strict escalation remains in the accounting layer.

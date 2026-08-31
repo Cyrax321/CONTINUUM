@@ -66,6 +66,17 @@ All notable changes to this project are documented here. The format follows
   A limit below `1` is refused with exit code 1 rather than clamped, since
   `--limit 0` would render a family with children as childless.
 
+- **The MCP reference documents all twelve tools (#271).** `docs/api/mcp.md`
+  carried eleven rows and summarised them as "three read-only, eight
+  mutating", but `tools/list` has served twelve tools since
+  `continuum_record_plan` was added: a client author reading the reference had
+  no way to learn the plan tool exists. The table gains a
+  `continuum_record_plan` row and the totals now match the server. Every other
+  row's `read`/`mutate` kind was audited against the `read_only_hint` the
+  server declares and needed no change. `tests/test_mcp_docs.py` now checks the
+  table against `tools/list`, so a tool registered without a row fails the
+  suite instead of shipping undocumented.
+
 ## [0.1.0] - 2026-08-27
 
 ### Added
