@@ -146,6 +146,11 @@ class MethodResult:
     full_log_tokens: int
     compression_ratio: float | None
     elapsed_seconds: float
+    checkpoint_bytes_written: int = 0
+    bytes_read_at_resume: int = 0
+    revalidation_calls: int = 0
+    resume_tokens: int = 0
+    replay_tokens_to_productive: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
