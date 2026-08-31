@@ -23,6 +23,7 @@ __all__ = [
     "DEFAULT_PHASE_SCOPES",
     "evaluate",
     "load_cadence_contract",
+    "silence_seconds",
 ]
 
 DEFAULT_MAX_SILENCE_SECONDS: int = 3600
@@ -144,6 +145,17 @@ def evaluate(
         last_event_ts=last_event_ts,
         has_open_claim=has_open_claim,
     )
+
+
+def silence_seconds(now: datetime, last_event_ts: datetime | None) -> float | None:
+    """Return ``now - last_event_ts`` in seconds, or None when no events."""
+    if last_event_ts is None:
+        return None
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    if last_event_ts.tzinfo is None:
+        last_event_ts = last_event_ts.replace(tzinfo=UTC)
+    return (now - last_event_ts).total_seconds()
 
 
 def load_cadence_contract(path: Path | None = None) -> CadenceContract:
