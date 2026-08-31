@@ -200,7 +200,9 @@ def _has_open_claim(storage: Any, run_id: str) -> bool:
         return False
 
 
-def advisory_for_storage(storage: Any, run_id: str, *, now: datetime | None = None) -> dict[str, Any]:
+def advisory_for_storage(
+    storage: Any, run_id: str, *, now: datetime | None = None
+) -> dict[str, Any]:
     """Compute liveness advisory for a run, injected clock.
 
     Shared by CLI, dashboard, MCP and sidecar read paths so every surface
