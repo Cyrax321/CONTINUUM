@@ -25,6 +25,7 @@ import os
 import sqlite3
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -195,6 +196,74 @@ def _environment(args: argparse.Namespace, run_id: str) -> EnvironmentSnapshot |
             )
         resources[name] = EnvResource(name=name, version=version)
     return capture(run_id, StaticProvider(resources))
+
+
+def _last_event_ts(storage: Storage, run_id: str) -> datetime | None:
+    """Return timestamp of the last event for ``run_id``, or None."""
+    try:
+        events = storage.read_events(run_id)
+    except Exception:
+        return None
+    if not events:
+        return None
+    return events[-1].timestamp
+
+
+def _has_open_claim(storage: Storage, run_id: str) -> bool:
+    """Whether the run has an open claim (STARTED or UNKNOWN)."""
+    try:
+        ledger = ActionLedger(storage, run_id)
+        return bool(ledger.pending())
+    except Exception:
+        return False
+
+
+def _liveness_advisory(
+    storage: Storage, run_id: str, *, now: datetime | None = None
+) -> dict[str, Any]:
+    """Compute liveness advisory for the read path, injected clock."""
+    try:
+        from continuum.liveness import evaluate, load_cadence_contract
+    except Exception:
+        return {"breached": False, "silence_seconds": None, "threshold_seconds": None}
+    try:
+        contract = load_cadence_contract()
+    except Exception:
+        from continuum.liveness import CadenceContract
+
+        contract = CadenceContract()
+    last_ts = _last_event_ts(storage, run_id)
+    has_claim = _has_open_claim(storage, run_id)
+    now_ts = now or datetime.now(UTC)
+    try:
+        result = evaluate(now_ts, last_ts, contract=contract, has_open_claim=has_claim)
+    except Exception:
+        return {"breached": False, "silence_seconds": None, "threshold_seconds": None}
+    return {
+        "breached": result.breached,
+        "silence_seconds": result.silence_seconds,
+        "threshold_seconds": result.threshold_seconds,
+        "phase": result.phase,
+        "has_open_claim": has_claim,
+        "last_event_ts": result.last_event_ts.isoformat() if result.last_event_ts else None,
+        "now": result.now.isoformat(),
+    }
+
+
+def _liveness_text(advisory: dict[str, Any]) -> str:
+    """Render advisory as human text, never affects exit code."""
+    breached = advisory.get("breached")
+    silence = advisory.get("silence_seconds")
+    threshold = advisory.get("threshold_seconds")
+    phase = advisory.get("phase") or "otherwise"
+    if silence is None:
+        return "Liveness: no events yet, no silence to evaluate."
+    if breached:
+        return (
+            f"Liveness: BREACHED, silence {silence:.1f}s exceeds threshold "
+            f"{threshold}s (phase {phase}). Advisory only."
+        )
+    return f"Liveness: ok, silence {silence:.1f}s within threshold {threshold}s (phase {phase})."
 
 
 # --------------------------------------------------------------------------- #
@@ -808,6 +877,8 @@ def cmd_validate(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
         text = decision.render()
     if pins_text:
         text += "\n\n" + pins_text
+    liveness = _liveness_advisory(storage, args.run_id)
+    text += "\n\n" + _liveness_text(liveness)
     payload = {
         "run_id": decision.run_id,
         "mode": decision.mode.value,
@@ -817,6 +888,7 @@ def cmd_validate(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
         "repairs": [s.action_name for s in decision.plan.steps],
         "human_steps": steps,
         "constraint_pins": constraint_pins,
+        "liveness": liveness,
     }
     # Advisory health is intentionally not part of the payload above; use
     # dedicated health command or resume advisory key for the score.
