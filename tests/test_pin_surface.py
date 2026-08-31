@@ -23,6 +23,15 @@ from continuum.storage import SQLiteStorage
 ANSI = re.compile(r"\033\[[0-9;]*m")
 
 
+def _normalize_liveness(text: str) -> str:
+    """Normalize wall-clock liveness line for byte-equality checks.
+
+    Liveness is ``now - last_event_ts`` so two back-to-back renders differ
+    by a few hundred milliseconds. Normalize the variable fragment.
+    """
+    return re.sub(r"silence \d+(?:\.\d+)?s", "silence X.Xs", text)
+
+
 def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -245,10 +254,10 @@ def test_cli_piped_vs_tty_is_byte_identical_modulo_colour(tmp_path: Path) -> Non
         storage.close()
     _, plain, _ = _run_cli(db, "--db", db, "resume", "run_1")
     _, coloured, _ = _run_cli(db, "--db", db, "--color", "resume", "run_1")
-    assert ANSI.sub("", coloured) == plain
+    assert _normalize_liveness(ANSI.sub("", coloured)) == _normalize_liveness(plain)
     _, plain_v, _ = _run_cli(db, "--db", db, "validate", "run_1")
     _, coloured_v, _ = _run_cli(db, "--db", db, "--color", "validate", "run_1")
-    assert ANSI.sub("", coloured_v) == plain_v
+    assert _normalize_liveness(ANSI.sub("", coloured_v)) == _normalize_liveness(plain_v)
 
 
 def test_json_is_never_colourised_even_with_flagged_pins(tmp_path: Path) -> None:
