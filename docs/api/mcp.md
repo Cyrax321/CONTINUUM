@@ -53,7 +53,7 @@ tools are gated by the allowlist (see Security).
 | `continuum_record_progress` | mutate | Record goal progress (completed/total). |
 | `continuum_checkpoint` | mutate | Force a state checkpoint. |
 | `continuum_record_summary` | mutate | Record where reasoning stands (plan stack, decisions, open questions, working set) so a fresh session inherits the plan instead of guessing. Capped at 4096 serialized characters; informational only, never moves mode or safety. |
-| `continuum_record_plan` | mutate | Record a structured plan milestone, one call per unit status change, so a resumed session knows the exact remaining work. Units carry `id`, `title`, `status` (`pending`, `working`, `done`, `blocked`) and optional `depends_on`. |
+| `continuum_record_plan` | mutate | Upsert plan units by `id` so a resumed session knows the exact remaining work; one call carries a single unit or the whole plan, and units absent from it keep their recorded status. Units carry `id`, `title`, `status` (`pending`, `working`, `done`, `blocked`) and optional `depends_on`. |
 | `continuum_intercept_action` | mutate | Claim a side effect; returns whether to proceed. |
 | `continuum_complete_action` | mutate | Record a side effect succeeded. |
 | `continuum_fail_action` | mutate | Record a side effect did not happen. |
