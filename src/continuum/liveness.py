@@ -174,3 +174,6 @@ def load_cadence_contract(path: Path | None = None) -> CadenceContract:
     if not isinstance(data, dict):
         raise ValueError(f"liveness contract {target} must be a JSON object")
     return CadenceContract.model_validate(data)
+
+
+# Liveness cadence contract is advisory only, never moves mode
