@@ -24,6 +24,20 @@ Metrics per (scenario, method):
 - ``detected_stale``         - whether the method noticed the environment changed
 - ``context_tokens``         - size of the briefing the agent needs to resume
 - ``compression_ratio``      - full log tokens / resume briefing tokens
+- ``checkpoint_bytes_written`` - bytes persisted for the checkpoint (continuum) or 0 for replay
+- ``bytes_read_at_resume``   - bytes read to restore the run at recovery time
+- ``revalidation_calls``     - number of environment revalidation calls made at resume
+- ``resume_tokens``          - tokens the resumed agent needs to become productive
+- ``replay_tokens_to_productive`` - replay tokens before first productive step
+
+Deterministic tokenizer note (issue #293a, #568):
+- Token counts use :func:`continuum.checkpoint.context.estimate_tokens`,
+  a deterministic ``len(text) // 4`` heuristic. No vendor tokenizer is
+  vendored, no new dependency is added. The heuristic is documented as an
+  estimate everywhere it appears and is stable across runs, so byte and token
+  comparisons between strategies are reproducible. Tool-schema size from
+  ``token_floor.md`` is not added separately, the briefing text already
+  accounts for schema-like content deterministically.
 """
 
 from __future__ import annotations
