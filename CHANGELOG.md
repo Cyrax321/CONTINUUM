@@ -143,7 +143,27 @@ All notable changes to this project are documented here. The format follows
   CONTINUUM hooks found in <path>` when there was nothing to do), and the
   subcommand's `--help` line says what it removes. The `removed` boolean in
   `--json` is unchanged.
->>>>>>> 4e27e6f (fix(hooks): default the remove path to the client profile, like install (#580))
+
+- **A valid-JSON request that is not a JSON object is answered on both sidecar
+  transports instead of killing one and hanging up on the other (#582).** Body
+  framing was already fail-closed; the payload *shape* was not, and each
+  transport then failed in the way it had been written not to. On stdio,
+  `rid = req.get("id")` sat one line above the guard whose own comment reads
+  "report, never crash the loop", so a single `[]` line raised `AttributeError`
+  where nothing was catching, exited the process 1, and took every later request
+  on that long-lived session with it. On HTTP, `do_POST` already spelled out the
+  right answer, but raised it inside a `try` that caught only
+  `json.JSONDecodeError`, so the refusal escaped the handler and the connection
+  closed with no response at all: the caller saw `RemoteDisconnected`, which is
+  what a crashed sidecar looks like, three lines below code that knew the answer
+  was 400. Both now reach one shared check, since these two had already drifted
+  here: stdio answers `{"id": null, "error": {"type": "bad_request", "message":
+  "body must be a JSON object"}}` and reads the next request, and HTTP answers
+  `400 {"error": "body must be a JSON object"}`. The id is null because a
+  non-object request has nowhere to put one. Object requests, absent and empty
+  bodies (still the empty params object, so a method needing no params stays
+  callable), and the existing answers for genuinely malformed JSON are
+  unchanged.
 
 ## [0.1.0] - 2026-08-27
 
