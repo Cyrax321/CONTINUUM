@@ -235,7 +235,7 @@ def test_remove_without_settings_is_quiet_when_nothing_is_installed(
     assert code == ExitCode.OK, err
     payload = json.loads(out)
     assert payload["removed"] is False
-    assert payload["settings"] == CLIENT_PROFILES["claude-code"]["settings"]
+    assert Path(payload["settings"]) == Path(CLIENT_PROFILES["claude-code"]["settings"])
     assert not (tmp_path / ".claude").exists()
 
 
