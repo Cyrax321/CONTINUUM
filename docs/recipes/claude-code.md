@@ -5,9 +5,10 @@ Copy-paste recipes for wiring CONTINUUM into Claude Code's session lifecycle.
 ## What you get
 
 - **SessionStart** injects the active run's recovery contract before the first model turn.
-- **PreCompact** verifies pinned constraints survive compaction.
+- **PreCompact** seals a checkpoint and verifies pinned constraints survive compaction.
 
-Both hooks are read-only and silent when no run is active.
+SessionStart is read-only; PreCompact writes a checkpoint. Both are silent about
+work they cannot find and exit 0 when no run is active.
 
 ## Install (one command)
 
@@ -15,10 +16,11 @@ Both hooks are read-only and silent when no run is active.
 continuum hooks install claude-code
 ```
 
-This writes two entries to `.claude/settings.json`:
+This writes three entries to `.claude/settings.json`:
 
 - `PostToolUse` on `Write|Edit|MultiEdit|NotebookEdit` → `continuum observe`
 - `SessionStart` → `continuum briefing` (instant detection via `.continuum/resume.json`)
+- `PreCompact` → `continuum precompact` (checkpoint at the compaction boundary; `--no-precompact` skips it)
 
 Verify:
 
@@ -26,7 +28,10 @@ Verify:
 cat .claude/settings.json | python -m json.tool
 ```
 
-## Add PreCompact for constraint verification (copy-paste)
+## Replace PreCompact with a read-only briefing (copy-paste)
+
+`hooks install` already wires PreCompact to `continuum precompact`. Use this
+instead if you want the compaction boundary to report without writing:
 
 ```json
 {

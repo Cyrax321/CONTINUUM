@@ -64,7 +64,7 @@ DEFAULT_MATCHER = "Write|Edit|MultiEdit|NotebookEdit"
 #: duplicate SessionStart group on every re-run instead of reporting it present
 #: or repointing a moved one (issue #484, duplication fixed in #526). Keeping the
 #: kinds here is what stops that drift recurring.
-_INSTALLED_KINDS = ("observe", "gate", "briefing")
+_INSTALLED_KINDS = ("observe", "gate", "briefing", "precompact")
 
 #: Keys of ``tool_input`` that hold the primary file path, in priority order.
 _PATH_KEYS = ("file_path", "notebook_path")
@@ -74,12 +74,19 @@ _PATH_KEYS = ("file_path", "notebook_path")
 #: events exist, and which tools count as file-mutating there. The observe
 #: and gate commands stay client-agnostic because every profiled client
 #: speaks the same stdin contract (tool_name plus tool_input JSON).
+#:
+#: ``compact_event`` is optional and names the client's context-compaction
+#: hook (issue #449). Only Claude Code documents one, so it is the only
+#: profile that carries the key: a client without it simply gets no
+#: precompact hook installed, rather than one wired to an event its harness
+#: will never fire. Adding a client's compaction hook later is this one line.
 CLIENT_PROFILES: dict[str, dict[str, str]] = {
     "claude-code": {
         "settings": ".claude/settings.json",
         "start_event": "SessionStart",
         "post_event": "PostToolUse",
         "pre_event": "PreToolUse",
+        "compact_event": "PreCompact",
         "write_matcher": "Write|Edit|MultiEdit|NotebookEdit",
         "any_matcher": "*",
     },

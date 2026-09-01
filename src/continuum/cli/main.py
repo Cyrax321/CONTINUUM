@@ -30,7 +30,7 @@ from typing import Any
 
 from continuum import __version__
 from continuum.actions import ActionLedger
-from continuum.checkpoint import CheckpointError, CheckpointManager
+from continuum.checkpoint import CheckpointError, CheckpointManager, CheckpointTrigger
 from continuum.cli.colour import Palette
 from continuum.cli.exitcodes import ExitCode, exit_code_for
 from continuum.clienthooks import (
@@ -2030,6 +2030,161 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     return ExitCode.OK
 
 
+#: Snapshots written beside the log at the compaction boundary (issue #449).
+#: The paths are the ones docs/guides/embed-claude-code.md already tells
+#: operators to read, so automating the hook does not move the files out from
+#: under a recipe someone has already scripted against.
+_PRECOMPACT_RESUME_JSON = ".continuum/precompact-resume.json"
+_PRECOMPACT_VERIFY_JSON = ".continuum/precompact-verify.json"
+
+
+def _precompact_resume_payload(storage: Storage, run_id: str) -> dict[str, Any]:
+    """The recovery verdict as of now, in the shape the guide says to read.
+
+    A deliberate subset of ``resume --json``: the PreCompact section of
+    docs/guides/embed-claude-code.md tells operators to inspect
+    ``contract.verified`` and ``contract.invalidated``, so the contract is
+    carried whole, next to the mode and the progress counters. Family roll-up
+    and advisory trust scoring are left out - they answer questions a
+    compaction boundary does not ask, and every field written here is one a
+    resumed session may act on.
+    """
+    decision = RecoveryEngine(storage).assess(run_id)
+    return {
+        "run_id": decision.run_id,
+        "goal": storage.get_run(run_id).goal,
+        "mode": decision.mode.value,
+        "safe": decision.safe,
+        "next_allowed_action": decision.next_allowed_action,
+        "human_steps": _human_steps(decision, run_id),
+        "contract": decision.contract.model_dump(mode="json"),
+        "progress": {
+            "completed": decision.state.progress.completed,
+            "pending": decision.state.progress.pending,
+            "failed": decision.state.progress.failed,
+        },
+    }
+
+
+def _write_precompact_snapshots(storage: Storage, run_id: str) -> tuple[dict[str, str], list[str]]:
+    """Write both compaction snapshots. Returns ``(written, failures)``.
+
+    Failures come back as strings instead of being raised. By the time this
+    runs the checkpoint is already sealed in the hash-chained log, which is the
+    durable half; the snapshots are a convenience for the next session and for
+    the operator. A read-only working tree, or a projection this build cannot
+    fold, must not turn a successful checkpoint into a failed hook and take the
+    host's compaction down with it.
+    """
+    written: dict[str, str] = {}
+    failures: list[str] = []
+    builders: tuple[tuple[str, str, Any], ...] = (
+        ("resume", _PRECOMPACT_RESUME_JSON, lambda: _precompact_resume_payload(storage, run_id)),
+        (
+            "verify",
+            _PRECOMPACT_VERIFY_JSON,
+            lambda: storage.verify_events(run_id).model_dump(mode="json"),
+        ),
+    )
+    for label, path, build in builders:
+        try:
+            payload = build()
+            target = Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n",
+                encoding="utf-8",
+            )
+        except Exception as exc:  # deliberately broad: see the docstring
+            failures.append(f"{path}: {exc}")
+        else:
+            written[label] = str(target)
+    return written, failures
+
+
+def cmd_precompact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Checkpoint at the context-compaction boundary (issue #449).
+
+    Wired as a PreCompact hook by ``hooks install``. Claude Code fires
+    PreCompact immediately before it compacts the transcript, which is the one
+    moment where reasoning that was never recorded is about to be destroyed -
+    the case CONTINUUM exists for. Until now it was also the only lifecycle
+    hook the installer left for the user to wire by hand, and forgetting it
+    costs exactly what CONTINUUM promises to keep.
+
+    The documented recipe could not be installed verbatim: it names one run
+    (``continuum checkpoint my-task --reason "pre-compact"``) while
+    ``hooks install`` runs once and runs come and go. So the hook resolves the
+    run itself, as ``observe`` and ``briefing`` do. The trigger recorded is
+    :data:`CheckpointTrigger.CONTEXT_PRESSURE` - the harness-side, involuntary
+    form of the signal :class:`ContextPressurePolicy` can only see when the
+    agent volunteers its own token counts.
+
+    Beside the checkpoint it leaves the two snapshots the guide promises:
+    ``.continuum/precompact-resume.json`` (the recovery verdict as of this
+    checkpoint) and ``.continuum/precompact-verify.json`` (the chain audit).
+    The checkpoint itself also refreshes ``.continuum/resume.json``, so the
+    next session's SessionStart briefing detects the interruption with no DB
+    read at all.
+
+    Never fails the host. With no active run there is nothing to seal, and a
+    snapshot that cannot be written is reported rather than raised: hooks fire
+    for every session in this directory, including ones with nothing to do
+    with CONTINUUM, and a compaction broken by its own safety net would earn
+    an uninstall.
+    """
+    run_id = args.run_id
+    if not run_id:
+        active = storage.get_active_run()
+        run_id = active.run_id if active else None
+    if not run_id:
+        _emit(
+            {"active_run": None, "checkpoint_id": None, "snapshots": {}, "failures": []},
+            "CONTINUUM: no active run; nothing to checkpoint before compaction.",
+            as_json=args.json,
+            stream=out,
+            palette=getattr(args, "_palette", None),
+        )
+        return ExitCode.OK
+
+    storage.get_run(run_id)  # raises RunNotFound -> NOT_FOUND by the dispatcher
+    checkpoint = CheckpointManager(storage).checkpoint(
+        run_id,
+        trigger=CheckpointTrigger.CONTEXT_PRESSURE,
+        reason=args.reason or "pre-compact",
+        environment=_environment(args, run_id),
+    )
+    written, failures = _write_precompact_snapshots(storage, run_id)
+
+    lines = [
+        f"Checkpoint {checkpoint.checkpoint_id} sealed at v{checkpoint.version} "
+        f"before compaction ({checkpoint.state.progress.completed} completed)"
+    ]
+    lines += [f"  {label}: {path}" for label, path in sorted(written.items())]
+    # Reported, not raised: the checkpoint above is the durable half and it
+    # landed. Staying silent about an unwritten snapshot would leave the
+    # operator reading a stale file from an earlier compaction as if it
+    # described this one.
+    lines += [f"  [!!] snapshot not written: {failure}" for failure in failures]
+    _emit(
+        {
+            "active_run": run_id,
+            "checkpoint_id": checkpoint.checkpoint_id,
+            "version": checkpoint.version,
+            "trigger": checkpoint.trigger,
+            "integrity_hash": checkpoint.integrity_hash,
+            "completed": checkpoint.state.progress.completed,
+            "snapshots": written,
+            "failures": failures,
+        },
+        "\n".join(lines),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK
+
+
 def cmd_gateway(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Run the enforcing HTTP gateway (issue #213 seam 4). Long-running."""
     from continuum.gateway import (
@@ -2085,6 +2240,7 @@ def cmd_hooks_install(args: argparse.Namespace, storage: Storage, out: Any, err:
     gate_command = command[: -len("observe")] + "gate"
 
     briefing_command = command[: -len("observe")] + "briefing"
+    precompact_command = command[: -len("observe")] + "precompact"
     statuses = [
         (
             install_client_hook(
@@ -2111,6 +2267,29 @@ def cmd_hooks_install(args: argparse.Namespace, storage: Storage, out: Any, err:
             briefing_command,
         ),
     ]
+    # Compaction checkpoint (issue #449). On by default, unlike --with-gate: a
+    # gate can deny a tool call and so changes how the agent behaves, while
+    # this only seals state the run already has. The empty matcher is the one
+    # the guide's hand-written recipe uses, so an operator who already pasted
+    # that entry sees it repointed rather than duplicated. Skipped entirely for
+    # a client whose profile declares no compaction event, since wiring one to
+    # an event the harness never fires would only look like durability.
+    compact_event = profile.get("compact_event")
+    if compact_event and not getattr(args, "no_precompact", False):
+        statuses.append(
+            (
+                install_client_hook(
+                    settings_path,
+                    precompact_command,
+                    event_name=compact_event,
+                    matcher="",
+                ),
+                "",
+                "precompact",
+                compact_event,
+                precompact_command,
+            )
+        )
     if getattr(args, "with_gate", False):
         statuses.append(
             (
@@ -3110,6 +3289,24 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
 
+    precompact = with_env(
+        add(
+            "precompact",
+            cmd_precompact,
+            "Checkpoint before context compaction (PreCompact hook). Mutates the run.",
+        )
+    )
+    precompact.add_argument(
+        "--run-id",
+        default=None,
+        help="run to seal (default: the most recently active non-terminal run).",
+    )
+    precompact.add_argument(
+        "--reason",
+        default="",
+        help="checkpoint reason recorded in the log (default: pre-compact).",
+    )
+
     gate = add(
         "gate",
         cmd_gate,
@@ -3159,6 +3356,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--with-gate",
         action="store_true",
         help="also install a PreToolUse gate that denies unclaimed side-effect calls.",
+    )
+    install.add_argument(
+        "--no-precompact",
+        action="store_true",
+        help="skip the compaction checkpoint hook (clients that have one, on by default).",
     )
     hooks_client(install, cmd_hooks_install)
 

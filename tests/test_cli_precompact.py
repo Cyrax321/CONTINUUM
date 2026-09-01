@@ -1,0 +1,328 @@
+"""The compaction boundary: ``continuum precompact`` and its wiring (issue #449).
+
+Context compaction is the one interruption that is scheduled rather than
+accidental: the harness announces it, and everything the transcript held that
+was never recorded disappears a moment later. Claude Code exposes PreCompact
+for exactly this, but until now `hooks install` wired SessionStart, PostToolUse
+and (opt-in) PreToolUse while PreCompact was left as a hand-edit in
+docs/guides/embed-claude-code.md - so the durability of the most predictable
+loss in the system depended on the operator remembering a JSON snippet.
+
+Two halves are pinned here: the command seals a checkpoint and leaves the
+snapshots the guide promises without ever failing its host, and `hooks install`
+wires it (`hooks remove` unwires it) as one of the kinds this project owns.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+from pathlib import Path
+
+import pytest
+
+from continuum.cli import ExitCode, main
+from continuum.clienthooks import CLIENT_PROFILES
+from continuum.storage import SQLiteStorage
+
+
+def run(*argv: str) -> tuple[int, str, str]:
+    out, err = io.StringIO(), io.StringIO()
+    code = main(list(argv), out=out, err=err)
+    return code, out.getvalue(), err.getvalue()
+
+
+@pytest.fixture
+def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A cwd with a database in it.
+
+    The snapshots and .continuum/resume.json are written relative to the
+    working directory, because a hook runs with the project root as cwd. Tests
+    chdir for the same reason rather than passing paths around.
+    """
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def db_path(project: Path) -> str:
+    return str(project / "continuum.db")
+
+
+def start_run(project: Path, run_id: str = "compacting", goal: str = "survive compaction") -> str:
+    code, _, err = run("--db", db_path(project), "start", run_id, "--goal", goal)
+    assert code == ExitCode.OK, err
+    return run_id
+
+
+# --- the command -------------------------------------------------------------- #
+
+
+def test_precompact_seals_a_checkpoint_on_the_active_run(project: Path) -> None:
+    start_run(project)
+    code, out, err = run("--db", db_path(project), "--json", "precompact")
+    assert code == ExitCode.OK, err
+    payload = json.loads(out)
+    assert payload["active_run"] == "compacting"
+    assert payload["checkpoint_id"]
+    assert payload["failures"] == []
+
+    with SQLiteStorage(db_path(project)) as store:
+        checkpoints = store.list_checkpoints("compacting")
+    assert [c.checkpoint_id for c in checkpoints] == [payload["checkpoint_id"]]
+
+
+def test_the_trigger_records_why_the_checkpoint_was_taken(project: Path) -> None:
+    """``context_pressure``, not ``manual``.
+
+    The existing ContextPressurePolicy can only fire when the agent volunteers
+    its token counts; this hook is the same signal observed from outside the
+    model, so it is recorded as the same trigger. A checkpoint labelled
+    "manual" would be indistinguishable afterwards from one somebody typed.
+    """
+    start_run(project)
+    code, out, err = run("--db", db_path(project), "--json", "precompact")
+    assert code == ExitCode.OK, err
+    assert json.loads(out)["trigger"] == "context_pressure"
+
+    with SQLiteStorage(db_path(project)) as store:
+        checkpoints = store.list_checkpoints("compacting")
+    assert checkpoints[0].trigger == "context_pressure"
+
+
+def test_both_snapshots_land_where_the_guide_says_to_read_them(project: Path) -> None:
+    start_run(project, goal="prove the snapshots")
+    code, out, err = run("--db", db_path(project), "--json", "precompact")
+    assert code == ExitCode.OK, err
+    snapshots = json.loads(out)["snapshots"]
+    assert snapshots == {
+        "resume": ".continuum/precompact-resume.json",
+        "verify": ".continuum/precompact-verify.json",
+    }
+
+    resume = json.loads((project / ".continuum/precompact-resume.json").read_text())
+    # The fields the PreCompact section of the guide tells operators to inspect.
+    assert resume["run_id"] == "compacting"
+    assert resume["goal"] == "prove the snapshots"
+    assert resume["mode"] == "resume"
+    assert "verified" in resume["contract"] and "invalidated" in resume["contract"]
+
+    verify = json.loads((project / ".continuum/precompact-verify.json").read_text())
+    assert verify["ok"] is True
+    assert verify["checked"] > 0
+
+
+def test_the_checkpoint_leaves_resume_json_for_the_next_session(project: Path) -> None:
+    """End to end: compaction now, instant detection later (#394 meets #449).
+
+    The SessionStart briefing short-circuits on .continuum/resume.json to stay
+    fast, which means a compaction that never checkpointed leaves the next
+    session with nothing to detect. The checkpoint this hook takes is what
+    writes that file.
+    """
+    start_run(project)
+    assert not (project / ".continuum/resume.json").exists()
+
+    code, _, err = run("--db", db_path(project), "precompact")
+    assert code == ExitCode.OK, err
+    assert (project / ".continuum/resume.json").exists()
+
+    code, out, err = run("--db", db_path(project), "briefing")
+    assert code == ExitCode.OK, err
+    assert "compacting" in out
+
+
+def test_no_active_run_is_not_an_error(project: Path) -> None:
+    """Hooks fire for every session in this directory, including ones with
+    nothing to do with CONTINUUM. A wall of failures at every compaction would
+    pressure the operator into uninstalling the instrumentation."""
+    code, out, err = run("--db", db_path(project), "--json", "precompact")
+    assert code == ExitCode.OK, err
+    payload = json.loads(out)
+    assert payload["active_run"] is None
+    assert payload["checkpoint_id"] is None
+    assert not (project / ".continuum/precompact-resume.json").exists()
+
+
+def test_an_explicit_run_id_is_honoured(project: Path) -> None:
+    start_run(project, "first")
+    start_run(project, "second")
+    code, out, err = run("--db", db_path(project), "--json", "precompact", "--run-id", "first")
+    assert code == ExitCode.OK, err
+    assert json.loads(out)["active_run"] == "first"
+
+
+def test_a_run_that_does_not_exist_is_reported_not_invented(project: Path) -> None:
+    """Silence for a missing run would be the wrong lesson from "never fail the
+    host": an operator who baked a run id into the hook command wants to hear
+    that it is wrong."""
+    start_run(project)
+    code, _, err = run("--db", db_path(project), "precompact", "--run-id", "typo")
+    assert code == ExitCode.NOT_FOUND
+    assert "typo" in err
+
+
+def test_an_unwritable_snapshot_is_reported_and_the_checkpoint_still_stands(
+    project: Path,
+) -> None:
+    """The checkpoint is the durable half and it is already in the chain.
+
+    A directory sitting where the snapshot goes stands in for the read-only or
+    full working tree: the write fails, the failure is named, and the exit
+    status stays 0 because taking the host's compaction down would cost more
+    than the snapshot is worth.
+    """
+    start_run(project)
+    (project / ".continuum").mkdir(parents=True, exist_ok=True)
+    (project / ".continuum/precompact-resume.json").mkdir()
+
+    code, out, err = run("--db", db_path(project), "--json", "precompact")
+    assert code == ExitCode.OK, err
+    payload = json.loads(out)
+    assert payload["checkpoint_id"]
+    assert list(payload["snapshots"]) == ["verify"]
+    assert any("precompact-resume.json" in failure for failure in payload["failures"])
+
+    with SQLiteStorage(db_path(project)) as store:
+        assert len(store.list_checkpoints("compacting")) == 1
+
+
+def test_the_failure_is_visible_in_the_text_output_too(project: Path) -> None:
+    """A stale snapshot from an earlier compaction read as if it described this
+    one is the failure mode; the human path has to say so as well."""
+    start_run(project)
+    (project / ".continuum").mkdir(parents=True, exist_ok=True)
+    (project / ".continuum/precompact-verify.json").mkdir()
+
+    code, out, err = run("--db", db_path(project), "precompact")
+    assert code == ExitCode.OK, err
+    assert "snapshot not written" in out
+    assert "precompact-verify.json" in out
+
+
+# --- the wiring --------------------------------------------------------------- #
+
+
+def _commands_under(settings: Path, event_name: str) -> list[str]:
+    groups = json.loads(settings.read_text())["hooks"].get(event_name, [])
+    return [h["command"] for g in groups if isinstance(g.get("hooks"), list) for h in g["hooks"]]
+
+
+def test_install_wires_precompact_for_claude_code(tmp_path: Path) -> None:
+    """The issue's first ask: install, then read the settings back."""
+    settings = tmp_path / "settings.json"
+    code, out, err = run("--json", "hooks", "install", "claude-code", "--settings", str(settings))
+    assert code == ExitCode.OK, err
+
+    data = json.loads(settings.read_text())
+    entry = data["hooks"]["PreCompact"]
+    assert len(entry) == 1
+    # The empty matcher is the one the guide's hand-written recipe uses.
+    assert entry[0]["matcher"] == ""
+    assert entry[0]["hooks"][0]["command"].split()[-1] == "precompact"
+
+    wired = {h["kind"]: h["event"] for h in json.loads(out)["hooks"]}
+    assert wired["precompact"] == "PreCompact"
+
+
+def test_remove_unwires_precompact(tmp_path: Path) -> None:
+    """The issue's second ask. The kind had to join _INSTALLED_KINDS for this to
+    pass: a hook the remover does not recognise survives an uninstall and keeps
+    pointing at a database the operator believes they detached from."""
+    settings = tmp_path / "settings.json"
+    run("hooks", "install", "claude-code", "--settings", str(settings))
+    assert _commands_under(settings, "PreCompact")
+
+    code, out, _ = run("--json", "hooks", "remove", "claude-code", "--settings", str(settings))
+    assert code == ExitCode.OK
+    assert json.loads(out)["removed"] is True
+    assert "PreCompact" not in json.loads(settings.read_text()).get("hooks", {})
+
+
+def test_no_precompact_skips_it(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    code, out, err = run(
+        "--json", "hooks", "install", "claude-code", "--no-precompact", "--settings", str(settings)
+    )
+    assert code == ExitCode.OK, err
+    assert "PreCompact" not in json.loads(settings.read_text())["hooks"]
+    assert "precompact" not in {h["kind"] for h in json.loads(out)["hooks"]}
+
+
+@pytest.mark.parametrize("client", ("gemini", "codex"))
+def test_a_client_with_no_compaction_event_gets_no_hook(tmp_path: Path, client: str) -> None:
+    """Wiring a hook to an event the harness never fires would look like
+    durability without being any. Only Claude Code documents a compaction hook,
+    so only its profile carries compact_event."""
+    assert "compact_event" not in CLIENT_PROFILES[client]
+    settings = tmp_path / f"{client}.json"
+    code, out, err = run("--json", "hooks", "install", client, "--settings", str(settings))
+    assert code == ExitCode.OK, err
+    assert "PreCompact" not in json.loads(settings.read_text())["hooks"]
+    assert "precompact" not in {h["kind"] for h in json.loads(out)["hooks"]}
+
+
+def test_three_installs_leave_one_precompact_entry(tmp_path: Path) -> None:
+    """The #484 duplication trap, re-armed for the new kind: the installer and
+    the remover read one list of kinds, so an added kind is recognised by both
+    or neither."""
+    settings = tmp_path / "settings.json"
+    last = ""
+    for _ in range(3):
+        code, last, err = run(
+            "--json", "hooks", "install", "claude-code", "--settings", str(settings)
+        )
+        assert code == ExitCode.OK, err
+    assert len(_commands_under(settings, "PreCompact")) == 1
+    statuses = {h["kind"]: h["status"] for h in json.loads(last)["hooks"]}
+    assert statuses["precompact"] == "present"
+
+
+def test_a_hand_pasted_recipe_is_repointed_not_duplicated(tmp_path: Path) -> None:
+    """Anyone who followed the guide before this landed already has a PreCompact
+    entry. Matching the recipe's empty matcher is what lets the installer adopt
+    that entry instead of leaving two hooks to fire at every compaction."""
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreCompact": [
+                        {
+                            "matcher": "",
+                            "hooks": [
+                                {"type": "command", "command": "/old/venv/bin/continuum precompact"}
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+    )
+    code, out, err = run("--json", "hooks", "install", "claude-code", "--settings", str(settings))
+    assert code == ExitCode.OK, err
+    commands = _commands_under(settings, "PreCompact")
+    assert len(commands) == 1
+    assert "/old/venv" not in commands[0]
+    statuses = {h["kind"]: h["status"] for h in json.loads(out)["hooks"]}
+    assert statuses["precompact"] == "updated"
+
+
+# --- the Codex gap ------------------------------------------------------------ #
+
+
+@pytest.mark.parametrize(
+    "guide",
+    ("docs/guides/embed-codex.md", "docs/recipes/codex.md"),
+)
+def test_the_codex_matcher_matches_what_the_guides_document(guide: str) -> None:
+    """Issue #449 gap 2, at the level the issue asks for: keep the docs honest.
+
+    Codex hooks traverse shell-like calls only, so `apply_patch` and MCP tools
+    do not fire `observe` there. That limitation is documented as a literal
+    matcher in two places, and a widened profile with stale guides would leave
+    operators believing in coverage they do not have. Pinning the string in CI
+    is what makes the docs and the code fail together instead of diverging.
+    """
+    matcher = CLIENT_PROFILES["codex"]["write_matcher"]
+    text = (Path(__file__).resolve().parents[1] / guide).read_text(encoding="utf-8")
+    assert matcher in text, f"{guide} does not document the matcher {matcher!r}"

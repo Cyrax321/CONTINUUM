@@ -16,7 +16,7 @@ This recipe pairs with instant-detection (#394): that work writes `.continuum/re
 # 1. Create a run. The goal is what the agent will continue after a crash.
 continuum start my-task --goal "Summarize quarterly reports from dataset v3"
 
-# 2. Wire the harness. This installs SessionStart + PostToolUse hooks.
+# 2. Wire the harness. This installs SessionStart + PostToolUse + PreCompact hooks.
 #    Add --with-gate if you use an allowlist for side effects (see Gate section).
 continuum hooks install claude-code --with-gate
 
@@ -28,6 +28,7 @@ Expected hooks installed:
 
 - `SessionStart` → `continuum briefing` (injects active-run context, uses `.continuum/resume.json` fast path)
 - `PostToolUse` on `Write|Edit|MultiEdit|NotebookEdit` → `continuum observe` (captures file writes as hash-chained evidence, outside model control)
+- `PreCompact` → `continuum precompact` (checkpoints before the transcript is compacted; pass `--no-precompact` to skip it)
 - `PreToolUse` on `*` → `continuum gate` when `--with-gate` was passed (denies unclaimed side effects before they fire)
 
 Verify without starting Claude Code:
@@ -97,7 +98,15 @@ When `safe` is false, `mode` is one of `repair_and_resume`, `request_human`, `ro
 
 Claude Code fires `PreCompact` before context compaction. Use it to force a checkpoint and re-validate so compaction does not discard unverified reasoning.
 
-Copy-paste snippet for `.claude/settings.json` (add alongside the installed hooks, do not replace them):
+`continuum hooks install claude-code` wires this for you: the `PreCompact` entry runs `continuum precompact`, which resolves the active run itself, seals a checkpoint with trigger `context_pressure`, and writes both snapshots below. Pass `--no-precompact` to leave the event alone, and `continuum hooks remove claude-code` takes it out again with the rest.
+
+```bash
+continuum precompact --json   # what the hook runs; safe to try by hand
+```
+
+It never fails its host: with no active run it exits 0 with nothing sealed, and a snapshot it cannot write is reported in `failures` while the checkpoint stands.
+
+If you want to pin one run instead of following the active one, the hand-written form still works. Copy-paste snippet for `.claude/settings.json` (add alongside the installed hooks, do not replace them):
 
 ```json
 {
@@ -123,6 +132,8 @@ Or use the tiny glue script shipped with this repo:
 # examples/hooks/continuum-precompact.sh — same two commands, kept tiny
 CONTINUUM_RUN_ID=my-task ./examples/hooks/continuum-precompact.sh
 ```
+
+Both use the same empty matcher as the installer, so an entry you pasted before this was automated is repointed on the next `hooks install` rather than left to fire twice.
 
 What this gives:
 
