@@ -27,6 +27,10 @@ source .venv/bin/activate        # macOS / Linux
 
 # 3. Install in editable mode with all dev extras
 pip install -e ".[dev]"
+
+# 4. Install the pre-commit hooks (recommended, see below)
+pip install pre-commit
+pre-commit install
 ```
 
 Local CONTINUUM data lives in `.continuum/` (budgets, local `*.db` files). It is already listed in `.gitignore`, so do not commit it. If you cloned before this was added, run `echo ".continuum/" >> .gitignore`.
@@ -91,38 +95,45 @@ The CI pipeline runs all three on every PR. A clean PR must pass all checks.
 
 ### Pre-commit hooks (optional but recommended)
 
-To catch lint and formatting issues automatically before you commit, you can use
+To catch lint and formatting issues automatically before you commit, use
 [pre-commit](https://pre-commit.com/):
 
 ```bash
 pip install pre-commit
+pre-commit install
 ```
 
-Create a `.pre-commit-config.yaml` in the repo root with:
+`.pre-commit-config.yaml` is committed at the repo root, so there is nothing to
+write yourself. It runs the same two ruff steps as the CI `Lint & Type-check`
+job, pinned to the same ruff version as the `dev` extra in `pyproject.toml` and
+scoped to the same three directories CI lints (`src/`, `tests/`, `examples/`):
 
 ```yaml
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.3
+    rev: v0.16.4
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: [--fix]
+        files: ^(src|tests|examples)/
       - id: ruff-format
+        files: ^(src|tests|examples)/
 ```
 
-Then install the git hook:
-
-```bash
-pre-commit install
-```
-
-Now `ruff check --fix` and `ruff format` will run automatically on every `git commit`.
+Now `ruff check --fix` and `ruff format` run automatically on every `git commit`.
+A hook that rewrites a file fails the commit and leaves the fix unstaged, so
+`git add` the changed files and commit again.
 
 To run it manually against all files:
 
 ```bash
 pre-commit run --all-files
 ```
+
+If you bump the `ruff==` pin in `pyproject.toml`, bump `rev` in
+`.pre-commit-config.yaml` to the matching `vX.Y.Z` tag in the same PR. A hook
+running a different ruff than CI is how a locally formatted file still fails
+`ruff format --check` on the PR.
 
 **Note on mypy:** mypy is intentionally not included in this pre-commit setup.
 Pre-commit hooks run in isolated environments without the project's installed

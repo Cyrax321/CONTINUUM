@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`.pre-commit-config.yaml`, pinned to the ruff CI runs (#537).**
+  `CONTRIBUTING.md` described the file instead of shipping it, so
+  `pre-commit install` on a fresh clone installed a hook that ran nothing and
+  the first PR still met a red `ruff format --check src/ tests/ examples/`. The
+  config now lives at the repo root with the `ruff-check` and `ruff-format`
+  hooks, `rev` naming the same ruff version the `dev` extra pins so a hook and
+  CI cannot format one file two ways, and both hooks scoped to `src/`, `tests/`
+  and `examples/`, the three directories the lint job checks. `benchmarks/`,
+  `demo-run/` and `_bugaudit/` are not ruff-clean and no gate checks them, so in
+  scope they would fail `pre-commit run --all-files` on a tree nobody touched.
+  mypy stays out, as `CONTRIBUTING.md` already explains: hooks run in isolated
+  environments without the project's dependencies, where its results are not
+  trustworthy. Contributor tooling, no runtime change.
+
 ### Fixed
 
 - Make `continuum complete` idempotent for runs that are already completed (#356).
