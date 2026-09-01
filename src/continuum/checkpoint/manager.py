@@ -50,7 +50,7 @@ from continuum.storage.base import Storage
 # SessionStart hook can inject a banner without opening the database.
 _RESUME_JSON = ".continuum/resume.json"
 
-__all__ = ["CheckpointManager", "RestoredRun", "CheckpointError"]
+__all__ = ["CheckpointManager", "RestoredRun", "CheckpointError", "rearm_resume_sentinel"]
 
 
 class CheckpointError(RuntimeError):
@@ -393,3 +393,31 @@ def _write_resume_json(run_id: str, checkpoint: StateCheckpoint) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
+
+
+def rearm_resume_sentinel(storage: Storage) -> str | None:
+    """Point the SessionStart sentinel at whatever is still in flight.
+
+    There is one sentinel file per working directory but many runs in a
+    database, so a run finishing cannot simply delete it: doing so disarmed the
+    fast path for every run that was still live. Observed on a real database
+    (2026-09-01): the all-features tour completed its own run, which removed the
+    file, and the session's actual work was left with no sentinel at all, so a
+    fresh session was told nothing was interrupted.
+
+    Returns the run the sentinel now names, or ``None`` when there is nothing
+    live to point at, in which case the file is removed. A live run that has not
+    checkpointed yet has nothing to write, so it also clears the file; briefing
+    falls back to the active-run query and still reports it.
+    """
+    path = Path(_RESUME_JSON)
+    active = storage.get_active_run()
+    if active is not None:
+        checkpoint = storage.latest_checkpoint(active.run_id)
+        if checkpoint is not None:
+            with contextlib.suppress(Exception):
+                _write_resume_json(active.run_id, checkpoint)
+                return active.run_id
+    with contextlib.suppress(OSError):
+        path.unlink(missing_ok=True)
+    return None

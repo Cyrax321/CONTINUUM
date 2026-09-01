@@ -84,6 +84,130 @@ def test_banner_appears_only_when_interrupted_run_exists(tmp_path: Path) -> None
         os.chdir(orig_cwd)
 
 
+def test_completing_one_run_hands_the_sentinel_to_a_live_one(tmp_path: Path) -> None:
+    """A finished run must not disarm the fast path for runs still in flight.
+
+    There is one sentinel file per directory but many runs in a database, and
+    `complete` used to just delete it. Observed on a real database: the
+    all-features tour completed its own run, the file went away, and the
+    session's actual work was left with nothing naming it, so the next session
+    was told nothing was interrupted.
+    """
+    import io
+    import os
+
+    orig_cwd = Path.cwd()
+    try:
+        os.chdir(tmp_path)
+        db = tmp_path / "continuum.db"
+        storage = SQLiteStorage(str(db))
+        for run_id, goal in (("real_work", "build the thing"), ("tour", "demo the tour")):
+            storage.create_run(Run(run_id=run_id, goal=goal))
+            storage.append_event(
+                run_id, EventType.RUN_STARTED, {"goal": goal}, source=Origin.EXTERNAL_AGENT
+            )
+        mgr = CheckpointManager(storage)
+        mgr.checkpoint("real_work")
+        mgr.checkpoint("tour")
+        storage.close()
+
+        sentinel = Path(".continuum/resume.json")
+        assert json.loads(sentinel.read_text(encoding="utf-8"))["run_id"] == "tour"
+
+        from continuum.cli.main import main as cli_main
+
+        code = cli_main(["--db", str(db), "complete", "tour"], out=io.StringIO(), err=io.StringIO())
+        assert code == 0
+
+        assert sentinel.exists(), "sentinel was deleted while real_work was still live"
+        assert json.loads(sentinel.read_text(encoding="utf-8"))["run_id"] == "real_work"
+    finally:
+        os.chdir(orig_cwd)
+
+
+def test_completing_the_only_run_clears_the_sentinel(tmp_path: Path) -> None:
+    """With nothing left in flight there is nothing to hand the sentinel to."""
+    import io
+    import os
+
+    orig_cwd = Path.cwd()
+    try:
+        os.chdir(tmp_path)
+        db = tmp_path / "continuum.db"
+        storage = SQLiteStorage(str(db))
+        storage.create_run(Run(run_id="only", goal="g"))
+        storage.append_event(
+            "only", EventType.RUN_STARTED, {"goal": "g"}, source=Origin.EXTERNAL_AGENT
+        )
+        CheckpointManager(storage).checkpoint("only")
+        storage.close()
+
+        sentinel = Path(".continuum/resume.json")
+        assert sentinel.exists()
+
+        from continuum.cli.main import main as cli_main
+
+        cli_main(["--db", str(db), "complete", "only"], out=io.StringIO(), err=io.StringIO())
+        assert not sentinel.exists()
+    finally:
+        os.chdir(orig_cwd)
+
+
+def test_briefing_reports_a_live_run_with_no_sentinel(tmp_path: Path) -> None:
+    """Sentinel absence is not evidence that nothing is interrupted.
+
+    The hook used to skip the database entirely whenever the file was missing,
+    which made it silent for any run that had not checkpointed yet and for every
+    run once some other run's `complete` removed the shared file.
+    """
+    import io
+    import os
+
+    orig_cwd = Path.cwd()
+    try:
+        os.chdir(tmp_path)
+        db = tmp_path / "continuum.db"
+        storage = SQLiteStorage(str(db))
+        storage.create_run(Run(run_id="unbriefed", goal="write the parser"))
+        storage.append_event(
+            "unbriefed",
+            EventType.RUN_STARTED,
+            {"goal": "write the parser"},
+            source=Origin.EXTERNAL_AGENT,
+        )
+        storage.close()
+        assert not Path(".continuum/resume.json").exists()
+
+        from continuum.cli.main import main as cli_main
+
+        out = io.StringIO()
+        code = cli_main(["--db", str(db), "briefing"], out=out, err=io.StringIO())
+        assert code == 0
+        assert "unbriefed" in out.getvalue()
+        assert "write the parser" in out.getvalue()
+    finally:
+        os.chdir(orig_cwd)
+
+
+def test_briefing_creates_no_database_when_there_is_none(tmp_path: Path) -> None:
+    """Cold start in a directory that never used CONTINUUM stays silent and inert."""
+    import io
+    import os
+
+    orig_cwd = Path.cwd()
+    try:
+        os.chdir(tmp_path)
+        from continuum.cli.main import main as cli_main
+
+        out = io.StringIO()
+        code = cli_main(["--db", "continuum.db", "briefing"], out=out, err=io.StringIO())
+        assert code == 0
+        assert out.getvalue() == ""
+        assert not Path("continuum.db").exists()
+    finally:
+        os.chdir(orig_cwd)
+
+
 def test_banner_latency_is_fast(tmp_path: Path) -> None:
     """Reading resume.json out of band is well under a second."""
     import os

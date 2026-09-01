@@ -30,7 +30,7 @@ from typing import Any
 
 from continuum import __version__
 from continuum.actions import ActionLedger
-from continuum.checkpoint import CheckpointError, CheckpointManager
+from continuum.checkpoint import CheckpointError, CheckpointManager, rearm_resume_sentinel
 from continuum.cli.colour import Palette
 from continuum.cli.exitcodes import ExitCode, exit_code_for
 from continuum.clienthooks import (
@@ -51,6 +51,7 @@ from continuum.gate import (
     decide as gate_decide,
 )
 from continuum.models import (
+    TERMINAL_RUN_STATUSES,
     ActionStatus,
     EnvironmentSnapshot,
     EnvResource,
@@ -1336,14 +1337,17 @@ def cmd_complete(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     )
     updated = run.touch(status=RunStatus.COMPLETED)
     storage.update_run(updated)
-    # Instant resume file tracks the most recent checkpoint; a completed run
-    # is no longer interrupted, so remove the file if it refers to this run.
+    # The instant-resume sentinel names the most recently checkpointed run. A
+    # completed run is no longer interrupted, so it must stop naming this one --
+    # but the file is shared by every run in the database, and deleting it
+    # outright disarmed the fast path for runs that were still in flight. Hand
+    # it to whatever is still live instead.
     try:
         resume_path = Path(".continuum/resume.json")
         if resume_path.exists():
             data = json.loads(resume_path.read_text(encoding="utf-8"))
             if data.get("run_id") == args.run_id:
-                resume_path.unlink()
+                rearm_resume_sentinel(storage)
     except Exception:
         pass
     payload = {
@@ -1864,55 +1868,49 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     executable next steps, and disk-checked file observations. Read-only;
     with no active run it says exactly how to create one.
 
-    Instant detection (issue #394): when invoked as a SessionStart hook with
-    no explicit run_id, the hook first checks .continuum/resume.json out of
-    band. If the file does not exist there is no interrupted run and the hook
-    is silent, avoiding any DB work and keeping cold-start latency well under
-    a second. When the file exists its banner is injected and the full
-    briefing follows.
+    Which run (issue #394): ``.continuum/resume.json`` is preferred when it
+    names a run that is still live, because it was written at checkpoint time
+    and is the most direct statement of what was interrupted. It is only a
+    hint, though. It is a single file shared by every run in the database, so
+    one run completing removes it while others are still in flight, and a run
+    that has not checkpointed yet never wrote it at all. Its absence therefore
+    says nothing, and the active-run query decides.
+
+    Token floor: when there is no live run this prints nothing under
+    SessionStart, so a session that starts with no work in flight injects no
+    context. The guidance on how to create a run is still printed when a human
+    runs the command directly.
     """
-    # Fast path for SessionStart hook: check resume.json before touching DB.
-    # This keeps the hook silent and fast when no interrupted run exists.
     resume_path = Path(".continuum/resume.json")
-    if not args.run_id and getattr(args, "hook_event_name", "SessionStart") == "SessionStart":
-        if not resume_path.exists():
-            # Silent when no interrupted run, as required for token floor.
-            return ExitCode.OK
-        # When file exists, inject its banner out of band before the full
-        # briefing. The file was written on the last checkpoint and contains
-        # the run_id that the hook should surface.
-        try:
-            resume_data = json.loads(resume_path.read_text(encoding="utf-8"))
-            banner_run = resume_data.get("run_id")
-            if banner_run:
-                # Verify the run is still active (not completed) before
-                # surfacing, but do it without a full project if possible.
-                # A quick existence check is enough; the full briefing below
-                # will do the thorough assessment.
-                pass
-        except Exception:
-            # Corrupt file is not a blocker; fall through to normal briefing
-            # which will do the DB check and report correctly.
-            pass
+    hook_event = getattr(args, "hook_event_name", "SessionStart")
 
     run_id = args.run_id
     if not run_id:
-        # Prefer the resume.json run_id when present, as it was written at
-        # checkpoint time and is available without a DB scan. Fall back to
-        # the active-run query for cases where the file is stale or missing.
+        # The sentinel is a hint, not an authority: prefer it only when the run
+        # it names is still non-terminal. It used to be taken on sight, so a
+        # stale file left by a finished run briefed the next session on work
+        # that was already done.
         if resume_path.exists():
             try:
                 resume_data = json.loads(resume_path.read_text(encoding="utf-8"))
                 candidate = resume_data.get("run_id")
-                if candidate and storage.get_run(candidate):
-                    run_id = candidate
+                if candidate:
+                    run = storage.get_run(candidate)
+                    if run and run.status not in TERMINAL_RUN_STATUSES:
+                        run_id = candidate
             except Exception:
+                # A corrupt or stale file is not a blocker; the active-run
+                # query below reports correctly.
                 pass
         if not run_id:
             active = storage.get_active_run()
             run_id = active.run_id if active else None
 
     if not run_id:
+        if not args.run_id and hook_event == "SessionStart":
+            # Nothing is in flight. Say nothing rather than spending context on
+            # instructions the agent did not ask for.
+            return ExitCode.OK
         text = (
             "CONTINUUM: no active run. Create one before working durably: "
             "`continuum start <run_id> --goal '...'`, or call "
@@ -3262,6 +3260,29 @@ def build_parser() -> argparse.ArgumentParser:
 # --------------------------------------------------------------------------- #
 
 
+def _database_exists(url: str | Path) -> bool:
+    """Whether ``url`` names a database that is already there.
+
+    Used only by the SessionStart cold-start guard, to tell "nothing to brief
+    on" apart from "would have to be created to find out". A SQLite file that
+    does not exist yet is the former; anything else is assumed present, because
+    guessing wrong for a remote database would silence the hook on exactly the
+    deployments that most need it.
+
+    The URL is parsed by the same :func:`_resolve_path` the storage layer uses,
+    so this cannot decide a path is absent that the opener would then create
+    somewhere else.
+    """
+    from continuum.storage.sqlite import _resolve_path
+
+    raw = str(url)
+    scheme = raw.split("://", 1)[0].lower() if "://" in raw else ""
+    if scheme not in ("", "sqlite"):
+        return True
+    path = _resolve_path(raw)
+    return path == ":memory:" or Path(path).exists()
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -3290,14 +3311,22 @@ def main(
     if args.command in ("benchmark", "attest-keygen", "serve", "hooks"):
         return int(args.func(args, None, out, err))
 
-    # Instant resume detection (issue #394): SessionStart hook reads
-    # .continuum/resume.json out of band. If the file does not exist there is
-    # no interrupted run and the hook is silent, avoiding any DB open and
-    # keeping cold-start latency well under a second. This fast path is
-    # hook-only; a manual `continuum briefing --run-id X` still opens storage.
+    # Cold-start guard for the SessionStart hook (issue #394). The hook must
+    # not create an empty database as a side effect of firing in a directory
+    # that never used CONTINUUM, and it must not pay for a DB open when there
+    # is provably nothing to brief on. Absence of the database file is that
+    # proof; absence of .continuum/resume.json is not.
+    #
+    # This used to skip the open whenever the sentinel was missing, which made
+    # the hook silent for any run that had not checkpointed yet, and for every
+    # run once some *other* run's `complete` removed the shared sentinel. A
+    # fresh session then started with no idea an interrupted run existed, which
+    # is the exact failure recovery is supposed to prevent. Opening the
+    # database and asking it costs one indexed query, and cmd_briefing still
+    # prints nothing when no run is active, so the token floor is unchanged.
     if args.command == "briefing" and not getattr(args, "run_id", None):
         hook_name = getattr(args, "hook_event_name", "SessionStart")
-        if hook_name == "SessionStart" and not Path(".continuum/resume.json").exists():
+        if hook_name == "SessionStart" and not _database_exists(args.db):
             return ExitCode.OK
 
     try:
