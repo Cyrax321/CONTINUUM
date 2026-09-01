@@ -76,6 +76,34 @@ All notable changes to this project are documented here. The format follows
   server declares and needed no change. `tests/test_mcp_docs.py` now checks the
   table against `tools/list`, so a tool registered without a row fails the
   suite instead of shipping undocumented.
+- **`hooks remove` resolves the settings path the same way `hooks install`
+  does (#580).** Both subcommands share one `--settings` option that defaults
+  to `None` and advertises "default: per client profile", but only the
+  installer fell back to `CLIENT_PROFILES[client]["settings"]`. The remover
+  passed the `None` straight to `Path`, so `continuum hooks remove
+  claude-code`, the uninstall named in `docs/guides/embed-claude-code.md`, died
+  with an uncaught `TypeError` before it read anything. Install was therefore a
+  one-way door for every operator who had not written down the path it worked
+  out for them: the only way back out was to repeat that path by hand. The
+  remover now reads the profile default, so the pair resolves one file per
+  client (`.claude/settings.json`, `.gemini/settings.json`,
+  `.codex/hooks.json`), and a directory that was never wired reports that
+  nothing was found instead of raising. The default path had no test on the
+  remove side because every case passed `--settings` explicitly, which is the
+  same reason the installer carried this bug once before; the profile default is
+  now pinned for both halves. Removal itself is unchanged, as is the `--json`
+  payload beyond the path it reports.
+
+- **The removal report names every hook it took out, not just the observation
+  hook (#580).** `remove_claude_code_hook` removes each kind in
+  `_INSTALLED_KINDS`, so an operator who had installed the `--with-gate`
+  PreToolUse hook was told "Removed observation hook" and could reasonably
+  believe the gate still stood between their agent and an unclaimed side
+  effect. The text now reads `Removed CONTINUUM hooks from <path>` (and `No
+  CONTINUUM hooks found in <path>` when there was nothing to do), and the
+  subcommand's `--help` line says what it removes. The `removed` boolean in
+  `--json` is unchanged.
+>>>>>>> 4e27e6f (fix(hooks): default the remove path to the client profile, like install (#580))
 
 ## [0.1.0] - 2026-08-27
 

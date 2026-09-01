@@ -2185,13 +2185,28 @@ def _codex_feature_flag_hint() -> str:
 
 
 def cmd_hooks_remove(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
-    """Remove the observation hook previously installed for a coding CLI."""
-    settings_path = Path(args.settings)
+    """Remove every hook ``hooks install`` wired for a coding CLI (issue #580).
+
+    The settings path defaults to the client's profile, exactly as it does for
+    install: both subcommands share one ``--settings`` option that defaults to
+    ``None``, and only the installer used to fall back, so the documented
+    uninstall (``continuum hooks remove claude-code``, named in
+    docs/guides/embed-claude-code.md) died on ``Path(None)`` before it read
+    anything. An operator could only reach it by repeating by hand the path
+    install had already worked out for them.
+
+    The report names hooks rather than the observation hook because
+    :func:`remove_claude_code_hook` takes out every kind in ``_INSTALLED_KINDS``:
+    an operator who also installed the gate was told only the observation hook
+    went, which understates what just changed in the file that decides whether
+    their side effects are still guarded.
+    """
+    settings_path = Path(args.settings or CLIENT_PROFILES[args.client]["settings"])
     removed = remove_claude_code_hook(settings_path)
     text = (
-        f"Removed observation hook from {settings_path}"
+        f"Removed CONTINUUM hooks from {settings_path}"
         if removed
-        else f"No observation hook found in {settings_path}"
+        else f"No CONTINUUM hooks found in {settings_path}"
     )
     _emit(
         {"client": args.client, "settings": str(settings_path), "removed": removed},
@@ -3162,7 +3177,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hooks_client(install, cmd_hooks_install)
 
-    remove = hooks_sub.add_parser("remove", help="Remove the observation hook.")
+    remove = hooks_sub.add_parser(
+        "remove", help="Remove every hook install wired. Mutates settings."
+    )
     hooks_client(remove, cmd_hooks_remove)
 
     verify = with_run(add("verify", cmd_verify, "Re-audit the event chain."))
