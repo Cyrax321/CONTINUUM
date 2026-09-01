@@ -29,6 +29,8 @@ from continuum.security.hashing import make_id, stable_hash
 
 __all__ = [
     "RunStatus",
+    "TERMINAL_RUN_STATUSES",
+    "TERMINAL_RUN_STATUS_VALUES",
     "StateStatus",
     "ActionStatus",
     "RecoveryMode",
@@ -84,6 +86,20 @@ class RunStatus(StrEnum):
     CRASHED = "crashed"
     ABORTED = "aborted"
     FAILED = "failed"
+
+
+#: Statuses a run does not come back from. Defined beside the enum because both
+#: storage backends and every surface that resolves "the active run" have to
+#: agree on what counts as finished; they each carried their own copy of this
+#: list, which is the kind of duplication that drifts silently when a status is
+#: added.
+TERMINAL_RUN_STATUSES = frozenset(
+    {RunStatus.COMPLETED, RunStatus.CRASHED, RunStatus.ABORTED, RunStatus.FAILED}
+)
+
+#: The same set as SQL parameters, in a stable order so a query's placeholder
+#: count is fixed at import time rather than by set iteration order.
+TERMINAL_RUN_STATUS_VALUES = tuple(sorted(status.value for status in TERMINAL_RUN_STATUSES))
 
 
 class StateStatus(StrEnum):

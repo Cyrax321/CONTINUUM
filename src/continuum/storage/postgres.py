@@ -34,10 +34,10 @@ from typing import Any
 
 from continuum.events import Event, EventType, IntegrityReport, IntegrityViolation
 from continuum.models import (
+    TERMINAL_RUN_STATUS_VALUES,
     Action,
     Origin,
     Run,
-    RunStatus,
     SemanticState,
     StateCheckpoint,
     utcnow,
@@ -360,16 +360,20 @@ class PostgresStorage(Storage):
         return [self._row_to_run(row) for row in rows]
 
     def get_active_run(self) -> Run | None:
-        terminal = (
-            RunStatus.COMPLETED.value,
-            RunStatus.CRASHED.value,
-            RunStatus.ABORTED.value,
-            RunStatus.FAILED.value,
-        )
+        """The non-terminal run touched most recently.
+
+        Mirrors :meth:`SQLiteStorage.get_active_run`, including the reason it
+        cannot order on ``updated_at`` alone: ``append_event`` never bumps that
+        column. ``GREATEST`` stands in for SQLite's two-argument ``MAX``, which
+        Postgres reads as the aggregate.
+        """
+        terminal = TERMINAL_RUN_STATUS_VALUES
         with self._read():
             rows = self._connection.execute(
-                "SELECT * FROM runs WHERE status NOT IN (%s, %s, %s, %s) "
-                "ORDER BY updated_at DESC, run_id DESC LIMIT 1",
+                "SELECT r.* FROM runs r WHERE r.status NOT IN (%s, %s, %s, %s) "
+                "ORDER BY GREATEST(r.updated_at, COALESCE("
+                "(SELECT MAX(e.timestamp) FROM events e WHERE e.run_id = r.run_id), "
+                "r.updated_at)) DESC, r.run_id DESC LIMIT 1",
                 terminal,
             ).fetchall()
         return self._row_to_run(rows[0]) if rows else None

@@ -139,6 +139,29 @@ def test_get_active_run_returns_the_most_recent_non_terminal_run(storage: SQLite
     assert storage.get_active_run().run_id == active.run_id
 
 
+def test_get_active_run_counts_events_as_activity(storage: SQLiteStorage) -> None:
+    # append_event does not bump runs.updated_at, so ordering on that column
+    # alone answered with whichever run was created last regardless of which
+    # one was actually being worked. Observed on a real database: an empty
+    # `-fork` run left behind by the all-features tour outranked the session's
+    # own run, which had fifty events. Every caller that resolves "the active
+    # run" for the operator reads this, so the resumed session was briefed on
+    # the wrong run and reported the real one as missing.
+    working = storage.create_run(Run(run_id="working", goal="g"))
+    storage.create_run(Run(run_id="created_later", goal="g"))
+    storage.append_event("working", EventType.WORK_COMPLETED, {})
+
+    assert storage.get_active_run().run_id == working.run_id
+
+
+def test_get_active_run_orders_eventless_runs_by_creation(storage: SQLiteStorage) -> None:
+    # Coalescing to updated_at keeps the old answer for runs that have no
+    # events yet, so counting events as activity does not reorder them.
+    storage.create_run(Run(run_id="first", goal="g"))
+    latest = storage.create_run(Run(run_id="second", goal="g"))
+    assert storage.get_active_run().run_id == latest.run_id
+
+
 # --- events ---------------------------------------------------------------- #
 
 

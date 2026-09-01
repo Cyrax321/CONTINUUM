@@ -32,7 +32,15 @@ from typing import Any
 from pydantic import ValidationError
 
 from continuum.events import Event, EventType, IntegrityReport, IntegrityViolation
-from continuum.models import Action, Origin, Run, RunStatus, SemanticState, StateCheckpoint, utcnow
+from continuum.models import (
+    TERMINAL_RUN_STATUS_VALUES,
+    Action,
+    Origin,
+    Run,
+    SemanticState,
+    StateCheckpoint,
+    utcnow,
+)
 from continuum.security.hashing import make_id
 from continuum.state.versioning import canonical_state_json, state_fingerprint
 from continuum.storage.actionindex import index_entry_from_payload
@@ -281,16 +289,31 @@ class SQLiteStorage(Storage):
         return [self._row_to_run(row) for row in rows]
 
     def get_active_run(self) -> Run | None:
-        terminal = (
-            RunStatus.COMPLETED.value,
-            RunStatus.CRASHED.value,
-            RunStatus.ABORTED.value,
-            RunStatus.FAILED.value,
-        )
+        """The non-terminal run touched most recently.
+
+        Ordered by real last activity, not by ``runs.updated_at`` alone:
+        ``append_event`` does not bump that column, so a run that has taken
+        fifty events since it was created still carries its creation
+        timestamp. Ordering on it returned whichever non-terminal run was
+        *created* last, which on a machine that had run the all-features tour
+        was the empty ``-fork`` demo artifact rather than the session's real
+        work. Every caller that resolves "the active run" for the operator
+        (``briefing``, ``gate``, ``observe``) inherited that answer, so a
+        resumed session was briefed on the wrong run and reported the real one
+        as missing.
+
+        The event timestamp is coalesced to ``updated_at`` so a run with no
+        events yet still sorts by when it was created, and ``updated_at``
+        still participates via ``MAX`` so an explicit ``update_run`` (a status
+        change, say) counts as activity even when it appends nothing.
+        """
+        terminal = TERMINAL_RUN_STATUS_VALUES
         with self._read() as conn:
             rows = conn.execute(
-                "SELECT * FROM runs WHERE status NOT IN (?, ?, ?, ?) "
-                "ORDER BY updated_at DESC, run_id DESC LIMIT 1",
+                "SELECT r.* FROM runs r WHERE r.status NOT IN (?, ?, ?, ?) "
+                "ORDER BY MAX(r.updated_at, COALESCE("
+                "(SELECT MAX(e.timestamp) FROM events e WHERE e.run_id = r.run_id), "
+                "r.updated_at)) DESC, r.run_id DESC LIMIT 1",
                 terminal,
             ).fetchall()
         return self._row_to_run(rows[0]) if rows else None
