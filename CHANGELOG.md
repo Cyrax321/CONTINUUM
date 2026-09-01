@@ -24,6 +24,30 @@ All notable changes to this project are documented here. The format follows
   surrounding whitespace; a run whose in-flight claim was recorded under a
   padded key will not match the stripped key derived after upgrading.
 
+- **`mypy src/continuum` passes on a core install (#315).** `CONTRIBUTING.md`
+  asks for three checks before a PR, and on a fresh `pip install -e .` clone the
+  third opened with 26 errors: `cryptography`, `mcp`, `langgraph`, `agents` and
+  `langchain_core` had no `[[tool.mypy.overrides]]` family, so every lazy import
+  of an optional package read as a missing library. Nothing was wrong with the
+  code, and the only way to a quiet run was to install the extras the core is
+  built not to need, which is the opposite of what a dependency-free recovery
+  library should ask of a first-time contributor. The five families are now
+  excused the way `psycopg`, `playwright` and `kubernetes` already were, and the
+  `opentelemetry` and `crewai` section that had drifted below the coverage
+  tables moved back under `[tool.mypy]`.
+
+  Excusing the import is half of it: the names it supplied become `Any`, and
+  strict mode then refused the `BaseCheckpointSaver` and `RunHooks` subclasses
+  and the twelve MCP tools registered through the server's own decorator. Those
+  14 errors are answered by scoping `disallow_subclassing_any` off for
+  `continuum.adapters.langgraph_store` and `continuum.adapters.openai`, and
+  `disallow_untyped_decorators` off for `continuum.mcp.server`, the three
+  modules that hold an optional seam. `strict = true` is untouched everywhere
+  else, and CI checks all three with the packages installed, where the real
+  signatures apply. `tests/test_mypy_overrides.py` walks the package's imports
+  and fails when one has no family, so the next optional dependency cannot
+  quietly put the 26 errors back.
+
 - **The gateway answers malformed JSON with 400 instead of hiding it (#323).**
   `_body` caught `JSONDecodeError` and returned an empty mapping, so a request
   whose body never parsed was carried on to key derivation and refused with
