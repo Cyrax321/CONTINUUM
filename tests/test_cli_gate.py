@@ -286,9 +286,17 @@ def test_gate_allows_after_a_real_claim_via_the_ledger_api(db: str, tmp_path: Pa
 
 
 def test_gate_fast_paths_when_no_config_exists(db: str, tmp_path: Path) -> None:
+    # The absent config is named explicitly rather than left to the default.
+    # The default resolves against the working directory, which for pytest is
+    # the checkout root, so on any machine that has actually used the gate
+    # (a .continuum/gate.json is written by `hooks install --with-gate` and by
+    # the demo setup) this read the developer's real registry and denied.
+    missing = tmp_path / "absent.json"
     p = tmp_path / "p.json"
     p.write_text(json.dumps(payload("send_invoice", customer="a", invoice_id=1)))
-    code, out, _ = run("--db", db, "--json", "gate", "--payload-file", str(p))
+    code, out, _ = run(
+        "--db", db, "--json", "gate", "--config", str(missing), "--payload-file", str(p)
+    )
     assert code == ExitCode.OK
     assert json.loads(out)["reason"] == "no gate configured"
 
