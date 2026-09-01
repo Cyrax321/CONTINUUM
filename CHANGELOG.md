@@ -8,6 +8,28 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Session-start recovery no longer depends on a file that any run can delete.**
+  Three defects combined to leave a resumed session believing nothing was
+  interrupted, which is the exact failure CONTINUUM exists to prevent. First,
+  `briefing` skipped the database entirely whenever `.continuum/resume.json` was
+  absent, so it was silent for any run that had not checkpointed yet; absence of
+  the sentinel was being read as proof that nothing was in flight, and it proves
+  nothing. It now consults the database and stays silent only when no run is
+  actually live, so the token floor the fast path was protecting is unchanged;
+  the cold-start guard is now the absence of the database file, which also keeps
+  the hook from creating one as a side effect of firing. Second, `complete`
+  deleted that sentinel outright, even though it is one file shared by every run
+  in the database: a demo run completing disarmed the fast path for a run that
+  was still working. It now hands the sentinel to whatever is still live. Third,
+  `get_active_run` ordered by `runs.updated_at`, which `append_event` never
+  bumps, so it answered with whichever non-terminal run was created most recently
+  rather than the one being worked on; an empty forked run outranked a run with
+  fifty events, and every surface that resolves the active run for the operator
+  inherited that answer. Ordering now accounts for real event activity, in both
+  the SQLite and PostgreSQL engines, and the terminal-status list they each
+  carried separately is now one constant beside `RunStatus`. `briefing` also no
+  longer prefers a sentinel that names an already-finished run.
+
 - Make `continuum complete` idempotent for runs that are already completed (#356).
 
 - **Derived keys ignore surrounding whitespace in argument values (#361).**
