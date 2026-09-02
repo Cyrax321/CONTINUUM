@@ -869,6 +869,150 @@ def cmd_validate(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     return exit_code_for(decision.mode)
 
 
+def _parse_duration(value: str) -> int:
+    """Parse duration like "30m", "1h", "10s" or plain seconds into int seconds."""
+    if isinstance(value, int):
+        return int(value)
+    s = str(value).strip()
+    if s.isdigit():
+        return int(s)
+    # Support suffixes
+    suffixes = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    if s and s[-1].lower() in suffixes:
+        num = s[:-1].strip()
+        if num.replace(".", "", 1).isdigit():
+            return int(float(num) * suffixes[s[-1].lower()])
+    raise ValueError(f"invalid duration {value!r}, expected e.g. 30m, 1h, 3600 or 10s")
+
+
+def cmd_watch(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Watch a run for liveness breach, optionally notify via webhook.
+
+    Read-only unless a breach is detected, in which case it appends
+    LIVENESS_SILENCE_DETECTED (hash-chained) and, on recovery, LIVENESS_RECOVERED.
+    Webhook delivery is fail-open, like every notification path.
+    """
+    run_id = args.run_id
+    # Check run exists
+    try:
+        storage.get_run(run_id)
+    except Exception as exc:
+        print(f"error: {exc}", file=err)
+        return 2
+    # Determine threshold
+    max_silence = getattr(args, "max_silence", None)
+    override_threshold = None
+    if max_silence is not None:
+        try:
+            override_threshold = _parse_duration(max_silence)
+        except Exception as exc:
+            print(f"error: --max-silence: {exc}", file=err)
+            return 1
+    # Compute advisory with injected clock (now)
+    try:
+        from continuum.recovery.health import CadenceContract, advisory_for_storage
+
+        # Use override if provided, else load contract
+        if override_threshold is not None:
+            contract = CadenceContract(max_silence_seconds=override_threshold)
+            # We need to compute advisory manually with override
+            from datetime import UTC, datetime
+
+            from continuum.recovery.health import _has_open_claim, _last_event_ts, evaluate
+
+            last_ts = _last_event_ts(storage, run_id)
+            has_claim = _has_open_claim(storage, run_id)
+            now = datetime.now(UTC)
+            result = evaluate(now, last_ts, contract=contract, has_open_claim=has_claim)
+            advisory = {
+                "breached": result.breached,
+                "silence_seconds": result.silence_seconds,
+                "threshold_seconds": result.threshold_seconds,
+                "phase": result.phase,
+                "has_open_claim": has_claim,
+                "last_event_ts": result.last_event_ts.isoformat() if result.last_event_ts else None,
+                "now": result.now.isoformat(),
+            }
+        else:
+            advisory = advisory_for_storage(storage, run_id)
+    except Exception as exc:
+        print(f"error: liveness check failed: {exc}", file=err)
+        return 1
+
+    breached = bool(advisory.get("breached"))
+    # Append liveness events as needed (mutating only on breach/recovery)
+    try:
+        events = storage.read_events(run_id)
+        last_liveness = None
+        for ev in reversed(events):
+            if ev.type.value in ("LIVENESS_SILENCE_DETECTED", "LIVENESS_RECOVERED"):
+                last_liveness = ev.type.value
+                break
+        if breached and last_liveness != "LIVENESS_SILENCE_DETECTED":
+            # Append DETECTED
+            from continuum.events import EventType
+
+            storage.append_event(
+                run_id,
+                EventType.LIVENESS_SILENCE_DETECTED,
+                {
+                    "silence_seconds": advisory.get("silence_seconds"),
+                    "threshold_seconds": advisory.get("threshold_seconds"),
+                    "phase": advisory.get("phase"),
+                },
+            )
+        elif not breached and last_liveness == "LIVENESS_SILENCE_DETECTED":
+            from continuum.events import EventType
+
+            storage.append_event(
+                run_id,
+                EventType.LIVENESS_RECOVERED,
+                {"silence_seconds": advisory.get("silence_seconds")},
+            )
+    except Exception:
+        # Fail-open on storage errors for liveness events, never block the check
+        pass
+
+    on_breach = getattr(args, "on_breach", "exit")
+    webhook_url = getattr(args, "webhook_url", None)
+    payload = {
+        "run_id": run_id,
+        "breached": breached,
+        "liveness": advisory,
+    }
+    text = (
+        _liveness_text(advisory)
+        if breached
+        else f"Liveness ok for {run_id}: {advisory.get('silence_seconds')}"
+    )
+    if breached and on_breach == "webhook" and webhook_url:
+        try:
+            import json as _json
+            import urllib.request
+
+            data = _json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                webhook_url, data=data, headers={"Content-Type": "application/json"}, method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=5):
+                pass
+        except Exception as exc:
+            # Fail-open delivery, like dashboard token path
+            print(f"warning: webhook delivery failed: {exc}", file=err)
+    # Emit result
+    _emit(
+        payload,
+        text,
+        as_json=getattr(args, "json", False),
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    # Exit code: breached maps to WAIT which is REQUIRES_HUMAN (20), otherwise OK
+    if breached:
+        return 20
+    return 0
+
+
 def cmd_health(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Advisory prefix-trust health check (issue #401). Read-only."""
     # Health is advisory only: it never moves mode, never gates, never changes
@@ -3312,6 +3456,29 @@ def build_parser() -> argparse.ArgumentParser:
         default="127.0.0.1",
         help="bind address (default: 127.0.0.1; 0.0.0.0 exposes recovery data).",
     )
+
+    watch = with_run(
+        add("watch", cmd_watch, "Watch a run for liveness breach, optionally notify via webhook.")
+    )
+    watch.add_argument(
+        "--max-silence",
+        dest="max_silence",
+        default=None,
+        help="max silence before breach, e.g. 30m, 1h, 3600",
+    )
+    watch.add_argument(
+        "--on-breach",
+        choices=("webhook", "exit"),
+        default="exit",
+        help="action on breach (default: exit)",
+    )
+    watch.add_argument(
+        "--webhook-url",
+        dest="webhook_url",
+        default=None,
+        help="webhook URL for --on-breach webhook",
+    )
+    watch.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
 
     return parser
 
