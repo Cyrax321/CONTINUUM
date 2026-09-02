@@ -427,6 +427,23 @@ class PostgresStorage(Storage):
         (compaction) reuse this instead of :meth:`append_event`, which would
         commit the marker in its own autocommit transaction.
         """
+        if type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED) and payload is not None:
+            caused_by = payload.get("caused_by") if isinstance(payload, dict) else None
+            if caused_by is not None:
+                if not isinstance(caused_by, list):
+                    raise ValueError("caused_by must be a list")
+                if len(caused_by) > 32:
+                    raise ValueError("caused_by must contain at most 32 ids")
+                for cid in caused_by:
+                    if not isinstance(cid, str) or not 1 <= len(cid) <= 128:
+                        raise ValueError("caused_by entries must be 1-128 chars")
+                    exists = self._connection.execute(
+                        "SELECT 1 FROM events WHERE run_id = %s AND event_id = %s UNION ALL "
+                        "SELECT 1 FROM events_archive WHERE run_id = %s AND event_id = %s LIMIT 1",
+                        (run_id, cid, run_id, cid),
+                    ).fetchone()
+                    if exists is None:
+                        raise ValueError(f"unknown caused_by id {cid!r}")
         self._require_run(self._connection, run_id)
         head = self._connection.execute(
             "SELECT sequence, hash FROM events WHERE run_id = %s ORDER BY sequence DESC LIMIT 1",
@@ -454,7 +471,30 @@ class PostgresStorage(Storage):
         return event
 
     def append_sealed(self, event: Event) -> Event:
+        if event.type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED):
+            caused_by = event.payload.get("caused_by") if isinstance(event.payload, dict) else None
+            if caused_by is not None:
+                if not isinstance(caused_by, list):
+                    raise ValueError("caused_by must be a list")
+                if len(caused_by) > 32:
+                    raise ValueError("caused_by must contain at most 32 ids")
+                for cid in caused_by:
+                    if not isinstance(cid, str) or not 1 <= len(cid) <= 128:
+                        raise ValueError("caused_by entries must be 1-128 chars")
         with self._write():
+            if event.type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED):
+                caused_by = (
+                    event.payload.get("caused_by") if isinstance(event.payload, dict) else None
+                )
+                if caused_by:
+                    for cid in caused_by:
+                        exists = self._connection.execute(
+                            "SELECT 1 FROM events WHERE run_id = %s AND event_id = %s UNION ALL "
+                            "SELECT 1 FROM events_archive WHERE run_id = %s AND event_id = %s LIMIT 1",
+                            (event.run_id, cid, event.run_id, cid),
+                        ).fetchone()
+                        if exists is None:
+                            raise ValueError(f"unknown caused_by id {cid!r}")
             self._require_run(self._connection, event.run_id)
             head = self._connection.execute(
                 "SELECT sequence, hash FROM events WHERE run_id = %s "

@@ -180,6 +180,85 @@ def test_default_settings_path_comes_from_the_profile(
     assert (tmp_path / expected).exists(), expected
 
 
+def _installed_kinds(settings: Path) -> set[str]:
+    """The last word of every hook command in the file, across all events."""
+    hooks = json.loads(settings.read_text()).get("hooks", {})
+    return {
+        str(h.get("command", "")).split()[-1]
+        for groups in hooks.values()
+        if isinstance(groups, list)
+        for g in groups
+        if isinstance(g.get("hooks"), list)
+        for h in g["hooks"]
+        if str(h.get("command", "")).strip()
+    }
+
+
+@pytest.mark.parametrize("client", ("claude-code", "gemini", "codex"))
+def test_remove_defaults_to_the_same_file_install_wrote(
+    tmp_path: Path, client: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #580: the fix above was only ever applied to the installer.
+
+    ``--settings`` defaults to None for both subcommands and its help already
+    promises "default: per client profile", but only install fell back, so the
+    uninstall the guides name (``continuum hooks remove claude-code``) raised
+    ``TypeError`` on ``Path(None)`` before reading anything. The pair has to
+    resolve the same file, or install is a one-way door for anyone who did not
+    write the path down.
+    """
+    monkeypatch.chdir(tmp_path)
+    settings = tmp_path / CLIENT_PROFILES[client]["settings"]
+    code, _, err = run("--json", "hooks", "install", client, "--with-gate")
+    assert code == ExitCode.OK, err
+    assert {"observe", "briefing", "gate"} <= _installed_kinds(settings)
+
+    code, out, err = run("--json", "hooks", "remove", client)
+    assert code == ExitCode.OK, err
+    payload = json.loads(out)
+    assert payload["removed"] is True
+    assert Path(payload["settings"]) == Path(CLIENT_PROFILES[client]["settings"])
+    assert _installed_kinds(settings) == set()
+
+
+def test_remove_without_settings_is_quiet_when_nothing_is_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Uninstalling twice, or in a directory that was never wired, is a no-op.
+
+    The absent file is the common case for the crash in #580: a hook command is
+    the one thing an operator runs without arguments, so the failure had to be a
+    reported nothing-to-do rather than a traceback.
+    """
+    monkeypatch.chdir(tmp_path)
+    code, out, err = run("--json", "hooks", "remove", "claude-code")
+    assert code == ExitCode.OK, err
+    payload = json.loads(out)
+    assert payload["removed"] is False
+    assert Path(payload["settings"]) == Path(CLIENT_PROFILES["claude-code"]["settings"])
+    assert not (tmp_path / ".claude").exists()
+
+
+def test_remove_reports_hooks_not_just_the_observation_hook(tmp_path: Path) -> None:
+    """The report has to cover what the removal actually does.
+
+    ``remove_claude_code_hook`` takes out every kind in ``_INSTALLED_KINDS``,
+    not just observe, while the text said "Removed observation hook". An
+    operator who installed the gate too was told only the observation hook
+    went, which is the wrong thing to believe about the file that decides
+    whether their side effects are still guarded.
+    """
+    settings = tmp_path / "settings.json"
+    run("hooks", "install", "claude-code", "--with-gate", "--settings", str(settings))
+    assert "gate" in _installed_kinds(settings)
+
+    code, out, err = run("hooks", "remove", "claude-code", "--settings", str(settings))
+    assert code == ExitCode.OK, err
+    assert "Removed CONTINUUM hooks from" in out
+    assert "observation hook" not in out
+    assert _installed_kinds(settings) == set()
+
+
 @pytest.mark.parametrize("client", ("claude-code", "gemini", "codex"))
 def test_briefing_is_wired_on_session_start(tmp_path: Path, client: str) -> None:
     """No CLAUDE.md required: the briefing rides the client's own

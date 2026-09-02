@@ -36,14 +36,22 @@ from pathlib import Path
 from typing import Any
 
 from continuum.actions.idempotency import idempotency_key
+from continuum.events import EventType
 
 __all__ = [
     "DEFAULT_GATE_CONFIG_PATH",
     "Decision",
+    "MEMORY_KEY_PREFIX",
+    "MEMORY_REQUIRED_FIELDS",
+    "is_memory_template",
+    "is_memory_key",
     "load_gate_config",
     "normalize_key_value",
     "render_key",
+    "derive_memory_key",
     "decide",
+    "collect_consumed_authorities",
+    "is_authority_consumed",
 ]
 
 #: Where the gate configuration lives, relative to the project root the hook
@@ -51,9 +59,44 @@ __all__ = [
 #: convention.
 DEFAULT_GATE_CONFIG_PATH = ".continuum/gate.json"
 
+#: Prefix for memory-store keys. The gate treats this as a global namespace
+#: so the ledger's ``action_index`` can catch a double-write from a later run.
+#: See ``docs/guides/memory_governance.md`` and issue #565 (parent #304).
+MEMORY_KEY_PREFIX = "mem:"
+
+#: Required placeholders for a memory-store template. ``tenant`` carries the
+#: tenancy boundary, ``store_id`` names the backing store, ``record_key`` is
+#: the record identity. Different tenants produce different keys, so a key for
+#: acme never dedupes against one for globex even when the record_key matches.
+MEMORY_REQUIRED_FIELDS = ("store_id", "tenant", "record_key")
+
 
 class GateConfigError(ValueError):
     """The gate configuration exists but cannot be honoured."""
+
+
+def collect_consumed_authorities(events: Any) -> dict[str, Any]:
+    """Scan events for AUTHORITY_CONSUMED and return map authority_id to event.
+
+    First consumption wins, the log is append-only. The map is used by the
+    gate to refuse resurrection of a consumed authority even after a restore.
+    """
+    consumed: dict[str, Any] = {}
+    for ev in events:
+        if getattr(ev, "type", None) is not EventType.AUTHORITY_CONSUMED:
+            continue
+        payload = getattr(ev, "payload", {}) or {}
+        aid = payload.get("authority_id")
+        if isinstance(aid, str) and aid not in consumed:
+            consumed[aid] = ev
+    return consumed
+
+
+def is_authority_consumed(authority_id: str, consumed: Any) -> bool:
+    """True when authority_id is in the consumed map."""
+    if not consumed:
+        return False
+    return authority_id in consumed
 
 
 @dataclass(frozen=True)
@@ -66,6 +109,21 @@ class Decision:
     #: resembles by resource tokens. Non-empty only on unclaimed denials that
     #: look like deliberate divergence after a restore, never on allow.
     fork_candidates: tuple[Any, ...] = ()
+
+
+def is_memory_template(template: str) -> bool:
+    """Whether a template governs a memory-store write.
+
+    Memory templates are identified by the ``mem:`` prefix. The prefix makes
+    the identity tenant-scoped and global to the store, not to the run, so
+    the ledger's ``action_index`` can catch a double-write from a later run.
+    """
+    return template.startswith(MEMORY_KEY_PREFIX)
+
+
+def is_memory_key(rendered: str) -> bool:
+    """Whether a rendered key is a memory-store identity."""
+    return rendered.startswith(MEMORY_KEY_PREFIX)
 
 
 def load_gate_config(path: Path) -> dict[str, dict[str, Any]] | None:
@@ -95,6 +153,17 @@ def load_gate_config(path: Path) -> dict[str, dict[str, Any]] | None:
             raise GateConfigError(f"{location}: tool {tool!r} needs a string 'key_template'")
         if spec.get("action_type") is not None and not isinstance(spec.get("action_type"), str):
             raise GateConfigError(f"{location}: tool {tool!r} 'action_type' must be a string")
+        template = spec.get("key_template", "")
+        if is_memory_template(template):
+            import string as _string
+
+            fields = {name for _, name, _, _ in _string.Formatter().parse(template) if name}
+            missing = [f for f in MEMORY_REQUIRED_FIELDS if f not in fields]
+            if missing:
+                raise GateConfigError(
+                    f"{location}: tool {tool!r} memory template {template!r} "
+                    f"must include placeholders {MEMORY_REQUIRED_FIELDS}, missing {missing}"
+                )
     return tools
 
 
@@ -141,8 +210,32 @@ def render_key(template: str, tool_input: Mapping[str, Any]) -> str:
 
 
 def _expected_key(action_type: str, run_id: str, rendered: str) -> str:
-    """The exact ledger key a claim of this operation must have produced."""
+    """The exact ledger key a claim of this operation must have produced.
+
+    Memory keys (``mem:``) are global to the store, not to the run, so they
+    use ``scope=None``. This lets the ledger's ``action_index`` catch a
+    double-write from a later run, which is the tenancy and erasure property
+    memory governance needs (issue #565). All other keys stay run-scoped.
+    """
+    if is_memory_key(rendered):
+        return str(idempotency_key(action_type, None, scope=None, key=rendered))
     return str(idempotency_key(action_type, None, scope=run_id, key=rendered))
+
+
+def derive_memory_key(
+    tool_input: Mapping[str, Any], *, template: str = "mem:{store_id}:{tenant}:{record_key}"
+) -> str:
+    """Derive a tenant-scoped memory key from arguments using a template.
+
+    Convenience wrapper around :func:`render_key` that enforces the memory
+    convention. The default template matches the documented example
+    ``mem:{store_id}:{tenant}:{record_key}`` and the pgvector and Mem0
+    examples in ``.continuum/gate.json.example``.
+    """
+    rendered = render_key(template, tool_input)
+    if not is_memory_key(rendered):
+        raise GateConfigError(f"memory key must start with {MEMORY_KEY_PREFIX!r}, got {rendered!r}")
+    return rendered
 
 
 def decide(
@@ -152,13 +245,49 @@ def decide(
     *,
     run_id: str,
     actions_by_key: Mapping[str, Any],
+    storage: Any | None = None,
+    consumed_authorities: Mapping[str, Any] | None = None,
 ) -> Decision:
     """Decide whether one tool call may proceed.
 
     ``actions_by_key`` maps ledger keys to Action records (the output of
     ``fold_action_events`` over the run's event log). Ungated tools pass
-    immediately without touching anything else.
+    immediately without touching anything else. When ``storage`` is supplied
+    and the rendered key is a memory-store identity (``mem:``), a foreign
+    lookup via the ledger's ``action_index`` also denies a duplicate that
+    was completed in another run, which is the cross-run tenancy guarantee
+    for memory writes (issue #565). Authority resurrection is also checked
+    when ``consumed_authorities`` is supplied (issue #289b).
     """
+    # Authority resurrection check (issue #289b): if any string value in the
+    # tool input matches a consumed authority, refuse before any ledger check.
+    # The check is value-based rather than field-name based so that drift in
+    # argument names does not resurrect spent authority. The message names the
+    # original consumption event so the operator can audit the lineage.
+    if consumed_authorities:
+        for _key, _value in tool_input.items():
+            if isinstance(_value, str) and _value in consumed_authorities:
+                ev = consumed_authorities[_value]
+                seq = (
+                    getattr(ev, "sequence", "?")
+                    if hasattr(ev, "sequence")
+                    else ev.get("sequence", "?")
+                )
+                payload = getattr(ev, "payload", {}) or {}
+                if hasattr(ev, "payload"):
+                    seq = ev.sequence
+                    payload = ev.payload
+                else:
+                    payload = ev.get("payload", {})
+                consumer = payload.get("consumer_run_id", "?")
+                return Decision(
+                    False,
+                    f"Authority {_value!r} consumed at seq {seq} by run {consumer!r}. Obtain a fresh authority.",
+                )
+        # Also check string values that may be nested as authority_id field
+        # is sometimes the whole value; the loop above already covers top-level
+        # values, which is sufficient for the tested shapes.
+
     if config is None:
         return Decision(True, "no gate configured")
     spec = config.get(tool_name)
@@ -171,6 +300,69 @@ def decide(
         _expected_key(action_type, run_id, rendered)
     except GateConfigError as exc:
         return Decision(False, f"gate configuration error: {exc}")
+
+    # Memory-store keys are global to the backing store, not to the run.
+    # Besides the local ``actions_by_key`` check below, consult the ledger's
+    # action_index when a storage handle is available so a double-write from
+    # a later run is caught even though that run's local log is empty.
+    if is_memory_key(rendered):
+        from continuum.models import ActionStatus
+
+        global_key = _expected_key(action_type, run_id, rendered)
+        action = actions_by_key.get(global_key)
+        if action is None and storage is not None:
+            try:
+                if getattr(storage, "supports_action_index", False):
+                    foreign = storage.foreign_action(global_key, exclude_run=run_id)
+                    if foreign is not None:
+                        action = foreign
+            except Exception:
+                action = None
+        if action is None:
+            from continuum.recovery.fork import detect_fork_candidates
+
+            candidates = tuple(
+                detect_fork_candidates(
+                    action_type=action_type,
+                    tool_input=tool_input,
+                    actions_by_key=actions_by_key,
+                )
+            )
+            message = (
+                f"side effect {action_type!r} with key {rendered!r} has no ledger claim. "
+                f"Call the MCP tool continuum_intercept_action with run_id={run_id!r}, "
+                f"action_type={action_type!r}, key={rendered!r} first, then repeat this call."
+            )
+            if candidates:
+                neighbour = candidates[0]
+                message += (
+                    f" This call resembles journalled action {neighbour.action_id[:14]} "
+                    f"({neighbour.status}, shared tokens: {', '.join(neighbour.shared_tokens[:3])}). "
+                    f"If it is a deliberate new direction, branch it with: "
+                    f"continuum fork {run_id} --reason '<why>' --child <new-run-id>"
+                )
+            return Decision(False, message, fork_candidates=candidates)
+        if action.status is ActionStatus.STARTED:
+            return Decision(True, f"live claim {rendered!r}")
+        if action.status is ActionStatus.COMPLETED:
+            return Decision(
+                False,
+                f"{action_type!r} with key {rendered!r} was already completed"
+                + (f" (external id {action.external_id!r})" if action.external_id else "")
+                + ". Do not repeat it.",
+            )
+        if action.status is ActionStatus.UNKNOWN:
+            return Decision(
+                False,
+                f"{action_type!r} with key {rendered!r} has an unknown outcome. Call "
+                f"continuum_reconcile_action for it before attempting anything further.",
+            )
+        return Decision(
+            False,
+            f"the previous attempt of {action_type!r} with key {rendered!r} is closed "
+            f"(status {action.status.value}). Claim it again "
+            f"through continuum_intercept_action before retrying.",
+        )
 
     from continuum.replayguard import GuardKind
     from continuum.replayguard import evaluate as core_evaluate

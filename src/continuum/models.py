@@ -38,6 +38,8 @@ __all__ = [
     "ApprovalStatus",
     "PlanStepStatus",
     "utcnow",
+    "DecisionPayload",
+    "ActionRecordPayload",
     "Goal",
     "PlanStep",
     "Progress",
@@ -51,10 +53,12 @@ __all__ = [
     "ConstraintRetracted",
     "ConstraintPin",
     "AttemptLesson",
+    "AuthorityConsumed",
     "ModelSpecificState",
     "ModelState",
     "Run",
     "SemanticState",
+    "ConsumedInputs",
     "Action",
     "EnvResource",
     "EnvironmentSnapshot",
@@ -299,6 +303,36 @@ class Decision(BaseModel):
     provenance: Provenance = Field(default_factory=Provenance)
 
 
+class DecisionPayload(BaseModel):
+    """Payload for DECISION_CREATED (issue #551).
+
+    ``caused_by`` records the event ids that caused this decision, enabling
+    the causal graph evidence -> finding -> decision -> action. Optional,
+    at most 32 ids of 1-128 chars each, defaults to [] for backward compat.
+    Unknown ids are refused by the writer (ValueError).
+    """
+
+    model_config = Frozen
+
+    decision_id: str = Field(default_factory=lambda: make_id("decision"))
+    decision: str
+    reason: str = ""
+    evidence: list[str] = Field(default_factory=list)
+    caused_by: list[str] = Field(default_factory=list)
+
+    @field_validator("caused_by")
+    @classmethod
+    def _validate_caused_by(cls, value: list[str]) -> list[str]:
+        if len(value) > 32:
+            raise ValueError("caused_by must contain at most 32 ids")
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("caused_by entries must be strings")
+            if not 1 <= len(item) <= 128:
+                raise ValueError("caused_by entries must be 1-128 chars")
+        return value
+
+
 class Evidence(BaseModel):
     model_config = Frozen
 
@@ -531,6 +565,53 @@ class AttemptLesson(BaseModel):
         return [str(v) for v in value]
 
 
+class AuthorityConsumed(BaseModel):
+    """Payload of AUTHORITY_CONSUMED: one-time authority was consumed (issue #289/#555).
+
+    Each consumption is a distinct hash-chained row with Origin.DETERMINISTIC,
+    so replay never deduplicates and the audit trail is append-only. The
+    authority_id is bounded to 1-128 characters and carried in the hash,
+    keeping the event size small and deterministic.
+    """
+
+    model_config = Frozen
+
+    authority_id: str = Field(min_length=1, max_length=128)
+    consumer_run_id: str = Field(min_length=1)
+    consumed_at: datetime = Field(default_factory=utcnow)
+    via_action_id: str | None = None
+
+    @field_validator("authority_id")
+    @classmethod
+    def _authority_id_valid(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("authority_id must be non-empty")
+        if len(cleaned) > 128:
+            raise ValueError("authority_id must be 1-128 characters")
+        return cleaned
+
+    @field_validator("consumer_run_id")
+    @classmethod
+    def _consumer_run_id_valid(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("consumer_run_id must be non-empty")
+        return cleaned
+
+    @field_validator("via_action_id")
+    @classmethod
+    def _via_action_id_valid(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("via_action_id must be non-empty when provided")
+        if len(cleaned) > 256:
+            raise ValueError("via_action_id must be at most 256 characters")
+        return cleaned
+
+
 class TrajectoryReport(BaseModel):
     """Deterministic sleep-time report distilled from archived history (issue #393).
 
@@ -704,6 +785,68 @@ class SemanticState(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
+class ConsumedInputs(BaseModel):
+    """Commitment inputs consumed by a completed action (issue #295).
+
+    Records which checkpoint components and prior action outputs were used
+    to produce this action. Caller supplied at completion time, validated
+    but optional for backward compatibility. An absent or empty value is
+    admissible (no commitments), so old ledger rows without the field
+    remain admissible and round-trip.
+
+    This is the DART commitment graph edge, distinct from causal
+    ``caused_by``: ``caused_by`` traces why an action was decided,
+    ``consumed_inputs`` records what state it committed to.
+    """
+
+    model_config = Frozen
+
+    checkpoint_seq: int = Field(default=0, ge=0)
+    """Checkpoint sequence consumed, 0 means none."""
+    event_positions: list[int] = Field(default_factory=list)
+    """Event sequence positions consumed."""
+    component_ids: list[str] = Field(default_factory=list)
+    """Checkpoint component ids consumed (e.g., decision ids, finding ids)."""
+    action_ids: list[str] = Field(default_factory=list)
+    """Prior action ids consumed."""
+
+    @field_validator("event_positions")
+    @classmethod
+    def _positions_valid(cls, v: list[int]) -> list[int]:
+        if len(v) > 128:
+            raise ValueError("event_positions must contain at most 128 entries")
+        for pos in v:
+            if not isinstance(pos, int):
+                raise ValueError("event_positions must be integers")
+            if pos < 0:
+                raise ValueError("event_positions must be >= 0")
+        return v
+
+    @field_validator("component_ids")
+    @classmethod
+    def _component_ids_valid(cls, v: list[str]) -> list[str]:
+        if len(v) > 32:
+            raise ValueError("component_ids must contain at most 32 entries")
+        for cid in v:
+            if not isinstance(cid, str):
+                raise ValueError("component_ids must be strings")
+            if not (1 <= len(cid) <= 128):
+                raise ValueError("component_id must be 1-128 characters")
+        return v
+
+    @field_validator("action_ids")
+    @classmethod
+    def _action_ids_valid(cls, v: list[str]) -> list[str]:
+        if len(v) > 32:
+            raise ValueError("action_ids must contain at most 32 entries")
+        for aid in v:
+            if not isinstance(aid, str):
+                raise ValueError("action_ids must be strings")
+            if not (1 <= len(aid) <= 128):
+                raise ValueError("action_id must be 1-128 characters")
+        return v
+
+
 class Action(BaseModel):
     """A record of an external side effect, for idempotent reconciliation."""
 
@@ -722,9 +865,83 @@ class Action(BaseModel):
     side_effect_uncertain: bool = False
     compensated_by: list[str] = Field(default_factory=list)
     last_error: str | None = None
+    origin_digest: str | None = None
+    """Optional hash of the originating observation that motivated this write.
+
+    Stored as 64 lowercase hex (SHA-256) when present. Gives poisoning
+    forensics: a bad record can be joined back to the perception or
+    tool result that caused it, then sibling writes from the same
+    contaminated origin can be enumerated. Round-tripped via the ledger
+    payload and ``Action`` so the chain keeps the attribution.
+    """
     created_at: datetime = Field(default_factory=utcnow)
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    consumed_inputs: ConsumedInputs = Field(default_factory=ConsumedInputs)
+    """Commitment inputs consumed to produce this action (issue #295)."""
+
+
+class ActionRecordPayload(BaseModel):
+    """Payload for ACTION_RECORDED (issue #551).
+
+    ``caused_by`` records the event ids that caused this action, completing
+    the causal chain. Same caps as DecisionPayload: optional, max 32 ids
+    of 1-128 chars, default [], unknown ids raise ValueError.
+    """
+
+    model_config = Frozen
+
+    action_id: str = Field(default_factory=lambda: make_id("action"))
+    action_type: str
+    arguments: Mapping[str, Any] = Field(default_factory=dict)
+    caused_by: list[str] = Field(default_factory=list)
+
+    @field_validator("caused_by")
+    @classmethod
+    def _validate_caused_by(cls, value: list[str]) -> list[str]:
+        if len(value) > 32:
+            raise ValueError("caused_by must contain at most 32 ids")
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("caused_by entries must be strings")
+            if not 1 <= len(item) <= 128:
+                raise ValueError("caused_by entries must be 1-128 chars")
+        return value
+
+
+def _validate_caused_by_known(caused_by: list[str], known_ids: set[str]) -> None:
+    """Raise ValueError if any id in caused_by is not in known_ids."""
+    for cid in caused_by:
+        if cid not in known_ids:
+            raise ValueError(f"unknown caused_by id {cid!r}")
+
+
+def validate_caused_by(caused_by: list[str] | None, known_ids: set[str] | None = None) -> list[str]:
+    """Validate caused_by list and optionally check existence.
+
+    Caps are enforced (max 32, each 1-128 chars). When known_ids is given,
+    every entry must be present or ValueError is raised. Empty or None
+    returns [] for backward compat.
+    """
+    if not caused_by:
+        return []
+    if len(caused_by) > 32:
+        raise ValueError("caused_by must contain at most 32 ids")
+    for cid in caused_by:
+        if not isinstance(cid, str) or not 1 <= len(cid) <= 128:
+            raise ValueError("caused_by entries must be 1-128 chars")
+    if known_ids is not None:
+        _validate_caused_by_known(caused_by, known_ids)
+    return list(caused_by)
+
+    @field_validator("origin_digest")  # type: ignore[misc]
+    @classmethod
+    def _origin_digest_is_sha256(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not _SHA256_PATTERN.fullmatch(value):
+            raise ValueError("origin_digest must be 64 lowercase hex characters")
+        return value
 
 
 class UnknownSideEffect(RuntimeError):

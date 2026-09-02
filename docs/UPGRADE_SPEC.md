@@ -123,6 +123,7 @@ Grouped from `gh issue list --state open` and label counts (`good first issue` 3
 **Research novelty, not yet implemented:**
 
 * #288 Claim-level provenance graph with staleness propagation (`enhancement` `research` `state`)
+  - #551 caused_by payload on DECISION_CREATED and ACTION_RECORDED, validation against log ids, hash-covered, max 32, 1-128 chars, defaults to [] (Refs #551)
 * #289 Authority lifecycle: consumed-credential tracking and resurrection prevention (`enhancement` `mcp` `security`, complements 239 grant work in 287)
 * #292 Atomic dual-state rewind, context plus environment revert in one command (`enhancement` `research`)
 * #293 Public recovery-correctness benchmark, fault-injection grading for any framework (`enhancement` `benchmark` `research`)
@@ -365,6 +366,25 @@ Tiers are sized so one phase lands as one reviewed PR.
 * Q2. Should `AttemptLesson` be emitted on every `REPAIR_AND_RESUME` or only on fork. Leaning to both but behind a helper that stays pure until the caller requests it, so `assess` stays read-only.
 * Q3. Where should trajectory reports live: as events in the hash chain, as a separate `reports` table, or as interchange artifacts. Leaning to events for audit, with bounded size.
 * Q4. Token floor measurement needs a deterministic tokenizer. Should it vendor a count or reuse the gateway byte count plus tool schema size. Leaning to the latter for zero new deps.
+
+## 14. Admissibility Layer (Issue #295)
+
+DART formalizes that a controller-legal restore can still be semantically
+invalid when committed downstream work depends on outputs that would be rolled
+back. CONTINUUM implements this as a commitment graph:
+
+* Completed actions optionally record consumed_inputs: checkpoint_seq,
+  event_positions, component_ids, action_ids (bounded, validated).
+* On resume, check_admissibility walks forward from the candidate checkpoint.
+  Any COMPLETED action whose consumed_inputs references a position after the
+  checkpoint makes the checkpoint inadmissible for plain RESUME.
+* Validator emits a machine-readable ComponentValidationEntry (ACTION) with
+  detail listing each blocking commitment and its chain position. Old rows
+  without consumed_inputs remain admissible.
+* Engine maps inadmissibility to REPAIR_AND_RESUME (re-derivable) or
+  REQUEST_HUMAN (action graph) instead of offering RESUME. The sealed
+  contract names each blocking commitment with chain position in both
+  invalidated and evidence, so the refusal is auditable.
 
 ## 15. Risks and mitigations
 

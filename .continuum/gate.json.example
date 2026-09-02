@@ -1,0 +1,23 @@
+{
+  "tools": {
+    "pgvector.upsert": {
+      "key_template": "mem:{store_id}:{tenant}:{record_key}",
+      "action_type": "mem_write"
+    },
+    "pgvector.delete": {
+      "key_template": "mem:{store_id}:{tenant}:{record_key}",
+      "action_type": "mem_delete"
+    },
+    "mem0.write": {
+      "key_template": "mem:{store_id}:{tenant}:{record_key}",
+      "action_type": "mem_write"
+    },
+    "mem0.delete": {
+      "key_template": "mem:{store_id}:{tenant}:{record_key}",
+      "action_type": "mem_delete"
+    },
+    "mem_write": {
+      "key_template": "mem:{store_id}:{tenant}:{record_key}"
+    }
+  }
+}
