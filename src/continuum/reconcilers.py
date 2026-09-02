@@ -94,7 +94,11 @@ def load_reconcilers(path: Path) -> dict[str, dict[str, Any]]:
                 f"{location}: probe {action_type!r} needs a string 'command'"
             )
         timeout = spec.get("timeout", _DEFAULT_TIMEOUT)
-        if not isinstance(timeout, (int, float)) or timeout <= 0:
+        # ``bool`` subclasses ``int``, so a JSON ``true`` clears the numeric check
+        # and registers as a one second timeout. Every probe would then be killed
+        # just after it starts and its action would reach the human queue carrying
+        # a timeout detail, rather than the config error this arm promises.
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
             raise ReconcilerConfigError(
                 f"{path}: probe {action_type!r} 'timeout' must be a positive number"
             )
