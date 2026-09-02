@@ -679,10 +679,23 @@ def cmd_events(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
 
 def cmd_provenance(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
-    """Show provenance DAG with per-node Origin (issue #552). Read-only."""
+    """Show provenance DAG with per-node Origin (issue #554). Read-only, compaction-aware."""
     storage.get_run(args.run_id)
-    events = storage.read_events(args.run_id)
+    # Use read_all_events so compacted runs still show the full DAG (issue #554)
+    try:
+        events = storage.read_all_events(args.run_id)
+    except Exception:
+        events = storage.read_events(args.run_id)
     graph = build_provenance_graph(events)
+    if getattr(args, "dot", False):
+        from continuum.provenance.graph import to_dot
+
+        dot = to_dot(graph)
+        if getattr(args, "json", False):
+            _emit({"run_id": args.run_id, "dot": dot}, "", as_json=True, stream=out)
+        else:
+            print(dot, file=out)
+        return ExitCode.OK
     if getattr(args, "json", False):
         payload = graph.to_dict()
         payload["run_id"] = args.run_id
@@ -705,13 +718,16 @@ def cmd_provenance(args: argparse.Namespace, storage: Storage, out: Any, err: An
 
 
 def cmd_impact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
-    """Show downstream impact of an evidence item (issue #552). Read-only."""
+    """Show downstream impact of an evidence item (issue #554). Read-only, compaction-aware."""
     storage.get_run(args.run_id)
     evidence_id = getattr(args, "evidence", None)
     if not evidence_id:
         print("error: --evidence is required", file=err)
         return ExitCode.ERROR
-    events = storage.read_events(args.run_id)
+    try:
+        events = storage.read_all_events(args.run_id)
+    except Exception:
+        events = storage.read_events(args.run_id)
     graph = build_provenance_graph(events)
     downstream = downstream_of(graph, evidence_id)
     if getattr(args, "json", False):
@@ -3001,7 +3017,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     with_run(add("history", cmd_history, "List state versions and checkpoints."))
 
-    with_run(add("provenance", cmd_provenance, "Show provenance DAG. Read-only."))
+    prov_parser = with_run(add("provenance", cmd_provenance, "Show provenance DAG. Read-only."))
+    prov_parser.add_argument(
+        "--dot", action="store_true", help="emit Graphviz DOT with per-node Origin color"
+    )
     impact = with_run(
         add("impact", cmd_impact, "Show downstream impact of an evidence item. Read-only.")
     )

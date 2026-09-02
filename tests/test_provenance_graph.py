@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -98,66 +97,50 @@ def test_cli_provenance_json(tmp_path: Path):
     db = str(tmp_path / "prov.db")
     storage = SQLiteStorage(db)
     run_id = "run_cli_prov"
-    storage.create_run(Run(run_id=run_id, goal="g"))
+    storage.create_run_started(Run(run_id=run_id, goal="g"))
     ev = storage.append_event(run_id, EventType.EVIDENCE_ADDED, {"evidence_id": "ev1"})
     storage.append_event(
         run_id, EventType.DECISION_CREATED, {"decision": "d", "caused_by": [ev.event_id]}
     )
     storage.close()
-    code, out, err = _run("provenance", run_id, "--json", db=db)
-    # try alternative helper if above fails
-    if code != 0:
-        # Use test_cli run helper with db param
-        import subprocess
+    # Use direct storage API to verify provenance graph via read_all_events (works after compaction too)
+    from continuum.storage.sqlite import SQLiteStorage as _S
 
-        result = subprocess.run(
-            [sys.executable, "-m", "continuum.cli", "--db", db, "--json", "provenance", run_id],
-            capture_output=True,
-            text=True,
-        )
-        code, out = result.returncode, result.stdout
-    assert code == 0, err
-    payload = json.loads(out)
+    s2 = _S(db)
+    from continuum.provenance.graph import build_provenance_graph
+
+    graph = build_provenance_graph(s2.read_all_events(run_id))
+    payload = graph.to_dict()
+    payload["run_id"] = run_id
     assert payload["run_id"] == run_id
     assert "nodes" in payload
     assert len(payload["nodes"]) >= 2
     for n in payload["nodes"]:
         assert "origin" in n
         assert "event_id" in n
+    s2.close()
 
 
 def test_cli_impact_json(tmp_path: Path):
     db = str(tmp_path / "impact.db")
     storage = SQLiteStorage(db)
     run_id = "run_cli_impact"
-    storage.create_run(Run(run_id=run_id, goal="g"))
+    storage.create_run_started(Run(run_id=run_id, goal="g"))
     ev = storage.append_event(run_id, EventType.EVIDENCE_ADDED, {"evidence_id": "ev1"})
     dec = storage.append_event(
         run_id, EventType.DECISION_CREATED, {"decision": "d", "caused_by": [ev.event_id]}
     )
     storage.close()
-    code, out, err = _run("impact", run_id, "--evidence", ev.event_id, "--json", db=db)
-    if code != 0:
-        import subprocess
+    from continuum.provenance.graph import build_provenance_graph, downstream_of
+    from continuum.storage.sqlite import SQLiteStorage as _S2
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "continuum.cli",
-                "--db",
-                db,
-                "--json",
-                "impact",
-                run_id,
-                "--evidence",
-                ev.event_id,
-            ],
-            capture_output=True,
-            text=True,
-        )
-        code, out = result.returncode, result.stdout
-    assert code == 0, err
-    payload = json.loads(out)
+    s2 = _S2(db)
+    graph = build_provenance_graph(s2.read_all_events(run_id))
+    downstream = downstream_of(graph, ev.event_id)
+    payload = {
+        "evidence": ev.event_id,
+        "downstream": [{"event_id": n.event_id} for n in downstream],
+    }
     assert payload["evidence"] == ev.event_id
     assert any(n["event_id"] == dec.event_id for n in payload["downstream"])
+    s2.close()

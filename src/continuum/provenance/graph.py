@@ -25,6 +25,7 @@ __all__ = [
     "ProvenanceGraph",
     "build_provenance_graph",
     "downstream_of",
+    "to_dot",
 ]
 
 
@@ -193,3 +194,30 @@ def downstream_of(graph: ProvenanceGraph, evidence_id: str) -> list[ProvenanceNo
                 seen.add(did)
                 result.append(graph.nodes[did])
     return result
+
+
+_ORIGIN_COLOR: dict[Origin, str] = {
+    Origin.DETERMINISTIC: "lightblue",
+    Origin.HUMAN: "lightgreen",
+    Origin.EXTERNAL_AGENT: "orange",
+    Origin.LLM: "gold",
+    Origin.IMPORTED: "lightgrey",
+}
+
+
+def to_dot(graph: ProvenanceGraph) -> str:
+    """Emit Graphviz DOT with per-node Origin color (issue #554)."""
+    lines = ["digraph provenance {"]
+    lines.append("  rankdir=LR;")
+    lines.append("  node [shape=box, style=filled];")
+    for node in sorted(graph.nodes.values(), key=lambda n: n.sequence):
+        color = _ORIGIN_COLOR.get(node.origin, "white")
+        label = f"{node.type.value}\\n{node.event_id[:8]}\\n{node.origin.value}"
+        # Escape quotes in label
+        label = label.replace('"', '\\"')
+        lines.append(f'  "{node.event_id}" [label="{label}", fillcolor="{color}"];')
+    for parent, children in graph.edges.items():
+        for child in children:
+            lines.append(f'  "{parent}" -> "{child}";')
+    lines.append("}")
+    return "\n".join(lines)

@@ -5,6 +5,7 @@ from continuum.provenance.graph import (
     ProvenanceNode,
     build_provenance_graph,
     downstream_of,
+    to_dot,
 )
 
-__all__ = ["ProvenanceGraph", "ProvenanceNode", "build_provenance_graph", "downstream_of"]
+__all__ = ["ProvenanceGraph", "ProvenanceNode", "build_provenance_graph", "downstream_of", "to_dot"]

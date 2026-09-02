@@ -252,6 +252,11 @@ class RecoveryEngine:
             else:
                 confirmed_components.update(["goal", "progress"])
 
+        # Provenance N-hop staleness (issue #553): include archived events so compaction does not launder
+        try:
+            provenance_events = self.storage.read_all_events(run_id)
+        except Exception:
+            provenance_events = self.storage.read_events(run_id)
         validation = self.validator.validate(
             restored.state,
             current_environment=current_environment,
@@ -260,6 +265,7 @@ class RecoveryEngine:
             expected_model=expected_model,
             confirmed=confirmed_components,
             scope=scope,
+            events=provenance_events,
         )
 
         ledger = ActionLedger(self.storage, run_id)
@@ -306,6 +312,7 @@ class RecoveryEngine:
             has_action_ref = any(d["consumed_inputs"]["action_ids"] for d in admissibility.details)
             status = StateStatus.REQUIRES_REVIEW if has_action_ref else StateStatus.STALE
             from continuum.models import Component, ComponentValidationEntry
+
             entries = list(validation.report.statuses)
             entries.append(
                 ComponentValidationEntry(
@@ -316,6 +323,7 @@ class RecoveryEngine:
                 )
             )
             from continuum.models import StateValidationResult
+
             new_report = StateValidationResult(
                 run_id=validation.report.run_id,
                 checkpoint_version=validation.report.checkpoint_version,
@@ -325,6 +333,7 @@ class RecoveryEngine:
                 validated_at=validation.report.validated_at,
             )
             from continuum.state.validator import ValidationOutcome
+
             validation = ValidationOutcome(
                 state=validation.state,
                 report=new_report,
@@ -336,7 +345,9 @@ class RecoveryEngine:
             strict_unknown=self.validator.strict_unknown,
             unprojectable=unprojectable,
         )
-        mode, rationale = self._decide(validation, uncertain, plan, restored, self.strict_unknown, admissibility)
+        mode, rationale = self._decide(
+            validation, uncertain, plan, restored, self.strict_unknown, admissibility
+        )
 
         reason = "; ".join(rationale) if rationale else validation.report.reason
 
@@ -499,6 +510,26 @@ class RecoveryEngine:
 
         if plan.requires_human:
             proposals.append((RecoveryMode.REQUEST_HUMAN, "at least one repair needs a person"))
+
+        # Liveness breach maps to WAIT, never auto-rollback (issue #302)
+        # Silence tells us nothing about what to roll back, only that a human
+        # or lease-recovery decision is needed. WAIT is the most cautious
+        # signal that still allows a lease to be recovered without human.
+        if liveness_advisory is not None and bool(liveness_advisory.get("breached")):
+            silence = liveness_advisory.get("silence_seconds")
+            threshold = liveness_advisory.get("threshold_seconds")
+            phase = liveness_advisory.get("phase") or "otherwise"
+            proposals.append(
+                (
+                    RecoveryMode.WAIT,
+                    f"liveness breach: silence {silence:.1f}s exceeds threshold {threshold}s (phase {phase})",
+                )
+            )
+
+        # Risk trigger mapping (issue #303): deterministic policy to mode
+        if risk_mode is not None:
+            rationale_text = risk_rationale or f"risk triggers {risk_mode.value}"
+            proposals.append((risk_mode, rationale_text))
 
         # A goal that is no longer valid cannot be repaired by re-running work.
         if any(
