@@ -76,6 +76,7 @@ def build_contract(
     scope: Iterable[str] | None = None,
     post_checkpoint_observations: list[dict[str, Any]] | None = None,
     liveness: dict[str, object] | None = None,
+    triggering_risks: list[str] | None = None,
 ) -> RecoveryContract:
     """Assemble a sealed, deterministic contract.
 
@@ -151,6 +152,7 @@ def build_contract(
         reason=reason,
         post_checkpoint_observations=post_checkpoint_observations or [],
         liveness=liveness,
+        triggering_risks=triggering_risks or [],
         created_at=utcnow(),
     )
     return seal_contract(contract)

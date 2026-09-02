@@ -353,6 +353,48 @@ class RecoveryEngine:
                 "threshold_seconds": liveness_advisory.get("threshold_seconds"),
                 "phase": liveness_advisory.get("phase"),
             }
+        # Risk evaluation (issue #303): map triggers to modes, collect ids
+        triggering_risks: list[str] = []
+        risk_mode = None
+        risk_rationale = None
+        try:
+            from continuum.recovery.risk import evaluate_risk, load_risk_policy
+
+            policy = load_risk_policy()
+            try:
+                risk_events = [
+                    e for e in self.storage.read_events(run_id) if e.type == EventType.RISK_OBSERVED
+                ]
+            except Exception:
+                risk_events = []
+            best_mode = None
+            best_trigger = None
+            triggering: list[str] = []
+            for ev in risk_events:
+                trig = ev.payload.get("trigger")
+                if not isinstance(trig, str):
+                    continue
+                mode_str = evaluate_risk(trig, policy)
+                if mode_str is None:
+                    continue
+                try:
+                    mode = RecoveryMode(mode_str)
+                except Exception:
+                    continue
+                if best_mode is None or SEVERITY[mode] > SEVERITY[best_mode]:
+                    best_mode = mode
+                    best_trigger = trig
+                    triggering = [ev.event_id]
+                elif SEVERITY[mode] == SEVERITY[best_mode]:
+                    triggering.append(ev.event_id)
+            if best_mode is not None:
+                risk_mode = best_mode
+                triggering_risks = triggering
+                risk_rationale = f"risk {best_trigger} triggers {best_mode.value}"
+        except Exception:
+            triggering_risks = []
+            risk_mode = None
+            risk_rationale = None
         contract = build_contract(
             run_id=run_id,
             checkpoint_version=checkpoint_version,
@@ -363,6 +405,7 @@ class RecoveryEngine:
             scope=scope,
             post_checkpoint_observations=observations,
             liveness=liveness_section,
+            triggering_risks=triggering_risks,
         )
 
         tail_evidence: str | None = None
@@ -431,6 +474,8 @@ class RecoveryEngine:
         restored: RestoredRun,
         strict_unknown: bool,
         liveness_advisory: dict[str, object] | None = None,
+        risk_mode: RecoveryMode | None = None,
+        risk_rationale: str | None = None,
     ) -> tuple[RecoveryMode, tuple[str, ...]]:
         """Collect a proposal per signal and return the most cautious."""
         proposals: list[tuple[RecoveryMode, str]] = []
@@ -504,6 +549,26 @@ class RecoveryEngine:
 
         if plan.requires_human:
             proposals.append((RecoveryMode.REQUEST_HUMAN, "at least one repair needs a person"))
+
+        # Liveness breach maps to WAIT, never auto-rollback (issue #302)
+        # Silence tells us nothing about what to roll back, only that a human
+        # or lease-recovery decision is needed. WAIT is the most cautious
+        # signal that still allows a lease to be recovered without human.
+        if liveness_advisory is not None and bool(liveness_advisory.get("breached")):
+            silence = liveness_advisory.get("silence_seconds")
+            threshold = liveness_advisory.get("threshold_seconds")
+            phase = liveness_advisory.get("phase") or "otherwise"
+            proposals.append(
+                (
+                    RecoveryMode.WAIT,
+                    f"liveness breach: silence {silence:.1f}s exceeds threshold {threshold}s (phase {phase})",
+                )
+            )
+
+        # Risk trigger mapping (issue #303): deterministic policy to mode
+        if risk_mode is not None:
+            rationale_text = risk_rationale or f"risk triggers {risk_mode.value}"
+            proposals.append((risk_mode, rationale_text))
 
         # Liveness breach maps to WAIT, never auto-rollback (issue #302)
         # Silence tells us nothing about what to roll back, only that a human

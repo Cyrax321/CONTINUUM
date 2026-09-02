@@ -834,6 +834,8 @@ class RecoveryContract(BaseModel):
     post_checkpoint_observations: list[dict[str, Any]] = Field(default_factory=list)
     #: Liveness advisory (issue #302): last append age and breach count, informational only.
     liveness: dict[str, Any] | None = None
+    #: Triggering risks (issue #303): RISK_OBSERVED ids that caused this decision.
+    triggering_risks: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utcnow)
     integrity_hash: str | None = None
 
