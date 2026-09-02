@@ -865,6 +865,15 @@ class Action(BaseModel):
     side_effect_uncertain: bool = False
     compensated_by: list[str] = Field(default_factory=list)
     last_error: str | None = None
+    origin_digest: str | None = None
+    """Optional hash of the originating observation that motivated this write.
+
+    Stored as 64 lowercase hex (SHA-256) when present. Gives poisoning
+    forensics: a bad record can be joined back to the perception or
+    tool result that caused it, then sibling writes from the same
+    contaminated origin can be enumerated. Round-tripped via the ledger
+    payload and ``Action`` so the chain keeps the attribution.
+    """
     created_at: datetime = Field(default_factory=utcnow)
     started_at: datetime | None = None
     completed_at: datetime | None = None
@@ -924,6 +933,15 @@ def validate_caused_by(caused_by: list[str] | None, known_ids: set[str] | None =
     if known_ids is not None:
         _validate_caused_by_known(caused_by, known_ids)
     return list(caused_by)
+
+    @field_validator("origin_digest")  # type: ignore[misc]
+    @classmethod
+    def _origin_digest_is_sha256(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not _SHA256_PATTERN.fullmatch(value):
+            raise ValueError("origin_digest must be 64 lowercase hex characters")
+        return value
 
 
 class UnknownSideEffect(RuntimeError):
@@ -1028,10 +1046,6 @@ class RecoveryContract(BaseModel):
     #: never affects the recovery decision. Newest first; a trailing row with
     #: ``truncated`` marks omitted older rows when the cap bites.
     post_checkpoint_observations: list[dict[str, Any]] = Field(default_factory=list)
-    #: Liveness advisory (issue #302): last append age and breach count, informational only.
-    liveness: dict[str, Any] | None = None
-    #: Triggering risks (issue #303): RISK_OBSERVED ids that caused this decision.
-    triggering_risks: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utcnow)
     integrity_hash: str | None = None
 

@@ -134,6 +134,9 @@ class EventType(StrEnum):
     # structured plan (issue #312): durable milestones for long-horizon recovery
     PLAN_UPSERT = "PLAN_UPSERT"
 
+    # memory governance (issue #304, #567): per-tenant tombstone for erasure
+    MEMORY_TOMBSTONED = "MEMORY_TOMBSTONED"
+
 
 class AppendOnlyViolation(RuntimeError):
     """Raised when an operation would rewrite history."""

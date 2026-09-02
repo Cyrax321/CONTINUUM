@@ -511,26 +511,6 @@ class RecoveryEngine:
         if plan.requires_human:
             proposals.append((RecoveryMode.REQUEST_HUMAN, "at least one repair needs a person"))
 
-        # Liveness breach maps to WAIT, never auto-rollback (issue #302)
-        # Silence tells us nothing about what to roll back, only that a human
-        # or lease-recovery decision is needed. WAIT is the most cautious
-        # signal that still allows a lease to be recovered without human.
-        if liveness_advisory is not None and bool(liveness_advisory.get("breached")):
-            silence = liveness_advisory.get("silence_seconds")
-            threshold = liveness_advisory.get("threshold_seconds")
-            phase = liveness_advisory.get("phase") or "otherwise"
-            proposals.append(
-                (
-                    RecoveryMode.WAIT,
-                    f"liveness breach: silence {silence:.1f}s exceeds threshold {threshold}s (phase {phase})",
-                )
-            )
-
-        # Risk trigger mapping (issue #303): deterministic policy to mode
-        if risk_mode is not None:
-            rationale_text = risk_rationale or f"risk triggers {risk_mode.value}"
-            proposals.append((risk_mode, rationale_text))
-
         # A goal that is no longer valid cannot be repaired by re-running work.
         if any(
             e.component.value == "goal" and e.status is not StateStatus.VALID

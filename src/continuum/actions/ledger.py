@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import timedelta
 from functools import wraps
@@ -108,6 +108,7 @@ __all__ = [
     "LedgerError",
     "DuplicateAction",
     "ClaimLockError",
+    "forensic_join_across_runs",
 ]
 
 
@@ -723,6 +724,8 @@ class ActionLedger:
         event_type: EventType = EventType.ACTION_RECORDED,
         pinning: dict[str, str] | None = None,
         grant: dict[str, str] | None = None,
+        origin_digest: str | None = None,
+        rendered_key: str | None = None,
     ) -> Action:
         payload: dict[str, Any] = {
             "key": key,
@@ -742,6 +745,20 @@ class ActionLedger:
             # time; terminal records inherit it via the shared payload keys,
             # so scan_grants can mark consumption from either event type.
             payload["grant"] = dict(grant)
+        if origin_digest is not None or action.origin_digest is not None:
+            # Origin digest (issue #304, #566): hash of the originating
+            # observation that motivated this write. Stored both top-level
+            # for forensic filtering and inside the action for round-trip.
+            digest = origin_digest if origin_digest is not None else action.origin_digest
+            if digest is not None:
+                payload["origin_digest"] = digest
+        if rendered_key is not None:
+            payload["rendered_key"] = rendered_key
+        elif action.arguments and "record_key" in action.arguments:
+            # Fallback for callers that supplied record_key via arguments
+            # rather than explicit key; keep forensic searchable.
+            with suppress(Exception):
+                payload["rendered_key"] = str(action.arguments.get("record_key"))
         self.storage.append_event(self.run_id, event_type, payload)
         return action
 
@@ -758,6 +775,7 @@ class ActionLedger:
         dep_scope: str | None = None,
         pinning: dict[str, str] | None = None,
         grant: Mapping[str, str] | None = None,
+        origin_digest: str | None = None,
     ) -> ActionOutcome:
         """Register intent to perform an action, or report it already happened.
 
@@ -787,6 +805,7 @@ class ActionLedger:
         resolves it.
         """
         explicit_key = key is not None
+        _explicit_rendered = key
         idem = idempotency_key(
             action_type,
             arguments,
@@ -795,6 +814,7 @@ class ActionLedger:
             key=key,
         )
         key = idem
+        rendered_key = _explicit_rendered
         existing = self.get(key)
 
         if existing is None and not scoped_to_run:
@@ -916,6 +936,16 @@ class ActionLedger:
         if existing is None:
             if budget_auth_id is not None:
                 self._budget_consume_claim(action_type, budget_auth_id)
+            # Origin digest (issue #566): optional 64 hex, validated by Action.
+            # Fail closed on bad digest rather than storing garbage that
+            # forensic joins would then misattribute.
+            if origin_digest is not None:
+                import re as _re
+
+                if not _re.fullmatch(r"[0-9a-f]{64}", origin_digest):
+                    raise LedgerError(
+                        f"origin_digest must be 64 lowercase hex, got {origin_digest!r}"
+                    )
             action = Action(
                 run_id=self.run_id,
                 action_type=action_type,
@@ -924,8 +954,16 @@ class ActionLedger:
                 arguments_hash=arguments_hash(arguments, volatile=volatile),
                 status=ActionStatus.STARTED,
                 started_at=utcnow(),
+                origin_digest=origin_digest,
             )
-            self._record(key, action, pinning=pinning, grant=grant_clean)
+            self._record(
+                key,
+                action,
+                pinning=pinning,
+                grant=grant_clean,
+                origin_digest=origin_digest,
+                rendered_key=rendered_key,
+            )
             return ActionOutcome(key=key, action=action, fresh=True)
 
         if existing.status is ActionStatus.COMPLETED:
@@ -1180,6 +1218,79 @@ class ActionLedger:
         )
         return self._record(key, action)
 
+    def forensic_lookup(self, record_key: str) -> list[dict[str, Any]]:
+        """Find actions whose rendered key contains ``record_key``.
+
+        Scans this run's ledger for memory writes whose stored
+        ``rendered_key`` contains the given substring. For each hit, also
+        resolves the originating observation event by ``origin_digest`` when
+        present. This is the poisoning forensics join: given a bad record,
+        walk back to what caused it, then enumerate siblings from the same
+        contaminated origin.
+
+        Returns a list of ``{"action": Action, "rendered_key": str,
+        "origin_digest": str | None, "observation_event": Event | None}``
+        entries. Empty when nothing matches. Searches only this run; for
+        store-global enumeration use :func:`forensic_join_across_runs`.
+        """
+        hits: list[dict[str, Any]] = []
+        # Map observation digest to event for this run
+        obs_by_digest: dict[str, Any] = {}
+        try:
+            from continuum.security.hashing import stable_hash as _sh
+
+            for ev in self.storage.read_events(self.run_id):
+                if ev.type == EventType.PERCEPTION_OBSERVED:
+                    try:
+                        digest = _sh(dict(ev.payload))
+                    except Exception:
+                        continue
+                    obs_by_digest[digest] = ev
+                    # Also index by content_hash if present
+                    ch = ev.payload.get("content_hash")
+                    if isinstance(ch, str):
+                        obs_by_digest[ch] = ev
+        except Exception:
+            obs_by_digest = {}
+        for ev in self.storage.read_events(self.run_id):
+            if ev.type not in _ACTION_EVENT_TYPES:
+                continue
+            payload = dict(ev.payload)
+            rendered = payload.get("rendered_key") or payload.get("key") or ""
+            # The stored key is hashed, so check rendered_key first, then
+            # fallback to substring search inside action arguments or key.
+            match = False
+            if isinstance(rendered, str) and record_key in rendered:
+                match = True
+            else:
+                # Fallback: check action arguments for record_key
+                try:
+                    act = payload.get("action") or {}
+                    args = act.get("arguments") or {}
+                    if record_key in str(args):
+                        match = True
+                    if record_key in str(payload.get("key", "")):
+                        match = True
+                except Exception:
+                    pass
+            if not match:
+                continue
+            try:
+                action = Action.model_validate(payload["action"])
+            except Exception:
+                continue
+            digest = payload.get("origin_digest") or action.origin_digest  # type: ignore[assignment]
+            obs_ev = obs_by_digest.get(digest) if isinstance(digest, str) else None
+            hits.append(
+                {
+                    "action": action,
+                    "rendered_key": rendered,
+                    "origin_digest": digest,
+                    "observation_event": obs_ev,
+                }
+            )
+        return hits
+
     def _require(self, key: str) -> tuple[str, Action]:
         """Resolve ``key`` to its stored key and action, or explain what is wrong.
 
@@ -1202,3 +1313,74 @@ class ActionLedger:
                 f"continuum_list_actions, and pass the action_key or action_id from there."
             )
         return resolved, self._replay()[resolved]
+
+
+def forensic_join_across_runs(storage: Storage, record_key: str) -> list[dict[str, Any]]:
+    """Store-global forensic join: record_key -> originating observations.
+
+    Scans every run in ``storage`` for memory actions whose rendered key
+    contains ``record_key``, returning the same shape as
+    :meth:`ActionLedger.forensic_lookup` but across all runs. This powers
+    enumeration for poisoning forensics where a contaminated origin may have
+    produced sibling writes in different runs.
+
+    Each hit includes ``run_id``, ``action``, ``rendered_key``,
+    ``origin_digest`` and ``observation_event`` (or None when the digest
+    has no matching PERCEPTION_OBSERVED in that run).
+    """
+    from continuum.security.hashing import stable_hash as _sh
+
+    hits: list[dict[str, Any]] = []
+    for run in storage.list_runs():
+        run_id = run.run_id
+        # Build per-run observation index
+        obs_by_digest: dict[str, Any] = {}
+        try:
+            for ev in storage.read_events(run_id):
+                if ev.type == EventType.PERCEPTION_OBSERVED:
+                    try:
+                        digest = _sh(dict(ev.payload))
+                    except Exception:
+                        continue
+                    obs_by_digest[digest] = ev
+                    ch = ev.payload.get("content_hash")
+                    if isinstance(ch, str):
+                        obs_by_digest[ch] = ev
+        except Exception:
+            obs_by_digest = {}
+        try:
+            events = storage.read_events(run_id)
+        except Exception:
+            continue
+        for ev in events:
+            if ev.type not in _ACTION_EVENT_TYPES:
+                continue
+            payload = dict(ev.payload)
+            rendered = payload.get("rendered_key") or ""
+            match = isinstance(rendered, str) and record_key in rendered
+            if not match:
+                try:
+                    act = payload.get("action") or {}
+                    args = act.get("arguments") or {}
+                    if record_key in str(args):
+                        match = True
+                except Exception:
+                    pass
+            if not match:
+                continue
+            try:
+                action = Action.model_validate(payload["action"])
+            except Exception:
+                continue
+            digest = payload.get("origin_digest") or getattr(action, "origin_digest", None)  # type: ignore[assignment]
+            obs_ev = obs_by_digest.get(digest) if isinstance(digest, str) else None
+            hits.append(
+                {
+                    "run_id": run_id,
+                    "action": action,
+                    "rendered_key": rendered,
+                    "origin_digest": digest,
+                    "observation_event": obs_ev,
+                }
+            )
+    return hits

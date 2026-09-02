@@ -161,8 +161,6 @@ def build_contract(
         evidence=evidence,
         reason=reason,
         post_checkpoint_observations=post_checkpoint_observations or [],
-        liveness=liveness,
-        triggering_risks=triggering_risks or [],
         created_at=utcnow(),
     )
     return seal_contract(contract)
