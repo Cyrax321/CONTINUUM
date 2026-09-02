@@ -332,6 +332,10 @@ class SidecarHTTP:
     closes the connection unanswered, and ``Transfer-Encoding: chunked`` is
     refused instead of being read as an empty body -- which is how a chunked
     stream used to get past the cap entirely.
+
+    A refusal that could not establish where the body ends also closes the
+    connection, since ``protocol_version`` is HTTP/1.1 and an unread remainder
+    on a kept-alive socket is read as the next request.
     """
 
     def __init__(self, sidecar: SidecarServer, port: int = 8765, bind: str = "127.0.0.1") -> None:
@@ -409,7 +413,15 @@ class SidecarHTTP:
                         if not chunk:
                             return None
                         remaining -= len(chunk)
-                    take(2)  # the CRLF that terminates the chunk
+                    # The chunk data must be followed by its own CRLF. Consuming
+                    # two bytes blindly would eat the front of the next chunk
+                    # header when that CRLF is missing, and the drain would then
+                    # report a clean finish from the middle of the stream -- the
+                    # one outcome whose refusal keeps the connection open.
+                    terminator = self.rfile.readline(_CHUNK_LINE_LIMIT)
+                    drained += len(terminator)
+                    if terminator.strip():
+                        return "malformed"
 
             def _read_body(self) -> bytes | None:
                 """Return the request body, or answer the refusal and return None.
@@ -433,8 +445,18 @@ class SidecarHTTP:
                         self.close_connection = True
                         self._json(413, {"error": "request body too large to drain"})
                     elif outcome == "malformed":
+                        # Closed, not answered on a live socket: the drain stopped
+                        # at framing it could not parse, so where the body ends is
+                        # unknown. protocol_version is HTTP/1.1, so keeping the
+                        # connection means the unread remainder is read as the next
+                        # request line, and a body shaped like a request gets
+                        # dispatched instead of discarded (request smuggling).
+                        self.close_connection = True
                         self._json(400, {"error": "invalid chunked Transfer-Encoding"})
                     else:
+                        # Kept alive: ``None`` means the stream reached its terminal
+                        # chunk or ended, so the boundary is known and the next
+                        # bytes on this socket really are the next request.
                         self._json(400, {"error": "chunked Transfer-Encoding is not supported"})
                     return None
 
@@ -447,6 +469,11 @@ class SidecarHTTP:
                 # A header that is present but blank is malformed too, not zero.
                 token = raw_length.strip()
                 if not (token.isascii() and token.isdigit()):
+                    # Closed for the same reason as unparseable chunk framing: a
+                    # length that is not a number cannot say how many bytes to
+                    # discard, so the body stays unread and any bytes the client
+                    # already wrote would be parsed as a pipelined request.
+                    self.close_connection = True
                     self._json(400, {"error": f"invalid Content-Length: {raw_length!r}"})
                     return None
                 length = int(token)
