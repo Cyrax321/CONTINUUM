@@ -726,6 +726,9 @@ _NON_PROJECTING = frozenset(
         EventType.GRANT_DENIED,
         # log maintenance (issue #239): records the compaction boundary itself
         EventType.EVENT_LOG_ANCHORED,
+        # liveness (issue #302): silence detection and recovery, never state
+        EventType.LIVENESS_SILENCE_DETECTED,
+        EventType.LIVENESS_RECOVERED,
     }
 )
 
