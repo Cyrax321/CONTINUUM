@@ -75,6 +75,7 @@ def build_contract(
     evidence: list[str] | None = None,
     scope: Iterable[str] | None = None,
     post_checkpoint_observations: list[dict[str, Any]] | None = None,
+    liveness: dict[str, object] | None = None,
 ) -> RecoveryContract:
     """Assemble a sealed, deterministic contract.
 
@@ -149,6 +150,7 @@ def build_contract(
         evidence=evidence,
         reason=reason,
         post_checkpoint_observations=post_checkpoint_observations or [],
+        liveness=liveness,
         created_at=utcnow(),
     )
     return seal_contract(contract)
