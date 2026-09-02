@@ -197,6 +197,9 @@ class Origin(StrEnum):
     IMPORTED = "imported"
     """Loaded from a foreign checkpoint whose event history is unavailable."""
 
+    EXTERNAL_MONITOR = "external_monitor"
+    """Asserted by an external risk monitor such as SNAGLINE. A witness, not an authority."""
+
     @property
     def self_certified(self) -> bool:
         """Whether this origin is an unverified self-report.

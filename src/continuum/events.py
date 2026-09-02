@@ -121,6 +121,9 @@ class EventType(StrEnum):
     LIVENESS_SILENCE_DETECTED = "LIVENESS_SILENCE_DETECTED"
     LIVENESS_RECOVERED = "LIVENESS_RECOVERED"
 
+    # risk (issue #303): real-time risk signal
+    RISK_OBSERVED = "RISK_OBSERVED"
+
     # structured attempt memory (issue #313): durable falsification lesson
     ATTEMPT_LESSON = "ATTEMPT_LESSON"
 
