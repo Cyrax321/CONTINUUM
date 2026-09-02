@@ -25,6 +25,7 @@ import os
 import sqlite3
 import sys
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -195,6 +196,41 @@ def _environment(args: argparse.Namespace, run_id: str) -> EnvironmentSnapshot |
             )
         resources[name] = EnvResource(name=name, version=version)
     return capture(run_id, StaticProvider(resources))
+
+
+def _liveness_advisory(
+    storage: Storage, run_id: str, *, now: datetime | None = None
+) -> dict[str, Any]:
+    """Compute liveness advisory for the read path, injected clock."""
+    try:
+        from continuum.recovery.health import advisory_for_storage
+
+        return advisory_for_storage(storage, run_id, now=now)
+    except Exception:
+        return {"breached": False, "silence_seconds": None, "threshold_seconds": None}
+
+
+def _liveness_text(advisory: dict[str, Any]) -> str:
+    """Render advisory as human text, never affects exit code."""
+    try:
+        from continuum.recovery.health import advisory_text
+
+        return advisory_text(advisory)
+    except Exception:
+        breached = advisory.get("breached")
+        silence = advisory.get("silence_seconds")
+        threshold = advisory.get("threshold_seconds")
+        phase = advisory.get("phase") or "otherwise"
+        if silence is None:
+            return "Liveness: no events yet, no silence to evaluate."
+        if breached:
+            return (
+                f"Liveness: BREACHED, silence {silence:.1f}s exceeds threshold "
+                f"{threshold}s (phase {phase}). Advisory only."
+            )
+        return (
+            f"Liveness: ok, silence {silence:.1f}s within threshold {threshold}s (phase {phase})."
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -808,6 +844,8 @@ def cmd_validate(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
         text = decision.render()
     if pins_text:
         text += "\n\n" + pins_text
+    liveness = _liveness_advisory(storage, args.run_id)
+    text += "\n\n" + _liveness_text(liveness)
     payload = {
         "run_id": decision.run_id,
         "mode": decision.mode.value,
@@ -817,6 +855,7 @@ def cmd_validate(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
         "repairs": [s.action_name for s in decision.plan.steps],
         "human_steps": steps,
         "constraint_pins": constraint_pins,
+        "liveness": liveness,
     }
     # Advisory health is intentionally not part of the payload above; use
     # dedicated health command or resume advisory key for the score.
@@ -986,6 +1025,8 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     pins_text = _constraint_pins_text(constraint_pins)
     if pins_text:
         text += "\n\n" + pins_text
+    liveness = _liveness_advisory(storage, run_id)
+    text += "\n\n" + _liveness_text(liveness)
     payload = {
         "run_id": decision.run_id,
         "goal": storage.get_run(run_id).goal,
@@ -1009,6 +1050,7 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         },
         "advisory": advisory,
         "constraint_pins": constraint_pins,
+        "liveness": liveness,
     }
     _emit(
         payload,
