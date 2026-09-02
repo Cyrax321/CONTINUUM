@@ -28,18 +28,28 @@ from dataclasses import dataclass
 from typing import Any
 
 from continuum.environment.diff import EnvironmentDiff, ResourceChange, diff_environments
+from continuum.events import Event  # for caused_by graph
 from continuum.models import (
+    Action,
+    ActionStatus,
     ApprovalStatus,
     Component,
     ComponentValidationEntry,
     EnvironmentSnapshot,
     SemanticState,
+    StateCheckpoint,
     StateStatus,
     StateValidationResult,
     utcnow,
 )
 
-__all__ = ["StateValidator", "ValidationOutcome", "validate_state"]
+__all__ = [
+    "StateValidator",
+    "ValidationOutcome",
+    "validate_state",
+    "AdmissibilityResult",
+    "check_admissibility",
+]
 
 
 #: Statuses that mean the component cannot be relied on as-is.
@@ -60,6 +70,113 @@ _UNUSABLE = frozenset(
         StateStatus.REQUIRES_REVIEW,
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissibilityResult:
+    """Result of checking whether a checkpoint is admissible for plain RESUME.
+
+    A checkpoint is inadmissible when a completed downstream action consumed
+    state produced after the checkpoint. The check is a deterministic graph
+    reachability over hash-chained positions, no heuristics.
+    """
+
+    admissible: bool
+    blocking: tuple[Action, ...]
+    reason: str
+    details: tuple[dict[str, Any], ...]
+
+
+def check_admissibility(
+    checkpoint: StateCheckpoint | None,
+    actions: Iterable[Action],
+) -> AdmissibilityResult:
+    """Check whether ``checkpoint`` is admissible given downstream ``actions``.
+
+    A checkpoint is inadmissible for plain RESUME when any COMPLETED action
+    consumed inputs that were produced after the checkpoint. Consumed inputs
+    include checkpoint_seq, event_positions, component_ids and prior action_ids.
+    Empty consumed_inputs is always admissible and old rows without the field
+    remain admissible.
+
+    ``checkpoint`` may be None when restoring without a checkpoint (pure event
+    replay); such restores are always admissible. ``actions`` is the full
+    ledger fold; only COMPLETED actions are examined, since other statuses
+    have not committed downstream work.
+    """
+    if checkpoint is None:
+        return AdmissibilityResult(admissible=True, blocking=(), reason="", details=())
+    blocking: list[Action] = []
+    details: list[dict[str, Any]] = []
+    actions_list = list(actions)
+    known_ids: set[str] = set()
+    for d in checkpoint.state.decisions:
+        known_ids.add(d.decision_id)
+    for f in checkpoint.state.findings:
+        known_ids.add(f.finding_id)
+    for e in checkpoint.state.evidence:
+        known_ids.add(e.evidence_id)
+    for p in checkpoint.state.plan:
+        known_ids.add(p.step_id)
+    for w in checkpoint.state.pending_work:
+        known_ids.add(w.task_id)
+    for dep in checkpoint.state.external_dependencies:
+        known_ids.add(dep.resource)
+    for pid in checkpoint.state.pins:
+        known_ids.add(pid)
+    for idx, action in enumerate(actions_list):
+        if action.status is not ActionStatus.COMPLETED:
+            continue
+        ci = action.consumed_inputs
+        if (
+            ci.checkpoint_seq == 0
+            and not ci.event_positions
+            and not ci.component_ids
+            and not ci.action_ids
+        ):
+            continue
+        reasons: list[str] = []
+        chain_pos = idx + 1
+        if ci.checkpoint_seq > checkpoint.version:
+            reasons.append(
+                f"checkpoint_seq {ci.checkpoint_seq} after checkpoint version {checkpoint.version}"
+            )
+        for pos in ci.event_positions:
+            if pos > checkpoint.state.source_sequence:
+                reasons.append(
+                    f"event position {pos} after checkpoint source_sequence {checkpoint.state.source_sequence}"
+                )
+                break
+        if ci.component_ids:
+            for cid in ci.component_ids:
+                if cid not in known_ids:
+                    reasons.append(f"component {cid!r} not in checkpoint (produced after)")
+                    break
+        if ci.action_ids:
+            reasons.append(f"consumed prior action(s) {', '.join(ci.action_ids)}")
+        if reasons:
+            blocking.append(action)
+            details.append(
+                {
+                    "action_id": action.action_id,
+                    "action_type": action.action_type,
+                    "chain_position": chain_pos,
+                    "consumed_inputs": ci.model_dump(),
+                    "reason": "; ".join(reasons),
+                }
+            )
+    if not blocking:
+        return AdmissibilityResult(admissible=True, blocking=(), reason="", details=())
+    reason = (
+        f"checkpoint v{checkpoint.version} inadmissible: {len(blocking)} blocking commitment(s): "
+        + "; ".join(
+            f"{d['action_id'][:12]} at position {d['chain_position']} ({d['reason']})"
+            for d in details[:3]
+        )
+    )
+    return AdmissibilityResult(
+        admissible=False, blocking=tuple(blocking), reason=reason, details=tuple(details)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +253,7 @@ class StateValidator:
         expected_model: str | None = None,
         confirmed: bool | Iterable[str] = False,
         scope: Iterable[str] | None = None,
+        events: Iterable[Event] | None = None,
     ) -> ValidationOutcome:
         if isinstance(confirmed, bool):
             self.confirmed = {"goal", "progress"} if confirmed else set()
@@ -158,6 +276,8 @@ class StateValidator:
                 state, environment_diff, entries, observed=observed
             )
             state = self._propagate(state, broken, entries)
+            if events is not None:
+                state = self._propagate_caused_by(state, events, entries)
             self._check_goal(state, entries)
             self._check_progress(state, entries)
             self._check_plan(state, entries)
@@ -177,6 +297,8 @@ class StateValidator:
                 state, environment_diff, entries, scope=scope_set, observed=observed
             )
             state = self._propagate(state, broken, entries)
+            if events is not None:
+                state = self._propagate_caused_by(state, events, entries)
             self._check_derived(state, entries)
 
         blocking = [
@@ -358,6 +480,209 @@ class StateValidator:
         return state.model_copy(
             update={"evidence": evidence, "findings": findings, "decisions": decisions}
         )
+
+    def _propagate_caused_by(
+        self,
+        state: SemanticState,
+        events: Iterable[Event],
+        entries: list[ComponentValidationEntry],
+    ) -> SemanticState:
+        """Propagate staleness N hops via caused_by DAG (issue #553)."""
+        try:
+            from continuum.provenance.graph import build_provenance_graph
+        except ImportError:
+            return state
+        try:
+            graph = build_provenance_graph(events)
+        except Exception:
+            return state
+        if not graph.nodes:
+            return state
+        event_to_component: dict[str, tuple[str, str, object]] = {}
+        for ev in state.evidence:
+            eid = ev.provenance.source_event_id
+            if eid:
+                event_to_component[eid] = ("evidence", ev.evidence_id, ev)
+        for f in state.findings:
+            eid = f.provenance.source_event_id
+            if eid:
+                event_to_component[eid] = ("finding", f.finding_id, f)
+        for d in state.decisions:
+            eid = d.provenance.source_event_id
+            if eid:
+                event_to_component[eid] = ("decision", d.decision_id, d)
+        for plan in state.plan:
+            eid = plan.provenance.source_event_id
+            if eid:
+                event_to_component[eid] = ("plan", plan.step_id, plan)
+        tainted_events: set[str] = set()
+        for entry in entries:
+            if entry.status in (
+                StateStatus.STALE,
+                StateStatus.CONFLICTED,
+                StateStatus.INVALID,
+                StateStatus.UNKNOWN,
+            ):
+                for eid, (comp, cid, _) in event_to_component.items():
+                    if comp == entry.component.value and cid == entry.component_id:
+                        tainted_events.add(eid)
+                        break
+                if entry.component is Component.EVIDENCE and entry.component_id:
+                    for eid, (_comp, cid, _) in event_to_component.items():
+                        if cid == entry.component_id:
+                            tainted_events.add(eid)
+        for ev in state.evidence:
+            if ev.status is not StateStatus.VALID and ev.provenance.source_event_id:
+                tainted_events.add(ev.provenance.source_event_id)
+        for f in state.findings:
+            if f.status is not StateStatus.VALID and f.provenance.source_event_id:
+                tainted_events.add(f.provenance.source_event_id)
+        for d in state.decisions:
+            if d.status is not StateStatus.VALID and d.provenance.source_event_id:
+                tainted_events.add(d.provenance.source_event_id)
+        if not tainted_events:
+            return state
+        from collections import deque
+
+        dq = deque(tainted_events)
+        seen: set[str] = set(tainted_events)
+        downstream_events: set[str] = set()
+        while dq:
+            cur = dq.popleft()
+            for child in graph.edges.get(cur, []):
+                if child in seen:
+                    continue
+                seen.add(child)
+                downstream_events.add(child)
+                dq.append(child)
+        has_cycle = False
+        visited_dfs: set[str] = set()
+
+        def dfs(node: str, stack: set[str]) -> bool:
+            if node in stack:
+                return True
+            if node in visited_dfs:
+                return False
+            visited_dfs.add(node)
+            stack.add(node)
+            for child in graph.edges.get(node, []):
+                if (child in downstream_events or child in tainted_events) and dfs(child, stack):
+                    return True
+            stack.remove(node)
+            return False
+
+        for start in tainted_events:
+            if dfs(start, set()):
+                has_cycle = True
+                break
+        evidence_by_id = {e.evidence_id: e for e in state.evidence}
+        findings_by_id = {f.finding_id: f for f in state.findings}
+        decisions_by_id = {d.decision_id: d for d in state.decisions}
+        plan_by_id = {p.step_id: p for p in state.plan}
+        tainted_downstream: list[tuple[str, str, str]] = []
+        for eid in downstream_events:
+            if eid not in event_to_component:
+                # Handle downstream ACTION_RECORDED not in state (ledger actions)
+                node = graph.nodes.get(eid)
+                if node and node.type.value == "ACTION_RECORDED":
+                    from continuum.events import EventType as _ET
+
+                    if node.type is _ET.ACTION_RECORDED:
+                        action_id = (
+                            node.payload.get("action_id")
+                            or node.payload.get("action", {}).get("action_id")
+                            or eid[:8]
+                        )
+                        # Avoid duplicate if already marked
+                        already_action = any(
+                            e.component is Component.ACTION
+                            and e.component_id == action_id
+                            and e.status is not StateStatus.VALID
+                            for e in entries
+                        )
+                        if not already_action:
+                            detail = "via caused_by downstream of tainted evidence (N-hop)"
+                            # Check for cycle already computed
+                            status_to_set_action = (
+                                StateStatus.CONFLICTED if has_cycle else StateStatus.STALE
+                            )
+                            entries.append(
+                                ComponentValidationEntry(
+                                    component=Component.ACTION,
+                                    component_id=action_id,
+                                    status=status_to_set_action,
+                                    detail=detail,
+                                )
+                            )
+                continue
+            comp, cid, obj = event_to_component[eid]
+            already = any(
+                e.component.value == comp
+                and e.component_id == cid
+                and e.status is not StateStatus.VALID
+                for e in entries
+            )
+            if already:
+                continue
+            current_status = obj.status if hasattr(obj, "status") else StateStatus.VALID
+            if current_status is not StateStatus.VALID:
+                continue
+            tainted_downstream.append((eid, comp, cid))
+        status_to_set = StateStatus.CONFLICTED if has_cycle else StateStatus.STALE
+        new_evidence = list(state.evidence)
+        new_findings = list(state.findings)
+        new_decisions = list(state.decisions)
+        new_plan = list(state.plan)
+        for eid, comp, cid in tainted_downstream:
+            parents = graph.reverse_edges.get(eid, [])
+            parent_str = parents[0][:8] if parents else "unknown"
+            detail = f"via caused_by from {parent_str} (N-hop staleness)"
+            if has_cycle:
+                detail = f"cycle detected via caused_by, downstream of {parent_str}"
+            # Map comp to Component
+            try:
+                comp_enum = Component(comp)
+            except ValueError:
+                comp_enum = Component.DECISION
+            entries.append(
+                ComponentValidationEntry(
+                    component=comp_enum,
+                    component_id=cid,
+                    status=status_to_set,
+                    detail=detail,
+                )
+            )
+            if comp == "evidence" and cid in evidence_by_id:
+                idx = next(i for i, e in enumerate(new_evidence) if e.evidence_id == cid)
+                new_evidence[idx] = evidence_by_id[cid].model_copy(update={"status": status_to_set})
+            elif comp == "finding" and cid in findings_by_id:
+                idx = next(i for i, f in enumerate(new_findings) if f.finding_id == cid)
+                new_findings[idx] = findings_by_id[cid].model_copy(update={"status": status_to_set})
+            elif comp == "decision" and cid in decisions_by_id:
+                idx = next(i for i, d in enumerate(new_decisions) if d.decision_id == cid)
+                update: dict[str, object] = {"status": status_to_set}
+                if status_to_set is StateStatus.STALE:
+                    from continuum.models import utcnow
+
+                    update["invalidated_reason"] = detail
+                    update["invalidated_at"] = utcnow()
+                new_decisions[idx] = decisions_by_id[cid].model_copy(update=update)
+            elif comp == "plan" and cid in plan_by_id:
+                idx = next(i for i, p in enumerate(new_plan) if p.step_id == cid)
+                import contextlib
+
+                with contextlib.suppress(Exception):
+                    new_plan[idx] = plan_by_id[cid].model_copy(update={"status": status_to_set})
+        if tainted_downstream:
+            return state.model_copy(
+                update={
+                    "evidence": new_evidence,
+                    "findings": new_findings,
+                    "decisions": new_decisions,
+                    "plan": new_plan,
+                }
+            )
+        return state
 
     # -- per-component checks --------------------------------------------- #
 
@@ -704,6 +1029,7 @@ def validate_state(
     strict_unknown: bool = True,
     confirmed: bool | Iterable[str] = False,
     scope: Iterable[str] | None = None,
+    events: Iterable[Event] | None = None,
 ) -> ValidationOutcome:
     """Validate a state against the current environment.
 
@@ -722,4 +1048,5 @@ def validate_state(
         expected_model=expected_model,
         confirmed=confirmed,
         scope=scope,
+        events=events,
     )

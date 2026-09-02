@@ -351,6 +351,23 @@ class SQLiteStorage(Storage):
         (compaction) reuse this instead of :meth:`append_event`, which would
         try to nest a second transaction.
         """
+        if type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED) and payload is not None:
+            caused_by = payload.get("caused_by") if isinstance(payload, dict) else None
+            if caused_by is not None:
+                if not isinstance(caused_by, list):
+                    raise ValueError("caused_by must be a list")
+                if len(caused_by) > 32:
+                    raise ValueError("caused_by must contain at most 32 ids")
+                for cid in caused_by:
+                    if not isinstance(cid, str) or not 1 <= len(cid) <= 128:
+                        raise ValueError("caused_by entries must be 1-128 chars")
+                    exists = conn.execute(
+                        "SELECT 1 FROM events WHERE run_id = ? AND event_id = ? UNION ALL "
+                        "SELECT 1 FROM events_archive WHERE run_id = ? AND event_id = ? LIMIT 1",
+                        (run_id, cid, run_id, cid),
+                    ).fetchone()
+                    if exists is None:
+                        raise ValueError(f"unknown caused_by id {cid!r}")
         self._require_run(conn, run_id)
         head = conn.execute(
             "SELECT sequence, hash FROM events WHERE run_id = ? ORDER BY sequence DESC LIMIT 1",
@@ -378,7 +395,30 @@ class SQLiteStorage(Storage):
         return event
 
     def append_sealed(self, event: Event) -> Event:
+        if event.type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED):
+            caused_by = event.payload.get("caused_by") if isinstance(event.payload, dict) else None
+            if caused_by is not None:
+                if not isinstance(caused_by, list):
+                    raise ValueError("caused_by must be a list")
+                if len(caused_by) > 32:
+                    raise ValueError("caused_by must contain at most 32 ids")
+                for cid in caused_by:
+                    if not isinstance(cid, str) or not 1 <= len(cid) <= 128:
+                        raise ValueError("caused_by entries must be 1-128 chars")
         with self._write() as conn:
+            if event.type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED):
+                caused_by = (
+                    event.payload.get("caused_by") if isinstance(event.payload, dict) else None
+                )
+                if caused_by:
+                    for cid in caused_by:
+                        exists = conn.execute(
+                            "SELECT 1 FROM events WHERE run_id = ? AND event_id = ? UNION ALL "
+                            "SELECT 1 FROM events_archive WHERE run_id = ? AND event_id = ? LIMIT 1",
+                            (event.run_id, cid, event.run_id, cid),
+                        ).fetchone()
+                        if exists is None:
+                            raise ValueError(f"unknown caused_by id {cid!r}")
             self._require_run(conn, event.run_id)
             head = conn.execute(
                 "SELECT sequence, hash FROM events WHERE run_id = ? ORDER BY sequence DESC LIMIT 1",

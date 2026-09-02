@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`.pre-commit-config.yaml`, pinned to the ruff CI runs (#537).**
+  `CONTRIBUTING.md` described the file instead of shipping it, so
+  `pre-commit install` on a fresh clone installed a hook that ran nothing and
+  the first PR still met a red `ruff format --check src/ tests/ examples/`. The
+  config now lives at the repo root with the `ruff-check` and `ruff-format`
+  hooks, `rev` naming the same ruff version the `dev` extra pins so a hook and
+  CI cannot format one file two ways, and both hooks scoped to `src/`, `tests/`
+  and `examples/`, the three directories the lint job checks. `benchmarks/`,
+  `demo-run/` and `_bugaudit/` are not ruff-clean and no gate checks them, so in
+  scope they would fail `pre-commit run --all-files` on a tree nobody touched.
+  mypy stays out, as `CONTRIBUTING.md` already explains: hooks run in isolated
+  environments without the project's dependencies, where its results are not
+  trustworthy. Contributor tooling, no runtime change.
+
 ### Fixed
 
 - Make `continuum complete` idempotent for runs that are already completed (#356).
@@ -23,6 +39,30 @@ All notable changes to this project are documented here. The format follows
   such as `{amount:.2f}` working. Keys are unchanged for values without
   surrounding whitespace; a run whose in-flight claim was recorded under a
   padded key will not match the stripped key derived after upgrading.
+
+- **`mypy src/continuum` passes on a core install (#315).** `CONTRIBUTING.md`
+  asks for three checks before a PR, and on a fresh `pip install -e .` clone the
+  third opened with 26 errors: `cryptography`, `mcp`, `langgraph`, `agents` and
+  `langchain_core` had no `[[tool.mypy.overrides]]` family, so every lazy import
+  of an optional package read as a missing library. Nothing was wrong with the
+  code, and the only way to a quiet run was to install the extras the core is
+  built not to need, which is the opposite of what a dependency-free recovery
+  library should ask of a first-time contributor. The five families are now
+  excused the way `psycopg`, `playwright` and `kubernetes` already were, and the
+  `opentelemetry` and `crewai` section that had drifted below the coverage
+  tables moved back under `[tool.mypy]`.
+
+  Excusing the import is half of it: the names it supplied become `Any`, and
+  strict mode then refused the `BaseCheckpointSaver` and `RunHooks` subclasses
+  and the twelve MCP tools registered through the server's own decorator. Those
+  14 errors are answered by scoping `disallow_subclassing_any` off for
+  `continuum.adapters.langgraph_store` and `continuum.adapters.openai`, and
+  `disallow_untyped_decorators` off for `continuum.mcp.server`, the three
+  modules that hold an optional seam. `strict = true` is untouched everywhere
+  else, and CI checks all three with the packages installed, where the real
+  signatures apply. `tests/test_mypy_overrides.py` walks the package's imports
+  and fails when one has no family, so the next optional dependency cannot
+  quietly put the 26 errors back.
 
 - **The gateway answers malformed JSON with 400 instead of hiding it (#323).**
   `_body` caught `JSONDecodeError` and returned an empty mapping, so a request
@@ -66,6 +106,44 @@ All notable changes to this project are documented here. The format follows
   A limit below `1` is refused with exit code 1 rather than clamped, since
   `--limit 0` would render a family with children as childless.
 
+- **The MCP reference documents all twelve tools (#271).** `docs/api/mcp.md`
+  carried eleven rows and summarised them as "three read-only, eight
+  mutating", but `tools/list` has served twelve tools since
+  `continuum_record_plan` was added: a client author reading the reference had
+  no way to learn the plan tool exists. The table gains a
+  `continuum_record_plan` row and the totals now match the server. Every other
+  row's `read`/`mutate` kind was audited against the `read_only_hint` the
+  server declares and needed no change. `tests/test_mcp_docs.py` now checks the
+  table against `tools/list`, so a tool registered without a row fails the
+  suite instead of shipping undocumented.
+- **`hooks remove` resolves the settings path the same way `hooks install`
+  does (#580).** Both subcommands share one `--settings` option that defaults
+  to `None` and advertises "default: per client profile", but only the
+  installer fell back to `CLIENT_PROFILES[client]["settings"]`. The remover
+  passed the `None` straight to `Path`, so `continuum hooks remove
+  claude-code`, the uninstall named in `docs/guides/embed-claude-code.md`, died
+  with an uncaught `TypeError` before it read anything. Install was therefore a
+  one-way door for every operator who had not written down the path it worked
+  out for them: the only way back out was to repeat that path by hand. The
+  remover now reads the profile default, so the pair resolves one file per
+  client (`.claude/settings.json`, `.gemini/settings.json`,
+  `.codex/hooks.json`), and a directory that was never wired reports that
+  nothing was found instead of raising. The default path had no test on the
+  remove side because every case passed `--settings` explicitly, which is the
+  same reason the installer carried this bug once before; the profile default is
+  now pinned for both halves. Removal itself is unchanged, as is the `--json`
+  payload beyond the path it reports.
+
+- **The removal report names every hook it took out, not just the observation
+  hook (#580).** `remove_claude_code_hook` removes each kind in
+  `_INSTALLED_KINDS`, so an operator who had installed the `--with-gate`
+  PreToolUse hook was told "Removed observation hook" and could reasonably
+  believe the gate still stood between their agent and an unclaimed side
+  effect. The text now reads `Removed CONTINUUM hooks from <path>` (and `No
+  CONTINUUM hooks found in <path>` when there was nothing to do), and the
+  subcommand's `--help` line says what it removes. The `removed` boolean in
+  `--json` is unchanged.
+
 - **The serve HTTP transport fails closed on body framing (#533).** `do_POST`
   read the body as `int(self.headers.get("Content-Length") or 0)`, so
   `Content-Length: abc` raised `ValueError` out of the handler and the
@@ -92,6 +170,23 @@ All notable changes to this project are documented here. The format follows
   before the body is read. The happy path is unchanged: an absent
   `Content-Length`, or a valid `0`, still dispatches the empty object, so a
   method that takes no params stays callable with no body.
+
+  A refusal that leaves the body unread has to close the connection.
+  `protocol_version` is `HTTP/1.1`, so the socket stays open unless the handler
+  says otherwise, and two of the 400s answered without a trustable body
+  boundary: unparseable chunk framing stops the drain mid-stream, and a
+  `Content-Length` that is not a number cannot say how many bytes to discard.
+  Whatever the client had already written was then read as the next request on
+  that same connection, so a body crafted to look like a request line was
+  dispatched as one. That is the request smuggling class rather than a plain
+  desync, and it stayed invisible because every test sent `Connection: close`.
+  Both branches now set `close_connection` before answering, matching the
+  unbounded drain path. Refusals whose boundary is known still keep the
+  connection alive: an oversize `Content-Length` drained in full, and a chunked
+  body drained to its terminal chunk. To make that second guarantee real, the
+  drain now checks that each chunk ends with its terminating CRLF instead of
+  consuming two bytes blindly, so a missing terminator is `malformed` rather
+  than a silent resync onto the middle of the next chunk header.
 
 ## [0.1.0] - 2026-08-27
 
