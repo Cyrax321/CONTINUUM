@@ -69,6 +69,7 @@ def test_broken_json_raises_instead_of_degrading(tmp_path: Path) -> None:
 
 
 def test_probe_requires_a_command_and_positive_timeout(tmp_path: Path) -> None:
+    """The two arms a probe spec has to clear before it is registered at all."""
     p = tmp_path / "r.json"
     p.write_text(json.dumps({"probes": {"send_invoice": {"timeout": 5}}}))
     with pytest.raises(ReconcilerConfigError, match="command"):
