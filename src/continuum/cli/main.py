@@ -2331,6 +2331,7 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
         DEFAULT_RECONCILERS_PATH,
         ReconcilerConfigError,
         load_reconcilers,
+        settle_authority,
         settle_run,
     )
 
@@ -2342,6 +2343,30 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
     except ReconcilerConfigError as exc:
         print(f"error: {exc}", file=err)
         return ExitCode.ERROR
+
+    # Authority probe path (issue #289c)
+    authority_id = getattr(args, "authority", None)
+    if authority_id:
+        authority_report = settle_authority(storage, args.run_id, authority_id, probes, dry_run=args.dry_run)
+        payload = {"run_id": args.run_id, "dry_run": args.dry_run, **authority_report.as_dict()}
+        # Keep existing shape for actions report when authority path taken
+        if authority_report.valid is True:
+            line = f"authority {authority_id!r} still valid, reconciled and unblocked"
+        elif authority_report.valid is False:
+            line = f"authority {authority_id!r} not valid, remains blocked"
+        else:
+            line = f"authority {authority_id!r} probe could not determine validity"
+        lines = [line, f"detail: {authority_report.detail}"]
+        if args.dry_run:
+            lines.append("dry run: nothing was written")
+        _emit(
+            payload,
+            "\n".join(lines),
+            as_json=args.json,
+            stream=out,
+            palette=getattr(args, "_palette", None),
+        )
+        return ExitCode.OK if authority_report.valid is True else ExitCode.REQUIRES_HUMAN
 
     pending = ActionLedger(storage, args.run_id).pending()
     report = settle_run(storage, args.run_id, probes, dry_run=args.dry_run)
@@ -3213,6 +3238,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         default=None,
         help="probe registry path (default: .continuum/reconcilers.json).",
+    )
+    reconcile_auto.add_argument(
+        "--authority",
+        default=None,
+        help="probe a consumed authority id via reconcilers.json instead of actions",
     )
     with_run(add("actions", cmd_actions, "List external side effects."))
     with_env(with_run(add("show-contract", cmd_contract, "Print the recovery contract.")))

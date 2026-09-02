@@ -43,6 +43,7 @@ from continuum.analysis.depends import DependencyGraph as SourceDependencyGraph
 from continuum.checkpoint.manager import CheckpointManager, RestoredRun
 from continuum.environment.diff import EnvironmentDiff
 from continuum.events import EventType
+from continuum.gate import collect_consumed_authorities
 from continuum.models import (
     Action,
     ActionStatus,
@@ -301,13 +302,28 @@ class RecoveryEngine:
             if broken.status is StateStatus.INVALID and broken.unprojectable_at_sequence is not None
             else None
         )
+        # Authority lifecycle (issue #289c): consumed authorities block resume
+        # until an external probe reconciles them. The gate already refuses
+        # forwarding, but the recovery decision must also surface the block
+        # so that `continuum resume` does not report safe when the gate would
+        # still deny.
+        consumed_authorities = collect_consumed_authorities(self.storage.read_events(run_id))
+        if consumed_authorities:
+            # If any consumed authority exists, it is a resurrection risk.
+            # The engine treats it as a human-required block, matching the
+            # gate's fail-closed stance. A later AUTHORITY_RECONCILED with
+            # valid true would have cleared the map.
+            pass
+
         plan = plan_repairs(
             validation.report.statuses,
             uncertain_actions=uncertain,
             strict_unknown=self.validator.strict_unknown,
             unprojectable=unprojectable,
         )
-        mode, rationale = self._decide(validation, uncertain, plan, restored, self.strict_unknown)
+        mode, rationale = self._decide(
+            validation, uncertain, plan, restored, self.strict_unknown, consumed_authorities
+        )
 
         reason = "; ".join(rationale) if rationale else validation.report.reason
 
@@ -395,6 +411,7 @@ class RecoveryEngine:
         plan: RepairPlan,
         restored: RestoredRun,
         strict_unknown: bool,
+        consumed_authorities: dict[str, Any] | None = None,
     ) -> tuple[RecoveryMode, tuple[str, ...]]:
         """Collect a proposal per signal and return the most cautious."""
         proposals: list[tuple[RecoveryMode, str]] = []
@@ -416,6 +433,15 @@ class RecoveryEngine:
                     f"({state.unprojectable_event_type}: {state.unprojectable_reason}); "
                     f"this verdict covers events through sequence "
                     f"{state.source_sequence} only",
+                )
+            )
+
+        # Authority resurrection blocks resume (issue #289c)
+        if consumed_authorities:
+            proposals.append(
+                (
+                    RecoveryMode.REQUEST_HUMAN,
+                    f"{len(consumed_authorities)} consumed authority(s) block resume until reconciled",
                 )
             )
 
