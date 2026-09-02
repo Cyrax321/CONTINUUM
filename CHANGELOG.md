@@ -24,6 +24,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The published image's default command runs the demo again (#280).**
+  `Dockerfile` installs the sources root-owned under `/opt/continuum` and then
+  drops to an unprivileged user, while `examples/crash_recovery_agent.py` pinned
+  its `demo-run` workspace to the source tree. So `docker run --rm
+  ghcr.io/cyrax321/continuum`, the image's documented default command, died with
+  `PermissionError: [Errno 13] Permission denied:
+  '/opt/continuum/demo-run/worker.py'` before printing a line, while the publish
+  workflow's `continuum --version` smoke test passed on that same image. The
+  workspace is now resolved against the working directory, which `Dockerfile`
+  already sets to a writable `/home/continuum` for exactly this reason. Every
+  documented entry point (`./try-it.sh`, `try-it.ps1`, and the README's
+  `python examples/crash_recovery_agent.py`) runs from the repository root, where
+  the workspace resolves to the same `demo-run` directory as before, so local
+  behaviour is unchanged.
+
 - Make `continuum complete` idempotent for runs that are already completed (#356).
 
 - **Derived keys ignore surrounding whitespace in argument values (#361).**
