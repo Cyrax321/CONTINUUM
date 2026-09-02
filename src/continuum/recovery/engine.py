@@ -312,6 +312,7 @@ class RecoveryEngine:
             has_action_ref = any(d["consumed_inputs"]["action_ids"] for d in admissibility.details)
             status = StateStatus.REQUIRES_REVIEW if has_action_ref else StateStatus.STALE
             from continuum.models import Component, ComponentValidationEntry
+
             entries = list(validation.report.statuses)
             entries.append(
                 ComponentValidationEntry(
@@ -322,6 +323,7 @@ class RecoveryEngine:
                 )
             )
             from continuum.models import StateValidationResult
+
             new_report = StateValidationResult(
                 run_id=validation.report.run_id,
                 checkpoint_version=validation.report.checkpoint_version,
@@ -331,6 +333,7 @@ class RecoveryEngine:
                 validated_at=validation.report.validated_at,
             )
             from continuum.state.validator import ValidationOutcome
+
             validation = ValidationOutcome(
                 state=validation.state,
                 report=new_report,
@@ -342,7 +345,9 @@ class RecoveryEngine:
             strict_unknown=self.validator.strict_unknown,
             unprojectable=unprojectable,
         )
-        mode, rationale = self._decide(validation, uncertain, plan, restored, self.strict_unknown, admissibility)
+        mode, rationale = self._decide(
+            validation, uncertain, plan, restored, self.strict_unknown, admissibility
+        )
 
         reason = "; ".join(rationale) if rationale else validation.report.reason
 

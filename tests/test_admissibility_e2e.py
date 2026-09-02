@@ -20,15 +20,17 @@ def test_crash_downstream_refused_with_contract() -> None:
     store.append_event(run_id, EventType.RUN_STARTED, {"goal": "e2e admissibility"})
     # some work
     store.append_event(run_id, EventType.EVIDENCE_ADDED, {"evidence_id": "ev1", "summary": "s"})
-    store.append_event(run_id, EventType.FINDING_ADDED, {"finding_id": "f1", "claim": "c", "evidence": ["ev1"]})
+    store.append_event(
+        run_id, EventType.FINDING_ADDED, {"finding_id": "f1", "claim": "c", "evidence": ["ev1"]}
+    )
     mgr = CheckpointManager(store)
     cp1 = mgr.checkpoint(run_id)
     assert cp1 is not None
-    seq1 = cp1.state.source_sequence
-    ver1 = cp1.version
     # more work after checkpoint
     store.append_event(run_id, EventType.EVIDENCE_ADDED, {"evidence_id": "ev2", "summary": "s2"})
-    store.append_event(run_id, EventType.FINDING_ADDED, {"finding_id": "f2", "claim": "c2", "evidence": ["ev2"]})
+    store.append_event(
+        run_id, EventType.FINDING_ADDED, {"finding_id": "f2", "claim": "c2", "evidence": ["ev2"]}
+    )
     # checkpoint again to have a later checkpoint that is still before downstream
     cp2 = mgr.checkpoint(run_id)
     assert cp2 is not None
