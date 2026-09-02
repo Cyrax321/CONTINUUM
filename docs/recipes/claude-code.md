@@ -7,8 +7,11 @@ Copy-paste recipes for wiring CONTINUUM into Claude Code's session lifecycle.
 - **SessionStart** injects the active run's recovery contract before the first model turn.
 - **PreCompact** seals a checkpoint and verifies pinned constraints survive compaction.
 
-SessionStart is read-only; PreCompact writes a checkpoint. Both are silent about
-work they cannot find and exit 0 when no run is active.
+SessionStart is read-only; PreCompact writes a checkpoint. Neither one fails its
+host when there is nothing to act on: `briefing` exits 0 with no output at all
+(it reads `.continuum/resume.json` before it would open SQLite), and `precompact`
+exits 0 after printing `CONTINUUM: no active run; nothing to checkpoint before
+compaction.`
 
 ## Install (one command)
 
@@ -20,7 +23,7 @@ This writes three entries to `.claude/settings.json`:
 
 - `PostToolUse` on `Write|Edit|MultiEdit|NotebookEdit` → `continuum observe`
 - `SessionStart` → `continuum briefing` (instant detection via `.continuum/resume.json`)
-- `PreCompact` → `continuum precompact` (checkpoint at the compaction boundary; `--no-precompact` skips it)
+- `PreCompact` → `continuum precompact` (checkpoint at the compaction boundary; `--no-precompact` skips it and takes out an entry an earlier install wrote)
 
 Verify:
 

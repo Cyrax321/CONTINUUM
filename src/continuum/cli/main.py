@@ -39,6 +39,7 @@ from continuum.clienthooks import (
     observe_command,
     observe_event_payload,
     remove_claude_code_hook,
+    remove_client_hook,
 )
 from continuum.environment import StaticProvider, capture
 from continuum.events import EventType
@@ -2098,7 +2099,15 @@ def _write_precompact_snapshots(storage: Storage, run_id: str) -> tuple[dict[str
         except Exception as exc:  # deliberately broad: see the docstring
             failures.append(f"{path}: {exc}")
         else:
-            written[label] = str(target)
+            # as_posix, not str: on Windows ``str(Path(...))`` rewrites the
+            # separator, so the same hook reported
+            # ".continuum\\precompact-resume.json" there and the documented
+            # forward-slash path everywhere else. These paths are a published
+            # contract (the guide names them, and recipes read them straight out
+            # of this payload), so they are reported in the one form that reads
+            # the same on every platform. Windows opens a forward-slash path
+            # either way.
+            written[label] = target.as_posix()
     return written, failures
 
 
@@ -2275,7 +2284,8 @@ def cmd_hooks_install(args: argparse.Namespace, storage: Storage, out: Any, err:
     # a client whose profile declares no compaction event, since wiring one to
     # an event the harness never fires would only look like durability.
     compact_event = profile.get("compact_event")
-    if compact_event and not getattr(args, "no_precompact", False):
+    no_precompact = bool(getattr(args, "no_precompact", False))
+    if compact_event and not no_precompact:
         statuses.append(
             (
                 install_client_hook(
@@ -2290,6 +2300,19 @@ def cmd_hooks_install(args: argparse.Namespace, storage: Storage, out: Any, err:
                 precompact_command,
             )
         )
+    # An explicit opt-out has to undo an earlier install, not merely decline
+    # this one: run against a directory where the hook is already wired,
+    # --no-precompact would otherwise leave it sealing a checkpoint at every
+    # compaction for an operator who just said not to. Only the command this
+    # installer writes is dropped, so the hand-written recipe that pins one run
+    # survives the very flag that makes room for it.
+    unwired: list[tuple[str, str]] = []
+    if (
+        compact_event
+        and no_precompact
+        and remove_client_hook(settings_path, kind="precompact", event_name=compact_event)
+    ):
+        unwired.append(("precompact", compact_event))
     if getattr(args, "with_gate", False):
         statuses.append(
             (
@@ -2310,6 +2333,8 @@ def cmd_hooks_install(args: argparse.Namespace, storage: Storage, out: Any, err:
     for st, matcher, kind, event, cmd in statuses:
         lines.append(f"  [{st}] {kind} on {event} (matcher {matcher})")
         lines.append(f"    command: {cmd}")
+    for kind, event in unwired:
+        lines.append(f"  [removed] {kind} on {event} (--no-precompact)")
     payload: dict[str, Any] = {
         "client": args.client,
         "settings": str(settings_path),
@@ -2317,6 +2342,7 @@ def cmd_hooks_install(args: argparse.Namespace, storage: Storage, out: Any, err:
             {"event": event, "matcher": m, "kind": k, "status": st, "command": cmd}
             for st, m, k, event, cmd in statuses
         ],
+        "unwired": [{"event": event, "kind": kind} for kind, event in unwired],
     }
     if args.client == "codex":
         hint = _codex_feature_flag_hint()
@@ -3360,7 +3386,10 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument(
         "--no-precompact",
         action="store_true",
-        help="skip the compaction checkpoint hook (clients that have one, on by default).",
+        help=(
+            "skip the compaction checkpoint hook, and take out one an earlier install "
+            "wrote (installed by default where the client has a compaction event)."
+        ),
     )
     hooks_client(install, cmd_hooks_install)
 

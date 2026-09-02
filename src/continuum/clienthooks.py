@@ -39,7 +39,7 @@ import shlex
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +51,7 @@ __all__ = [
     "install_client_hook",
     "install_claude_code_hook",
     "remove_claude_code_hook",
+    "remove_client_hook",
 ]
 
 #: Tool names whose completions carry a file path worth observing. Kept as one
@@ -65,6 +66,17 @@ DEFAULT_MATCHER = "Write|Edit|MultiEdit|NotebookEdit"
 #: or repointing a moved one (issue #484, duplication fixed in #526). Keeping the
 #: kinds here is what stops that drift recurring.
 _INSTALLED_KINDS = ("observe", "gate", "briefing", "precompact")
+
+#: The compaction recipe operators pasted by hand before #449 automated it, and
+#: which docs/guides/embed-claude-code.md still offers for pinning one run: a
+#: compound of ``continuum`` calls redirected into these two files. It cannot end
+#: in its kind, because the ``precompact`` subcommand did not exist when the
+#: recipe was written, so the shape check in :func:`_is_continuum_hook` does not
+#: see it: ``hooks install`` would append a second PreCompact entry beside it and
+#: ``hooks remove`` would leave it firing at a database the operator believes
+#: they detached from. The redirect target is the fingerprint that makes it
+#: recognisable, since these two filenames exist because this project named them.
+_LEGACY_PRECOMPACT_MARKERS = ("precompact-resume.json", "precompact-verify.json")
 
 #: Keys of ``tool_input`` that hold the primary file path, in priority order.
 _PATH_KEYS = ("file_path", "notebook_path")
@@ -215,8 +227,8 @@ def observe_command(*, db: str | None = None) -> str:
     return _join_command(parts)
 
 
-def _is_continuum_hook(hook: Mapping[str, Any], kind: str) -> bool:
-    """True when a hook entry is one this module would have installed.
+def _is_managed_hook(hook: Mapping[str, Any], kind: str) -> bool:
+    """True when a hook entry is one :func:`_install_hook` itself would write.
 
     Deliberately narrow: a command that merely ends in the kind word could
     belong to an unrelated tool, and treating it as ours would let install
@@ -237,6 +249,43 @@ def _is_continuum_hook(hook: Mapping[str, Any], kind: str) -> bool:
     if Path(tokens[0]).stem == "continuum":
         return True
     return tokens[1] == "-m" and len(tokens) >= 4 and tokens[2] == "continuum.cli"
+
+
+def _is_legacy_precompact_hook(hook: Mapping[str, Any]) -> bool:
+    """True for the hand-written compaction recipe ``precompact`` replaces.
+
+    Narrow on both halves, for the same reason :func:`_is_managed_hook` is: the
+    command has to redirect into one of the snapshot files this project named
+    (:data:`_LEGACY_PRECOMPACT_MARKERS`) *and* invoke the ``continuum`` CLI.
+    Either test alone would be too loose to rewrite or delete a stranger's
+    configuration on. Nothing about the compound's own shape is required, since
+    the guide published two variants of it and a shell has many more ways to
+    spell the same two commands.
+    """
+    command = hook.get("command")
+    if not isinstance(command, str):
+        return False
+    if not any(marker in command for marker in _LEGACY_PRECOMPACT_MARKERS):
+        return False
+    try:
+        tokens = _split_command(command)
+    except ValueError:
+        return False
+    return "continuum.cli" in tokens or any(Path(token).stem == "continuum" for token in tokens)
+
+
+def _is_continuum_hook(hook: Mapping[str, Any], kind: str) -> bool:
+    """True when a hook entry of kind ``kind`` belongs to this project.
+
+    Everything :func:`_is_managed_hook` claims, plus, for ``precompact`` alone,
+    the recipe this project told operators to paste by hand before the hook was
+    automated (issue #449). Adopting that entry on install is what keeps two
+    hooks from firing at every compaction, and recognising it on remove is what
+    keeps ``hooks remove`` from being a lie.
+    """
+    return _is_managed_hook(hook, kind) or (
+        kind == "precompact" and _is_legacy_precompact_hook(hook)
+    )
 
 
 def _is_observe_hook(hook: Mapping[str, Any]) -> bool:
@@ -379,6 +428,43 @@ def remove_claude_code_hook(settings_path: Path) -> bool:
     elsewhere survives untouched, as does every other key in the file. A group
     holding unrelated hooks keeps them.
     """
+    return _remove_hooks(
+        settings_path,
+        lambda hook: any(_is_continuum_hook(hook, kind) for kind in _INSTALLED_KINDS),
+    )
+
+
+def remove_client_hook(settings_path: Path, *, kind: str, event_name: str) -> bool:
+    """Remove the entry ``install_client_hook`` writes for one kind and event.
+
+    Narrower than :func:`remove_claude_code_hook` on every axis: one event, one
+    kind, and only the canonical command shape (:func:`_is_managed_hook`), never
+    a hand-written recipe that the same kind's fuller recogniser adopts. This is
+    what an opt-out flag needs. Declining a managed hook means "leave this file
+    as if I had never installed it", not "delete what I wrote myself", and for
+    ``precompact`` the hand-written form is the documented way to pin one run
+    instead of following the active one.
+    """
+    return _remove_hooks(
+        settings_path,
+        lambda hook: _is_managed_hook(hook, kind),
+        event_name=event_name,
+    )
+
+
+def _remove_hooks(
+    settings_path: Path,
+    claimed: Callable[[Mapping[str, Any]], bool],
+    *,
+    event_name: str | None = None,
+) -> bool:
+    """Drop every hook entry ``claimed`` recognises. True when anything went.
+
+    Shared by both removers so they cannot come to disagree about how a settings
+    file is pruned: which entries count as ours is the predicate's business, and
+    everything about leaving the rest of the file exactly as it was is this
+    function's.
+    """
     if not settings_path.exists():
         return False
     try:
@@ -393,10 +479,13 @@ def remove_claude_code_hook(settings_path: Path) -> bool:
         return False
 
     removed = False
-    # Scan every event list, not just the Claude Code names: clients differ
-    # in what they call their hook points (Gemini uses AfterTool/BeforeTool).
-    for event_name in [k for k, v in hooks.items() if isinstance(v, list)]:
-        hook_list = hooks[event_name]
+    # Scan every event list by default, not just the Claude Code names: clients
+    # differ in what they call their hook points (Gemini uses
+    # AfterTool/BeforeTool). A named event narrows that to the one list it owns,
+    # which is what lets an opt-out touch its own hook and nothing else.
+    events = [event_name] if event_name is not None else list(hooks)
+    for event in events:
+        hook_list = hooks.get(event)
         if not isinstance(hook_list, list):
             continue
 
@@ -405,17 +494,11 @@ def remove_claude_code_hook(settings_path: Path) -> bool:
             if not (isinstance(group, dict) and isinstance(group.get("hooks"), list)):
                 kept_groups.append(group)
                 continue
-            # Drop only the hook entries this module recognises as its own. A
+            # Drop only the hook entries the predicate recognises as ours. A
             # matcher group can hold unrelated user hooks alongside ours;
             # removing the whole group would delete configuration this command
             # never installed.
-            kept_hooks = [
-                h
-                for h in group["hooks"]
-                if not (
-                    isinstance(h, dict) and any(_is_continuum_hook(h, k) for k in _INSTALLED_KINDS)
-                )
-            ]
+            kept_hooks = [h for h in group["hooks"] if not (isinstance(h, dict) and claimed(h))]
             if len(kept_hooks) != len(group["hooks"]):
                 removed = True
             if not kept_hooks:
@@ -427,9 +510,9 @@ def remove_claude_code_hook(settings_path: Path) -> bool:
         # entries and surviving groups is idempotent whether or not this run
         # removed anything.
         if kept_groups:
-            hooks[event_name] = kept_groups
-        elif event_name in hooks:
-            del hooks[event_name]
+            hooks[event] = kept_groups
+        elif event in hooks:
+            del hooks[event]
 
     if not removed:
         return False

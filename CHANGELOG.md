@@ -25,23 +25,36 @@ All notable changes to this project are documented here. The format follows
   (`continuum checkpoint my-task --reason "pre-compact"`) while `hooks install`
   runs once and runs come and go. So `continuum precompact` resolves the run
   itself, as `observe` and `briefing` do, and records the checkpoint with
-  trigger `context_pressure` — the harness-side, involuntary form of the signal
+  trigger `context_pressure` (the harness-side, involuntary form of the signal
   `ContextPressurePolicy` can only see when the agent volunteers its own token
-  counts. Beside the checkpoint it writes the two snapshots the guide promises,
+  counts). Beside the checkpoint it writes the two snapshots the guide promises,
   at the paths the guide already names, so a recipe scripted against
   `.continuum/precompact-resume.json` or `.continuum/precompact-verify.json`
-  keeps working. The checkpoint also refreshes `.continuum/resume.json`, which
-  is what lets the next session's SessionStart briefing detect the interruption
-  without opening the database at all.
+  keeps working. Those paths are reported in posix form on every platform, since
+  the guide names one spelling and recipes read them straight out of the JSON.
+  The checkpoint also refreshes `.continuum/resume.json`, which is what lets the
+  next session's SessionStart briefing detect the interruption without opening
+  the database at all.
 
   The hook never fails its host. With no active run it exits 0 having sealed
   nothing, and a snapshot it cannot write is reported in `failures` while the
-  checkpoint — the durable half, already in the hash-chained log — stands. An
-  explicit `--run-id` naming a run that does not exist is still an error, since
-  an operator who baked the wrong id into a hook command needs to hear it. An
-  entry pasted from the guide before this landed is repointed rather than
-  duplicated, because the installer uses the same empty matcher the recipe
-  does.
+  checkpoint stands: that is the durable half, and it is already in the
+  hash-chained log. An explicit `--run-id` naming a run that does not exist is
+  still an error, since an operator who baked the wrong id into a hook command
+  needs to hear it.
+
+  The compaction recipe the guide published for hand-editing is recognised as
+  this project's own, so `hooks install` adopts it (one entry, repointed) instead
+  of appending a second hook to fire beside it, and `hooks remove` takes it out
+  rather than leaving a `continuum checkpoint` writing to a database the operator
+  believes they detached from. It cannot be recognised by shape, the way every
+  other installed hook is, because it predates the `precompact` subcommand and
+  ends in a redirect; the snapshot filenames this project named are the
+  fingerprint instead, and a command has to invoke the `continuum` CLI as well
+  before either verb will touch it. `--no-precompact` now takes out an entry an
+  earlier install wrote, rather than only declining to write one, and is the
+  supported way to keep a hand-written recipe that pins a single run: it removes
+  the command the installer writes and leaves what the operator wrote alone.
 
   Codex and Gemini get no `PreCompact` entry: neither harness exposes a
   compaction event, as both guides state, and wiring a hook to an event that

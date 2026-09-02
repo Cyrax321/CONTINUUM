@@ -98,7 +98,7 @@ When `safe` is false, `mode` is one of `repair_and_resume`, `request_human`, `ro
 
 Claude Code fires `PreCompact` before context compaction. Use it to force a checkpoint and re-validate so compaction does not discard unverified reasoning.
 
-`continuum hooks install claude-code` wires this for you: the `PreCompact` entry runs `continuum precompact`, which resolves the active run itself, seals a checkpoint with trigger `context_pressure`, and writes both snapshots below. Pass `--no-precompact` to leave the event alone, and `continuum hooks remove claude-code` takes it out again with the rest.
+`continuum hooks install claude-code` wires this for you: the `PreCompact` entry runs `continuum precompact`, which resolves the active run itself, seals a checkpoint with trigger `context_pressure`, and writes both snapshots below. Pass `--no-precompact` to keep the managed entry off the event, which also takes out one an earlier install wrote, and `continuum hooks remove claude-code` takes it out again with the rest.
 
 ```bash
 continuum precompact --json   # what the hook runs; safe to try by hand
@@ -106,7 +106,7 @@ continuum precompact --json   # what the hook runs; safe to try by hand
 
 It never fails its host: with no active run it exits 0 with nothing sealed, and a snapshot it cannot write is reported in `failures` while the checkpoint stands.
 
-If you want to pin one run instead of following the active one, the hand-written form still works. Copy-paste snippet for `.claude/settings.json` (add alongside the installed hooks, do not replace them):
+If you want to pin one run instead of following the active one, the hand-written form still works, but install with `--no-precompact` so yours is the only entry on the event (see the note below the snippets). Copy-paste snippet for `.claude/settings.json`:
 
 ```json
 {
@@ -129,11 +129,11 @@ If you want to pin one run instead of following the active one, the hand-written
 Or use the tiny glue script shipped with this repo:
 
 ```bash
-# examples/hooks/continuum-precompact.sh — same two commands, kept tiny
+# examples/hooks/continuum-precompact.sh, same two commands, kept tiny
 CONTINUUM_RUN_ID=my-task ./examples/hooks/continuum-precompact.sh
 ```
 
-Both use the same empty matcher as the installer, so an entry you pasted before this was automated is repointed on the next `hooks install` rather than left to fire twice.
+Both use the same empty matcher as the installer, and `hooks install` now counts this recipe as one of its own: an entry pasted before the event was automated is repointed to `continuum precompact` rather than left beside it to fire twice. That is the right outcome when the pinned run id was only ever standing in for the active one, and it is why pinning has to be deliberate. `continuum hooks install claude-code --no-precompact` declines to write the managed entry and takes out one an earlier install wrote, so pass it and paste yours after. `continuum hooks remove claude-code` detaches either form.
 
 What this gives:
 
@@ -334,7 +334,7 @@ Gap list as of this doc (honest): LangChain/LangGraph/Codex adapters require the
 - Hook silent on SessionStart with no run: expected. `briefing` checks `.continuum/resume.json` before touching SQLite and exits 0 with no output when no interrupted run exists.
 - Hook writes stale command path after moving a virtualenv: re-run `continuum hooks install claude-code` (reports `updated` and rewrites the command).
 - `CONNECTION_CLOSED` from MCP: see `docs/api/mcp.md` troubleshooting; hook path issues, not CONTINUUM.
-- PreCompact never fires: confirm Claude Code version supports PreCompact (add the entry manually as shown; `hooks install` manages SessionStart/PostToolUse/PreToolUse, PreCompact is an additive entry).
+- PreCompact never fires: confirm your Claude Code version supports the event, then confirm the entry is actually there. `hooks install` writes it by default (PostToolUse, SessionStart, PreCompact, and PreToolUse only under `--with-gate`), so a missing entry means the install ran with `--no-precompact` or predates #449; re-run `continuum hooks install claude-code` and look for `precompact` in the output.
 - Resume still `request_human` after reconcile: run `continuum actions my-task --json` to confirm no STARTED/UNKNOWN remains, then `continuum resume` again.
 
 ## See also
