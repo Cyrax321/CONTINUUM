@@ -150,10 +150,34 @@ def match_route(
     body: dict[str, Any],
     actions_by_key: dict[str, Any],
     run_id: str,
+    consumed_authorities: Any | None = None,
 ) -> Decision:
     """The gateway's verdict for one request, mirroring gate's table."""
     from continuum.actions.idempotency import idempotency_key
     from continuum.models import ActionStatus
+
+    # Authority resurrection check (issue #289b): refuse if body carries a consumed authority.
+    if consumed_authorities:
+        for _v in body.values():
+            if isinstance(_v, str) and _v in consumed_authorities:
+                ev = consumed_authorities[_v]
+                seq = (
+                    getattr(ev, "sequence", "?")
+                    if hasattr(ev, "sequence")
+                    else ev.get("sequence", "?")
+                )
+                payload = getattr(ev, "payload", {}) or {}
+                if hasattr(ev, "payload"):
+                    seq = ev.sequence
+                    payload = ev.payload
+                else:
+                    payload = ev.get("payload", {})
+                consumer = payload.get("consumer_run_id", "?")
+                return Decision(
+                    False,
+                    f"Authority {_v!r} consumed at seq {seq} by run {consumer!r}. Obtain a fresh authority.",
+                    route=None,
+                )
 
     candidates = [r for r in routes if r.host == host]
     if not candidates:
@@ -323,6 +347,9 @@ class GatewayServer:
                     from continuum.actions.ledger import fold_action_events
 
                     actions = fold_action_events(storage.read_events(run_id))
+                    from continuum.gate import collect_consumed_authorities
+
+                    consumed = collect_consumed_authorities(storage.read_events(run_id))
                     decision = match_route(
                         server._routes,
                         host=host.split(":")[0],
@@ -330,6 +357,7 @@ class GatewayServer:
                         body=body,
                         actions_by_key=actions,
                         run_id=run_id,
+                        consumed_authorities=consumed,
                     )
                     if not decision.allow or decision.route is None or decision.key is None:
                         self._respond(

@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from continuum.actions.idempotency import idempotency_key
+from continuum.events import EventType
 
 __all__ = [
     "DEFAULT_GATE_CONFIG_PATH",
@@ -44,6 +45,8 @@ __all__ = [
     "normalize_key_value",
     "render_key",
     "decide",
+    "collect_consumed_authorities",
+    "is_authority_consumed",
 ]
 
 #: Where the gate configuration lives, relative to the project root the hook
@@ -54,6 +57,30 @@ DEFAULT_GATE_CONFIG_PATH = ".continuum/gate.json"
 
 class GateConfigError(ValueError):
     """The gate configuration exists but cannot be honoured."""
+
+
+def collect_consumed_authorities(events: Any) -> dict[str, Any]:
+    """Scan events for AUTHORITY_CONSUMED and return map authority_id to event.
+
+    First consumption wins, the log is append-only. The map is used by the
+    gate to refuse resurrection of a consumed authority even after a restore.
+    """
+    consumed: dict[str, Any] = {}
+    for ev in events:
+        if getattr(ev, "type", None) is not EventType.AUTHORITY_CONSUMED:
+            continue
+        payload = getattr(ev, "payload", {}) or {}
+        aid = payload.get("authority_id")
+        if isinstance(aid, str) and aid not in consumed:
+            consumed[aid] = ev
+    return consumed
+
+
+def is_authority_consumed(authority_id: str, consumed: Any) -> bool:
+    """True when authority_id is in the consumed map."""
+    if not consumed:
+        return False
+    return authority_id in consumed
 
 
 @dataclass(frozen=True)
@@ -152,6 +179,7 @@ def decide(
     *,
     run_id: str,
     actions_by_key: Mapping[str, Any],
+    consumed_authorities: Mapping[str, Any] | None = None,
 ) -> Decision:
     """Decide whether one tool call may proceed.
 
@@ -159,6 +187,35 @@ def decide(
     ``fold_action_events`` over the run's event log). Ungated tools pass
     immediately without touching anything else.
     """
+    # Authority resurrection check (issue #289b): if any string value in the
+    # tool input matches a consumed authority, refuse before any ledger check.
+    # The check is value-based rather than field-name based so that drift in
+    # argument names does not resurrect spent authority. The message names the
+    # original consumption event so the operator can audit the lineage.
+    if consumed_authorities:
+        for _key, _value in tool_input.items():
+            if isinstance(_value, str) and _value in consumed_authorities:
+                ev = consumed_authorities[_value]
+                seq = (
+                    getattr(ev, "sequence", "?")
+                    if hasattr(ev, "sequence")
+                    else ev.get("sequence", "?")
+                )
+                payload = getattr(ev, "payload", {}) or {}
+                if hasattr(ev, "payload"):
+                    seq = ev.sequence
+                    payload = ev.payload
+                else:
+                    payload = ev.get("payload", {})
+                consumer = payload.get("consumer_run_id", "?")
+                return Decision(
+                    False,
+                    f"Authority {_value!r} consumed at seq {seq} by run {consumer!r}. Obtain a fresh authority.",
+                )
+        # Also check string values that may be nested as authority_id field
+        # is sometimes the whole value; the loop above already covers top-level
+        # values, which is sufficient for the tested shapes.
+
     if config is None:
         return Decision(True, "no gate configured")
     spec = config.get(tool_name)

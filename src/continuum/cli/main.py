@@ -46,6 +46,7 @@ from continuum.events import EventType
 from continuum.gate import (
     DEFAULT_GATE_CONFIG_PATH,
     GateConfigError,
+    collect_consumed_authorities,
     load_gate_config,
 )
 from continuum.gate import (
@@ -63,6 +64,7 @@ from continuum.models import (
     StateStatus,
 )
 from continuum.observability import render_dashboard
+from continuum.provenance.graph import build_provenance_graph, downstream_of
 from continuum.provenance_map import summarize
 from continuum.recovery import RecoveryEngine, render_contract
 from continuum.security.attestation import (
@@ -709,6 +711,90 @@ def cmd_events(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         as_json=args.json,
         stream=out,
     )
+    return ExitCode.OK
+
+
+def cmd_provenance(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Show provenance DAG with per-node Origin (issue #554). Read-only, compaction-aware."""
+    storage.get_run(args.run_id)
+    # Use read_all_events so compacted runs still show the full DAG (issue #554)
+    try:
+        events = storage.read_all_events(args.run_id)
+    except Exception:
+        events = storage.read_events(args.run_id)
+    graph = build_provenance_graph(events)
+    if getattr(args, "dot", False):
+        from continuum.provenance.graph import to_dot
+
+        dot = to_dot(graph)
+        if getattr(args, "json", False):
+            _emit({"run_id": args.run_id, "dot": dot}, "", as_json=True, stream=out)
+        else:
+            print(dot, file=out)
+        return ExitCode.OK
+    if getattr(args, "json", False):
+        payload = graph.to_dict()
+        payload["run_id"] = args.run_id
+        _emit(payload, "", as_json=True, stream=out)
+        return ExitCode.OK
+    lines = [
+        f"run: {args.run_id}  (provenance DAG)",
+        f"nodes: {len(graph.nodes)}  edges: {sum(len(v) for v in graph.edges.values())}",
+    ]
+    for node in sorted(graph.nodes.values(), key=lambda n: n.sequence):
+        parents = graph.reverse_edges.get(node.event_id, [])
+        children = graph.edges.get(node.event_id, [])
+        parents_str = ",".join(p[:8] for p in parents) if parents else "-"
+        children_str = ",".join(c[:8] for c in children) if children else "-"
+        lines.append(
+            f"  {node.sequence:>3}  {node.type.value:<18} {node.event_id[:8]}  origin={node.origin.value}  parents={parents_str}  children={children_str}  {node.label}"
+        )
+    _emit({}, "\n".join(lines), as_json=False, stream=out, palette=getattr(args, "_palette", None))
+    return ExitCode.OK
+
+
+def cmd_impact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Show downstream impact of an evidence item (issue #554). Read-only, compaction-aware."""
+    storage.get_run(args.run_id)
+    evidence_id = getattr(args, "evidence", None)
+    if not evidence_id:
+        print("error: --evidence is required", file=err)
+        return ExitCode.ERROR
+    try:
+        events = storage.read_all_events(args.run_id)
+    except Exception:
+        events = storage.read_events(args.run_id)
+    graph = build_provenance_graph(events)
+    downstream = downstream_of(graph, evidence_id)
+    if getattr(args, "json", False):
+        payload = {
+            "run_id": args.run_id,
+            "evidence": evidence_id,
+            "downstream": [
+                {
+                    "event_id": n.event_id,
+                    "sequence": n.sequence,
+                    "type": n.type.value,
+                    "origin": n.origin.value,
+                    "label": n.label,
+                }
+                for n in downstream
+            ],
+        }
+        _emit(payload, "", as_json=True, stream=out)
+        return ExitCode.OK
+    if not downstream:
+        _emit({}, f"no downstream artefacts for {evidence_id!r}", as_json=False, stream=out)
+        return ExitCode.OK
+    lines = [
+        f"run: {args.run_id}  impact of {evidence_id!r}",
+        f"downstream: {len(downstream)} node(s)",
+    ]
+    for node in downstream:
+        lines.append(
+            f"  {node.sequence:>3}  {node.type.value:<18} {node.event_id[:8]}  origin={node.origin.value}  {node.label}"
+        )
+    _emit({}, "\n".join(lines), as_json=False, stream=out, palette=getattr(args, "_palette", None))
     return ExitCode.OK
 
 
@@ -2324,12 +2410,16 @@ def cmd_gate(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> 
         return 2
 
     actions_by_key = fold_action_events(storage.read_events(run_id)) if run_id is not None else {}
+    consumed = (
+        collect_consumed_authorities(storage.read_events(run_id)) if run_id is not None else {}
+    )
     decision = gate_decide(
         config,
         tool_name,
         tool_input,
         run_id=run_id or "",
         actions_by_key=actions_by_key,
+        consumed_authorities=consumed,
     )
     if decision.allow:
         _emit(
@@ -2968,6 +3058,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     with_run(add("history", cmd_history, "List state versions and checkpoints."))
+
+    prov_parser = with_run(add("provenance", cmd_provenance, "Show provenance DAG. Read-only."))
+    prov_parser.add_argument(
+        "--dot", action="store_true", help="emit Graphviz DOT with per-node Origin color"
+    )
+    impact = with_run(
+        add("impact", cmd_impact, "Show downstream impact of an evidence item. Read-only.")
+    )
+    impact.add_argument(
+        "--evidence", required=True, help="evidence event id or payload evidence_id"
+    )
 
     events = with_run(add("events", cmd_events, "List recorded events."))
     events.add_argument("--after", type=int, default=0)
