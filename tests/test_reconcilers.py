@@ -14,11 +14,13 @@ from pathlib import Path
 
 import pytest
 
+from continuum import reconcilers
 from continuum.actions import ActionLedger
 from continuum.cli import ExitCode, main
 from continuum.events import EventType
 from continuum.models import ActionStatus, Origin, Run
 from continuum.reconcilers import (
+    _DEFAULT_TIMEOUT,
     ReconcilerConfigError,
     _parse_verdict,
     load_reconcilers,
@@ -238,3 +240,46 @@ def test_cli_reconcile_unknown_run_is_not_found(tmp_path: Path) -> None:
         pass
     code, _, _ = run("--db", path, "reconcile", "ghost")
     assert code == ExitCode.NOT_FOUND
+
+
+# --- documented contract (issue #322) ------------------------------------------------ #
+
+
+#: The reference page whose reconcile paragraph documents the registry.
+CLI_DOC = Path(__file__).resolve().parents[1] / "docs" / "api" / "cli.md"
+
+
+def documented_registry() -> str:
+    """The registry example a reader copies out of the module docstring."""
+    lines = [line.strip() for line in (reconcilers.__doc__ or "").splitlines()]
+    return next(line for line in lines if line.startswith("{"))
+
+
+def test_the_documented_registry_example_registers_its_probe(tmp_path: Path) -> None:
+    """The example has to be the shape the loader actually reads.
+
+    It showed a bare ``{action_type: spec}`` mapping, which is valid JSON and
+    clears every validation arm above because the ``probes`` key is simply
+    absent: the registry loads empty and ``continuum reconcile`` then reports the
+    action as having no probe instead of running the command that was registered
+    for it. A silent no-op is the one outcome an operator cannot debug from the
+    output, so the copyable example is pinned here.
+    """
+    p = tmp_path / "reconcilers.json"
+    p.write_text(documented_registry(), encoding="utf-8")
+
+    assert load_reconcilers(p) == {"send_invoice": {"command": "check-outbox", "timeout": 10.0}}
+
+
+def test_the_documented_default_timeout_is_the_one_applied() -> None:
+    """Three places quote the default and only ``_DEFAULT_TIMEOUT`` decides it.
+
+    A registry that omits ``timeout`` still gets one, so the number is part of
+    what an operator sizes a probe against. Pinning the prose to the constant is
+    what stops a change to it from leaving three stale mentions behind.
+    """
+    default = f"{_DEFAULT_TIMEOUT:g} seconds"
+
+    assert default in (reconcilers.__doc__ or "")
+    assert default in (load_reconcilers.__doc__ or "")
+    assert default in CLI_DOC.read_text(encoding="utf-8")
