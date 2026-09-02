@@ -87,6 +87,22 @@ def _advisory_trust_html(storage: Storage, run_id: str) -> str:
         return ""
 
 
+def _liveness_html(storage: Storage, run_id: str) -> str:
+    """Read-only liveness advisory (issue #302)."""
+    try:
+        from continuum.recovery.health import advisory_for_storage, advisory_text
+        advisory = advisory_for_storage(storage, run_id)
+        rendered = advisory_text(advisory)
+        css = "#c00" if advisory.get("breached") else "#0a0"
+        return (
+            f'<div style="margin:8px 0;padding:8px;border:1px solid {css}">'
+            f"<b>Liveness:</b> {rendered}"
+            f"</div>"
+        )
+    except Exception:
+        return ""
+
+
 def _pins_html(storage: Storage, run_id: str) -> str:
     """Read-only advisory display for constraint pins (issue #419)."""
     try:
@@ -145,11 +161,13 @@ def render_run_detail_html(storage: Storage, run_id: str) -> str:
         ledger_html = f"<pre>{contract_html}</pre>"
         validation_html = f'<table border="1" cellpadding="4"><tr><th>Component</th><th>Status</th><th>Detail</th></tr>{validation_rows}</table>'
         advisory_html = _advisory_trust_html(storage, run_id)
+        liveness_html = _liveness_html(storage, run_id)
         pins_html = _pins_html(storage, run_id)
     except Exception as exc:
         ledger_html = f"<p>{html.escape(str(exc))}</p>"
         validation_html = ""
         advisory_html = ""
+        liveness_html = ""
         pins_html = ""
     events = storage.read_events(run_id)
     try:
@@ -224,6 +242,7 @@ def render_run_detail_html(storage: Storage, run_id: str) -> str:
 <body><h1>Run {html.escape(run_id)}</h1>
 <p>Goal: {html.escape(run.goal)} | Status: {html.escape(run.status.value)}</p>
 {advisory_html}
+{liveness_html}
 {pins_html}
 {hitl_html}
 <h2>Contract</h2>{ledger_html}
