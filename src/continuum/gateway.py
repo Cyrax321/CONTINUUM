@@ -259,7 +259,13 @@ def match_route(
             if getattr(storage, "supports_action_index", False):
                 foreign_action = storage.foreign_action(key, exclude_run=run_id)
                 if foreign_action is not None:
-                    action = foreign_action
+                    return Decision(
+                        False,
+                        f"side effect {route.action_type!r} key {rendered!r} "
+                        f"already has a claim in another run "
+                        f"({foreign_action.status.value}); reconcile it first",
+                        route=route,
+                    )
         except Exception:
             action = None
     else:
