@@ -57,6 +57,15 @@ __all__ = [
 #: matcher expression so the installed settings stay a single entry.
 DEFAULT_MATCHER = "Write|Edit|MultiEdit|NotebookEdit"
 
+#: Every hook kind this module installs, which is also the final word of each
+#: installed command. One list, read by both the installer and the remover: they
+#: used to carry the set separately, and when the briefing hook was added
+#: (7c6248d) only the remover's copy was updated, so the installer appended a
+#: duplicate SessionStart group on every re-run instead of reporting it present
+#: or repointing a moved one (issue #484, duplication fixed in #526). Keeping the
+#: kinds here is what stops that drift recurring.
+_INSTALLED_KINDS = ("observe", "gate", "briefing")
+
 #: Keys of ``tool_input`` that hold the primary file path, in priority order.
 _PATH_KEYS = ("file_path", "notebook_path")
 
@@ -227,6 +236,25 @@ def _is_observe_hook(hook: Mapping[str, Any]) -> bool:
     return _is_continuum_hook(hook, "observe")
 
 
+def _installed_kind(command: str) -> str | None:
+    """Which of :data:`_INSTALLED_KINDS` ``command`` ends in, or ``None``.
+
+    The kind a command carries is what makes an existing entry the same hook
+    rather than a different one, so it is read from the command being installed
+    instead of being listed at the call site: a new kind then cannot reach the
+    installer without the installer knowing about it. ``None`` for anything else,
+    which leaves :func:`_install_hook` appending, exactly as it does today for a
+    command this module did not build.
+    """
+    try:
+        tokens = _split_command(command)
+    except ValueError:
+        return None
+    if tokens and tokens[-1] in _INSTALLED_KINDS:
+        return tokens[-1]
+    return None
+
+
 def install_client_hook(
     settings_path: Path,
     command: str,
@@ -268,10 +296,16 @@ def _install_hook(
     """Add a continuum hook entry to a client settings file.
 
     Existing settings are preserved; only the matching list under ``hooks``
-    gains (or updates) our single entry. Returns ``"installed"`` when the
-    entry was added, ``"updated"`` when an existing entry pointed somewhere
-    else (a moved virtualenv, say) and was repointed, ``"present"`` when
-    nothing needed to change.
+    gains (or updates) our single entry of the kind ``command`` names.
+    Returns ``"installed"`` when the entry was added, ``"updated"`` when an
+    existing entry of the same kind pointed somewhere else (a moved
+    virtualenv, say) and was repointed, ``"present"`` when nothing needed to
+    change.
+
+    An entry counts as ours only when its kind matches the one being installed,
+    so an observe install cannot repoint a briefing or gate hook that happens to
+    share the event and matcher: repointing across kinds would silently drop a
+    hook the caller never asked about.
 
     A settings file that exists but is unreadable raises rather than being
     overwritten: a file someone edited by hand is a statement of intent, and
@@ -299,6 +333,7 @@ def _install_hook(
 
     status = "installed"
     entry_found = False
+    kind = _installed_kind(command)
     for group in hook_list:
         if not isinstance(group, dict) or group.get("matcher") != matcher:
             continue
@@ -306,9 +341,7 @@ def _install_hook(
         if not isinstance(entries, list):
             continue
         for hook in entries:
-            ours = isinstance(hook, dict) and any(
-                _is_continuum_hook(hook, k) for k in ("observe", "gate", "briefing")
-            )
+            ours = kind is not None and isinstance(hook, dict) and _is_continuum_hook(hook, kind)
             if ours:
                 entry_found = True
                 if hook.get("command") != command:
@@ -334,10 +367,10 @@ def remove_claude_code_hook(settings_path: Path) -> bool:
     """Remove every continuum hook this module installed. True when anything
     was removed.
 
-    Only entries this module's shape recognises are touched (observe and gate,
-    any matcher): a hand-written entry pointing elsewhere survives untouched,
-    as does every other key in the file. A group holding unrelated hooks keeps
-    them.
+    Only entries this module's shape recognises are touched
+    (:data:`_INSTALLED_KINDS`, any matcher): a hand-written entry pointing
+    elsewhere survives untouched, as does every other key in the file. A group
+    holding unrelated hooks keeps them.
     """
     if not settings_path.exists():
         return False
@@ -373,8 +406,7 @@ def remove_claude_code_hook(settings_path: Path) -> bool:
                 h
                 for h in group["hooks"]
                 if not (
-                    isinstance(h, dict)
-                    and any(_is_continuum_hook(h, k) for k in ("observe", "gate", "briefing"))
+                    isinstance(h, dict) and any(_is_continuum_hook(h, k) for k in _INSTALLED_KINDS)
                 )
             ]
             if len(kept_hooks) != len(group["hooks"]):

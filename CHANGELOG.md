@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`.pre-commit-config.yaml`, pinned to the ruff CI runs (#537).**
+  `CONTRIBUTING.md` described the file instead of shipping it, so
+  `pre-commit install` on a fresh clone installed a hook that ran nothing and
+  the first PR still met a red `ruff format --check src/ tests/ examples/`. The
+  config now lives at the repo root with the `ruff-check` and `ruff-format`
+  hooks, `rev` naming the same ruff version the `dev` extra pins so a hook and
+  CI cannot format one file two ways, and both hooks scoped to `src/`, `tests/`
+  and `examples/`, the three directories the lint job checks. `benchmarks/`,
+  `demo-run/` and `_bugaudit/` are not ruff-clean and no gate checks them, so in
+  scope they would fail `pre-commit run --all-files` on a tree nobody touched.
+  mypy stays out, as `CONTRIBUTING.md` already explains: hooks run in isolated
+  environments without the project's dependencies, where its results are not
+  trustworthy. Contributor tooling, no runtime change.
+
 ### Fixed
 
 - Make `continuum complete` idempotent for runs that are already completed (#356).
@@ -24,6 +40,30 @@ All notable changes to this project are documented here. The format follows
   surrounding whitespace; a run whose in-flight claim was recorded under a
   padded key will not match the stripped key derived after upgrading.
 
+- **`mypy src/continuum` passes on a core install (#315).** `CONTRIBUTING.md`
+  asks for three checks before a PR, and on a fresh `pip install -e .` clone the
+  third opened with 26 errors: `cryptography`, `mcp`, `langgraph`, `agents` and
+  `langchain_core` had no `[[tool.mypy.overrides]]` family, so every lazy import
+  of an optional package read as a missing library. Nothing was wrong with the
+  code, and the only way to a quiet run was to install the extras the core is
+  built not to need, which is the opposite of what a dependency-free recovery
+  library should ask of a first-time contributor. The five families are now
+  excused the way `psycopg`, `playwright` and `kubernetes` already were, and the
+  `opentelemetry` and `crewai` section that had drifted below the coverage
+  tables moved back under `[tool.mypy]`.
+
+  Excusing the import is half of it: the names it supplied become `Any`, and
+  strict mode then refused the `BaseCheckpointSaver` and `RunHooks` subclasses
+  and the twelve MCP tools registered through the server's own decorator. Those
+  14 errors are answered by scoping `disallow_subclassing_any` off for
+  `continuum.adapters.langgraph_store` and `continuum.adapters.openai`, and
+  `disallow_untyped_decorators` off for `continuum.mcp.server`, the three
+  modules that hold an optional seam. `strict = true` is untouched everywhere
+  else, and CI checks all three with the packages installed, where the real
+  signatures apply. `tests/test_mypy_overrides.py` walks the package's imports
+  and fails when one has no family, so the next optional dependency cannot
+  quietly put the 26 errors back.
+
 - **The gateway answers malformed JSON with 400 instead of hiding it (#323).**
   `_body` caught `JSONDecodeError` and returned an empty mapping, so a request
   whose body never parsed was carried on to key derivation and refused with
@@ -35,6 +75,75 @@ All notable changes to this project are documented here. The format follows
   `400 {"error": "invalid JSON in request body: ..."}` before any routing or
   ledger work. A genuinely empty body still becomes an empty mapping, so a route
   whose template needs no fields stays callable with no body.
+
+- **One list of installed hook kinds, and the kind is read off the command
+  (#484).** `hooks install` duplicated the `SessionStart` briefing hook on
+  every run because the installer recognised an existing entry as its own only
+  when the command ended in `observe` or `gate`, while `hooks remove` already
+  knew about `briefing`: the two lists were written out separately, so the kind
+  added in 7c6248d reached one and missed the other. #526 fixed the
+  duplication by extending the installer's list. The kinds are now a single
+  `_INSTALLED_KINDS` read by both the installer and the remover, so a future
+  kind cannot be added to one and forgotten in the other, and the kind is
+  derived from the command being installed rather than checked as a set: an
+  install of one kind can no longer repoint an entry of another that happens
+  to share the event and matcher, which would drop a hook the caller never
+  named. A command this module did not build carries no kind and is appended,
+  as before. A settings file that already holds duplicates is cleaned by
+  `hooks remove` followed by `hooks install`.
+
+- **`continuum tree --limit` truncates the child list instead of being ignored
+  (#321).** The flag was registered with `help=argparse.SUPPRESS` and never
+  read, so `--limit 5` was accepted and printed every child anyway: an operator
+  with a wide family got the full wall of output and no error saying why. The
+  flag now shows the newest `n` children and reports what it hid
+  (`... 3 of 40 children hidden by --limit 5`), because a truncated tree that
+  says nothing is indistinguishable from a small family. `--json` gained
+  `children_total` and `children_hidden` alongside the truncated `children`
+  list; output without `--limit` is unchanged. The truncation is display-only:
+  `children_of` still returns every child, so the family safety roll-up behind
+  `resume` cannot lose an uncertain child that scrolled off the printed list.
+  A limit below `1` is refused with exit code 1 rather than clamped, since
+  `--limit 0` would render a family with children as childless.
+
+- **The MCP reference documents all twelve tools (#271).** `docs/api/mcp.md`
+  carried eleven rows and summarised them as "three read-only, eight
+  mutating", but `tools/list` has served twelve tools since
+  `continuum_record_plan` was added: a client author reading the reference had
+  no way to learn the plan tool exists. The table gains a
+  `continuum_record_plan` row and the totals now match the server. Every other
+  row's `read`/`mutate` kind was audited against the `read_only_hint` the
+  server declares and needed no change. `tests/test_mcp_docs.py` now checks the
+  table against `tools/list`, so a tool registered without a row fails the
+  suite instead of shipping undocumented.
+- **`hooks remove` resolves the settings path the same way `hooks install`
+  does (#580).** Both subcommands share one `--settings` option that defaults
+  to `None` and advertises "default: per client profile", but only the
+  installer fell back to `CLIENT_PROFILES[client]["settings"]`. The remover
+  passed the `None` straight to `Path`, so `continuum hooks remove
+  claude-code`, the uninstall named in `docs/guides/embed-claude-code.md`, died
+  with an uncaught `TypeError` before it read anything. Install was therefore a
+  one-way door for every operator who had not written down the path it worked
+  out for them: the only way back out was to repeat that path by hand. The
+  remover now reads the profile default, so the pair resolves one file per
+  client (`.claude/settings.json`, `.gemini/settings.json`,
+  `.codex/hooks.json`), and a directory that was never wired reports that
+  nothing was found instead of raising. The default path had no test on the
+  remove side because every case passed `--settings` explicitly, which is the
+  same reason the installer carried this bug once before; the profile default is
+  now pinned for both halves. Removal itself is unchanged, as is the `--json`
+  payload beyond the path it reports.
+
+- **The removal report names every hook it took out, not just the observation
+  hook (#580).** `remove_claude_code_hook` removes each kind in
+  `_INSTALLED_KINDS`, so an operator who had installed the `--with-gate`
+  PreToolUse hook was told "Removed observation hook" and could reasonably
+  believe the gate still stood between their agent and an unclaimed side
+  effect. The text now reads `Removed CONTINUUM hooks from <path>` (and `No
+  CONTINUUM hooks found in <path>` when there was nothing to do), and the
+  subcommand's `--help` line says what it removes. The `removed` boolean in
+  `--json` is unchanged.
+>>>>>>> 4e27e6f (fix(hooks): default the remove path to the client profile, like install (#580))
 
 ## [0.1.0] - 2026-08-27
 

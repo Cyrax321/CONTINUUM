@@ -1,0 +1,13 @@
+{
+  "name": "continuum",
+  "description": "Universal verifiable recovery for long-running AI agents with semantic checkpoints, idempotent action ledger and hash chained log as a deny by default MCP server",
+  "version": "0.1.0",
+  "transport": {
+    "type": "stdio",
+    "command": "continuum-mcp"
+  },
+  "license": "Apache-2.0",
+  "repository": "https://github.com/Cyrax321/CONTINUUM",
+  "homepage": "https://continuum-nu-six.vercel.app",
+  "keywords": ["mcp", "agent", "recovery", "checkpoint", "langgraph", "langchain"]
+}

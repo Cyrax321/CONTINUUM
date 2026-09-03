@@ -5,8 +5,9 @@ codes are a safety contract: only a verified-safe run exits `0`, so
 `continuum resume "$RUN" && ./start-agent.sh` cannot launch onto stale state.
 
 ```bash
-continuum --db continuum.db <command> [args]
-continuum --json <command>      # machine-readable output
+continuum <command> [args]                    # storage defaults to ./continuum.db
+continuum --db <url-or-path> <command>        # storage URL or path (default: continuum.db)
+continuum --json <command>                    # machine-readable output
 ```
 
 ## Commands
@@ -26,7 +27,7 @@ continuum --json <command>      # machine-readable output
 | `confirm <run_id>` | Confirm a human-approved recovery step. |
 | `complete <run_id>` | Close a run as done. Mutates storage. |
 | `budget <run_id>` | Retry-budget usage per action type. |
-| `tree <run_id>` | Show a parent run and its children. |
+| `tree <run_id> [--limit <n>]` | Show a parent run and its children. `--limit` shows only the newest `n` children. |
 | `fork <run_id> --reason <text>` | Approve a divergent continuation as a child run. Mutates storage. |
 | `compact <run_id>` | Archive the pre-anchor log prefix. Mutates storage. |
 | `checkpoint <run_id>` | Force a state checkpoint. |
@@ -60,9 +61,28 @@ continuum diff run_42 1 2
 continuum verify run_42
 continuum attest run_42 --key signer.pem --out run_42.attest.json
 continuum attest-verify run_42 --attest run_42.attest.json
+
+# Same data, machine-readable: --json goes before the command, not after it
+continuum --json runs | jq '.runs[] | {run_id, status}'
+continuum --json resume run_42 | jq '{safe, mode}'
+
+# Just the newest few children of a wide family
+continuum tree run_42 --limit 5
 ```
 
-Most commands accept `--db` (storage path or URL) and `--json` (machine-readable output, also available as `continuum <command> --help` for each subcommand). Colour is
+`tree --limit <n>` truncates the printed child list to the newest `n` children
+and says how many it hid, so a short tree is never mistaken for a small family.
+The truncation is display-only: the family safety roll-up behind `resume` still
+reads every child, so hiding one cannot turn a blocked family into a safe one.
+With `--json`, `children_total` and `children_hidden` report the full count
+alongside the truncated `children` list. A `--limit` below `1` is refused rather
+than clamped (issue #321).
+
+`--db` (storage URL or path, default `continuum.db`) and `--json`
+(machine-readable output) are global flags, so they go before the command:
+`continuum --json runs`, not `continuum runs --json`, which is rejected as an
+unrecognised argument. Most commands emit JSON with it, and
+`continuum <command> --help` lists that command's own flags. Colour is
 TTY-aware and respects `NO_COLOR`; piped output is byte-identical to uncoloured
 output.
 

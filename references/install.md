@@ -93,6 +93,9 @@ continuum-mcp --help             # needs [mcp] or [dev]
 
 # One-command demo (process kill, hash-chain verify)
 ./try-it.sh demo                 # same as: python examples/crash_recovery_agent.py
+# Windows PowerShell (from repo root):
+# powershell -ExecutionPolicy Bypass -File .\try-it.ps1
+# powershell -ExecutionPolicy Bypass -File .\try-it.ps1 cli --help
 
 # Full test suite (~1,300 tests; exact skips vary by environment)
 pytest -q                        # or: ./try-it.sh test

@@ -104,6 +104,13 @@ warn_unused_configs = true
 plugins = ["pydantic.mypy"]
 files = ["src/continuum"]
 
+# Every optional dependency is imported lazily, behind a `try` or under
+# `TYPE_CHECKING`, so each module that reaches for one still has to type-check on
+# an install that does not have it. A plain `pip install -e .` clone has only
+# pydantic, and the families below are what stand between that clone and 26
+# errors from `mypy src/continuum` that say nothing about the code (#315). An
+# optional import added without a family here brings the errors back.
+
 # psycopg is an optional runtime dependency (the [postgres] extra). It is
 # imported lazily, so the module must type-check without it installed.
 [[tool.mypy.overrides]]
@@ -116,6 +123,47 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["playwright", "playwright.*", "kubernetes"]
 ignore_missing_imports = true
+
+# opentelemetry backs the [otel] span bridge and crewai the thin hook adapter.
+[[tool.mypy.overrides]]
+module = ["opentelemetry.*", "crewai", "crewai.*", "crewai.hooks"]
+ignore_missing_imports = true
+
+# cryptography signs the event chain for `continuum attest` (the [attest]
+# extra). The recovery path must import with no crypto installed, so the import
+# sits inside the signing call.
+[[tool.mypy.overrides]]
+module = ["cryptography.*"]
+ignore_missing_imports = true
+
+# The MCP server stack (the [mcp] extra). The core library and CLI never import
+# it, so a dependency-free install must still type-check the server module.
+[[tool.mypy.overrides]]
+module = ["mcp.*"]
+ignore_missing_imports = true
+
+# The framework adapters: langgraph, openai-agents (imported as `agents`) and
+# langchain-core. Each has its own extra and its own availability guard, so none
+# of the three is present in a core install.
+[[tool.mypy.overrides]]
+module = ["langgraph.*", "agents", "agents.*", "langchain_core"]
+ignore_missing_imports = true
+
+# Silencing the missing import is half the job: the names it supplied are now
+# `Any`, and two strict checks refuse `Any` where these three modules need it.
+# `langgraph_store` subclasses LangGraph's `BaseCheckpointSaver` and the openai
+# adapter subclasses `RunHooks`, which `disallow_subclassing_any` rejects; every
+# MCP tool is registered through the server's own decorator, which
+# `disallow_untyped_decorators` rejects. Both are checked in CI, where the
+# packages are installed and the real signatures apply. Scoped to the three
+# modules that hold an optional seam so strict stays whole everywhere else.
+[[tool.mypy.overrides]]
+module = ["continuum.adapters.langgraph_store", "continuum.adapters.openai"]
+disallow_subclassing_any = false
+
+[[tool.mypy.overrides]]
+module = ["continuum.mcp.server"]
+disallow_untyped_decorators = false
 
 [tool.pydantic.mypy]
 init_forbid_extra = true
@@ -138,6 +186,3 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
-[[tool.mypy.overrides]]
-module = ["opentelemetry.*", "crewai", "crewai.*", "crewai.hooks"]
-ignore_missing_imports = true
