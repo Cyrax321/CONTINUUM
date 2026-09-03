@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import threading
 from pathlib import Path
 
@@ -74,6 +75,13 @@ def post(addr: str, path: str, body: dict[str, object], host: str = "api.example
     data = json.loads(resp.read() or b"{}")
     conn.close()
     return resp.status, data
+
+
+def recv_until_close(sock: socket.socket) -> bytes:
+    chunks = []
+    while chunk := sock.recv(4096):
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def claim(db: str, key: str) -> str:
@@ -287,7 +295,11 @@ def test_malformed_content_length_returns_400(db: str, gateway: str) -> None:
         "POST",
         "/v1/invoices",
         body=b'{"id": "1"}',
-        headers={"Host": "api.example.com", "Content-Type": "application/json", "Content-Length": "invalid"},
+        headers={
+            "Host": "api.example.com",
+            "Content-Type": "application/json",
+            "Content-Length": "invalid",
+        },
     )
     resp = conn.getresponse()
     body = json.loads(resp.read())
@@ -302,11 +314,60 @@ def test_chunked_transfer_encoding_returns_400(db: str, gateway: str) -> None:
         "POST",
         "/v1/invoices",
         body=b'e\r\n{"id": "1"}\r\n0\r\n\r\n',
-        headers={"Host": "api.example.com", "Content-Type": "application/json", "Transfer-Encoding": "chunked"},
+        headers={
+            "Host": "api.example.com",
+            "Content-Type": "application/json",
+            "Transfer-Encoding": "chunked",
+        },
     )
     resp = conn.getresponse()
     body = json.loads(resp.read())
     conn.close()
     assert resp.status == 400
-    assert "chunked transfer encoding is not supported" in body["error"]
+    assert "transfer encoding is not supported" in body["error"]
+    assert resp.getheader("Connection") == "close"
 
+
+def test_duplicate_content_length_returns_400(db: str, gateway: str) -> None:
+    host, port = gateway.split(":")
+    request = (
+        b"POST /v1/invoices HTTP/1.1\r\n"
+        b"Host: api.example.com\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: 4\r\n"
+        b"Content-Length: 9\r\n"
+        b"\r\n"
+        b'{"id": "1"}'
+    )
+    with socket.create_connection((host, int(port)), timeout=10) as sock:
+        sock.sendall(request)
+        response = recv_until_close(sock)
+
+    assert b"400 Bad Request" in response
+    assert b"Connection: close" in response
+    assert b"multiple Content-Length headers are not supported" in response
+
+
+def test_transfer_encoding_closes_gateway_connection(db: str, gateway: str) -> None:
+    host, port = gateway.split(":")
+    request = (
+        b"POST /v1/invoices HTTP/1.1\r\n"
+        b"Host: api.example.com\r\n"
+        b"Transfer-Encoding: gzip\r\n"
+        b"Transfer-Encoding: chunked\r\n"
+        b"\r\n"
+        b"1\r\nx\r\n0\r\n\r\n"
+        b"POST /v1/invoices HTTP/1.1\r\n"
+        b"Host: api.example.com\r\n"
+        b"Content-Length: 0\r\n"
+        b"\r\n"
+    )
+    with socket.create_connection((host, int(port)), timeout=10) as sock:
+        sock.sendall(request)
+        response = recv_until_close(sock)
+
+    assert response.count(b"HTTP/1.1") == 1
+    assert b"400 Bad Request" in response
+    assert b"Connection: close" in response
+    assert b"transfer encoding is not supported" in response
+    assert b"501" not in response

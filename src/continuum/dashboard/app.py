@@ -285,21 +285,32 @@ def make_dashboard_server(
             self._html(render_dashboard_html(storage))
 
         def do_POST(self) -> None:  # noqa: N802
-            te = self.headers.get("Transfer-Encoding", "").lower()
-            if "chunked" in te:
+            transfer_encodings = self.headers.get_all("Transfer-Encoding", [])
+            if transfer_encodings:
+                self.close_connection = True
                 self._html(
-                    "<h1>400 Bad Request</h1><p>chunked transfer encoding is not supported</p>",
+                    "<h1>400 Bad Request</h1><p>transfer encoding is not supported</p>",
                     code=400,
                 )
                 return
 
-            cl_header = self.headers.get("Content-Length")
+            content_lengths = self.headers.get_all("Content-Length", [])
+            if len(content_lengths) > 1:
+                self.close_connection = True
+                self._html(
+                    "<h1>400 Bad Request</h1><p>multiple Content-Length headers are not supported</p>",
+                    code=400,
+                )
+                return
+
+            cl_header = content_lengths[0] if content_lengths else None
             if cl_header is not None:
                 try:
                     length = int(cl_header)
                     if length < 0:
                         raise ValueError("Content-Length must be non-negative")
                 except ValueError as exc:
+                    self.close_connection = True
                     self._html(
                         f"<h1>400 Bad Request</h1><p>malformed Content-Length: {html.escape(str(exc))}</p>",
                         code=400,

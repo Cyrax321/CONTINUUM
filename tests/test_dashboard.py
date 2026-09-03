@@ -1,5 +1,6 @@
 import http.client
 import os
+import socket
 import threading
 import urllib.parse
 from pathlib import Path
@@ -13,6 +14,13 @@ from continuum.dashboard.app import (
 from continuum.events import EventType
 from continuum.models import Run
 from continuum.storage import SQLiteStorage
+
+
+def recv_until_close(sock: socket.socket) -> bytes:
+    chunks = []
+    while chunk := sock.recv(4096):
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def test_dashboard_renders_runs() -> None:
@@ -222,7 +230,26 @@ def test_dashboard_post_body_too_large_returns_413(tmp_path: Path) -> None:
         data = resp.read().decode(errors="ignore")
         conn.close()
         assert resp.status == 400
-        assert "chunked transfer encoding is not supported" in data
+        assert "transfer encoding is not supported" in data
+        assert resp.getheader("Connection") == "close"
+
+        # Duplicate Content-Length is ambiguous framing and is refused (#522)
+        host, port = addr.split(":")
+        request = (
+            b"POST /action/confirm HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Content-Length: 4\r\n"
+            b"Content-Length: 9\r\n"
+            b"\r\n"
+            b"token=x"
+        )
+        with socket.create_connection((host, int(port)), timeout=10) as sock:
+            sock.sendall(request)
+            response = recv_until_close(sock)
+
+        assert b"400 Bad Request" in response
+        assert b"Connection: close" in response
+        assert b"multiple Content-Length headers are not supported" in response
     finally:
         server.shutdown()
         server.server_close()
