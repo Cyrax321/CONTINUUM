@@ -187,16 +187,11 @@ def match_route(
         for _v in body.values():
             if isinstance(_v, str) and _v in consumed_authorities:
                 ev = consumed_authorities[_v]
-                seq = (
-                    getattr(ev, "sequence", "?")
-                    if hasattr(ev, "sequence")
-                    else ev.get("sequence", "?")
-                )
-                payload = getattr(ev, "payload", {}) or {}
                 if hasattr(ev, "payload"):
                     seq = ev.sequence
-                    payload = ev.payload
+                    payload = ev.payload or {}
                 else:
+                    seq = ev.get("sequence", "?")
                     payload = ev.get("payload", {})
                 consumer = payload.get("consumer_run_id", "?")
                 return Decision(
@@ -268,13 +263,6 @@ def match_route(
                     )
         except Exception:
             action = None
-    else:
-        # action already from local, foreign stays None
-        pass
-    # If we already resolved action via foreign, we need to handle status below
-    # Reuse variable action; key already computed
-    # To avoid double lookup, we will have a flag
-
     if action is None or getattr(action, "action_type", None) != route.action_type:
         return Decision(
             False,
