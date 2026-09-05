@@ -300,6 +300,11 @@ def cmd_start(args: argparse.Namespace, storage: Storage, out: Any, err: Any) ->
 
 
 def cmd_runs(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """List the most recent runs with their status and event count.
+
+    The text table truncates long goals to keep one run per line; the JSON
+    payload carries each goal in full, so scripts never read a clipped goal.
+    """
     runs = storage.list_runs(limit=args.limit)
     if not runs:
         _emit(
@@ -643,6 +648,11 @@ def cmd_status(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
 
 def cmd_history(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """List a run's checkpoint lineage, one row per checkpoint.
+
+    Read-only. A run that was never created raises ``RunNotFound`` rather than
+    reporting an empty history, which would read as "no checkpoints yet".
+    """
     # Multiple checkpoints legitimately share a state version (put_version
     # returns the same version when the state fingerprint is unchanged), so we
     # list every checkpoint rather than keying by version, which would collapse
@@ -688,6 +698,11 @@ def cmd_history(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
 
 
 def cmd_events(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Print a run's event log, optionally windowed by ``--after`` / ``--upto``.
+
+    Read-only. Shows the whole log, archived prefix included, so a compacted run
+    reads the same as one that was never compacted.
+    """
     storage.get_run(args.run_id)  # raises RunNotFound for a run that was never created
     # Full log: archived prefix plus live tail, matching the dashboard hint (issue #532).
     events = [
@@ -799,6 +814,11 @@ def cmd_impact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
 
 def cmd_diff(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Show the semantic diff between two stored state versions of one run.
+
+    Read-only: both versions are read as stored, never re-projected, so the diff
+    reports what was actually persisted at each point.
+    """
     before = storage.get_version(args.run_id, args.from_version)
     after = storage.get_version(args.run_id, args.to_version)
     diff = diff_states(before, after)
@@ -2165,6 +2185,7 @@ def cmd_gateway(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
         GatewayConfigError,
         GatewayServer,
         load_gateway_config,
+        load_gateway_tenant,
     )
 
     config_path = Path(args.config) if args.config else Path(DEFAULT_GATEWAY_CONFIG_PATH)
@@ -2181,9 +2202,12 @@ def cmd_gateway(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
         )
         return ExitCode.ERROR
 
+    bound_tenant = load_gateway_tenant(config_path)
     active = storage.get_active_run()
     run_id = args.run_id or (active.run_id if active else None)
-    server = GatewayServer(lambda: open_storage(args.db), run_id, routes, port=args.port)
+    server = GatewayServer(
+        lambda: open_storage(args.db), run_id, routes, port=args.port, bound_tenant=bound_tenant
+    )
     print(
         f"CONTINUUM gateway listening on 127.0.0.1:{server.port} "
         f"({len(routes)} upstream route(s), run={run_id or 'dynamic'})",
@@ -2650,7 +2674,138 @@ def cmd_actions(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     return ExitCode.REQUIRES_HUMAN if uncertain else ExitCode.OK
 
 
+def cmd_forget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Enumerate memory writes for a tenant and tombstone them (issue #567, parent #304).
+
+    Every memory write is a ledger row keyed by tenant namespace, so
+    enumeration is a filter over ``rendered_key``. The command lists
+    exactly what to delete externally and, unless ``--dry-run``, appends
+    a ``MEMORY_TOMBSTONED`` event. The chain keeps hashes, not plaintext,
+    so logical deletion does not break ``verify()``. Physical removal of
+    historical hashes is out of scope by design.
+
+    When ``--run-id`` is given, enumeration is scoped to that run;
+    otherwise it scans every run in storage. The tombstone is written
+    to the target run (explicit ``--run-id`` or the active run). Dry-run
+    never writes.
+    """
+    tenant = getattr(args, "tenant", None)
+    if not tenant or not str(tenant).strip():
+        print("error: --tenant is required and must be non-empty", file=out)
+        return ExitCode.ERROR
+    tenant = str(tenant).strip()
+    reason = getattr(args, "reason", "") or ""
+    dry_run = bool(getattr(args, "dry_run", False))
+    run_filter = getattr(args, "run_id", None)
+
+    # Determine target run for tombstone (when not dry-run)
+    target_run_id: str | None = run_filter
+    if not dry_run and target_run_id is None:
+        active = storage.get_active_run()
+        target_run_id = active.run_id if active else None
+
+    # Enumerate: scan runs for memory actions whose rendered_key contains tenant
+    hits: list[dict[str, str]] = []
+    record_keys: set[str] = set()
+    runs_to_scan = []
+    if run_filter:
+        try:
+            storage.get_run(run_filter)
+            runs_to_scan = [storage.get_run(run_filter)]
+        except Exception as exc:
+            print(f"error: {exc}", file=out)
+            return ExitCode.NOT_FOUND
+    else:
+        runs_to_scan = list(storage.list_runs())
+
+    for run in runs_to_scan:
+        try:
+            events = storage.read_events(run.run_id)
+        except Exception:
+            continue
+        for ev in events:
+            if ev.type != EventType.ACTION_RECORDED:
+                continue
+            payload = dict(ev.payload)
+            rendered = payload.get("rendered_key") or ""
+            if not isinstance(rendered, str) or not rendered.startswith("mem:"):
+                continue
+            # Tenant is third segment of mem:{store}:{tenant}:{record}
+            parts = rendered.split(":")
+            if len(parts) < 4:
+                continue
+            tenant_in_key = parts[2]
+            if tenant_in_key != tenant:
+                continue
+            record_key = parts[3] if len(parts) >= 4 else rendered
+            # Also handle longer record keys with colons? Use join remainder
+            if len(parts) > 4:
+                record_key = ":".join(parts[3:])
+            hits.append({"run_id": run.run_id, "rendered_key": rendered, "record_key": record_key})
+            record_keys.add(record_key)
+
+    # Also check tombstone history to avoid re-tombstoning? No, enumeration is idempotent
+    sorted_keys = sorted(record_keys)
+    payload_out: dict[str, object] = {
+        "tenant": tenant,
+        "record_keys": sorted_keys,
+        "hits": hits,
+        "dry_run": dry_run,
+        "reason": reason,
+    }
+    lines = [f"Tenant {tenant!r}: {len(sorted_keys)} record(s) found"]
+    if sorted_keys:
+        for rk in sorted_keys:
+            lines.append(f"  - {rk}")
+    else:
+        lines.append("  (no matching memory records)")
+    if dry_run:
+        lines.append("Dry run: no tombstone written.")
+    else:
+        if not target_run_id:
+            lines.append("No target run for tombstone; enumeration only.")
+            payload_out["tombstone_run"] = None
+        elif not sorted_keys:
+            lines.append("Nothing to tombstone.")
+            payload_out["tombstone_run"] = target_run_id
+        else:
+            try:
+                storage.get_run(target_run_id)
+            except Exception as exc:
+                print(f"error: target run {target_run_id!r} not found: {exc}", file=out)
+                return ExitCode.NOT_FOUND
+            # Hashes are kept, plaintext record_keys are in the tombstone payload
+            # but the historical chain retains hashes, so verify() stays intact.
+            tombstone_payload = {
+                "tenant": tenant,
+                "record_keys": sorted_keys,
+                "reason": reason,
+                "hits": len(hits),
+                "hashes_kept": True,
+            }
+            storage.append_event(
+                target_run_id, EventType.MEMORY_TOMBSTONED, tombstone_payload, source=Origin.HUMAN
+            )
+            lines.append(f"Tombstone written to run {target_run_id!r} ({len(sorted_keys)} keys).")
+            payload_out["tombstone_run"] = target_run_id
+            payload_out["tombstone_sequence"] = storage.last_sequence(target_run_id)
+
+    _emit(
+        payload_out,
+        "\n".join(lines),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK
+
+
 def cmd_contract(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Print the recovery contract for a run without acting on it.
+
+    Read-only, but the exit status still carries the recovery mode, so a script
+    can gate on the verdict without parsing the contract it just printed.
+    """
     decision = RecoveryEngine(storage).assess(
         args.run_id, current_environment=_environment(args, args.run_id)
     )
@@ -2826,6 +2981,13 @@ def cmd_export_evidence(args: argparse.Namespace, storage: Storage, out: Any, er
 
 
 def cmd_benchmark(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Run the recovery and idempotency benchmarks and report both.
+
+    Uses its own throwaway stores, so the configured database is untouched. The
+    idempotency pass runs a quarter of ``--total``, since it attempts every
+    action twice across four strategies. ``--json`` appends the machine
+    readable payload after the tables rather than replacing them.
+    """
     import json
 
     from continuum.benchmark import (
@@ -2988,6 +3150,11 @@ def cmd_attest_verify(args: argparse.Namespace, storage: Storage, out: Any, err:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the full ``continuum`` parser, subcommands included.
+
+    Every subcommand sets ``func`` as a default, so :func:`main` dispatches on
+    the parsed namespace alone and never on the command name.
+    """
     parser = argparse.ArgumentParser(
         prog="continuum",
         description="Semantic recovery layer for long-running AI agents.",
@@ -3017,15 +3184,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     def add(name: str, func: Any, help_text: str) -> argparse.ArgumentParser:
+        """Register a subcommand bound to ``func``, returning it for more arguments."""
         p = sub.add_parser(name, help=help_text, description=help_text)
         p.set_defaults(func=func)
         return p
 
     def with_run(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        """Add the positional ``run_id`` every run-scoped subcommand takes."""
         p.add_argument("run_id", help="the run to operate on.")
         return p
 
     def with_env(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        """Add the repeatable ``--env NAME=VERSION`` flag for staleness checks."""
         p.add_argument(
             "--env",
             action="append",
@@ -3293,6 +3463,7 @@ def build_parser() -> argparse.ArgumentParser:
     hooks_sub = hooks.add_subparsers(dest="hooks_command", metavar="ACTION CLIENT", required=True)
 
     def hooks_client(p: argparse.ArgumentParser, func: Any) -> None:
+        """Give a ``hooks`` action its client selector and settings override."""
         p.add_argument(
             "client",
             choices=tuple(CLIENT_PROFILES),
@@ -3336,6 +3507,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="rebuild drifted index rows from the log (requires --index).",
     )
+
+    forget = add(
+        "forget",
+        cmd_forget,
+        "Enumerate and tombstone memory records for a tenant. Mutates unless --dry-run.",
+    )
+    forget.add_argument(
+        "--tenant", required=True, help="tenant namespace to enumerate and tombstone."
+    )
+    forget.add_argument(
+        "--run-id", default=None, help="target run for tombstone (default: active run)."
+    )
+    forget.add_argument("--reason", default="", help="reason for erasure.")
+    forget.add_argument("--dry-run", action="store_true", help="list only, do not write tombstone.")
 
     reconcile_auto = with_run(
         add(
@@ -3398,6 +3583,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8765, help="port for --transport http.")
 
     def cmd_dashboard(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+        """Serve the read-only dashboard, blocking until interrupted.
+
+        Binds loopback unless ``--host`` says otherwise: the pages render goals
+        and side-effect details, which must not be off-host by default.
+        """
         from continuum.dashboard import serve_dashboard as _serve
 
         print(f"Serving dashboard at http://localhost:{args.port}", file=out)

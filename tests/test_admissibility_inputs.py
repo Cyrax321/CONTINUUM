@@ -42,7 +42,7 @@ def test_old_row_without_consumed_inputs_is_admissible() -> None:
 
 def test_old_event_without_field_survives_fold() -> None:
     store = _new_store_with_run("run_old")
-    ledger = ActionLedger(store, "run_old")
+    ActionLedger(store, "run_old")
     # Manually craft an ACTION_RECORDED event whose action dict lacks consumed_inputs
     action = Action(run_id="run_old", action_type="a.do", status=ActionStatus.COMPLETED)
     raw_payload = action.model_dump(mode="json")
@@ -123,7 +123,11 @@ def test_empty_consumed_inputs_is_valid() -> None:
 
     # Also via dict form with empty lists
     a2 = Action.model_validate(
-        {"run_id": "r", "action_type": "t", "consumed_inputs": {"checkpoint_seq": 0, "event_positions": [], "action_ids": []}}
+        {
+            "run_id": "r",
+            "action_type": "t",
+            "consumed_inputs": {"checkpoint_seq": 0, "event_positions": [], "action_ids": []},
+        }
     )
     assert a2.consumed_inputs == empty
 
@@ -133,13 +137,18 @@ def test_complete_accepts_both_mapping_and_model() -> None:
     ledger = ActionLedger(store, "run_both")
     outcome = ledger.claim("a.do", {}, key="k-both")
     # Mapping form
-    ledger.complete(outcome.key, consumed_inputs={"checkpoint_seq": 1, "event_positions": [], "action_ids": []})
+    ledger.complete(
+        outcome.key, consumed_inputs={"checkpoint_seq": 1, "event_positions": [], "action_ids": []}
+    )
     fetched = ledger.get(outcome.key)
     assert fetched is not None
     assert fetched.consumed_inputs.checkpoint_seq == 1
 
     # Model form (update on already completed)
-    ledger.complete(outcome.key, consumed_inputs=ConsumedInputs(checkpoint_seq=9, event_positions=[9], action_ids=["a1"]))
+    ledger.complete(
+        outcome.key,
+        consumed_inputs=ConsumedInputs(checkpoint_seq=9, event_positions=[9], action_ids=["a1"]),
+    )
     refetched = ledger.get(outcome.key)
     assert refetched is not None
     assert refetched.consumed_inputs.checkpoint_seq == 9
@@ -170,11 +179,17 @@ def test_complete_validates_invalid_consumed_inputs() -> None:
     store = _new_store_with_run("run_val")
     ledger = ActionLedger(store, "run_val")
     outcome = ledger.claim("a.do", {}, key="k-val")
-    with pytest.raises(Exception):
-        ledger.complete(outcome.key, consumed_inputs={"checkpoint_seq": -5, "event_positions": [], "action_ids": []})
+    with pytest.raises(Exception):  # noqa: B017
+        ledger.complete(
+            outcome.key,
+            consumed_inputs={"checkpoint_seq": -5, "event_positions": [], "action_ids": []},
+        )
     # Also via action_ids too long
-    with pytest.raises(Exception):
-        ledger.complete(outcome.key, consumed_inputs={"checkpoint_seq": 0, "event_positions": [], "action_ids": [""]})
+    with pytest.raises(Exception):  # noqa: B017
+        ledger.complete(
+            outcome.key,
+            consumed_inputs={"checkpoint_seq": 0, "event_positions": [], "action_ids": [""]},
+        )
     store.close()
 
 

@@ -43,7 +43,13 @@ from continuum.models import (
     utcnow,
 )
 
-__all__ = ["StateValidator", "ValidationOutcome", "validate_state", "AdmissibilityResult", "check_admissibility"]
+__all__ = [
+    "StateValidator",
+    "ValidationOutcome",
+    "validate_state",
+    "AdmissibilityResult",
+    "check_admissibility",
+]
 
 
 #: Statuses that mean the component cannot be relied on as-is.
@@ -122,15 +128,24 @@ def check_admissibility(
         if action.status is not ActionStatus.COMPLETED:
             continue
         ci = action.consumed_inputs
-        if ci.checkpoint_seq == 0 and not ci.event_positions and not ci.component_ids and not ci.action_ids:
+        if (
+            ci.checkpoint_seq == 0
+            and not ci.event_positions
+            and not ci.component_ids
+            and not ci.action_ids
+        ):
             continue
         reasons: list[str] = []
         chain_pos = idx + 1
         if ci.checkpoint_seq > checkpoint.version:
-            reasons.append(f"checkpoint_seq {ci.checkpoint_seq} after checkpoint version {checkpoint.version}")
+            reasons.append(
+                f"checkpoint_seq {ci.checkpoint_seq} after checkpoint version {checkpoint.version}"
+            )
         for pos in ci.event_positions:
             if pos > checkpoint.state.source_sequence:
-                reasons.append(f"event position {pos} after checkpoint source_sequence {checkpoint.state.source_sequence}")
+                reasons.append(
+                    f"event position {pos} after checkpoint source_sequence {checkpoint.state.source_sequence}"
+                )
                 break
         if ci.component_ids:
             for cid in ci.component_ids:
@@ -152,11 +167,16 @@ def check_admissibility(
             )
     if not blocking:
         return AdmissibilityResult(admissible=True, blocking=(), reason="", details=())
-    reason = f"checkpoint v{checkpoint.version} inadmissible: {len(blocking)} blocking commitment(s): " + "; ".join(
-        f"{d['action_id'][:12]} at position {d['chain_position']} ({d['reason']})" for d in details[:3]
+    reason = (
+        f"checkpoint v{checkpoint.version} inadmissible: {len(blocking)} blocking commitment(s): "
+        + "; ".join(
+            f"{d['action_id'][:12]} at position {d['chain_position']} ({d['reason']})"
+            for d in details[:3]
+        )
     )
-    return AdmissibilityResult(admissible=False, blocking=tuple(blocking), reason=reason, details=tuple(details))
-
+    return AdmissibilityResult(
+        admissible=False, blocking=tuple(blocking), reason=reason, details=tuple(details)
+    )
 
 
 @dataclass(frozen=True, slots=True)

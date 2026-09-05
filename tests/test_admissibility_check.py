@@ -22,7 +22,15 @@ def test_admissible_when_no_consumed_after() -> None:
     store, run_id = _store_with_checkpoint("run_adm_ok")
     ledger = ActionLedger(store, run_id)
     out = ledger.claim("a.do", {"x": 1})
-    ledger.complete(out.key, consumed_inputs={"checkpoint_seq": 0, "event_positions": [], "component_ids": [], "action_ids": []})
+    ledger.complete(
+        out.key,
+        consumed_inputs={
+            "checkpoint_seq": 0,
+            "event_positions": [],
+            "component_ids": [],
+            "action_ids": [],
+        },
+    )
     out2 = ledger.claim("a.do2", {"y": 2})
     ledger.complete(out2.key)
     mgr = CheckpointManager(store)
@@ -42,7 +50,15 @@ def test_inadmissible_via_event_position() -> None:
     seq = cp.state.source_sequence
     ledger = ActionLedger(store, run_id)
     out = ledger.claim("a.downstream", {"v": 1})
-    ledger.complete(out.key, consumed_inputs={"checkpoint_seq": 0, "event_positions": [seq + 5], "component_ids": [], "action_ids": []})
+    ledger.complete(
+        out.key,
+        consumed_inputs={
+            "checkpoint_seq": 0,
+            "event_positions": [seq + 5],
+            "component_ids": [],
+            "action_ids": [],
+        },
+    )
     restored = mgr.restore(run_id)
     result = check_admissibility(restored.checkpoint, ledger.all())
     assert result.admissible is False
@@ -60,7 +76,15 @@ def test_inadmissible_via_component_id() -> None:
     assert cp is not None
     ledger = ActionLedger(store, run_id)
     out = ledger.claim("a.comp", {})
-    ledger.complete(out.key, consumed_inputs={"checkpoint_seq": 0, "event_positions": [], "component_ids": ["decision_unknown"], "action_ids": []})
+    ledger.complete(
+        out.key,
+        consumed_inputs={
+            "checkpoint_seq": 0,
+            "event_positions": [],
+            "component_ids": ["decision_unknown"],
+            "action_ids": [],
+        },
+    )
     restored = mgr.restore(run_id)
     result = check_admissibility(restored.checkpoint, ledger.all())
     assert result.admissible is False
@@ -75,7 +99,15 @@ def test_inadmissible_via_checkpoint_seq() -> None:
     assert cp is not None
     ledger = ActionLedger(store, run_id)
     out = ledger.claim("a.seq", {})
-    ledger.complete(out.key, consumed_inputs={"checkpoint_seq": cp.version + 1, "event_positions": [], "component_ids": [], "action_ids": []})
+    ledger.complete(
+        out.key,
+        consumed_inputs={
+            "checkpoint_seq": cp.version + 1,
+            "event_positions": [],
+            "component_ids": [],
+            "action_ids": [],
+        },
+    )
     restored = mgr.restore(run_id)
     result = check_admissibility(restored.checkpoint, ledger.all())
     assert result.admissible is False
@@ -85,12 +117,20 @@ def test_inadmissible_via_checkpoint_seq() -> None:
 
 def test_engine_maps_event_to_repair() -> None:
     store, run_id = _store_with_checkpoint("run_engine_repair")
-    mgr = CheckpointManager(store)
+    CheckpointManager(store)
     cp = store.latest_checkpoint(run_id)
     assert cp is not None
     ledger = ActionLedger(store, run_id)
     out = ledger.claim("a.repair", {})
-    ledger.complete(out.key, consumed_inputs={"checkpoint_seq": 0, "event_positions": [cp.state.source_sequence + 1], "component_ids": [], "action_ids": []})
+    ledger.complete(
+        out.key,
+        consumed_inputs={
+            "checkpoint_seq": 0,
+            "event_positions": [cp.state.source_sequence + 1],
+            "component_ids": [],
+            "action_ids": [],
+        },
+    )
     engine = RecoveryEngine(store)
     decision = engine.assess(run_id)
     assert decision.mode.value == "repair_and_resume"
@@ -101,14 +141,22 @@ def test_engine_maps_event_to_repair() -> None:
 
 def test_engine_maps_action_ids_to_request_human() -> None:
     store, run_id = _store_with_checkpoint("run_engine_human")
-    mgr = CheckpointManager(store)
+    CheckpointManager(store)
     cp = store.latest_checkpoint(run_id)
     assert cp is not None
     ledger = ActionLedger(store, run_id)
     out1 = ledger.claim("a.first", {})
     ledger.complete(out1.key)
     out2 = ledger.claim("a.second", {})
-    ledger.complete(out2.key, consumed_inputs={"checkpoint_seq": 0, "event_positions": [], "component_ids": [], "action_ids": [out1.action.action_id]})
+    ledger.complete(
+        out2.key,
+        consumed_inputs={
+            "checkpoint_seq": 0,
+            "event_positions": [],
+            "component_ids": [],
+            "action_ids": [out1.action.action_id],
+        },
+    )
     engine = RecoveryEngine(store)
     decision = engine.assess(run_id)
     assert decision.mode.value == "request_human"
