@@ -258,7 +258,7 @@ def test_cli_piped_vs_tty_is_byte_identical_modulo_colour(tmp_path: Path) -> Non
     assert _without_volatile_age(ANSI.sub("", coloured)) == _without_volatile_age(plain)
     _, plain_v, _ = _run_cli(db, "--db", db, "validate", "run_1")
     _, coloured_v, _ = _run_cli(db, "--db", db, "--color", "validate", "run_1")
-    assert ANSI.sub("", coloured_v) == plain_v
+    assert _without_volatile_age(ANSI.sub("", coloured_v)) == _without_volatile_age(plain_v)
 
 
 def test_json_is_never_colourised_even_with_flagged_pins(tmp_path: Path) -> None:
