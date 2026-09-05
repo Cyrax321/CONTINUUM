@@ -37,6 +37,60 @@ All notable changes to this project are documented here. The format follows
   environments without the project's dependencies, where its results are not
   trustworthy. Contributor tooling, no runtime change.
 
+- **`hooks install` wires the compaction checkpoint (#449).** Claude Code fires
+  `PreCompact` immediately before it compacts the transcript: the one
+  interruption the harness announces in advance, and until now the only
+  lifecycle hook the installer left for the operator to hand-edit into
+  `.claude/settings.json`. Forgetting it meant compaction could discard
+  reasoning that was never recorded, which is the loss this project exists to
+  prevent. `continuum hooks install claude-code` now writes a `PreCompact`
+  entry running the new `continuum precompact` command, alongside the
+  SessionStart and PostToolUse hooks; `--no-precompact` skips it and
+  `hooks remove` takes it out with the rest. It is on by default, unlike
+  `--with-gate`, because a gate can deny a tool call and so changes how the
+  agent behaves, while this only seals state the run already has.
+
+  The documented recipe could not be installed verbatim: it names one run
+  (`continuum checkpoint my-task --reason "pre-compact"`) while `hooks install`
+  runs once and runs come and go. So `continuum precompact` resolves the run
+  itself, as `observe` and `briefing` do, and records the checkpoint with
+  trigger `context_pressure` (the harness-side, involuntary form of the signal
+  `ContextPressurePolicy` can only see when the agent volunteers its own token
+  counts). Beside the checkpoint it writes the two snapshots the guide promises,
+  at the paths the guide already names, so a recipe scripted against
+  `.continuum/precompact-resume.json` or `.continuum/precompact-verify.json`
+  keeps working. Those paths are reported in posix form on every platform, since
+  the guide names one spelling and recipes read them straight out of the JSON.
+  The checkpoint also refreshes `.continuum/resume.json`, which is what lets the
+  next session's SessionStart briefing detect the interruption without opening
+  the database at all.
+
+  The hook never fails its host. With no active run it exits 0 having sealed
+  nothing, and a snapshot it cannot write is reported in `failures` while the
+  checkpoint stands: that is the durable half, and it is already in the
+  hash-chained log. An explicit `--run-id` naming a run that does not exist is
+  still an error, since an operator who baked the wrong id into a hook command
+  needs to hear it.
+
+  The compaction recipe the guide published for hand-editing is recognised as
+  this project's own, so `hooks install` adopts it (one entry, repointed) instead
+  of appending a second hook to fire beside it, and `hooks remove` takes it out
+  rather than leaving a `continuum checkpoint` writing to a database the operator
+  believes they detached from. It cannot be recognised by shape, the way every
+  other installed hook is, because it predates the `precompact` subcommand and
+  ends in a redirect; the snapshot filenames this project named are the
+  fingerprint instead, and a command has to invoke the `continuum` CLI as well
+  before either verb will touch it. `--no-precompact` now takes out an entry an
+  earlier install wrote, rather than only declining to write one, and is the
+  supported way to keep a hand-written recipe that pins a single run: it removes
+  the command the installer writes and leaves what the operator wrote alone.
+
+  Codex and Gemini get no `PreCompact` entry: neither harness exposes a
+  compaction event, as both guides state, and wiring a hook to an event that
+  never fires would look like durability without being any. Codex observation
+  stays `^Bash$|^shell$`, now pinned by a test against both pages that document
+  it, so the profile and the guides fail together instead of drifting apart.
+
 - **Deterministic authorization identity from keys or resource tokens (#412,
   PR #430).** Budgets need a bucket that survives an agent minting a fresh
   idempotency key: with one bucket per key, a retry loop that re-renders its
@@ -254,6 +308,50 @@ All notable changes to this project are documented here. The format follows
   CONTINUUM hooks found in <path>` when there was nothing to do), and the
   subcommand's `--help` line says what it removes. The `removed` boolean in
   `--json` is unchanged.
+
+- **The serve HTTP transport fails closed on body framing (#533).** `do_POST`
+  read the body as `int(self.headers.get("Content-Length") or 0)`, so
+  `Content-Length: abc` raised `ValueError` out of the handler and the
+  connection closed with no response at all: to the caller a refusal is
+  indistinguishable from a dead sidecar. A `Content-Length` that is not a
+  non-negative integer, including one that is present but blank, is now
+  `400 {"error": "invalid Content-Length: ..."}`. Only that one connection was
+  ever lost, since each is handled on its own thread, which is what made the
+  crash quiet enough to go unnoticed.
+
+  The same read never checked `Transfer-Encoding`. A client that omitted
+  `Content-Length` and sent a chunked body had `length` read as `0`, so the
+  request was dispatched as though its body were empty while the stream itself
+  was never bounded, which is how a chunked body got past a cap the other two
+  HTTP surfaces enforce. `chunked` (case-insensitive, anywhere in the comma
+  list) is now refused with 400 rather than decoded, after draining up to
+  `SIDECAR_DRAIN_LIMIT_BYTES` so the client can finish writing and read the
+  refusal instead of dying on a broken pipe; framing that does not parse is
+  `400 invalid chunked Transfer-Encoding`.
+
+  The transport had no body cap at all, so `MAX_SIDECAR_BODY_BYTES` (1 MB,
+  matching the dashboard rather than the gateway's 10 MB, since neither surface
+  forwards a caller's payload anywhere) is refused with 413 from the header,
+  before the body is read. The happy path is unchanged: an absent
+  `Content-Length`, or a valid `0`, still dispatches the empty object, so a
+  method that takes no params stays callable with no body.
+
+  A refusal that leaves the body unread has to close the connection.
+  `protocol_version` is `HTTP/1.1`, so the socket stays open unless the handler
+  says otherwise, and two of the 400s answered without a trustable body
+  boundary: unparseable chunk framing stops the drain mid-stream, and a
+  `Content-Length` that is not a number cannot say how many bytes to discard.
+  Whatever the client had already written was then read as the next request on
+  that same connection, so a body crafted to look like a request line was
+  dispatched as one. That is the request smuggling class rather than a plain
+  desync, and it stayed invisible because every test sent `Connection: close`.
+  Both branches now set `close_connection` before answering, matching the
+  unbounded drain path. Refusals whose boundary is known still keep the
+  connection alive: an oversize `Content-Length` drained in full, and a chunked
+  body drained to its terminal chunk. To make that second guarantee real, the
+  drain now checks that each chunk ends with its terminating CRLF instead of
+  consuming two bytes blindly, so a missing terminator is `malformed` rather
+  than a silent resync onto the middle of the next chunk header.
 
 - **A valid-JSON request that is not a JSON object is answered on both sidecar
   transports instead of killing one and hanging up on the other (#582).** Body
