@@ -8,6 +8,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`examples/demo.ipynb`, the crash-recovery walkthrough as a notebook (#283).**
+  The lowest-friction way to watch a recovery was `docker run`, which still wants
+  a daemon; this wants a browser. Colab and Binder badges in the Quick Start
+  table open it, and its first cell installs CONTINUUM only when the import
+  fails, so the one file runs on both and from a clone unchanged. The walkthrough
+  is the one `examples/crash_recovery_agent.py` prints, driven through the library
+  instead of the CLI: a real child process is killed at document 400 by a real
+  `os._exit(9)`, the dataset moves v3 to v4, `RecoveryEngine.assess` answers
+  `REQUEST_HUMAN` and `continuum resume` would exit 20, a probe reconciles the
+  side effect nobody could vouch for, and the run finishes at 1,000 documents
+  with zero duplicates and one GitHub issue. It writes to a temporary directory,
+  not to `demo-run/`, and deletes it in the last cell.
+  `tests/test_demo_notebook.py` executes the cells as a plain script, so a
+  renamed API cannot rot the first thing a new reader runs. No library change.
+
 - **`.pre-commit-config.yaml`, pinned to the ruff CI runs (#537).**
   `CONTRIBUTING.md` described the file instead of shipping it, so
   `pre-commit install` on a fresh clone installed a hook that ran nothing and
@@ -21,6 +36,79 @@ All notable changes to this project are documented here. The format follows
   mypy stays out, as `CONTRIBUTING.md` already explains: hooks run in isolated
   environments without the project's dependencies, where its results are not
   trustworthy. Contributor tooling, no runtime change.
+
+- **Deterministic authorization identity from keys or resource tokens (#412,
+  PR #430).** Budgets need a bucket that survives an agent minting a fresh
+  idempotency key: with one bucket per key, a retry loop that re-renders its
+  key gets a fresh allowance every attempt and the cap means nothing. New
+  `resolve_authorization_id(action_type, key, arguments, *, volatile, ledger)`
+  in `src/continuum/actions/idempotency.py` derives that identity with a stated
+  precedence. An explicit key wins and arguments are ignored, so the id is
+  `stable_hash({type, key})` and the same pair resolves the same on any
+  machine. With no key, the id is the hash of the canonical leaf tokens of the
+  arguments, which collapses the renderings of one operation that differ only
+  in shape: a renamed field (`invoice_id` against `invoice`), a relative path
+  against an absolute one, a derived form such as `INV-001.sent` against
+  `INV-001`. A token under three characters or on the fixed weak/stopword lists
+  (`sent`, `true`, `tmp`, `file`, `the`, `and`, and the rest) is dropped, so
+  arguments made only of those resolve to `None`, as do arguments with neither
+  a key nor a distinctive token; that leaves the caller unbound and
+  byte-identical to before. When a ledger is supplied, only a *unique* completed
+  or interrupted match anchors the id; an ambiguous
+  multi-match returns `None` rather than guessing a bucket. Action-type drift
+  is deliberately not bridged, because two different action types are two
+  different operations. The helper reuses `identity_tokens`, `leaf_tokens`,
+  `location_tokens` and the existing stem/suffix rule rather than introducing a
+  second identity scheme, so a claim and a budget cannot disagree about what
+  the same operation is. Covered by `tests/test_authorization_identity.py`.
+
+- **Authorization-bound budget drawdown on claim (#413).** The identity above
+  is what `ActionLedger` now binds budgets to. `_budget_authorization_id`
+  deliberately passes neither the explicit key nor the ledger: passing the key
+  would give each rotated key its own bucket and undo the cap fix, and
+  anchoring on the ledger would let a prior failed attempt make its own retry
+  look unbound. A malformed registry fails closed with `LedgerError` rather
+  than proceeding unaccounted, while a `budgets.json` that does not exist means
+  budgets are unconfigured and nothing is drawn down, so runs without an
+  authorization registry stay byte-identical. `CONTINUUM_BUDGETS_PATH`
+  overrides the registry location. `continuum budget <run>` gained an
+  `AUTHORIZATION` table and a matching `authorization_budgets` JSON key, so a
+  drawdown is observable without reading the raw registry. Covered by
+  `tests/test_budget_drawdown.py`.
+
+- **Docstrings on every function in `gateway.py`, `dashboard/app.py` and
+  `cli/main.py` (#538).** The three files most recently hardened carried
+  undocumented functions, and `cli/main.py` sat at 47/59 = 79.7%, just under the
+  80% CodeRabbit threshold, so the next unrelated PR touching any of them
+  inherited a failing pre-merge check for code it did not write. All 30 are now
+  documented and each file reads 100%: 16/16, 12/12 and 59/59. The additions say
+  what the caller needs rather than restating the signature - which surfaces are
+  read-only, where an exit status carries the recovery verdict, why an oversized
+  dashboard body is drained before the 413, why `benchmark` cannot touch the
+  configured database, why a missing run answers 404 rather than 200. The
+  issue's file list is partly stale: `gateway.py`'s `_body` and `_handle` are
+  named as gaps but already documented on `main`, so the audit was rerun with an
+  AST pass over the three files rather than taken from the list. Docstrings only,
+  105 insertions and no deletions, no runtime change.
+
+- **`references/adapters.md` covers the thin hook adapters and the two transport
+  seams (#267).** The adapter reference documented the class-based adapters and
+  stopped there, so three shipped integrations and two seams lived only in README
+  bullets and source docstrings: `install_crewai_hooks`, `wrap_autogen_tool` and
+  `wrap_pydantic_ai_hooks` in `src/continuum/adapters/thin.py`, the enforcing
+  `continuum gateway` proxy, and the `continuum.otel` span processor. Someone who
+  opened the reference to wire CrewAI found no mention of it and could reasonably
+  conclude it was unsupported. Two new sections now mirror the README table, give
+  a snippet per surface, and state the parts that are easy to get wrong: `key_fn`
+  on a hook surface takes `(tool_name, args_dict)` rather than the wrapped
+  function's `(*args, **kwargs)`, the gateway settles a claim from the real
+  response status while the OTel bridge only observes and never blocks, and the
+  `[otel]` extra pins `opentelemetry-api` while `make_span_processor` imports
+  from `opentelemetry.sdk.trace`. Writing it surfaced one discrepancy, documented
+  rather than papered over: `thin.py`'s module docstring says provenance is
+  `EXTERNAL_AGENT`, but `ActionLedger` passes no source, so its events land with
+  `append_event`'s `Origin.DETERMINISTIC` default and a thin-adapter run is not
+  held for review the way an MCP-reported one is. Docs-only, no runtime change.
 
 ### Fixed
 
@@ -38,6 +126,14 @@ All notable changes to this project are documented here. The format follows
   `python examples/crash_recovery_agent.py`) runs from the repository root, where
   the workspace resolves to the same `demo-run` directory as before, so local
   behaviour is unchanged.
+
+- **`resolve_authorization_id` docstring matches the token predicate (#613).**
+  The function claimed that "status words" never produce an id. There is no
+  status-word category: a token is dropped only when it is shorter than three
+  characters or appears in `_WEAK_TOKENS` or `_STOPWORDS`. Words such as
+  `pending` and `queued` therefore bind an id, and the old sentence contradicted
+  testing. The same false "status words" claim in `identity_tokens` is corrected
+  for consistency. Wording only; no runtime change.
 
 - Make `continuum complete` idempotent for runs that are already completed (#356).
 
@@ -158,7 +254,27 @@ All notable changes to this project are documented here. The format follows
   CONTINUUM hooks found in <path>` when there was nothing to do), and the
   subcommand's `--help` line says what it removes. The `removed` boolean in
   `--json` is unchanged.
->>>>>>> 4e27e6f (fix(hooks): default the remove path to the client profile, like install (#580))
+
+- **A valid-JSON request that is not a JSON object is answered on both sidecar
+  transports instead of killing one and hanging up on the other (#582).** Body
+  framing was already fail-closed; the payload *shape* was not, and each
+  transport then failed in the way it had been written not to. On stdio,
+  `rid = req.get("id")` sat one line above the guard whose own comment reads
+  "report, never crash the loop", so a single `[]` line raised `AttributeError`
+  where nothing was catching, exited the process 1, and took every later request
+  on that long-lived session with it. On HTTP, `do_POST` already spelled out the
+  right answer, but raised it inside a `try` that caught only
+  `json.JSONDecodeError`, so the refusal escaped the handler and the connection
+  closed with no response at all: the caller saw `RemoteDisconnected`, which is
+  what a crashed sidecar looks like, three lines below code that knew the answer
+  was 400. Both now reach one shared check, since these two had already drifted
+  here: stdio answers `{"id": null, "error": {"type": "bad_request", "message":
+  "body must be a JSON object"}}` and reads the next request, and HTTP answers
+  `400 {"error": "body must be a JSON object"}`. The id is null because a
+  non-object request has nowhere to put one. Object requests, absent and empty
+  bodies (still the empty params object, so a method needing no params stays
+  callable), and the existing answers for genuinely malformed JSON are
+  unchanged.
 
 ## [0.1.0] - 2026-08-27
 
@@ -336,7 +452,9 @@ All notable changes to this project are documented here. The format follows
   probes, executable guidance, gateway, OTel bridge, action index);
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
-  the enforced-durability work complete; test counts are current (1224).
+  the enforced-durability work complete; test counts are current
+  (~1,918 collected, ~1,880 passed, ~38 skipped on a minimal env).
+  <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
   request bodies above 10 MB with 413, draining (without buffering) up to a

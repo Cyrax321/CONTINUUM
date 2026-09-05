@@ -25,6 +25,7 @@ import os
 import sqlite3
 import sys
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -199,6 +200,41 @@ def _environment(args: argparse.Namespace, run_id: str) -> EnvironmentSnapshot |
     return capture(run_id, StaticProvider(resources))
 
 
+def _liveness_advisory(
+    storage: Storage, run_id: str, *, now: datetime | None = None
+) -> dict[str, Any]:
+    """Compute liveness advisory for the read path, injected clock."""
+    try:
+        from continuum.recovery.health import advisory_for_storage
+
+        return advisory_for_storage(storage, run_id, now=now)
+    except Exception:
+        return {"breached": False, "silence_seconds": None, "threshold_seconds": None}
+
+
+def _liveness_text(advisory: dict[str, Any]) -> str:
+    """Render advisory as human text, never affects exit code."""
+    try:
+        from continuum.recovery.health import advisory_text
+
+        return advisory_text(advisory)
+    except Exception:
+        breached = advisory.get("breached")
+        silence = advisory.get("silence_seconds")
+        threshold = advisory.get("threshold_seconds")
+        phase = advisory.get("phase") or "otherwise"
+        if silence is None:
+            return "Liveness: no events yet, no silence to evaluate."
+        if breached:
+            return (
+                f"Liveness: BREACHED, silence {silence:.1f}s exceeds threshold "
+                f"{threshold}s (phase {phase}). Advisory only."
+            )
+        return (
+            f"Liveness: ok, silence {silence:.1f}s within threshold {threshold}s (phase {phase})."
+        )
+
+
 # --------------------------------------------------------------------------- #
 # commands
 # --------------------------------------------------------------------------- #
@@ -264,6 +300,11 @@ def cmd_start(args: argparse.Namespace, storage: Storage, out: Any, err: Any) ->
 
 
 def cmd_runs(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """List the most recent runs with their status and event count.
+
+    The text table truncates long goals to keep one run per line; the JSON
+    payload carries each goal in full, so scripts never read a clipped goal.
+    """
     runs = storage.list_runs(limit=args.limit)
     if not runs:
         _emit(
@@ -607,6 +648,11 @@ def cmd_status(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
 
 def cmd_history(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """List a run's checkpoint lineage, one row per checkpoint.
+
+    Read-only. A run that was never created raises ``RunNotFound`` rather than
+    reporting an empty history, which would read as "no checkpoints yet".
+    """
     # Multiple checkpoints legitimately share a state version (put_version
     # returns the same version when the state fingerprint is unchanged), so we
     # list every checkpoint rather than keying by version, which would collapse
@@ -652,6 +698,11 @@ def cmd_history(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
 
 
 def cmd_events(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Print a run's event log, optionally windowed by ``--after`` / ``--upto``.
+
+    Read-only. Shows the whole log, archived prefix included, so a compacted run
+    reads the same as one that was never compacted.
+    """
     storage.get_run(args.run_id)  # raises RunNotFound for a run that was never created
     # Full log: archived prefix plus live tail, matching the dashboard hint (issue #532).
     events = [
@@ -763,6 +814,11 @@ def cmd_impact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
 
 def cmd_diff(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Show the semantic diff between two stored state versions of one run.
+
+    Read-only: both versions are read as stored, never re-projected, so the diff
+    reports what was actually persisted at each point.
+    """
     before = storage.get_version(args.run_id, args.from_version)
     after = storage.get_version(args.run_id, args.to_version)
     diff = diff_states(before, after)
@@ -894,6 +950,8 @@ def cmd_validate(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
         text = decision.render()
     if pins_text:
         text += "\n\n" + pins_text
+    liveness = _liveness_advisory(storage, args.run_id)
+    text += "\n\n" + _liveness_text(liveness)
     payload = {
         "run_id": decision.run_id,
         "mode": decision.mode.value,
@@ -903,6 +961,7 @@ def cmd_validate(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
         "repairs": [s.action_name for s in decision.plan.steps],
         "human_steps": steps,
         "constraint_pins": constraint_pins,
+        "liveness": liveness,
     }
     # Advisory health is intentionally not part of the payload above; use
     # dedicated health command or resume advisory key for the score.
@@ -914,6 +973,150 @@ def cmd_validate(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
         palette=getattr(args, "_palette", None),
     )
     return exit_code_for(decision.mode)
+
+
+def _parse_duration(value: str) -> int:
+    """Parse duration like "30m", "1h", "10s" or plain seconds into int seconds."""
+    if isinstance(value, int):
+        return int(value)
+    s = str(value).strip()
+    if s.isdigit():
+        return int(s)
+    # Support suffixes
+    suffixes = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    if s and s[-1].lower() in suffixes:
+        num = s[:-1].strip()
+        if num.replace(".", "", 1).isdigit():
+            return int(float(num) * suffixes[s[-1].lower()])
+    raise ValueError(f"invalid duration {value!r}, expected e.g. 30m, 1h, 3600 or 10s")
+
+
+def cmd_watch(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Watch a run for liveness breach, optionally notify via webhook.
+
+    Read-only unless a breach is detected, in which case it appends
+    LIVENESS_SILENCE_DETECTED (hash-chained) and, on recovery, LIVENESS_RECOVERED.
+    Webhook delivery is fail-open, like every notification path.
+    """
+    run_id = args.run_id
+    # Check run exists
+    try:
+        storage.get_run(run_id)
+    except Exception as exc:
+        print(f"error: {exc}", file=err)
+        return 2
+    # Determine threshold
+    max_silence = getattr(args, "max_silence", None)
+    override_threshold = None
+    if max_silence is not None:
+        try:
+            override_threshold = _parse_duration(max_silence)
+        except Exception as exc:
+            print(f"error: --max-silence: {exc}", file=err)
+            return 1
+    # Compute advisory with injected clock (now)
+    try:
+        from continuum.recovery.health import CadenceContract, advisory_for_storage
+
+        # Use override if provided, else load contract
+        if override_threshold is not None:
+            contract = CadenceContract(max_silence_seconds=override_threshold)
+            # We need to compute advisory manually with override
+            from datetime import UTC, datetime
+
+            from continuum.recovery.health import _has_open_claim, _last_event_ts, evaluate
+
+            last_ts = _last_event_ts(storage, run_id)
+            has_claim = _has_open_claim(storage, run_id)
+            now = datetime.now(UTC)
+            result = evaluate(now, last_ts, contract=contract, has_open_claim=has_claim)
+            advisory = {
+                "breached": result.breached,
+                "silence_seconds": result.silence_seconds,
+                "threshold_seconds": result.threshold_seconds,
+                "phase": result.phase,
+                "has_open_claim": has_claim,
+                "last_event_ts": result.last_event_ts.isoformat() if result.last_event_ts else None,
+                "now": result.now.isoformat(),
+            }
+        else:
+            advisory = advisory_for_storage(storage, run_id)
+    except Exception as exc:
+        print(f"error: liveness check failed: {exc}", file=err)
+        return 1
+
+    breached = bool(advisory.get("breached"))
+    # Append liveness events as needed (mutating only on breach/recovery)
+    try:
+        events = storage.read_events(run_id)
+        last_liveness = None
+        for ev in reversed(events):
+            if ev.type.value in ("LIVENESS_SILENCE_DETECTED", "LIVENESS_RECOVERED"):
+                last_liveness = ev.type.value
+                break
+        if breached and last_liveness != "LIVENESS_SILENCE_DETECTED":
+            # Append DETECTED
+            from continuum.events import EventType
+
+            storage.append_event(
+                run_id,
+                EventType.LIVENESS_SILENCE_DETECTED,
+                {
+                    "silence_seconds": advisory.get("silence_seconds"),
+                    "threshold_seconds": advisory.get("threshold_seconds"),
+                    "phase": advisory.get("phase"),
+                },
+            )
+        elif not breached and last_liveness == "LIVENESS_SILENCE_DETECTED":
+            from continuum.events import EventType
+
+            storage.append_event(
+                run_id,
+                EventType.LIVENESS_RECOVERED,
+                {"silence_seconds": advisory.get("silence_seconds")},
+            )
+    except Exception:
+        # Fail-open on storage errors for liveness events, never block the check
+        pass
+
+    on_breach = getattr(args, "on_breach", "exit")
+    webhook_url = getattr(args, "webhook_url", None)
+    payload = {
+        "run_id": run_id,
+        "breached": breached,
+        "liveness": advisory,
+    }
+    text = (
+        _liveness_text(advisory)
+        if breached
+        else f"Liveness ok for {run_id}: {advisory.get('silence_seconds')}"
+    )
+    if breached and on_breach == "webhook" and webhook_url:
+        try:
+            import json as _json
+            import urllib.request
+
+            data = _json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                webhook_url, data=data, headers={"Content-Type": "application/json"}, method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=5):
+                pass
+        except Exception as exc:
+            # Fail-open delivery, like dashboard token path
+            print(f"warning: webhook delivery failed: {exc}", file=err)
+    # Emit result
+    _emit(
+        payload,
+        text,
+        as_json=getattr(args, "json", False),
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    # Exit code: breached maps to WAIT which is REQUIRES_HUMAN (20), otherwise OK
+    if breached:
+        return 20
+    return 0
 
 
 def cmd_health(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
@@ -1072,6 +1275,8 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     pins_text = _constraint_pins_text(constraint_pins)
     if pins_text:
         text += "\n\n" + pins_text
+    liveness = _liveness_advisory(storage, run_id)
+    text += "\n\n" + _liveness_text(liveness)
     payload = {
         "run_id": decision.run_id,
         "goal": storage.get_run(run_id).goal,
@@ -1095,6 +1300,7 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         },
         "advisory": advisory,
         "constraint_pins": constraint_pins,
+        "liveness": liveness,
     }
     _emit(
         payload,
@@ -2420,6 +2626,7 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
         DEFAULT_RECONCILERS_PATH,
         ReconcilerConfigError,
         load_reconcilers,
+        settle_authority,
         settle_run,
     )
 
@@ -2431,6 +2638,32 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
     except ReconcilerConfigError as exc:
         print(f"error: {exc}", file=err)
         return ExitCode.ERROR
+
+    # Authority probe path (issue #289c)
+    authority_id = getattr(args, "authority", None)
+    if authority_id:
+        authority_report = settle_authority(
+            storage, args.run_id, authority_id, probes, dry_run=args.dry_run
+        )
+        payload = {"run_id": args.run_id, "dry_run": args.dry_run, **authority_report.as_dict()}
+        # Keep existing shape for actions report when authority path taken
+        if authority_report.valid is True:
+            line = f"authority {authority_id!r} still valid, reconciled and unblocked"
+        elif authority_report.valid is False:
+            line = f"authority {authority_id!r} not valid, remains blocked"
+        else:
+            line = f"authority {authority_id!r} probe could not determine validity"
+        lines = [line, f"detail: {authority_report.detail}"]
+        if args.dry_run:
+            lines.append("dry run: nothing was written")
+        _emit(
+            payload,
+            "\n".join(lines),
+            as_json=args.json,
+            stream=out,
+            palette=getattr(args, "_palette", None),
+        )
+        return ExitCode.OK if authority_report.valid is True else ExitCode.REQUIRES_HUMAN
 
     pending = ActionLedger(storage, args.run_id).pending()
     report = settle_run(storage, args.run_id, probes, dry_run=args.dry_run)
@@ -2739,6 +2972,11 @@ def cmd_forget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
 
 def cmd_contract(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Print the recovery contract for a run without acting on it.
+
+    Read-only, but the exit status still carries the recovery mode, so a script
+    can gate on the verdict without parsing the contract it just printed.
+    """
     decision = RecoveryEngine(storage).assess(
         args.run_id, current_environment=_environment(args, args.run_id)
     )
@@ -2914,6 +3152,13 @@ def cmd_export_evidence(args: argparse.Namespace, storage: Storage, out: Any, er
 
 
 def cmd_benchmark(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Run the recovery and idempotency benchmarks and report both.
+
+    Uses its own throwaway stores, so the configured database is untouched. The
+    idempotency pass runs a quarter of ``--total``, since it attempts every
+    action twice across four strategies. ``--json`` appends the machine
+    readable payload after the tables rather than replacing them.
+    """
     import json
 
     from continuum.benchmark import (
@@ -3076,6 +3321,11 @@ def cmd_attest_verify(args: argparse.Namespace, storage: Storage, out: Any, err:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the full ``continuum`` parser, subcommands included.
+
+    Every subcommand sets ``func`` as a default, so :func:`main` dispatches on
+    the parsed namespace alone and never on the command name.
+    """
     parser = argparse.ArgumentParser(
         prog="continuum",
         description="Semantic recovery layer for long-running AI agents.",
@@ -3105,15 +3355,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     def add(name: str, func: Any, help_text: str) -> argparse.ArgumentParser:
+        """Register a subcommand bound to ``func``, returning it for more arguments."""
         p = sub.add_parser(name, help=help_text, description=help_text)
         p.set_defaults(func=func)
         return p
 
     def with_run(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        """Add the positional ``run_id`` every run-scoped subcommand takes."""
         p.add_argument("run_id", help="the run to operate on.")
         return p
 
     def with_env(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        """Add the repeatable ``--env NAME=VERSION`` flag for staleness checks."""
         p.add_argument(
             "--env",
             action="append",
@@ -3381,6 +3634,7 @@ def build_parser() -> argparse.ArgumentParser:
     hooks_sub = hooks.add_subparsers(dest="hooks_command", metavar="ACTION CLIENT", required=True)
 
     def hooks_client(p: argparse.ArgumentParser, func: Any) -> None:
+        """Give a ``hooks`` action its client selector and settings override."""
         p.add_argument(
             "client",
             choices=tuple(CLIENT_PROFILES),
@@ -3454,6 +3708,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="probe registry path (default: .continuum/reconcilers.json).",
     )
+    reconcile_auto.add_argument(
+        "--authority",
+        default=None,
+        help="probe a consumed authority id via reconcilers.json instead of actions",
+    )
     with_run(add("actions", cmd_actions, "List external side effects."))
     with_env(with_run(add("show-contract", cmd_contract, "Print the recovery contract.")))
 
@@ -3500,6 +3759,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8765, help="port for --transport http.")
 
     def cmd_dashboard(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+        """Serve the read-only dashboard, blocking until interrupted.
+
+        Binds loopback unless ``--host`` says otherwise: the pages render goals
+        and side-effect details, which must not be off-host by default.
+        """
         from continuum.dashboard import serve_dashboard as _serve
 
         print(f"Serving dashboard at http://localhost:{args.port}", file=out)
@@ -3515,6 +3779,29 @@ def build_parser() -> argparse.ArgumentParser:
         default="127.0.0.1",
         help="bind address (default: 127.0.0.1; 0.0.0.0 exposes recovery data).",
     )
+
+    watch = with_run(
+        add("watch", cmd_watch, "Watch a run for liveness breach, optionally notify via webhook.")
+    )
+    watch.add_argument(
+        "--max-silence",
+        dest="max_silence",
+        default=None,
+        help="max silence before breach, e.g. 30m, 1h, 3600",
+    )
+    watch.add_argument(
+        "--on-breach",
+        choices=("webhook", "exit"),
+        default="exit",
+        help="action on breach (default: exit)",
+    )
+    watch.add_argument(
+        "--webhook-url",
+        dest="webhook_url",
+        default=None,
+        help="webhook URL for --on-breach webhook",
+    )
+    watch.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
 
     return parser
 

@@ -26,7 +26,10 @@ Welcome. This guide gets you from clone to green tests without re-deriving conte
 
 Install once with `uv sync --extra dev` (or `pip install -e ".[dev]"`).
 
-- Run all tests: `uv run pytest` or `pytest -q`. Expect `1020 passed, 9 skipped` on main at this writing. Skips are environmental (Postgres without `CONTINUUM_TEST_POSTGRES_DSN`, adapter tests without `langgraph` or `openai-agents`).
+- Run all tests: `uv run pytest` or `pytest -q`. Expect `~1,880 passed, ~38 skipped`
+  on main at this writing (`~1,918` collected).
+  <!-- generated via: pytest --collect-only -q; pytest -q -->
+  Skips are environmental (Postgres without `CONTINUUM_TEST_POSTGRES_DSN`, adapter tests without `langgraph` or `openai-agents`).
 - Run a single area: `uv run pytest tests/test_checkpoint_phase4.py -v`
 - Lint: `uv run ruff check src/ tests/ examples/`
 - Format check: `uv run ruff format --check src/ tests/ examples/`
