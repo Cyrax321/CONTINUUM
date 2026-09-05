@@ -196,6 +196,68 @@ def test_bad_params_map_to_400(server) -> None:
     assert "error" in body
 
 
+# --- request shape (issue #582) ---------------------------------------------------- #
+
+
+def post_body(addr: str, method: str, body: bytes) -> tuple[int, dict[str, object]]:
+    """POST one exact body, so a test can send what ``post`` cannot encode."""
+    req = urllib.request.Request(
+        f"http://{addr}/{method}", data=body, headers={"Content-Type": "application/json"}
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=5)
+        return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        return exc.code, json.loads(raw) if raw else {}
+
+
+@pytest.mark.parametrize("body", (b"[]", b"null", b"5", b'"resume"', b"true", b'["resume"]'))
+def test_a_non_object_body_is_answered_not_dropped(server, body: bytes) -> None:
+    """A body that parses but is not an object is a 400 (issue #582).
+
+    ``do_POST`` already spelled out this refusal, but raised it inside a ``try``
+    that caught only ``json.JSONDecodeError``: ``BadParams`` is not one, so it
+    propagated out of the handler and the connection closed with no response at
+    all. The caller saw ``RemoteDisconnected``, which is what a crashed sidecar
+    looks like, three lines below code that knew the answer was 400.
+
+    No token is sent and the answer is still 400 rather than 403: a body that is
+    not a request cannot carry credentials to check, and the message is a fixed
+    string about the protocol, so refusing on shape first discloses nothing.
+    """
+    status, payload = post_body(server, "resume", body)
+    assert status == 400, payload
+    assert payload["error"] == "body must be a JSON object"
+
+
+def test_a_malformed_body_keeps_its_own_answer(server) -> None:
+    """The framing answer #582 reuses, pinned so the shared check cannot move it.
+
+    A body no parser can read keeps the decoder's message; only the shape case
+    gets the new one. Same status, different text, which is what lets a client
+    tell "you sent me bytes I cannot parse" from "you parsed, but that is not a
+    request".
+    """
+    status, payload = post_body(server, "resume", b"not json at all")
+    assert status == 400, payload
+    assert "invalid JSON body" in str(payload["error"])
+
+
+def test_the_server_keeps_serving_after_a_non_object_body(server) -> None:
+    """The refusal must cost the caller nothing beyond that one request."""
+    assert post_body(server, "resume", b"[]")[0] == 400
+
+    status, body = post(
+        server,
+        "record_progress",
+        {"run_id": "after-bad-shape", "completed": 1, "total": 2, "goal": "still up"},
+        token=TOKEN,
+    )
+    assert status == 200, body
+    assert body["completed"] == 1
+
+
 def test_storage_errors_map_to_500_without_killing_the_server(server) -> None:
     status, body = post(server, "resume", {"run_id": "ghost"}, token=TOKEN)
     assert status == 500

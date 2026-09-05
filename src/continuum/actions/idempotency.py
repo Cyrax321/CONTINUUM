@@ -308,8 +308,9 @@ def identity_tokens(
     rendered as one, since a row id of ``4821`` identifies a row as well as
     ``INV-001`` identifies an invoice (issue #36) -- plus the basename and
     basename-stem of any path-like value, and the same for ``external_id``.
-    Weak tokens are dropped so the fallback never matches on incidental values
-    like counts or status words.
+    Weak tokens are dropped so the fallback never matches on incidental values:
+    tokens shorter than three characters, or ones that appear in the fixed
+    weak-token or stopword lists.
     """
     tokens: set[str] = set()
 
@@ -553,8 +554,9 @@ def resolve_authorization_id(
        by shared identity tokens anchors the id, reusing the same containment,
        derivation and location-agreement checks as ``ActionLedger.claim``'s
        fallback; without a ledger the id is the hash of the canonical leaf
-       tokens of the incoming arguments. Weak tokens (counts, status words,
-       stopwords) never produce an id.
+       tokens of the incoming arguments. A token is dropped when it is
+       shorter than three characters or appears in the fixed weak-token or
+       stopword lists. Arguments made only of such tokens produce no id.
     3. Unbound (neither key nor distinctive tokens, or an ambiguous
        multi-match): ``None`` is returned. The caller keeps today's
        behaviour (no authorization-bound budget) byte-identical.

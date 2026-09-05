@@ -81,6 +81,7 @@ _ORIGIN_MAP: dict[Origin, CanonicalProvenance] = {
     Origin.HUMAN: CanonicalProvenance.VERIFIED,
     Origin.LLM: CanonicalProvenance.AGENT_ASSERTED,
     Origin.EXTERNAL_AGENT: CanonicalProvenance.AGENT_ASSERTED,
+    Origin.EXTERNAL_MONITOR: CanonicalProvenance.OBSERVED,
     Origin.IMPORTED: CanonicalProvenance.INFERRED,
 }
 

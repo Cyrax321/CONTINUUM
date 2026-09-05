@@ -187,16 +187,11 @@ def match_route(
         for _v in body.values():
             if isinstance(_v, str) and _v in consumed_authorities:
                 ev = consumed_authorities[_v]
-                seq = (
-                    getattr(ev, "sequence", "?")
-                    if hasattr(ev, "sequence")
-                    else ev.get("sequence", "?")
-                )
-                payload = getattr(ev, "payload", {}) or {}
                 if hasattr(ev, "payload"):
                     seq = ev.sequence
-                    payload = ev.payload
+                    payload = ev.payload or {}
                 else:
+                    seq = ev.get("sequence", "?")
                     payload = ev.get("payload", {})
                 consumer = payload.get("consumer_run_id", "?")
                 return Decision(
@@ -259,16 +254,15 @@ def match_route(
             if getattr(storage, "supports_action_index", False):
                 foreign_action = storage.foreign_action(key, exclude_run=run_id)
                 if foreign_action is not None:
-                    action = foreign_action
+                    return Decision(
+                        False,
+                        f"side effect {route.action_type!r} key {rendered!r} "
+                        f"already has a claim in another run "
+                        f"({foreign_action.status.value}); reconcile it first",
+                        route=route,
+                    )
         except Exception:
             action = None
-    else:
-        # action already from local, foreign stays None
-        pass
-    # If we already resolved action via foreign, we need to handle status below
-    # Reuse variable action; key already computed
-    # To avoid double lookup, we will have a flag
-
     if action is None or getattr(action, "action_type", None) != route.action_type:
         return Decision(
             False,
@@ -310,6 +304,12 @@ class GatewayServer:
         port: int = 0,
         bound_tenant: str | None = None,
     ) -> None:
+        """Bind the proxy and build the handler that enforces ``routes``.
+
+        ``port=0`` takes an ephemeral port, readable afterwards as
+        :attr:`port`. ``run_id`` of ``None`` resolves the active run per
+        request, so the proxy can start before the run does.
+        """
         self._storage_factory = storage_factory
         self._run_id = run_id
         self._routes = routes
@@ -320,6 +320,7 @@ class GatewayServer:
             protocol_version = "HTTP/1.1"
 
             def log_message(self, *args: Any) -> None:  # silence test noise
+                """Drop the stdlib access log: evidence belongs in the event log."""
                 pass
 
             def _body(self, max_bytes: int = MAX_BODY_BYTES) -> dict[str, Any]:
@@ -337,7 +338,33 @@ class GatewayServer:
                 decode (issue #323). Callers catch both and return, since the
                 response is already on the wire.
                 """
-                length = int(self.headers.get("Content-Length") or 0)
+                transfer_encodings = self.headers.get_all("Transfer-Encoding", [])
+                if transfer_encodings:
+                    self.close_connection = True
+                    self._respond(400, {"error": "transfer encoding is not supported"})
+                    raise _MalformedBody
+
+                content_lengths = self.headers.get_all("Content-Length", [])
+                if len(content_lengths) > 1:
+                    self.close_connection = True
+                    self._respond(
+                        400, {"error": "multiple Content-Length headers are not supported"}
+                    )
+                    raise _MalformedBody
+
+                cl_header = content_lengths[0] if content_lengths else None
+                if cl_header is not None:
+                    try:
+                        length = int(cl_header)
+                        if length < 0:
+                            raise ValueError("Content-Length must be non-negative")
+                    except ValueError as exc:
+                        self.close_connection = True
+                        self._respond(400, {"error": f"malformed Content-Length header: {exc}"})
+                        raise _MalformedBody from exc
+                else:
+                    length = 0
+
                 if length > max_bytes:
                     # Drain (without buffering) so the client can finish
                     # writing and read our 413, instead of dying on a broken
@@ -385,6 +412,12 @@ class GatewayServer:
                 return parsed if isinstance(parsed, dict) else {}
 
             def _respond(self, code: int, payload: dict[str, Any]) -> None:
+                """Answer with one JSON body, keeping the framing self-consistent.
+
+                ``Connection: close`` is sent only when the handler has already
+                decided to close, so a refusal that left the request body unread
+                does not advertise keep-alive it cannot honour.
+                """
                 body = json.dumps(payload).encode()
                 self.send_response(code)
                 if getattr(self, "close_connection", False):
@@ -511,26 +544,37 @@ class GatewayServer:
                         close_storage()
 
             def do_POST(self) -> None:  # noqa: N802
+                """Route a POST through the claim check."""
                 self._handle("POST")
 
             def do_PUT(self) -> None:  # noqa: N802
+                """Route a PUT through the claim check."""
                 self._handle("PUT")
 
             def do_PATCH(self) -> None:  # noqa: N802
+                """Route a PATCH through the claim check."""
                 self._handle("PATCH")
 
             def do_DELETE(self) -> None:  # noqa: N802
+                """Route a DELETE through the claim check."""
                 self._handle("DELETE")
 
             def do_GET(self) -> None:  # noqa: N802
+                """Route a GET through the claim check, if a route registers it."""
                 self._handle("GET")
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
         self.port = int(self.httpd.server_address[1])
 
     def serve_forever(self) -> None:
+        """Serve until :meth:`shutdown`, blocking the calling thread."""
         self.httpd.serve_forever()
 
     def shutdown(self) -> None:
+        """Stop serving and release the socket.
+
+        The stop runs on its own thread because ``shutdown`` cannot be called
+        from the thread currently inside ``serve_forever``.
+        """
         threading.Thread(target=self.httpd.shutdown).start()
         self.httpd.server_close()
