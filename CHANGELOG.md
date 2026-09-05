@@ -8,6 +8,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`examples/demo.ipynb`, the crash-recovery walkthrough as a notebook (#283).**
+  The lowest-friction way to watch a recovery was `docker run`, which still wants
+  a daemon; this wants a browser. Colab and Binder badges in the Quick Start
+  table open it, and its first cell installs CONTINUUM only when the import
+  fails, so the one file runs on both and from a clone unchanged. The walkthrough
+  is the one `examples/crash_recovery_agent.py` prints, driven through the library
+  instead of the CLI: a real child process is killed at document 400 by a real
+  `os._exit(9)`, the dataset moves v3 to v4, `RecoveryEngine.assess` answers
+  `REQUEST_HUMAN` and `continuum resume` would exit 20, a probe reconciles the
+  side effect nobody could vouch for, and the run finishes at 1,000 documents
+  with zero duplicates and one GitHub issue. It writes to a temporary directory,
+  not to `demo-run/`, and deletes it in the last cell.
+  `tests/test_demo_notebook.py` executes the cells as a plain script, so a
+  renamed API cannot rot the first thing a new reader runs. No library change.
+
 - **`.pre-commit-config.yaml`, pinned to the ruff CI runs (#537).**
   `CONTRIBUTING.md` described the file instead of shipping it, so
   `pre-commit install` on a fresh clone installed a hook that ran nothing and

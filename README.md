@@ -68,9 +68,11 @@ Zero-setup paths (no clone, no install, nothing published anywhere):
 | Use the CLI through Docker | `docker run --rm ghcr.io/cyrax321/continuum continuum --help` |
 | Run the CLI without cloning | `uvx --from git+https://github.com/Cyrax321/CONTINUUM.git continuum --help` |
 | Windows PowerShell (from a clone) | `powershell -ExecutionPolicy Bypass -File .\try-it.ps1` or `powershell -ExecutionPolicy Bypass -File .\try-it.ps1 cli --help` |
+| Watch the same recovery in a notebook | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Cyrax321/CONTINUUM/blob/main/examples/demo.ipynb) |
+| The same notebook, on Binder | [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/Cyrax321/CONTINUUM/HEAD?labpath=examples%2Fdemo.ipynb) |
 | Full dev environment in the browser | [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Cyrax321/CONTINUUM?quickstart=1) |
 
-The Docker image is published to GHCR by CI on every push to `main` and every release tag (`.github/workflows/docker-publish.yml`). The Codespace is defined in `.devcontainer/`.
+The Docker image is published to GHCR by CI on every push to `main` and every release tag (`.github/workflows/docker-publish.yml`). The Codespace is defined in `.devcontainer/`. The notebook is [examples/demo.ipynb](examples/demo.ipynb): its first cell installs CONTINUUM only when the import fails, so the one file runs on Colab, on Binder, and from a clone.
 
 ```bash
 git clone https://github.com/Cyrax321/CONTINUUM.git
