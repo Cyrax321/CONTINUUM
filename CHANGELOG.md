@@ -22,6 +22,45 @@ All notable changes to this project are documented here. The format follows
   environments without the project's dependencies, where its results are not
   trustworthy. Contributor tooling, no runtime change.
 
+- **Deterministic authorization identity from keys or resource tokens (#412,
+  PR #430).** Budgets need a bucket that survives an agent minting a fresh
+  idempotency key: with one bucket per key, a retry loop that re-renders its
+  key gets a fresh allowance every attempt and the cap means nothing. New
+  `resolve_authorization_id(action_type, key, arguments, *, volatile, ledger)`
+  in `src/continuum/actions/idempotency.py` derives that identity with a stated
+  precedence. An explicit key wins and arguments are ignored, so the id is
+  `stable_hash({type, key})` and the same pair resolves the same on any
+  machine. With no key, the id is the hash of the canonical leaf tokens of the
+  arguments, which collapses the renderings of one operation that differ only
+  in shape: a renamed field (`invoice_id` against `invoice`), a relative path
+  against an absolute one, a derived form such as `INV-001.sent` against
+  `INV-001`. A token under three characters or on the fixed weak/stopword lists
+  (`sent`, `true`, `tmp`, `file`, `the`, `and`, and the rest) is dropped, so
+  arguments made only of those resolve to `None`, as do arguments with neither
+  a key nor a distinctive token; that leaves the caller unbound and
+  byte-identical to before. When a ledger is supplied, only a *unique* completed
+  or interrupted match anchors the id; an ambiguous
+  multi-match returns `None` rather than guessing a bucket. Action-type drift
+  is deliberately not bridged, because two different action types are two
+  different operations. The helper reuses `identity_tokens`, `leaf_tokens`,
+  `location_tokens` and the existing stem/suffix rule rather than introducing a
+  second identity scheme, so a claim and a budget cannot disagree about what
+  the same operation is. Covered by `tests/test_authorization_identity.py`.
+
+- **Authorization-bound budget drawdown on claim (#413).** The identity above
+  is what `ActionLedger` now binds budgets to. `_budget_authorization_id`
+  deliberately passes neither the explicit key nor the ledger: passing the key
+  would give each rotated key its own bucket and undo the cap fix, and
+  anchoring on the ledger would let a prior failed attempt make its own retry
+  look unbound. A malformed registry fails closed with `LedgerError` rather
+  than proceeding unaccounted, while a `budgets.json` that does not exist means
+  budgets are unconfigured and nothing is drawn down, so runs without an
+  authorization registry stay byte-identical. `CONTINUUM_BUDGETS_PATH`
+  overrides the registry location. `continuum budget <run>` gained an
+  `AUTHORIZATION` table and a matching `authorization_budgets` JSON key, so a
+  drawdown is observable without reading the raw registry. Covered by
+  `tests/test_budget_drawdown.py`.
+
 - **Docstrings on every function in `gateway.py`, `dashboard/app.py` and
   `cli/main.py` (#538).** The three files most recently hardened carried
   undocumented functions, and `cli/main.py` sat at 47/59 = 79.7%, just under the
