@@ -31,7 +31,7 @@ may resume. The integration points, in order of most to least common, are:
 - [Checkpoints](checkpoints.md) - CheckpointManager, RestoredRun
 - [Recovery](recovery.md) - RecoveryEngine, RecoveryDecision
 - [Validation](validation.md) - StateValidator, validate_state, ValidationOutcome
-- [MCP server](mcp.md) - continuum-mcp, the eleven tools, build_server
+- [MCP server](mcp.md) - continuum-mcp, the twelve tools, build_server
 - [Security](security.md) - attestation and caller authentication
 - [CLI](cli.md) - the `continuum` command reference
 

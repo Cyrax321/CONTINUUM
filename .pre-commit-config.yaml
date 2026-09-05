@@ -1,0 +1,29 @@
+# Local mirror of the CI "Lint & Type-check" job's ruff steps (issue #537).
+#
+# CONTRIBUTING.md described this file instead of shipping it, so `pre-commit
+# install` on a fresh clone installed a hook that ran nothing and the first PR
+# still met a red `ruff format --check` in CI.
+#
+# rev tracks the `ruff==` pin in pyproject.toml's dev extra. A hook running a
+# different ruff than CI would format a file one way locally and fail the same
+# file in CI, which is the failure this config exists to prevent: bump both
+# together.
+#
+# files scopes the hooks to the three directories CI lints. benchmarks/,
+# demo-run/ and _bugaudit/ are not ruff-clean and are not checked by CI, so
+# leaving them in would fail `pre-commit run --all-files` on an untouched tree
+# and rewrite files no gate asks about.
+#
+# mypy is deliberately absent: pre-commit hooks run in isolated environments
+# without the project's installed dependencies, so its results there are not
+# trustworthy. CI runs `mypy src/continuum` against a full environment. See the
+# "Pre-commit hooks" section of CONTRIBUTING.md.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.4
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+        files: ^(src|tests|examples)/
+      - id: ruff-format
+        files: ^(src|tests|examples)/

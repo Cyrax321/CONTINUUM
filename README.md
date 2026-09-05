@@ -18,6 +18,7 @@
   <a href="https://continuum-nu-six.vercel.app/"><img src="https://img.shields.io/badge/website-live_demo-E06D53?style=flat-square" alt="Website Demo" /></a>
   <a href="https://github.com/Cyrax321/CONTINUUM/actions/workflows/ci.yml"><img src="https://github.com/Cyrax321/CONTINUUM/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
   <a href="https://app.codecov.io/gh/Cyrax321/CONTINUUM"><img src="https://img.shields.io/codecov/c/github/Cyrax321/CONTINUUM?style=flat-square&logo=codecov" alt="Coverage" /></a>
+  <a href="https://github.com/Cyrax321/CONTINUUM"><img src="https://img.shields.io/github/stars/Cyrax321/CONTINUUM?style=flat-square" alt="Stars" /></a>
 </p>
 
 <p align="center" style="margin-bottom: 6px;">
@@ -30,6 +31,10 @@
 
 <p align="center">
   <sub>If CONTINUUM helps your agents recover, please star the repo. It helps others discover it and keeps good first issues coming.</sub>
+</p>
+
+<p align="center">
+  <sub><strong>English</strong> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.es.md">Español</a> | <a href="README.ja.md">日本語</a> | <a href="README.pt-BR.md">Português</a> | <a href="README.ko.md">한국어</a></sub>
 </p>
 
 ---
@@ -88,10 +93,11 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 
 Verify:
 
+<!-- generated via: pytest --collect-only -q; pytest -q -->
 ```bash
 continuum --help                 # CLI entrypoint
 continuum-mcp --help             # MCP server entrypoint (needs [mcp] or [dev])
-pytest -q                        # ~1,380 collected (exact count and skips vary by environment)
+pytest -q                        # ~1,918 collected, ~1,880 passed, ~38 skipped on a minimal env (exact counts vary)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # the three gates CI enforces
 ```
@@ -224,7 +230,7 @@ CONTINUUM is verified against real LLM agents, live protocol boundaries, and har
 - **Third-party clients**: Gemini CLI and Kilo Code connected over stdio JSON-RPC against the live SQLite store, validating multi-agent co-existence and authorization isolation.
 - **Protocol compliance**: driven end to end with `@modelcontextprotocol/inspector --cli` across process deaths; mutating tools deny by default behind `CONTINUUM_MCP_MUTATING_CLIENTS`; external claims degrade to `REQUIRES_REVIEW` (`safe: false`).
 - **Self-healing**: hard-killed servers recover from orphaned SQLite `-wal`/`-shm` sidecars via single-retry cleanup at startup.
-- **Scale**: roughly 1,380 tests collected (~1,360 passing; the rest skip without optional services) on Python 3.11, 3.12, and 3.13 (unit, `hypothesis` property-based, concurrency, adversarial). CONTINUUM-Bench runs five crash scenarios plus a dedicated argument-drift scenario, measuring 0 duplicate work and 0 duplicate side effects for CONTINUUM against full duplication for naive replay; a separate 12-scenario recovery-correctness suite (`continuum.benchmark.phase6`) encodes the crash points from the durable-execution survey as executable assertions.
+- **Scale**: roughly 1,918 tests collected (~1,880 passing; the rest skip without optional services) on Python 3.11, 3.12, and 3.13 (unit, `hypothesis` property-based, concurrency, adversarial). CONTINUUM-Bench runs five crash scenarios plus a dedicated argument-drift scenario, measuring 0 duplicate work and 0 duplicate side effects for CONTINUUM against full duplication for naive replay; a separate 12-scenario recovery-correctness suite (`continuum.benchmark.phase6`) encodes the crash points from the durable-execution survey as executable assertions.
 - **Adversarial audit**: the full MCP surface was audited over the live protocol; three defects were found and fixed. Method and reproduction steps in [test.md](test.md).
 
 ## MCP Integration
@@ -293,35 +299,47 @@ The deep reference for each concept lives in [references/concepts.md](references
 
 ## Architecture
 
-CONTINUUM is organised around one invariant: **every fact carries its origin, and trust is earned, never assumed.** The system has five layers, five integration seams, and three guarantees.
+CONTINUUM is organised around one invariant: **every fact carries its origin, and trust is earned, never assumed.** Why this matters for a startup: an agent that runs for weeks must not lose work when its context is lost, and it must not waste tokens, cost, or fire a tool twice.
 
-### The three guarantees
+### System at a glance — universal adapter, one log, any harness
 
-1. **No self-certification.** Agent-reported state is marked EXTERNAL_AGENT and degrades to human review on resume. Only trusted writers (in-process adapters, CLI operators) produce DETERMINISTIC state.
-2. **Side effects require claims.** External effects are claimed in an idempotent ledger before they fire; unclaimed effects are blocked at the harness boundary.
-3. **Recovery decisions verify against reality.** Resume contracts check checkpoint state against the current environment (dependency versions, file digests, model identity) before declaring safety.
+Any harness plugs into the same hash chained log. The same run can be written by Claude Code, resumed by LangGraph, inspected by the CLI, and approved on the dashboard. No framework cooperation is required.
+
+```text
+  Claude Code ─┐
+  Gemini CLI ──┤
+  Codex ───────┤
+  LangGraph ───┼── 5 seams ──►  One durable log  ──►  Recovery + Dashboard + CLI
+  LangChain ───┤                (hash chained,        (sealed contract,
+  OpenAI SDK ──┤                 provenance tagged,     verify, health,
+  CrewAI ──────┤                 exactly once)          family)
+  Any HTTP ────┤
+  Any OTel app ┘
+
+  Seams: 1 In-process  2 MCP  3 CLI hooks  4 Gateway  5 OTel
+```
+
+### The three guarantees (the demo proves each one)
+
+1. **No self-certification.** Agent reported state is `EXTERNAL_AGENT` and degrades to `REQUIRES_REVIEW` until a human `REVIEW_CONFIRMED`. Only trusted writers produce `DETERMINISTIC` state.
+2. **Side effects require claims.** Every external effect is claimed in an idempotent ledger before it fires. Unclaimed effects are blocked at the boundary, duplicates are refused, uncertain outcomes raise for reconciliation.
+3. **Recovery verifies against reality.** Resume checks file digests, dependency versions, and model identity before saying safe. Staleness propagates `dependency -> evidence -> finding -> decision` plus `PlanStep.depends_on` so only affected steps repair.
 
 ### Five integration seams
 
-Any agent harness connects through exactly one of these; no framework cooperation is required.
+| Seam | How to connect | What it gives you |
+|:--|:--|:--|
+| 1 In-process | `GenericAgentAdapter.intercept_action(...)` and `wrap_tool(key_fn=...)` on LangChain, LangGraph, OpenAI Agents SDK | Python frameworks, trusted writes |
+| 2 MCP server | `continuum-mcp` 12 tools over stdio (`continuum_record_progress`, `continuum_intercept_action`, `continuum_complete_action`, etc.) | Any MCP capable client, 3 read only + 8 mutating, allowlist `CONTINUUM_MCP_MUTATING_CLIENTS` |
+| 3 CLI lifecycle hooks | `continuum hooks install claude-code --with-gate` also `gemini` and `codex` | Coding CLIs: `SessionStart briefing`, `PostToolUse observe`, `PreToolUse gate` — no CLAUDE.md needed |
+| 4 Enforcing HTTP gateway | `continuum gateway --port 8765` with `.continuum/gateway.json` | Any language, any outbound HTTP must have a claim, gateway settles from real status code |
+| 5 OpenTelemetry bridge | `make_span_processor(storage)` | Any traced app, spans become `TOOL_COMPLETED` evidence |
 
-```text
-Seam 1: In-process adapters     GenericAgentAdapter.intercept_action(...);
-         Python frameworks       wrap_tool(key_fn=...) on LangChain/LangGraph,
-                                 OpenAI Agents SDK hooks
-Seam 2: MCP server              continuum-mcp (11 tools over stdio)
-         MCP-capable clients
-Seam 3: CLI lifecycle hooks     continuum hooks install <client> [--with-gate]
-         Coding CLIs             claude-code, gemini, codex
-Seam 4: Enforcing HTTP gateway  continuum gateway --port N
-         Any language            routes: .continuum/gateway.json
-Seam 5: OpenTelemetry bridge    make_span_processor(storage)
-         Traced applications     spans -> TOOL_COMPLETED evidence
-```
+Thin hook surfaces for CrewAI, AutoGen, Pydantic AI live in `adapters/thin.py` with no SDK required.
 
-### Enforcement pipeline
+### Enforcement pipeline — why no duplicate and no invalid call
 
-The gate-to-observe pipeline closes the durability gap at the harness boundary:
+The gate to observe pipeline closes the gap at the harness boundary. This is what saves tokens and cost and blocks invalid tool calls.
 
 ```text
 PreToolUse hook                    PostToolUse hook
@@ -330,81 +348,90 @@ PreToolUse hook                    PostToolUse hook
 continuum gate                    continuum observe
     |                                    |
     |-- no claim? DENY (exit 2)          |-- TOOL_COMPLETED event:
-    |   + instructions to claim          |     path, bytes, sha256
+    |   + instructions to claim          |     path, bytes, sha256 on disk now
     |                                    |
-    |-- live claim? ALLOW                |-- disk-checked status:
+    |-- live claim? ALLOW                |-- disk checked status:
     |                                    |     verified / changed / missing
     v
 agent performs effect
     |
     v
-continuum_complete_action
+continuum_complete_action  (settled from reality, not from report)
     |
     v
-claim settled from reality
+ledger marked COMPLETED — next replay returns cached result, not a second fire
 ```
 
-### Recovery decision tree
+Unknown host is denied fail closed, not an open relay. Shell `Bash/curl` is the documented v1 blind spot.
 
-The recovery engine evaluates signals in severity order and returns the maximum:
+### Recovery decision tree — weeks until done, correct and exactly
+
+The engine takes the most cautious signal, so safety never loses to convenience.
 
 ```text
 RESUME < REPAIR_AND_RESUME < REPLAN < WAIT < REQUEST_HUMAN < ROLLBACK < ABORT
 ```
 
-Every resume produces a sealed contract with: recovery status, verified/invalidated components, executable next steps (`human_steps`), post-checkpoint observations (disk-checked), pinning drift, and family aggregation (multi-agent).
+Every `continuum resume` returns a sealed contract with: recovery status and `safe`, verified/invalidated components, executable `human_steps` (exact shell to run), post checkpoint observations disk checked, pinning drift, and family aggregation for multi agent `continuum tree`. Briefing `continuum briefing` injects that contract on every fresh `claude` SessionStart, so saying `hi` after you killed the terminal resumes from the last good prefix.
+
+### Why this saves tokens, cost, and invalid calls
+
+* **Tokens:** Semantic checkpoint stores `Goal + Plan + Progress` not a transcript dump. Briefing serves only verified state plus a 4096 cap reasoning summary, not the error tail that self conditioning shows degrades the next session. Informed retry `recovery/summary.py` injects an engine authored summary, not raw history.
+* **Cost:** Ledger `action_index` refuses duplicate side effects even under argument drift like relative vs absolute paths (`invoice:INV-001` stable key) — so same API is not paid twice after a resume. Budgets `budgets.py` cap retry storms at claim time. `continuum benchmark` prints `0 duplicates` for continuum vs `50` for naive.
+* **Invalid calls:** Gate and gateway and `replayguard` `langgraph_protected_node` block unclaimed or replayed tool calls before they fire. Pinning `pinning.py` surfaces prompt or tool drift on resume.
 
 ### Storage architecture
 
-Schema v6. SQLite is primary; Postgres is CI-verified.
+Schema v6. SQLite is primary, Postgres is CI verified. One log, many projections.
 
 | Table | Purpose |
 |:--|:--|
-| `events` | Hash-chained append-only log (36 event types) |
-| `runs` | Run metadata with parent_run_id for multi-agent |
+| `events` | Hash chained append only log (44 event types in v0.2) |
+| `runs` | Run metadata with `parent_run_id` for multi agent |
 | `versions` | SemanticState snapshots per checkpoint |
-| `checkpoints` | Sealed checkpoint records |
-| `action_index` | Cross-run idempotency projection (schema v3+) |
-| `events_archive` | Compacted prefix storage (schema v5+) |
-| `lg_checkpoints` / `lg_writes` | LangGraph native persistence (schema v4+) |
+| `checkpoints` | Sealed checkpoint records with `RECOVERY` anchors |
+| `action_index` | Cross run idempotency projection (schema v3+) — indexed reads, not full scans |
+| `events_archive` | Compacted prefix storage (schema v5+) — `continuum compact` bounds live log for weeks |
+| `lg_checkpoints` / `lg_writes` | LangGraph native persistence (schema v4+) — `make_continuum_checkpointer(storage)` |
 
-### Module map
+### Module map — one library, many surfaces
 
-CONTINUUM is one library (`src/continuum`, 104 modules) plus a large test suite (98 test files, ~1,380 tests). All modules append to and replay one hash-chained event log:
+CONTINUUM is one library (`src/continuum`, 104 modules) plus a large test suite (98 test files, ~1,918 tests). All modules append to and replay one hash chained event log:
 
 | Module | Role |
 |:--|:--|
-| `events.py` | Append-only, hash-chained event log and `verify()` |
-| `state/` | Projection, validation, extraction |
-| `storage/` | SQLiteStorage (v6 schema), postgres.py, migrations.py, actionindex.py |
-| `actions/` | Idempotent action ledger, reconciliation, claim/complete, consumed-grant tracking |
-| `checkpoint/` | Policy-driven checkpoints with forced anchoring |
-| `recovery/` | Engine, planner, sealed contract, guidance, observations, family rollup, fork semantics, informed retry summaries |
-| `gate.py` | Pre-tool-use enforcement: allow/deny against ledger claims |
-| `gateway.py` | Enforcing HTTP proxy: claim-before-fire for outbound requests |
-| `replayguard.py` | Portable replay-safety guard: evaluate/protected_call/langgraph_protected_node |
-| `hooks.py` | Shared checkpoint hooks (auto-checkpoint, file-derived progress) |
-| `clienthooks.py` | Client installer profiles and hook command management |
-| `budgets.py` | Retry budget registry and evaluation |
-| `pinning.py` | Version pinning normalisation and drift detection |
-| `replay_similarity.py` | Semantic similarity backends (exact/fuzzy/embedding) |
-| `reconcilers.py` | Probe registry for automatic settlement |
-| `adapters/` | 9 class-based adapters + thin hooks (CrewAI/AutoGen/Pydantic AI) + LangGraph store |
-| `mcp/` | 11 stdio tools plus authz (token auth, allowlist, confirmation token) |
-| `serve/` | Sidecar (stdio JSON wire + HTTP transport) |
-| `dashboard/` | Web dashboard with HITL buttons (confirm/reconcile/complete) |
-| `cli/` | 33 argparse commands, exit codes as verdict |
+| `events.py` | Append only, hash chained event log and `verify() trusted_through` |
+| `state/` | Projection `project()`, validation, extraction — staleness propagation |
+| `storage/` | `SQLiteStorage` v6, `postgres.py`, `migrations.py`, `actionindex.py` |
+| `actions/` | Idempotent ledger `claim/complete/reconcile`, `idempotency.py` key + canonicalization + token fallback, consumed grant tracking `GRANT_DENIED` |
+| `checkpoint/` | Policy driven checkpoints `manager.py` `policy.py` with `RECOVERY` anchors and `prune` |
+| `recovery/` | Engine, planner, sealed contract `contract.py`, `guidance` `human_steps`, `observations` disk checked, `family` rollup, `fork` semantics, `summary` informed retry |
+| `gate.py` | Pre tool use enforcement: allow or deny against ledger claims |
+| `gateway.py` | Enforcing HTTP proxy: claim before fire for outbound requests |
+| `replayguard.py` | Portable guard: `evaluate, protected_call, langgraph_protected_node` — closes ACRFence replay hazard |
+| `hooks.py` `clienthooks.py` | Shared checkpoint hooks and installer profiles `claude-code gemini codex` |
+| `budgets.py` | Retry budget registry and evaluation per action type |
+| `pinning.py` | Version pinning normalisation and drift detection on resume |
+| `replay_similarity.py` | Semantic similarity backends exact/fuzzy/embedding for replay vs fork |
+| `reconcilers.py` | Probe registry `.continuum/reconcilers.json` for automatic settlement |
+| `adapters/` | 9 class adapters + thin hooks `thin.py` CrewAI AutoGen Pydantic AI + LangGraph store |
+| `mcp/` | 12 stdio tools plus authz `authz.py` token auth, allowlist, confirmation token |
+| `serve/` | Sidecar stdio JSON wire + HTTP `CONTINUUM_SERVE_TOKEN` |
+| `dashboard/` | Web dashboard `app.py` `hitl.py` with HITL buttons confirm/reconcile/complete, prefix trust advisory, pins |
+| `cli/` | 38 argparse commands, exit codes as verdict — `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | OpenTelemetry span processor bridge |
+| `benchmark/` | CONTINUUM-Bench harness — 5 crash scenarios + argument drift + 12 scenario recovery suite |
 
 ### Honest limitations
 
-- Gate does not see inside shell commands (Bash/curl bypass structured-tool claims)
-- Postgres backend is CI-tested but not battle-tested in production
-- No webhook-out for request_human notifications yet
-- One level of multi-agent hierarchy v1
-- Payload offloading (#254) not yet implemented
+- Gate does not see inside shell commands (Bash/curl bypass structured tool claims)
+- Postgres backend is CI tested but not battle tested in production
+- No webhook out for `request_human` notifications yet (#305)
+- One level of multi agent hierarchy v1
+- Large payload offloading (#254) not yet implemented
+- Weeks scale benchmark with token cost table lands in #550 board (#568 to #570)
 
-Full reference in [references/architecture.md](references/architecture.md).
+Full reference in [references/architecture.md](references/architecture.md). And the months plane that builds on this — provenance causal graph, authority resurrection, admissibility, liveness — is pinned as board #550 with 20 sub issues #551 to #570.
 
 ## API and CLI
 
@@ -483,9 +510,17 @@ CONTINUUM sits at the overlap of durable execution, idempotent side-effect track
 - **Agent/MCP runs need an explicit confirm before auto-resume.** Externally-reported state is `REQUIRES_REVIEW`, so `continuum resume` returns `request_human` until a human confirms. By design, not a bug; see [Framework Integration](#framework-integration).
 - **e2e autonomy test series** (issue [#6](https://github.com/Cyrax321/CONTINUUM/issues/6)): three full Claude Code runs scored 7/7 mechanics with unprompted recovery behavior observed. Further iterations across diverse prompt styles remain open.
 
+## About
+
+In early 2026 I saw long running agents fail on recovery, not reasoning. Checkpoints were treated as proof to continue, not evidence to verify. Surveying Temporal, LangGraph, ACRFence 2603.20625 and self conditioning 2509.09677, I found the gap was a portable verification substrate that asks, given the state at time T and the world as it is now, is it still safe to continue.
+
+Over three weeks I built CONTINUUM from one invariant, every fact carries its origin. The result is a hash chained log with `verify()`, a ledger with stable key deduplication, a gate and gateway that block unclaimed effects, and a recovery engine that seals a contract. Five seams expose the same log to Claude Code, LangGraph, LangChain, OpenAI, HTTP and OpenTelemetry. Validated with real kills and 1380 tests, it prints `0 duplicates` where naive replay prints `50`.
+
+CONTINUUM was created by **Anandhu P Shaji** ([@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/)) and is maintained by the original creator. It is open source under the [Apache-2.0](LICENSE) license. Community contributions are welcome via [CONTRIBUTING.md](CONTRIBUTING.md) and are credited in [AUTHORS.md](AUTHORS.md) and [graphs/contributors](https://github.com/Cyrax321/CONTINUUM/graphs/contributors).
+
 ## Contributing
 
-Contributions are welcome. This project is open source under Apache 2.0 and deliberately built to be extended: by researchers validating the recovery semantics, by engineers porting the ledger or MCP server to other frameworks or languages, and by anyone turning the planned roadmap into reality. A good place to start is the `good first issue` label on the [issue tracker](https://github.com/Cyrax321/CONTINUUM/issues), or the open correctness bugs listed in STATUS.md.
+This project is open source under Apache 2.0 and deliberately built to be extended: by researchers validating the recovery semantics, by engineers porting the ledger or MCP server to other frameworks or languages, and by anyone turning the planned roadmap into reality. A good place to start is the `good first issue` label on the [issue tracker](https://github.com/Cyrax321/CONTINUUM/issues), or the open correctness bugs listed in STATUS.md.
 
 Open an issue before submitting large PRs. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution guide, including the [Code of Conduct](CODE_OF_CONDUCT.md).
 
