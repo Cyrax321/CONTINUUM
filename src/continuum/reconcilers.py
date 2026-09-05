@@ -6,7 +6,14 @@ mechanically checkable ("is the invoice in the outbox?"), so this module lets
 a project register one probe per action type:
 
     .continuum/reconcilers.json
-    {"send_invoice": {"command": "check-outbox", "timeout": 10}}
+    {"probes": {"send_invoice": {"command": "check-outbox", "timeout": 10}}}
+
+The ``probes`` wrapper is the shape :func:`load_reconcilers` reads: a file that
+maps action types at the top level is valid JSON, registers nothing, and leaves
+every uncertain action reported as having no probe. ``timeout`` is in seconds,
+optional, and defaults to 10 seconds; it must be a positive number, and a probe
+that outlives it is an error rather than a verdict, so its action stays in the
+human queue (issue #322).
 
 A probe receives the full Action record as JSON on stdin and prints exactly
 one verdict on its last stdout line: ``occurred=true``, ``occurred=false`` or
@@ -60,7 +67,14 @@ class ReconcilerConfigError(ValueError):
 
 
 def load_reconcilers(path: Path) -> dict[str, dict[str, Any]]:
-    """Read the registry. Empty dict when absent; raise when malformed."""
+    """Read the registry. Empty dict when absent; raise when malformed.
+
+    Every returned spec carries a ``timeout``, 10 seconds when the file left it
+    out, so a caller never has to supply the default itself. A ``timeout`` that
+    is not a positive number is refused rather than clamped: zero or negative
+    expires every probe the moment it starts, which would look like an external
+    system nobody can reach instead of a registry typo (issue #322).
+    """
     if not path.exists():
         return {}
     # Absolute, so the message names a file the operator can open: the
@@ -80,7 +94,11 @@ def load_reconcilers(path: Path) -> dict[str, dict[str, Any]]:
                 f"{location}: probe {action_type!r} needs a string 'command'"
             )
         timeout = spec.get("timeout", _DEFAULT_TIMEOUT)
-        if not isinstance(timeout, (int, float)) or timeout <= 0:
+        # ``bool`` subclasses ``int``, so a JSON ``true`` clears the numeric check
+        # and registers as a one second timeout. Every probe would then be killed
+        # just after it starts and its action would reach the human queue carrying
+        # a timeout detail, rather than the config error this arm promises.
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
             raise ReconcilerConfigError(
                 f"{path}: probe {action_type!r} 'timeout' must be a positive number"
             )
