@@ -218,6 +218,19 @@ def observe_command(*, db: str | None = None) -> str:
     interpreter-plus-module form is used instead. An explicit ``db`` is baked
     in too, since the default resolves relative to the working directory and
     hook processes run with the project root as cwd.
+
+    Examples:
+        When ``continuum`` is on PATH::
+
+            /usr/local/bin/continuum observe
+
+        When the executable is not on PATH (editable install)::
+
+            /path/to/python -m continuum.cli observe
+
+        When ``--db`` is passed to ``hooks install``::
+
+            /usr/local/bin/continuum --db /abs/path.db observe
     """
     executable = shutil.which("continuum")
     parts = [executable] if executable else [sys.executable, "-m", "continuum.cli"]
