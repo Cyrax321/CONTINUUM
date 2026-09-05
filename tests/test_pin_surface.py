@@ -229,6 +229,16 @@ def test_cli_renders_flagged_pins_prominently() -> None:
         storage.close()
 
 
+def _without_volatile_age(text: str) -> str:
+    """Normalize the live liveness age for byte-equality assertions.
+
+    The advisory embeds seconds since the last append, so two renders of one
+    unchanged run legitimately differ in that token. Everything else must be
+    byte-identical, which is what these tests pin.
+    """
+    return re.sub(r"silence \d+\.\ds", "silence <age>s", text)
+
+
 def test_cli_piped_vs_tty_is_byte_identical_modulo_colour(tmp_path: Path) -> None:
     db = str(tmp_path / "db.sqlite")
     storage = SQLiteStorage(db)
@@ -245,10 +255,10 @@ def test_cli_piped_vs_tty_is_byte_identical_modulo_colour(tmp_path: Path) -> Non
         storage.close()
     _, plain, _ = _run_cli(db, "--db", db, "resume", "run_1")
     _, coloured, _ = _run_cli(db, "--db", db, "--color", "resume", "run_1")
-    assert ANSI.sub("", coloured) == plain
+    assert _without_volatile_age(ANSI.sub("", coloured)) == _without_volatile_age(plain)
     _, plain_v, _ = _run_cli(db, "--db", db, "validate", "run_1")
     _, coloured_v, _ = _run_cli(db, "--db", db, "--color", "validate", "run_1")
-    assert ANSI.sub("", coloured_v) == plain_v
+    assert _without_volatile_age(ANSI.sub("", coloured_v)) == _without_volatile_age(plain_v)
 
 
 def test_json_is_never_colourised_even_with_flagged_pins(tmp_path: Path) -> None:

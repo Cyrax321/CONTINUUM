@@ -25,6 +25,9 @@ This document scopes what CONTINUUM protects against, what it detects, and what 
 - **Silent constraint drops**  
   `CONSTRAINT_PINNED` hash-only pins verified across compaction and briefing via `account_pins_in_context` (#391, #418). A summary that omits a pinned constraint is flagged as `absent` past grace, `unverifiable` when truncated, and escalates to `REQUIRES_REVIEW` in strict mode. See `docs/guides/constraint-pinning.md` and `docs/concepts/constraint-pinning.md` and `src/continuum/state/semantic.py:account_pins_in_context`.
 
+- **Stale causal ancestors via provenance graph (N-hop)**  
+  Evidence invalidation propagates N hops through the ``caused_by`` DAG (``evidence -> finding -> decision -> action``). When a dataset changes, every downstream finding, decision and action reachable via ``caused_by`` is marked ``STALE`` (or ``CONFLICTED`` on cycles) with reason ``via caused_by from <parent> (N-hop staleness)``. The propagation walks the transitive closure, not just direct parents, and surfaces in ``RecoveryContract.invalidated``. The graph is built from ``read_all_events`` so compaction does not launder history. See ``src/continuum/state/validator.py:_propagate_caused_by`` and ``src/continuum/provenance/graph.py``. Tested in ``tests/test_provenance_staleness.py`` (issue #553).
+
 ## What CONTINUUM does NOT protect against
 
 - **Full disk access by a remote attacker**  

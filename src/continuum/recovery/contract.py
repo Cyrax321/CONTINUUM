@@ -40,10 +40,27 @@ def _identifier(component: Component, component_id: str | None) -> str:
     return f"{component.value}:{component_id}" if component_id else component.value
 
 
+def _hashable_payload(contract: RecoveryContract) -> dict[str, Any]:
+    """Payload the integrity hash covers.
+
+    ``created_at`` is wall-clock metadata, not terms. ``liveness`` carries one
+    wall-clock reading too (``last_append_age``, seconds since the last append
+    at assessment time), so two assessments of an unchanged run would seal
+    different hashes without this: the age is display, while the verdict fields
+    (``breached``, ``threshold_seconds``, ``phase``, ``breaches``) stay covered.
+    """
+    payload = contract.model_dump(mode="json", exclude={"integrity_hash", "created_at"})
+    liveness = payload.get("liveness")
+    if isinstance(liveness, dict):
+        payload["liveness"] = {
+            key: value for key, value in liveness.items() if key != "last_append_age"
+        }
+    return payload
+
+
 def seal_contract(contract: RecoveryContract) -> RecoveryContract:
     """Attach an integrity hash covering the contract's terms."""
-    payload = contract.model_dump(mode="json", exclude={"integrity_hash", "created_at"})
-    return contract.model_copy(update={"integrity_hash": stable_hash(payload)})
+    return contract.model_copy(update={"integrity_hash": stable_hash(_hashable_payload(contract))})
 
 
 def verify_contract(contract: RecoveryContract) -> bool:
@@ -55,8 +72,7 @@ def verify_contract(contract: RecoveryContract) -> bool:
     """
     if contract.integrity_hash is None:
         return False
-    payload = contract.model_dump(mode="json", exclude={"integrity_hash", "created_at"})
-    if contract.integrity_hash == stable_hash(payload):
+    if contract.integrity_hash == stable_hash(_hashable_payload(contract)):
         return True
     legacy = contract.model_dump(
         mode="json", exclude={"integrity_hash", "created_at", "evidence", "reason"}
@@ -75,6 +91,9 @@ def build_contract(
     evidence: list[str] | None = None,
     scope: Iterable[str] | None = None,
     post_checkpoint_observations: list[dict[str, Any]] | None = None,
+    liveness: dict[str, object] | None = None,
+    triggering_risks: list[str] | None = None,
+    admissibility: Any | None = None,
 ) -> RecoveryContract:
     """Assemble a sealed, deterministic contract.
 
@@ -111,6 +130,11 @@ def build_contract(
             verified.append(name)
         else:
             invalidated.append(f"{name} ({entry.status.value})")
+    if admissibility is not None and not admissibility.admissible:
+        for d in admissibility.details:
+            invalidated.append(
+                f"action:{d['action_id']} at position {d['chain_position']} ({d['reason']})"
+            )
     if projection_broken:
         invalidated.append(
             f"projection (invalid: log stops folding at sequence {state.unprojectable_at_sequence})"
@@ -122,6 +146,12 @@ def build_contract(
         reason = validation.report.reason
     if evidence is None:
         evidence = _validation_evidence(validation.report)
+    if admissibility is not None and not admissibility.admissible:
+        for d in admissibility.details:
+            evidence.append(
+                f"blocking commitment: action {d['action_id']} at position {d['chain_position']} type {d['action_type']} consumed {d['consumed_inputs']} reason {d['reason']}"
+            )
+        evidence = sorted(set(evidence))
     if projection_broken:
         # The validation details describe the prefix and cannot name the break;
         # without this the contract's evidence would read as a complete audit.
@@ -149,6 +179,8 @@ def build_contract(
         evidence=evidence,
         reason=reason,
         post_checkpoint_observations=post_checkpoint_observations or [],
+        liveness=liveness,
+        triggering_risks=triggering_risks or [],
         created_at=utcnow(),
     )
     return seal_contract(contract)

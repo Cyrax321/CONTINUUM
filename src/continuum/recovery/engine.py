@@ -43,7 +43,6 @@ from continuum.analysis.depends import DependencyGraph as SourceDependencyGraph
 from continuum.checkpoint.manager import CheckpointManager, RestoredRun
 from continuum.environment.diff import EnvironmentDiff
 from continuum.events import EventType
-from continuum.gate import collect_consumed_authorities
 from continuum.models import (
     Action,
     ActionStatus,
@@ -59,7 +58,7 @@ from continuum.recovery.contract import build_contract
 from continuum.recovery.observations import collect_observations
 from continuum.recovery.planner import RepairPlan, plan_repairs
 from continuum.recovery.summary import build_informed_retry
-from continuum.state.validator import StateValidator, ValidationOutcome
+from continuum.state.validator import StateValidator, ValidationOutcome, check_admissibility
 from continuum.storage.base import Storage
 
 __all__ = ["RecoveryEngine", "RecoveryDecision", "SEVERITY"]
@@ -253,6 +252,11 @@ class RecoveryEngine:
             else:
                 confirmed_components.update(["goal", "progress"])
 
+        # Provenance N-hop staleness (issue #553): include archived events so compaction does not launder
+        try:
+            provenance_events = self.storage.read_all_events(run_id)
+        except Exception:
+            provenance_events = self.storage.read_events(run_id)
         validation = self.validator.validate(
             restored.state,
             current_environment=current_environment,
@@ -261,6 +265,7 @@ class RecoveryEngine:
             expected_model=expected_model,
             confirmed=confirmed_components,
             scope=scope,
+            events=provenance_events,
         )
 
         ledger = ActionLedger(self.storage, run_id)
@@ -302,27 +307,115 @@ class RecoveryEngine:
             if broken.status is StateStatus.INVALID and broken.unprojectable_at_sequence is not None
             else None
         )
-        # Authority lifecycle (issue #289c): consumed authorities block resume
-        # until an external probe reconciles them. The gate already refuses
-        # forwarding, but the recovery decision must also surface the block
-        # so that `continuum resume` does not report safe when the gate would
-        # still deny.
-        consumed_authorities = collect_consumed_authorities(self.storage.read_events(run_id))
-        if consumed_authorities:
-            # If any consumed authority exists, it is a resurrection risk.
-            # The engine treats it as a human-required block, matching the
-            # gate's fail-closed stance. A later AUTHORITY_RECONCILED with
-            # valid true would have cleared the map.
-            pass
+        admissibility = check_admissibility(restored.checkpoint, ledger.all())
+        if not admissibility.admissible:
+            has_action_ref = any(d["consumed_inputs"]["action_ids"] for d in admissibility.details)
+            status = StateStatus.REQUIRES_REVIEW if has_action_ref else StateStatus.STALE
+            from continuum.models import Component, ComponentValidationEntry
 
+            entries = list(validation.report.statuses)
+            entries.append(
+                ComponentValidationEntry(
+                    component=Component.ACTION,
+                    component_id=None,
+                    status=status,
+                    detail=admissibility.reason,
+                )
+            )
+            from continuum.models import StateValidationResult
+
+            new_report = StateValidationResult(
+                run_id=validation.report.run_id,
+                checkpoint_version=validation.report.checkpoint_version,
+                statuses=entries,
+                safe_to_resume=False,
+                reason=admissibility.reason,
+                validated_at=validation.report.validated_at,
+            )
+            from continuum.state.validator import ValidationOutcome
+
+            validation = ValidationOutcome(
+                state=validation.state,
+                report=new_report,
+                environment_diff=validation.environment_diff,
+            )
         plan = plan_repairs(
             validation.report.statuses,
             uncertain_actions=uncertain,
             strict_unknown=self.validator.strict_unknown,
             unprojectable=unprojectable,
         )
+        # Liveness: silence as WAIT, never auto-rollback (issue #302)
+        liveness_advisory = None
+        liveness_breaches = 0
+        try:
+            from continuum.recovery.health import advisory_for_storage
+
+            liveness_advisory = advisory_for_storage(self.storage, run_id)
+            # Count prior breaches as DETECTED events
+            try:
+                evs = self.storage.read_events(run_id)
+                liveness_breaches = sum(
+                    1 for e in evs if e.type == EventType.LIVENESS_SILENCE_DETECTED
+                )
+            except Exception:
+                liveness_breaches = 0
+        except Exception:
+            liveness_advisory = None
+        # Risk evaluation (issue #303): map triggers to modes, collect ids.
+        # Runs before the decision so the worst trigger proposes alongside the
+        # other signals; the most cautious proposal wins regardless of order.
+        triggering_risks: list[str] = []
+        risk_mode = None
+        risk_rationale = None
+        try:
+            from continuum.recovery.risk import evaluate_risk, load_risk_policy
+
+            policy = load_risk_policy()
+            try:
+                risk_events = [
+                    e for e in self.storage.read_events(run_id) if e.type == EventType.RISK_OBSERVED
+                ]
+            except Exception:
+                risk_events = []
+            best_mode = None
+            best_trigger = None
+            triggering: list[str] = []
+            for risk_ev in risk_events:
+                trig = risk_ev.payload.get("trigger")
+                if not isinstance(trig, str):
+                    continue
+                mode_str = evaluate_risk(trig, policy)
+                if mode_str is None:
+                    continue
+                try:
+                    candidate = RecoveryMode(mode_str)
+                except Exception:
+                    continue
+                if best_mode is None or SEVERITY[candidate] > SEVERITY[best_mode]:
+                    best_mode = candidate
+                    best_trigger = trig
+                    triggering = [risk_ev.event_id]
+                elif SEVERITY[candidate] == SEVERITY[best_mode]:
+                    triggering.append(risk_ev.event_id)
+            if best_mode is not None:
+                risk_mode = best_mode
+                triggering_risks = triggering
+                risk_rationale = f"risk {best_trigger} triggers {best_mode.value}"
+        except Exception:
+            triggering_risks = []
+            risk_mode = None
+            risk_rationale = None
         mode, rationale = self._decide(
-            validation, uncertain, plan, restored, self.strict_unknown, consumed_authorities
+            validation,
+            uncertain,
+            plan,
+            restored,
+            self.strict_unknown,
+            admissibility,
+            liveness_advisory=liveness_advisory,
+            risk_mode=risk_mode,
+            risk_rationale=risk_rationale,
         )
 
         reason = "; ".join(rationale) if rationale else validation.report.reason
@@ -335,6 +428,16 @@ class RecoveryEngine:
             after_sequence = latest_version.source_sequence
         observations = collect_observations(self.storage, run_id, after_sequence=after_sequence)
 
+        # Build liveness section for contract
+        liveness_section = None
+        if liveness_advisory is not None:
+            liveness_section = {
+                "last_append_age": liveness_advisory.get("silence_seconds"),
+                "breaches": liveness_breaches,
+                "breached": bool(liveness_advisory.get("breached")),
+                "threshold_seconds": liveness_advisory.get("threshold_seconds"),
+                "phase": liveness_advisory.get("phase"),
+            }
         contract = build_contract(
             run_id=run_id,
             checkpoint_version=checkpoint_version,
@@ -344,6 +447,9 @@ class RecoveryEngine:
             reason=reason,
             scope=scope,
             post_checkpoint_observations=observations,
+            liveness=liveness_section,
+            triggering_risks=triggering_risks,
+            admissibility=admissibility,
         )
 
         tail_evidence: str | None = None
@@ -411,7 +517,10 @@ class RecoveryEngine:
         plan: RepairPlan,
         restored: RestoredRun,
         strict_unknown: bool,
-        consumed_authorities: dict[str, Any] | None = None,
+        admissibility: Any | None = None,
+        liveness_advisory: dict[str, object] | None = None,
+        risk_mode: RecoveryMode | None = None,
+        risk_rationale: str | None = None,
     ) -> tuple[RecoveryMode, tuple[str, ...]]:
         """Collect a proposal per signal and return the most cautious."""
         proposals: list[tuple[RecoveryMode, str]] = []
@@ -433,15 +542,6 @@ class RecoveryEngine:
                     f"({state.unprojectable_event_type}: {state.unprojectable_reason}); "
                     f"this verdict covers events through sequence "
                     f"{state.source_sequence} only",
-                )
-            )
-
-        # Authority resurrection blocks resume (issue #289c)
-        if consumed_authorities:
-            proposals.append(
-                (
-                    RecoveryMode.REQUEST_HUMAN,
-                    f"{len(consumed_authorities)} consumed authority(s) block resume until reconciled",
                 )
             )
 
@@ -495,12 +595,54 @@ class RecoveryEngine:
         if plan.requires_human:
             proposals.append((RecoveryMode.REQUEST_HUMAN, "at least one repair needs a person"))
 
+        # Liveness breach maps to WAIT, never auto-rollback (issue #302)
+        # Silence tells us nothing about what to roll back, only that a human
+        # or lease-recovery decision is needed. WAIT is the most cautious
+        # signal that still allows a lease to be recovered without human.
+        if liveness_advisory is not None and bool(liveness_advisory.get("breached")):
+            silence = liveness_advisory.get("silence_seconds")
+            threshold = liveness_advisory.get("threshold_seconds")
+            phase = liveness_advisory.get("phase") or "otherwise"
+            proposals.append(
+                (
+                    RecoveryMode.WAIT,
+                    f"liveness breach: silence {silence:.1f}s exceeds threshold {threshold}s (phase {phase})",
+                )
+            )
+
+        # Risk trigger mapping (issue #303): deterministic policy to mode
+        if risk_mode is not None:
+            rationale_text = risk_rationale or f"risk triggers {risk_mode.value}"
+            proposals.append((risk_mode, rationale_text))
+
+        # Liveness breach maps to WAIT, never auto-rollback (issue #302)
+        # Silence tells us nothing about what to roll back, only that a human
+        # or lease-recovery decision is needed. WAIT is the most cautious
+        # signal that still allows a lease to be recovered without human.
+        if liveness_advisory is not None and bool(liveness_advisory.get("breached")):
+            silence = liveness_advisory.get("silence_seconds")
+            threshold = liveness_advisory.get("threshold_seconds")
+            phase = liveness_advisory.get("phase") or "otherwise"
+            proposals.append(
+                (
+                    RecoveryMode.WAIT,
+                    f"liveness breach: silence {silence:.1f}s exceeds threshold {threshold}s (phase {phase})",
+                )
+            )
+
         # A goal that is no longer valid cannot be repaired by re-running work.
         if any(
             e.component.value == "goal" and e.status is not StateStatus.VALID
             for e in validation.report.statuses
         ):
             proposals.append((RecoveryMode.REPLAN, "the goal itself is no longer valid"))
+
+        if admissibility is not None and not admissibility.admissible:
+            has_action_ref = any(d["consumed_inputs"]["action_ids"] for d in admissibility.details)
+            if has_action_ref:
+                proposals.append((RecoveryMode.REQUEST_HUMAN, admissibility.reason))
+            else:
+                proposals.append((RecoveryMode.REPAIR_AND_RESUME, admissibility.reason))
 
         # A run with neither checkpoint nor events cannot reach here: restore()
         # raises CheckpointError first, so there is nothing to decide about.

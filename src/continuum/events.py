@@ -68,6 +68,9 @@ class EventType(StrEnum):
     TOOL_FAILED = "TOOL_FAILED"
 
     # semantic state
+    # DECISION_CREATED payload may include caused_by: list[str] (1-128 chars each, max 32,
+    # default []). Unknown ids raise ValueError. Field is hash-covered and old events
+    # without it load as [].
     DECISION_CREATED = "DECISION_CREATED"
     DECISION_INVALIDATED = "DECISION_INVALIDATED"
     EVIDENCE_ADDED = "EVIDENCE_ADDED"
@@ -110,12 +113,21 @@ class EventType(StrEnum):
     BRANCH_RESOLVED = "BRANCH_RESOLVED"
 
     # action ledger
+    # ACTION_RECORDED payload may include caused_by: list[str] (1-128 chars each, max 32,
+    # default []). Unknown ids raise ValueError. Hash-covered, old events load as [].
     ACTION_RECORDED = "ACTION_RECORDED"
     ACTION_RECONCILED = "ACTION_RECONCILED"
     ACTION_COMPENSATED = "ACTION_COMPENSATED"
 
     # authority (issue #269): a claim tried to reuse a consumed single-use grant
     GRANT_DENIED = "GRANT_DENIED"
+
+    # liveness (issue #302): silence as signal
+    LIVENESS_SILENCE_DETECTED = "LIVENESS_SILENCE_DETECTED"
+    LIVENESS_RECOVERED = "LIVENESS_RECOVERED"
+
+    # risk (issue #303): real-time risk signal
+    RISK_OBSERVED = "RISK_OBSERVED"
 
     # authority lifecycle (issue #289/#555): one-time credential was consumed
     AUTHORITY_CONSUMED = "AUTHORITY_CONSUMED"
@@ -129,6 +141,9 @@ class EventType(StrEnum):
 
     # structured plan (issue #312): durable milestones for long-horizon recovery
     PLAN_UPSERT = "PLAN_UPSERT"
+
+    # memory governance (issue #304, #567): per-tenant tombstone for erasure
+    MEMORY_TOMBSTONED = "MEMORY_TOMBSTONED"
 
 
 class AppendOnlyViolation(RuntimeError):
@@ -271,6 +286,18 @@ class EventLog:
     ) -> Event:
         """Append an event and return the sealed (hashed) record."""
         chain = self._by_run.setdefault(run_id, [])
+        if type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED) and payload is not None:
+            caused_by = payload.get("caused_by") if isinstance(payload, Mapping) else None
+            if caused_by is not None:
+                if not isinstance(caused_by, list):
+                    raise ValueError("caused_by must be a list")
+                if len(caused_by) > 32:
+                    raise ValueError("caused_by must contain at most 32 ids")
+                for cid in caused_by:
+                    if not isinstance(cid, str) or not 1 <= len(cid) <= 128:
+                        raise ValueError("caused_by entries must be 1-128 chars")
+                    if not any(e.event_id == cid for e in chain):
+                        raise ValueError(f"unknown caused_by id {cid!r}")
         head = chain[-1] if chain else None
         event = Event(
             event_id=event_id or make_id("event"),

@@ -188,6 +188,13 @@ def _step_for(entry: ComponentValidationEntry, *, strict_unknown: bool = True) -
                 reason=entry.detail or f"{entry.component.value} is {entry.status}",
                 requires_human=True,
             )
+        case Component.ACTION:
+            return RepairStep(
+                kind=RepairKind.HUMAN_REVIEW,
+                target=target,
+                reason=entry.detail,
+                requires_human=entry.status is StateStatus.REQUIRES_REVIEW,
+            )
         case _:
             return RepairStep(
                 kind=RepairKind.HUMAN_REVIEW,
