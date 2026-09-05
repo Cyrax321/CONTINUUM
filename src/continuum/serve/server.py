@@ -14,6 +14,11 @@ Response::
     {"id": <same>, "result": {<json>}}
     {"id": <same>, "error": {"type": "<code>", "message": "<text>"}}
 
+A line that is not a JSON object -- not valid JSON at all, or valid JSON of some
+other type -- is not a request, and there is nowhere in it to read an ``id``
+from. It is answered ``bad_request`` with ``"id": null``, and the session
+continues (#582).
+
 Only the core of CONTINUUM is imported here, so ``continuum serve`` does not
 require the ``mcp`` extra. Authentication is a fail-closed shared secret (see
 ``SidecarAuth``), the same model as the MCP server's ``AuthPolicy``.
@@ -87,6 +92,18 @@ class NotAuthorized(SidecarError):
 
 class BadParams(SidecarError):
     code = "bad_params"
+
+
+class BadRequest(SidecarError):
+    """A body that could not be read as a request at all (issue #582).
+
+    Distinct from :class:`BadParams`, which answers a request that *was* read
+    and dispatched and so comes back carrying that request's ``id``. This one
+    has no ``id`` to carry, and on the stdio wire it reuses the ``bad_request``
+    type already answered for a line that is not JSON.
+    """
+
+    code = "bad_request"
 
 
 class SidecarAuth:
@@ -273,8 +290,11 @@ class SidecarServer:
             if not line:
                 continue
             try:
-                req = json.loads(line)
-            except json.JSONDecodeError as exc:
+                req = _request_object(json.loads(line))
+            except (json.JSONDecodeError, BadRequest) as exc:
+                # One arm for both: unreadable as JSON, or readable and not an
+                # object. Neither is a request, so neither answer can name an
+                # id, and the session has to outlive both.
                 _write(
                     outstream, {"id": None, "error": {"type": "bad_request", "message": str(exc)}}
                 )
@@ -335,11 +355,15 @@ class SidecarHTTP:
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length) if length else b"{}"
                 try:
-                    params = json.loads(raw)
-                    if not isinstance(params, dict):
-                        raise BadParams("body must be a JSON object")
+                    params = _request_object(json.loads(raw))
                 except json.JSONDecodeError as exc:
                     self._json(400, {"error": f"invalid JSON body: {exc}"})
+                    return
+                except BadRequest as exc:
+                    # The arm now sits on the statement that raises. This
+                    # refusal was already spelled out here, then escaped the
+                    # handler and closed the connection unanswered (#582).
+                    self._json(400, {"error": str(exc)})
                     return
                 try:
                     result = sidecar_ref.dispatch(method, params)
@@ -383,6 +407,24 @@ class SidecarHTTP:
 def _write(stream: TextIO, payload: dict[str, Any]) -> None:
     stream.write(json.dumps(payload, default=str) + "\n")
     stream.flush()
+
+
+def _request_object(parsed: Any) -> dict[str, Any]:
+    """Refuse a parsed body that is not a JSON object (issue #582).
+
+    One check for both transports. Neither had one that worked. ``json.loads``
+    returns whatever the body happened to be, and stdio simply assumed a
+    mapping, reading ``.get`` off it one line above the guard whose comment
+    promises to report and never crash the loop, so a single ``[]`` line killed
+    a long-lived session and every request still queued behind it. The HTTP
+    handler did spell out this exact refusal, but inside a ``try`` that caught
+    only ``JSONDecodeError``, so it escaped ``do_POST`` and the connection closed
+    with no response -- indistinguishable, to a client, from a sidecar that had
+    died.
+    """
+    if not isinstance(parsed, dict):
+        raise BadRequest("body must be a JSON object")
+    return parsed
 
 
 # --------------------------------------------------------------------------- #
@@ -752,6 +794,7 @@ __all__ = [
     "MethodNotFound",
     "NotAuthorized",
     "BadParams",
+    "BadRequest",
     "MalformedRunLog",
     "MUTATING",
     "list_methods",
