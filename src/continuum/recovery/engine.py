@@ -43,6 +43,7 @@ from continuum.analysis.depends import DependencyGraph as SourceDependencyGraph
 from continuum.checkpoint.manager import CheckpointManager, RestoredRun
 from continuum.environment.diff import EnvironmentDiff
 from continuum.events import EventType
+from continuum.gate import collect_consumed_authorities
 from continuum.models import (
     Action,
     ActionStatus,
@@ -417,6 +418,23 @@ class RecoveryEngine:
             risk_mode=risk_mode,
             risk_rationale=risk_rationale,
         )
+
+        # Authority lifecycle (issue #289c): consumed authorities block resume
+        # until an external probe reconciles them. The gate already refuses
+        # forwarding, but the recovery decision must also surface the block
+        # so that `continuum resume` does not report safe when the gate would
+        # still deny. A later AUTHORITY_RECONCILED with valid true clears the
+        # map inside collect_consumed_authorities.
+        try:
+            consumed_authorities = collect_consumed_authorities(self.storage.read_events(run_id))
+        except Exception:
+            consumed_authorities = {}
+        if consumed_authorities:
+            mode = RecoveryMode.REQUEST_HUMAN
+            rationale = (
+                *rationale,
+                f"consumed authority blocks resume: {sorted(consumed_authorities)}",
+            )
 
         reason = "; ".join(rationale) if rationale else validation.report.reason
 
