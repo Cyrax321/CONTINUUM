@@ -40,10 +40,27 @@ def _identifier(component: Component, component_id: str | None) -> str:
     return f"{component.value}:{component_id}" if component_id else component.value
 
 
+def _hashable_payload(contract: RecoveryContract) -> dict[str, Any]:
+    """Payload the integrity hash covers.
+
+    ``created_at`` is wall-clock metadata, not terms. ``liveness`` carries one
+    wall-clock reading too (``last_append_age``, seconds since the last append
+    at assessment time), so two assessments of an unchanged run would seal
+    different hashes without this: the age is display, while the verdict fields
+    (``breached``, ``threshold_seconds``, ``phase``, ``breaches``) stay covered.
+    """
+    payload = contract.model_dump(mode="json", exclude={"integrity_hash", "created_at"})
+    liveness = payload.get("liveness")
+    if isinstance(liveness, dict):
+        payload["liveness"] = {
+            key: value for key, value in liveness.items() if key != "last_append_age"
+        }
+    return payload
+
+
 def seal_contract(contract: RecoveryContract) -> RecoveryContract:
     """Attach an integrity hash covering the contract's terms."""
-    payload = contract.model_dump(mode="json", exclude={"integrity_hash", "created_at"})
-    return contract.model_copy(update={"integrity_hash": stable_hash(payload)})
+    return contract.model_copy(update={"integrity_hash": stable_hash(_hashable_payload(contract))})
 
 
 def verify_contract(contract: RecoveryContract) -> bool:
@@ -55,8 +72,7 @@ def verify_contract(contract: RecoveryContract) -> bool:
     """
     if contract.integrity_hash is None:
         return False
-    payload = contract.model_dump(mode="json", exclude={"integrity_hash", "created_at"})
-    if contract.integrity_hash == stable_hash(payload):
+    if contract.integrity_hash == stable_hash(_hashable_payload(contract)):
         return True
     legacy = contract.model_dump(
         mode="json", exclude={"integrity_hash", "created_at", "evidence", "reason"}
