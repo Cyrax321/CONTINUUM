@@ -91,6 +91,25 @@ with per-pin status (`present`, `absent`, `unverifiable`), grace deadline, and
 flagged set. Flagged pins render prominently in human text as `[!!]` lines
 coloured on TTY and plain when piped, byte-identical modulo colour (issue #419).
 
+`reconcile <run_id>` reads its probe registry from `.continuum/reconcilers.json`
+unless `--config <path>` names another file, and each probe's `timeout` is in
+seconds and optional:
+
+```json
+{
+  "probes": {
+    "send_invoice": {"command": "check-outbox", "timeout": 30},
+    "charge_card": {"command": "check-ledger"}
+  }
+}
+```
+
+`charge_card` gets the default of 10 seconds. A `timeout` that is not a positive
+number is refused rather than clamped, and the `probes` wrapper is required: a
+file that maps action types at the top level registers nothing, so `reconcile`
+reports every uncertain action as having no probe rather than saying the registry
+was wrong (issue #322).
+
 ## hooks
 
 `continuum hooks install` writes host-side observation hooks into agent
