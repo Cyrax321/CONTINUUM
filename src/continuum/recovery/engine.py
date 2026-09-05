@@ -58,7 +58,7 @@ from continuum.recovery.contract import build_contract
 from continuum.recovery.observations import collect_observations
 from continuum.recovery.planner import RepairPlan, plan_repairs
 from continuum.recovery.summary import build_informed_retry
-from continuum.state.validator import StateValidator, ValidationOutcome
+from continuum.state.validator import StateValidator, ValidationOutcome, check_admissibility
 from continuum.storage.base import Storage
 
 __all__ = ["RecoveryEngine", "RecoveryDecision", "SEVERITY"]
@@ -252,6 +252,11 @@ class RecoveryEngine:
             else:
                 confirmed_components.update(["goal", "progress"])
 
+        # Provenance N-hop staleness (issue #553): include archived events so compaction does not launder
+        try:
+            provenance_events = self.storage.read_all_events(run_id)
+        except Exception:
+            provenance_events = self.storage.read_events(run_id)
         validation = self.validator.validate(
             restored.state,
             current_environment=current_environment,
@@ -260,6 +265,7 @@ class RecoveryEngine:
             expected_model=expected_model,
             confirmed=confirmed_components,
             scope=scope,
+            events=provenance_events,
         )
 
         ledger = ActionLedger(self.storage, run_id)
@@ -301,6 +307,38 @@ class RecoveryEngine:
             if broken.status is StateStatus.INVALID and broken.unprojectable_at_sequence is not None
             else None
         )
+        admissibility = check_admissibility(restored.checkpoint, ledger.all())
+        if not admissibility.admissible:
+            has_action_ref = any(d["consumed_inputs"]["action_ids"] for d in admissibility.details)
+            status = StateStatus.REQUIRES_REVIEW if has_action_ref else StateStatus.STALE
+            from continuum.models import Component, ComponentValidationEntry
+
+            entries = list(validation.report.statuses)
+            entries.append(
+                ComponentValidationEntry(
+                    component=Component.ACTION,
+                    component_id=None,
+                    status=status,
+                    detail=admissibility.reason,
+                )
+            )
+            from continuum.models import StateValidationResult
+
+            new_report = StateValidationResult(
+                run_id=validation.report.run_id,
+                checkpoint_version=validation.report.checkpoint_version,
+                statuses=entries,
+                safe_to_resume=False,
+                reason=admissibility.reason,
+                validated_at=validation.report.validated_at,
+            )
+            from continuum.state.validator import ValidationOutcome
+
+            validation = ValidationOutcome(
+                state=validation.state,
+                report=new_report,
+                environment_diff=validation.environment_diff,
+            )
         plan = plan_repairs(
             validation.report.statuses,
             uncertain_actions=uncertain,
@@ -330,6 +368,7 @@ class RecoveryEngine:
             plan,
             restored,
             self.strict_unknown,
+            admissibility,
             liveness_advisory=liveness_advisory,
         )
 
@@ -406,6 +445,7 @@ class RecoveryEngine:
             post_checkpoint_observations=observations,
             liveness=liveness_section,
             triggering_risks=triggering_risks,
+            admissibility=admissibility,
         )
 
         tail_evidence: str | None = None
@@ -473,6 +513,7 @@ class RecoveryEngine:
         plan: RepairPlan,
         restored: RestoredRun,
         strict_unknown: bool,
+        admissibility: Any | None = None,
         liveness_advisory: dict[str, object] | None = None,
         risk_mode: RecoveryMode | None = None,
         risk_rationale: str | None = None,
@@ -591,6 +632,13 @@ class RecoveryEngine:
             for e in validation.report.statuses
         ):
             proposals.append((RecoveryMode.REPLAN, "the goal itself is no longer valid"))
+
+        if admissibility is not None and not admissibility.admissible:
+            has_action_ref = any(d["consumed_inputs"]["action_ids"] for d in admissibility.details)
+            if has_action_ref:
+                proposals.append((RecoveryMode.REQUEST_HUMAN, admissibility.reason))
+            else:
+                proposals.append((RecoveryMode.REPAIR_AND_RESUME, admissibility.reason))
 
         # A run with neither checkpoint nor events cannot reach here: restore()
         # raises CheckpointError first, so there is nothing to decide about.
