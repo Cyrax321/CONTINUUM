@@ -4,17 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from continuum.events import EventType
-from continuum.models import RecoveryMode, Run
-from continuum.recovery import RecoveryEngine
-from continuum.recovery.risk import ingest_risk
-from continuum.storage import SQLiteStorage
-
 from benchmarks.fault_injection.risk_bench import (
     RISK_FAULTS,
     assert_no_duplicate_after_abort,
     run_risk_fault_suite,
 )
+from continuum.events import EventType
+from continuum.models import RecoveryMode, Run
+from continuum.recovery import RecoveryEngine
+from continuum.recovery.risk import ingest_risk
+from continuum.storage import SQLiteStorage
 
 
 def test_risk_faults_choose_correct_mode(tmp_path: Path) -> None:
