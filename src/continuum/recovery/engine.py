@@ -362,6 +362,50 @@ class RecoveryEngine:
                 liveness_breaches = 0
         except Exception:
             liveness_advisory = None
+        # Risk evaluation (issue #303): map triggers to modes, collect ids.
+        # Runs before the decision so the worst trigger proposes alongside the
+        # other signals; the most cautious proposal wins regardless of order.
+        triggering_risks: list[str] = []
+        risk_mode = None
+        risk_rationale = None
+        try:
+            from continuum.recovery.risk import evaluate_risk, load_risk_policy
+
+            policy = load_risk_policy()
+            try:
+                risk_events = [
+                    e for e in self.storage.read_events(run_id) if e.type == EventType.RISK_OBSERVED
+                ]
+            except Exception:
+                risk_events = []
+            best_mode = None
+            best_trigger = None
+            triggering: list[str] = []
+            for risk_ev in risk_events:
+                trig = risk_ev.payload.get("trigger")
+                if not isinstance(trig, str):
+                    continue
+                mode_str = evaluate_risk(trig, policy)
+                if mode_str is None:
+                    continue
+                try:
+                    candidate = RecoveryMode(mode_str)
+                except Exception:
+                    continue
+                if best_mode is None or SEVERITY[candidate] > SEVERITY[best_mode]:
+                    best_mode = candidate
+                    best_trigger = trig
+                    triggering = [risk_ev.event_id]
+                elif SEVERITY[candidate] == SEVERITY[best_mode]:
+                    triggering.append(risk_ev.event_id)
+            if best_mode is not None:
+                risk_mode = best_mode
+                triggering_risks = triggering
+                risk_rationale = f"risk {best_trigger} triggers {best_mode.value}"
+        except Exception:
+            triggering_risks = []
+            risk_mode = None
+            risk_rationale = None
         mode, rationale = self._decide(
             validation,
             uncertain,
@@ -370,6 +414,8 @@ class RecoveryEngine:
             self.strict_unknown,
             admissibility,
             liveness_advisory=liveness_advisory,
+            risk_mode=risk_mode,
+            risk_rationale=risk_rationale,
         )
 
         reason = "; ".join(rationale) if rationale else validation.report.reason
@@ -392,48 +438,6 @@ class RecoveryEngine:
                 "threshold_seconds": liveness_advisory.get("threshold_seconds"),
                 "phase": liveness_advisory.get("phase"),
             }
-        # Risk evaluation (issue #303): map triggers to modes, collect ids
-        triggering_risks: list[str] = []
-        risk_mode = None
-        risk_rationale = None
-        try:
-            from continuum.recovery.risk import evaluate_risk, load_risk_policy
-
-            policy = load_risk_policy()
-            try:
-                risk_events = [
-                    e for e in self.storage.read_events(run_id) if e.type == EventType.RISK_OBSERVED
-                ]
-            except Exception:
-                risk_events = []
-            best_mode = None
-            best_trigger = None
-            triggering: list[str] = []
-            for ev in risk_events:
-                trig = ev.payload.get("trigger")
-                if not isinstance(trig, str):
-                    continue
-                mode_str = evaluate_risk(trig, policy)
-                if mode_str is None:
-                    continue
-                try:
-                    mode = RecoveryMode(mode_str)
-                except Exception:
-                    continue
-                if best_mode is None or SEVERITY[mode] > SEVERITY[best_mode]:
-                    best_mode = mode
-                    best_trigger = trig
-                    triggering = [ev.event_id]
-                elif SEVERITY[mode] == SEVERITY[best_mode]:
-                    triggering.append(ev.event_id)
-            if best_mode is not None:
-                risk_mode = best_mode
-                triggering_risks = triggering
-                risk_rationale = f"risk {best_trigger} triggers {best_mode.value}"
-        except Exception:
-            triggering_risks = []
-            risk_mode = None
-            risk_rationale = None
         contract = build_contract(
             run_id=run_id,
             checkpoint_version=checkpoint_version,
