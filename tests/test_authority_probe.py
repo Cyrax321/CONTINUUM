@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import sys
 
 from continuum.actions.authority import record_authority_consumed
 from continuum.events import EventType
@@ -12,6 +13,18 @@ from continuum.models import Run
 from continuum.reconcilers import load_reconcilers, settle_authority
 from continuum.recovery.engine import RecoveryEngine
 from continuum.storage import SQLiteStorage
+
+
+def _probe_command(body: str) -> str:
+    """A probe command that prints *body* on any shell.
+
+    ``echo`` with single quotes is a POSIX-ism: Windows cmd keeps the quotes
+    and the output stops parsing as JSON. The interpreter is already here,
+    so use it directly; backslash-escaped quotes survive both sh grouping
+    and the C runtime unescaping behind cmd.
+    """
+    inner = "'" + body.replace('"', '\\"') + "'"
+    return f'"{sys.executable}" -c "print({inner})"'
 
 
 def _storage() -> SQLiteStorage:
@@ -28,7 +41,11 @@ def test_probe_via_reconcilers_json_valid_true_unblocks(tmp_path: pathlib.Path) 
         cfg = tmp_path / "reconcilers.json"
         cfg.write_text(
             json.dumps(
-                {"probes": {"auth-probe-1": {"command": "echo '{\"valid\": true}'", "timeout": 5}}}
+                {
+                    "probes": {
+                        "auth-probe-1": {"command": _probe_command('{"valid": true}'), "timeout": 5}
+                    }
+                }
             )
         )
         probes = load_reconcilers(cfg)
@@ -75,7 +92,14 @@ def test_probe_valid_false_keeps_blocked(tmp_path: pathlib.Path) -> None:
         cfg = tmp_path / "reconcilers.json"
         cfg.write_text(
             json.dumps(
-                {"probes": {"auth-probe-2": {"command": "echo '{\"valid\": false}'", "timeout": 5}}}
+                {
+                    "probes": {
+                        "auth-probe-2": {
+                            "command": _probe_command('{"valid": false}'),
+                            "timeout": 5,
+                        }
+                    }
+                }
             )
         )
         probes = load_reconcilers(cfg)
@@ -108,7 +132,10 @@ def test_probe_unknown_leaves_blocked(tmp_path: pathlib.Path) -> None:
             json.dumps(
                 {
                     "probes": {
-                        "auth-probe-3": {"command": 'echo \'{"valid": "unknown"}\'', "timeout": 5}
+                        "auth-probe-3": {
+                            "command": _probe_command('{"valid": "unknown"}'),
+                            "timeout": 5,
+                        }
                     }
                 }
             )
@@ -162,7 +189,10 @@ def test_restore_does_not_resurrect_negative(tmp_path: pathlib.Path) -> None:
             json.dumps(
                 {
                     "probes": {
-                        "auth-restore-neg": {"command": "echo '{\"valid\": true}'", "timeout": 5}
+                        "auth-restore-neg": {
+                            "command": _probe_command('{"valid": true}'),
+                            "timeout": 5,
+                        }
                     }
                 }
             )
