@@ -238,6 +238,40 @@ def test_gateway_tenant_deny_before_ledger(tmp_path) -> None:
         assert "tenant mismatch" in decision.reason
 
 
+def test_gateway_denies_foreign_memory_claim(tmp_path) -> None:
+    from continuum.gateway import Route
+
+    route = Route(
+        host="pgvector.internal",
+        methods=("POST",),
+        prefix="/upsert",
+        action_type="mem_write",
+        key_template="mem:{store_id}:{tenant}:{record_key}",
+    )
+    path = str(tmp_path / "gw.db")
+    with SQLiteStorage(path) as store:
+        for run_id in ("run_1", "run_2"):
+            store.create_run(Run(run_id=run_id, goal="g"))
+            store.append_event(run_id, EventType.RUN_STARTED, {"goal": "g"})
+
+        rendered = "mem:pgvector_main:acme:rec-42"
+        ActionLedger(store, "run_2").claim("mem_write", {}, key=rendered, scoped_to_run=False)
+        actions = fold_action_events(store.read_events("run_1"))
+
+        decision = match_route(
+            [route],
+            host="pgvector.internal",
+            method="POST",
+            body={"store_id": "pgvector_main", "tenant": "acme", "record_key": "rec-42"},
+            actions_by_key=actions,
+            run_id="run_1",
+            storage=store,
+        )
+
+    assert decision.allow is False
+    assert "already has a claim in another run" in decision.reason
+
+
 def test_memory_observation_unverified_escalates(tmp_path) -> None:
     path = str(tmp_path / "mem.db")
     with SQLiteStorage(path) as store:
