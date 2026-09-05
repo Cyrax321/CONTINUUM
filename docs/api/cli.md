@@ -109,3 +109,31 @@ number is refused rather than clamped, and the `probes` wrapper is required: a
 file that maps action types at the top level registers nothing, so `reconcile`
 reports every uncertain action as having no probe rather than saying the registry
 was wrong (issue #322).
+
+## hooks
+
+`continuum hooks install` writes host-side observation hooks into agent
+settings files (for example `.claude/settings.json` or `.gemini/settings.json`).
+The installed `observe` command is baked in at install time and may take one of
+two shapes:
+
+- **`continuum` on PATH**: an absolute path to the resolved executable, for
+  example `/usr/local/bin/continuum observe`.
+- **Editable / interpreter-only installs**: `/path/to/python -m continuum.cli observe`
+  when no `continuum` executable is found on PATH.
+
+If you pass `--db`, that path is baked into the command too (for example
+`continuum --db /abs/path.db observe`), because hook processes run with the
+project root as cwd and the default database path would otherwise be ambiguous.
+
+To see what was installed, inspect the settings file after install:
+
+```bash
+continuum hooks install claude-code --db /tmp/test.db
+cat .claude/settings.json
+```
+
+If the command looks unexpected after moving a virtualenv, re-run the
+same install command for that host, including the original `--db` value
+when one was used (for example `continuum hooks install claude-code --db /tmp/test.db`);
+it rewrites the baked command path without changing the database target.

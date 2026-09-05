@@ -187,16 +187,11 @@ def match_route(
         for _v in body.values():
             if isinstance(_v, str) and _v in consumed_authorities:
                 ev = consumed_authorities[_v]
-                seq = (
-                    getattr(ev, "sequence", "?")
-                    if hasattr(ev, "sequence")
-                    else ev.get("sequence", "?")
-                )
-                payload = getattr(ev, "payload", {}) or {}
                 if hasattr(ev, "payload"):
                     seq = ev.sequence
-                    payload = ev.payload
+                    payload = ev.payload or {}
                 else:
+                    seq = ev.get("sequence", "?")
                     payload = ev.get("payload", {})
                 consumer = payload.get("consumer_run_id", "?")
                 return Decision(
@@ -259,16 +254,15 @@ def match_route(
             if getattr(storage, "supports_action_index", False):
                 foreign_action = storage.foreign_action(key, exclude_run=run_id)
                 if foreign_action is not None:
-                    action = foreign_action
+                    return Decision(
+                        False,
+                        f"side effect {route.action_type!r} key {rendered!r} "
+                        f"already has a claim in another run "
+                        f"({foreign_action.status.value}); reconcile it first",
+                        route=route,
+                    )
         except Exception:
             action = None
-    else:
-        # action already from local, foreign stays None
-        pass
-    # If we already resolved action via foreign, we need to handle status below
-    # Reuse variable action; key already computed
-    # To avoid double lookup, we will have a flag
-
     if action is None or getattr(action, "action_type", None) != route.action_type:
         return Decision(
             False,
@@ -337,7 +331,33 @@ class GatewayServer:
                 decode (issue #323). Callers catch both and return, since the
                 response is already on the wire.
                 """
-                length = int(self.headers.get("Content-Length") or 0)
+                transfer_encodings = self.headers.get_all("Transfer-Encoding", [])
+                if transfer_encodings:
+                    self.close_connection = True
+                    self._respond(400, {"error": "transfer encoding is not supported"})
+                    raise _MalformedBody
+
+                content_lengths = self.headers.get_all("Content-Length", [])
+                if len(content_lengths) > 1:
+                    self.close_connection = True
+                    self._respond(
+                        400, {"error": "multiple Content-Length headers are not supported"}
+                    )
+                    raise _MalformedBody
+
+                cl_header = content_lengths[0] if content_lengths else None
+                if cl_header is not None:
+                    try:
+                        length = int(cl_header)
+                        if length < 0:
+                            raise ValueError("Content-Length must be non-negative")
+                    except ValueError as exc:
+                        self.close_connection = True
+                        self._respond(400, {"error": f"malformed Content-Length header: {exc}"})
+                        raise _MalformedBody from exc
+                else:
+                    length = 0
+
                 if length > max_bytes:
                     # Drain (without buffering) so the client can finish
                     # writing and read our 413, instead of dying on a broken
