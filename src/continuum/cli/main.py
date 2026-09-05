@@ -2642,7 +2642,9 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
     # Authority probe path (issue #289c)
     authority_id = getattr(args, "authority", None)
     if authority_id:
-        authority_report = settle_authority(storage, args.run_id, authority_id, probes, dry_run=args.dry_run)
+        authority_report = settle_authority(
+            storage, args.run_id, authority_id, probes, dry_run=args.dry_run
+        )
         payload = {"run_id": args.run_id, "dry_run": args.dry_run, **authority_report.as_dict()}
         # Keep existing shape for actions report when authority path taken
         if authority_report.valid is True:
