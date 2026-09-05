@@ -264,6 +264,11 @@ def cmd_start(args: argparse.Namespace, storage: Storage, out: Any, err: Any) ->
 
 
 def cmd_runs(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """List the most recent runs with their status and event count.
+
+    The text table truncates long goals to keep one run per line; the JSON
+    payload carries each goal in full, so scripts never read a clipped goal.
+    """
     runs = storage.list_runs(limit=args.limit)
     if not runs:
         _emit(
@@ -607,6 +612,11 @@ def cmd_status(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
 
 def cmd_history(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """List a run's checkpoint lineage, one row per checkpoint.
+
+    Read-only. A run that was never created raises ``RunNotFound`` rather than
+    reporting an empty history, which would read as "no checkpoints yet".
+    """
     # Multiple checkpoints legitimately share a state version (put_version
     # returns the same version when the state fingerprint is unchanged), so we
     # list every checkpoint rather than keying by version, which would collapse
@@ -652,6 +662,11 @@ def cmd_history(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
 
 
 def cmd_events(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Print a run's event log, optionally windowed by ``--after`` / ``--upto``.
+
+    Read-only. Shows the whole log, archived prefix included, so a compacted run
+    reads the same as one that was never compacted.
+    """
     storage.get_run(args.run_id)  # raises RunNotFound for a run that was never created
     # Full log: archived prefix plus live tail, matching the dashboard hint (issue #532).
     events = [
@@ -763,6 +778,11 @@ def cmd_impact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
 
 def cmd_diff(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Show the semantic diff between two stored state versions of one run.
+
+    Read-only: both versions are read as stored, never re-projected, so the diff
+    reports what was actually persisted at each point.
+    """
     before = storage.get_version(args.run_id, args.from_version)
     after = storage.get_version(args.run_id, args.to_version)
     diff = diff_states(before, after)
@@ -2739,6 +2759,11 @@ def cmd_forget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
 
 def cmd_contract(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Print the recovery contract for a run without acting on it.
+
+    Read-only, but the exit status still carries the recovery mode, so a script
+    can gate on the verdict without parsing the contract it just printed.
+    """
     decision = RecoveryEngine(storage).assess(
         args.run_id, current_environment=_environment(args, args.run_id)
     )
@@ -2914,6 +2939,13 @@ def cmd_export_evidence(args: argparse.Namespace, storage: Storage, out: Any, er
 
 
 def cmd_benchmark(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Run the recovery and idempotency benchmarks and report both.
+
+    Uses its own throwaway stores, so the configured database is untouched. The
+    idempotency pass runs a quarter of ``--total``, since it attempts every
+    action twice across four strategies. ``--json`` appends the machine
+    readable payload after the tables rather than replacing them.
+    """
     import json
 
     from continuum.benchmark import (
@@ -3076,6 +3108,11 @@ def cmd_attest_verify(args: argparse.Namespace, storage: Storage, out: Any, err:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the full ``continuum`` parser, subcommands included.
+
+    Every subcommand sets ``func`` as a default, so :func:`main` dispatches on
+    the parsed namespace alone and never on the command name.
+    """
     parser = argparse.ArgumentParser(
         prog="continuum",
         description="Semantic recovery layer for long-running AI agents.",
@@ -3105,15 +3142,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     def add(name: str, func: Any, help_text: str) -> argparse.ArgumentParser:
+        """Register a subcommand bound to ``func``, returning it for more arguments."""
         p = sub.add_parser(name, help=help_text, description=help_text)
         p.set_defaults(func=func)
         return p
 
     def with_run(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        """Add the positional ``run_id`` every run-scoped subcommand takes."""
         p.add_argument("run_id", help="the run to operate on.")
         return p
 
     def with_env(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        """Add the repeatable ``--env NAME=VERSION`` flag for staleness checks."""
         p.add_argument(
             "--env",
             action="append",
@@ -3381,6 +3421,7 @@ def build_parser() -> argparse.ArgumentParser:
     hooks_sub = hooks.add_subparsers(dest="hooks_command", metavar="ACTION CLIENT", required=True)
 
     def hooks_client(p: argparse.ArgumentParser, func: Any) -> None:
+        """Give a ``hooks`` action its client selector and settings override."""
         p.add_argument(
             "client",
             choices=tuple(CLIENT_PROFILES),
@@ -3500,6 +3541,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8765, help="port for --transport http.")
 
     def cmd_dashboard(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+        """Serve the read-only dashboard, blocking until interrupted.
+
+        Binds loopback unless ``--host`` says otherwise: the pages render goals
+        and side-effect details, which must not be off-host by default.
+        """
         from continuum.dashboard import serve_dashboard as _serve
 
         print(f"Serving dashboard at http://localhost:{args.port}", file=out)

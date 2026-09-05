@@ -17,6 +17,7 @@ from typing import IO, Any, TextIO, cast
 
 from continuum.serve.server import (
     BadParams,
+    BadRequest,
     MalformedRunLog,
     MethodNotFound,
     NotAuthorized,
@@ -39,6 +40,7 @@ __all__ = [
     "MethodNotFound",
     "NotAuthorized",
     "BadParams",
+    "BadRequest",
     "MalformedRunLog",
 ]
 

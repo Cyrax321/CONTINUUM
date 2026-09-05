@@ -22,6 +22,12 @@ DASHBOARD_DRAIN_LIMIT_BYTES = 256 * 1024 * 1024
 
 
 def render_dashboard_html(storage: Storage) -> str:
+    """Render the run index: one row per run with its recovery verdict.
+
+    Each row assesses recovery independently, and an assessment that raises is
+    shown as ``error: ...`` in that row rather than failing the whole page: an
+    unreadable run must not hide the readable ones.
+    """
     runs = storage.list_runs()
     rows: list[str] = []
     for run in runs:
@@ -129,6 +135,12 @@ def _pins_html(storage: Storage, run_id: str) -> str:
 
 
 def render_run_detail_html(storage: Storage, run_id: str) -> str:
+    """Render one run: contract, validation, advisories, HITL controls, events.
+
+    Only the last 20 events are shown, with a pointer to ``continuum events``
+    for the full log. A run that cannot be read yields a "Run not found" page;
+    the handler pairs that body with 404 rather than 200.
+    """
     try:
         run = storage.get_run(run_id)
     except Exception as exc:
@@ -259,9 +271,16 @@ def make_dashboard_server(
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+            """Drop the stdlib access log: the event log is the record of truth."""
             return
 
         def _html(self, content: str, code: int = 200) -> None:
+            """Answer with one HTML body and an explicit ``Content-Length``.
+
+            ``Connection: close`` is advertised only when the handler already
+            decided to close, so a refusal that left the request body unread
+            does not promise keep-alive it cannot honour.
+            """
             body = content.encode("utf-8")
             self.send_response(code)
             if getattr(self, "close_connection", False):
@@ -272,6 +291,7 @@ def make_dashboard_server(
             self.wfile.write(body)
 
         def do_GET(self) -> None:  # noqa: N802
+            """Serve the run index, or one run's detail page under ``/runs/<id>``."""
             if self.path.startswith("/runs/"):
                 run_id = self.path.split("/runs/")[1].split("?")[0].split("/")[0]
                 content = render_run_detail_html(storage, run_id)
@@ -285,6 +305,15 @@ def make_dashboard_server(
             self._html(render_dashboard_html(storage))
 
         def do_POST(self) -> None:  # noqa: N802
+            """Apply one human-in-the-loop action: confirm, reconcile, or complete.
+
+            The body is form-encoded and capped at ``MAX_DASHBOARD_BODY``; an
+            oversized one is drained (up to the drain limit) so the client can
+            read the 413 instead of hitting a broken pipe. Every action is token
+            gated, and a rejected token answers 403 before anything is written.
+            An action that raises answers 400: settling a claim is a write, and
+            a half-applied one must be visible rather than reported as success.
+            """
             transfer_encodings = self.headers.get_all("Transfer-Encoding", [])
             if transfer_encodings:
                 self.close_connection = True
@@ -345,6 +374,7 @@ def make_dashboard_server(
             run_id = form.get("run_id", "")
 
             def ok(msg: str) -> None:
+                """Answer 200 with ``msg`` above the refreshed run detail."""
                 detail = render_run_detail_html(storage, run_id) if run_id else ""
                 self._html(
                     f"<p>[ok] {html.escape(msg)}</p>{detail}"
@@ -398,6 +428,11 @@ def make_dashboard_server(
 
 
 def serve_dashboard(storage: Storage, port: int = 8000, host: str = "127.0.0.1") -> None:
+    """Serve the dashboard until interrupted, closing the socket on the way out.
+
+    Blocks the calling thread. See :func:`make_dashboard_server` for the
+    loopback default and the body cap.
+    """
     httpd = make_dashboard_server(storage, port=port, host=host)
     print(f"Serving dashboard at http://{host}:{port}")
     try:
