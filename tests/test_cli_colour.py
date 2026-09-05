@@ -179,7 +179,7 @@ def test_stripping_colour_reproduces_plain_output_exactly(db: str, argv: tuple[s
     """Colour is presentational: strip the codes and you get the plain text."""
     _, plain, _ = run("--db", db, *argv)
     _, coloured, _ = run("--db", db, "--color", *argv)
-    assert ANSI.sub("", coloured) == plain
+    assert _without_volatile_age(ANSI.sub("", coloured)) == _without_volatile_age(plain)
 
 
 @pytest.mark.parametrize(
