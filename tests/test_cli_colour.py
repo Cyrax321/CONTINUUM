@@ -266,6 +266,16 @@ def test_for_stream_infers_from_the_stream() -> None:
 # --- as a real process ------------------------------------------------------ #
 
 
+def _without_volatile_age(text: str) -> str:
+    """Normalize the live liveness age for byte-equality assertions.
+
+    The advisory embeds seconds since the last append, so two renders of one
+    unchanged run legitimately differ in that token. Everything else must be
+    byte-identical, which is what this test pins.
+    """
+    return re.sub(r"silence \d+\.\ds", "silence <age>s", text)
+
+
 def test_a_real_piped_process_emits_no_colour(db: str) -> None:
     # The uncoloured in-process render is the reference: a real piped process
     # must produce it byte for byte, exit code included.
@@ -283,6 +293,6 @@ def test_a_real_piped_process_emits_no_colour(db: str) -> None:
     # Assert the CLI actually ran. Checking only for absent escape sequences
     # would pass for a process that died before producing any output at all.
     assert result.returncode == expected_code, result.stderr
-    assert result.stdout == expected_out
+    assert _without_volatile_age(result.stdout) == _without_volatile_age(expected_out)
     assert not ANSI.search(result.stdout)
     assert not ANSI.search(result.stderr)
