@@ -1,5 +1,6 @@
 import http.client
 import os
+import socket
 import threading
 import urllib.parse
 from pathlib import Path
@@ -13,6 +14,13 @@ from continuum.dashboard.app import (
 from continuum.events import EventType
 from continuum.models import Run
 from continuum.storage import SQLiteStorage
+
+
+def recv_until_close(sock: socket.socket) -> bytes:
+    chunks = []
+    while chunk := sock.recv(4096):
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def test_dashboard_renders_runs() -> None:
@@ -195,6 +203,53 @@ def test_dashboard_post_body_too_large_returns_413(tmp_path: Path) -> None:
         conn.close()
         assert resp.status == 200
         assert "goal and progress confirmed" in data
+
+        # Malformed Content-Length returns 400 without crashing (#522)
+        conn = http.client.HTTPConnection(addr, timeout=10)
+        conn.request(
+            "POST",
+            "/action/confirm",
+            body=b"x",
+            headers={"Content-Length": "abc"},
+        )
+        resp = conn.getresponse()
+        data = resp.read().decode(errors="ignore")
+        conn.close()
+        assert resp.status == 400
+        assert "400 Bad Request" in data
+
+        # Chunked Transfer-Encoding returns 400 (#522)
+        conn = http.client.HTTPConnection(addr, timeout=10)
+        conn.request(
+            "POST",
+            "/action/confirm",
+            body=b"1\r\nx\r\n0\r\n\r\n",
+            headers={"Transfer-Encoding": "chunked"},
+        )
+        resp = conn.getresponse()
+        data = resp.read().decode(errors="ignore")
+        conn.close()
+        assert resp.status == 400
+        assert "transfer encoding is not supported" in data
+        assert resp.getheader("Connection") == "close"
+
+        # Duplicate Content-Length is ambiguous framing and is refused (#522)
+        host, port = addr.split(":")
+        request = (
+            b"POST /action/confirm HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Content-Length: 4\r\n"
+            b"Content-Length: 9\r\n"
+            b"\r\n"
+            b"token=x"
+        )
+        with socket.create_connection((host, int(port)), timeout=10) as sock:
+            sock.sendall(request)
+            response = recv_until_close(sock)
+
+        assert b"400 Bad Request" in response
+        assert b"Connection: close" in response
+        assert b"multiple Content-Length headers are not supported" in response
     finally:
         server.shutdown()
         server.server_close()
