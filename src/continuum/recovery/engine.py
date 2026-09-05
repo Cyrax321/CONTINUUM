@@ -345,8 +345,77 @@ class RecoveryEngine:
             strict_unknown=self.validator.strict_unknown,
             unprojectable=unprojectable,
         )
+        # Liveness: silence as WAIT, never auto-rollback (issue #302)
+        liveness_advisory = None
+        liveness_breaches = 0
+        try:
+            from continuum.recovery.health import advisory_for_storage
+
+            liveness_advisory = advisory_for_storage(self.storage, run_id)
+            # Count prior breaches as DETECTED events
+            try:
+                evs = self.storage.read_events(run_id)
+                liveness_breaches = sum(
+                    1 for e in evs if e.type == EventType.LIVENESS_SILENCE_DETECTED
+                )
+            except Exception:
+                liveness_breaches = 0
+        except Exception:
+            liveness_advisory = None
+        # Risk evaluation (issue #303): map triggers to modes, collect ids.
+        # Runs before the decision so the worst trigger proposes alongside the
+        # other signals; the most cautious proposal wins regardless of order.
+        triggering_risks: list[str] = []
+        risk_mode = None
+        risk_rationale = None
+        try:
+            from continuum.recovery.risk import evaluate_risk, load_risk_policy
+
+            policy = load_risk_policy()
+            try:
+                risk_events = [
+                    e for e in self.storage.read_events(run_id) if e.type == EventType.RISK_OBSERVED
+                ]
+            except Exception:
+                risk_events = []
+            best_mode = None
+            best_trigger = None
+            triggering: list[str] = []
+            for risk_ev in risk_events:
+                trig = risk_ev.payload.get("trigger")
+                if not isinstance(trig, str):
+                    continue
+                mode_str = evaluate_risk(trig, policy)
+                if mode_str is None:
+                    continue
+                try:
+                    candidate = RecoveryMode(mode_str)
+                except Exception:
+                    continue
+                if best_mode is None or SEVERITY[candidate] > SEVERITY[best_mode]:
+                    best_mode = candidate
+                    best_trigger = trig
+                    triggering = [risk_ev.event_id]
+                elif SEVERITY[candidate] == SEVERITY[best_mode]:
+                    triggering.append(risk_ev.event_id)
+            if best_mode is not None:
+                risk_mode = best_mode
+                triggering_risks = triggering
+                risk_rationale = f"risk {best_trigger} triggers {best_mode.value}"
+        except Exception:
+            triggering_risks = []
+            risk_mode = None
+            risk_rationale = None
         mode, rationale = self._decide(
-            validation, uncertain, plan, restored, self.strict_unknown, admissibility
+            validation,
+            uncertain,
+            plan,
+            restored,
+            self.strict_unknown,
+            admissibility,
+            liveness_advisory=liveness_advisory,
+            risk_mode=risk_mode,
+            risk_rationale=risk_rationale,
         )
 
         reason = "; ".join(rationale) if rationale else validation.report.reason
@@ -359,6 +428,16 @@ class RecoveryEngine:
             after_sequence = latest_version.source_sequence
         observations = collect_observations(self.storage, run_id, after_sequence=after_sequence)
 
+        # Build liveness section for contract
+        liveness_section = None
+        if liveness_advisory is not None:
+            liveness_section = {
+                "last_append_age": liveness_advisory.get("silence_seconds"),
+                "breaches": liveness_breaches,
+                "breached": bool(liveness_advisory.get("breached")),
+                "threshold_seconds": liveness_advisory.get("threshold_seconds"),
+                "phase": liveness_advisory.get("phase"),
+            }
         contract = build_contract(
             run_id=run_id,
             checkpoint_version=checkpoint_version,
@@ -368,6 +447,8 @@ class RecoveryEngine:
             reason=reason,
             scope=scope,
             post_checkpoint_observations=observations,
+            liveness=liveness_section,
+            triggering_risks=triggering_risks,
             admissibility=admissibility,
         )
 
@@ -437,6 +518,9 @@ class RecoveryEngine:
         restored: RestoredRun,
         strict_unknown: bool,
         admissibility: Any | None = None,
+        liveness_advisory: dict[str, object] | None = None,
+        risk_mode: RecoveryMode | None = None,
+        risk_rationale: str | None = None,
     ) -> tuple[RecoveryMode, tuple[str, ...]]:
         """Collect a proposal per signal and return the most cautious."""
         proposals: list[tuple[RecoveryMode, str]] = []
@@ -510,6 +594,41 @@ class RecoveryEngine:
 
         if plan.requires_human:
             proposals.append((RecoveryMode.REQUEST_HUMAN, "at least one repair needs a person"))
+
+        # Liveness breach maps to WAIT, never auto-rollback (issue #302)
+        # Silence tells us nothing about what to roll back, only that a human
+        # or lease-recovery decision is needed. WAIT is the most cautious
+        # signal that still allows a lease to be recovered without human.
+        if liveness_advisory is not None and bool(liveness_advisory.get("breached")):
+            silence = liveness_advisory.get("silence_seconds")
+            threshold = liveness_advisory.get("threshold_seconds")
+            phase = liveness_advisory.get("phase") or "otherwise"
+            proposals.append(
+                (
+                    RecoveryMode.WAIT,
+                    f"liveness breach: silence {silence:.1f}s exceeds threshold {threshold}s (phase {phase})",
+                )
+            )
+
+        # Risk trigger mapping (issue #303): deterministic policy to mode
+        if risk_mode is not None:
+            rationale_text = risk_rationale or f"risk triggers {risk_mode.value}"
+            proposals.append((risk_mode, rationale_text))
+
+        # Liveness breach maps to WAIT, never auto-rollback (issue #302)
+        # Silence tells us nothing about what to roll back, only that a human
+        # or lease-recovery decision is needed. WAIT is the most cautious
+        # signal that still allows a lease to be recovered without human.
+        if liveness_advisory is not None and bool(liveness_advisory.get("breached")):
+            silence = liveness_advisory.get("silence_seconds")
+            threshold = liveness_advisory.get("threshold_seconds")
+            phase = liveness_advisory.get("phase") or "otherwise"
+            proposals.append(
+                (
+                    RecoveryMode.WAIT,
+                    f"liveness breach: silence {silence:.1f}s exceeds threshold {threshold}s (phase {phase})",
+                )
+            )
 
         # A goal that is no longer valid cannot be repaired by re-running work.
         if any(

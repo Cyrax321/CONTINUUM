@@ -562,6 +562,12 @@ def _h_validate(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]
         constraint_pins = constraint_pins_payload(decision.state, rendered)
     except Exception:
         constraint_pins = {"pins": {}, "flagged": [], "grace_seconds": None}
+    try:
+        from continuum.recovery.health import advisory_for_storage
+
+        liveness = advisory_for_storage(server.storage, run_id)
+    except Exception:
+        liveness = {"breached": False, "silence_seconds": None}
     return {
         "run_id": run_id,
         "safe": decision.safe,
@@ -579,6 +585,7 @@ def _h_validate(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]
         ],
         "environment_changes": [d.render() for d in decision.environment_diff.breaking],
         "constraint_pins": constraint_pins,
+        "liveness": liveness,
     }
 
 
@@ -610,7 +617,14 @@ def _h_resume(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]:
     # continue without keeping its own task file. Read-only: returning the
     # self-reported goal confirms nothing, so a self-certified run still comes
     # back as request_human.
-    return _decision_payload(decision, goal=server.storage.get_run(run_id).goal)
+    payload = _decision_payload(decision, goal=server.storage.get_run(run_id).goal)
+    try:
+        from continuum.recovery.health import advisory_for_storage
+
+        payload["liveness"] = advisory_for_storage(server.storage, run_id)
+    except Exception:
+        payload["liveness"] = {"breached": False, "silence_seconds": None}
+    return payload
 
 
 def _h_confirm(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]:

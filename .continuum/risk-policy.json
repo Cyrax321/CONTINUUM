@@ -1,0 +1,10 @@
+{
+  "loop": "replan",
+  "error_cascade": "wait",
+  "latency_anomaly": "annotate",
+  "token_runaway": "wait",
+  "silent_abort": "repair_and_resume",
+  "meltdown": "rollback",
+  "side_effect_duplicate": "abort",
+  "governance_decay": "request_human"
+}
