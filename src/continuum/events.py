@@ -131,6 +131,7 @@ class EventType(StrEnum):
 
     # authority lifecycle (issue #289/#555): one-time credential was consumed
     AUTHORITY_CONSUMED = "AUTHORITY_CONSUMED"
+    AUTHORITY_RECONCILED = "AUTHORITY_RECONCILED"
 
     # structured attempt memory (issue #313): durable falsification lesson
     ATTEMPT_LESSON = "ATTEMPT_LESSON"

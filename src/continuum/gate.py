@@ -78,17 +78,25 @@ class GateConfigError(ValueError):
 def collect_consumed_authorities(events: Any) -> dict[str, Any]:
     """Scan events for AUTHORITY_CONSUMED and return map authority_id to event.
 
-    First consumption wins, the log is append-only. The map is used by the
-    gate to refuse resurrection of a consumed authority even after a restore.
+    First consumption wins, the log is append-only, but a later
+    AUTHORITY_RECONCILED with valid true clears the consumed mark, which
+    is how an external probe can re-validate an authority. Valid false
+    keeps it blocked, unknown leaves it blocked.
     """
     consumed: dict[str, Any] = {}
     for ev in events:
-        if getattr(ev, "type", None) is not EventType.AUTHORITY_CONSUMED:
-            continue
+        ev_type = getattr(ev, "type", None)
         payload = getattr(ev, "payload", {}) or {}
-        aid = payload.get("authority_id")
-        if isinstance(aid, str) and aid not in consumed:
-            consumed[aid] = ev
+        if ev_type is EventType.AUTHORITY_CONSUMED:
+            aid = payload.get("authority_id")
+            if isinstance(aid, str) and aid not in consumed:
+                consumed[aid] = ev
+        elif ev_type is EventType.AUTHORITY_RECONCILED:
+            aid = payload.get("authority_id")
+            valid = payload.get("valid")
+            if isinstance(aid, str) and aid in consumed and valid is True:
+                # External probe says authority is still valid, unblock
+                del consumed[aid]
     return consumed
 
 

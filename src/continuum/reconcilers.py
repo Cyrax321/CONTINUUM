@@ -53,6 +53,9 @@ __all__ = [
     "load_reconcilers",
     "probe_verdict",
     "settle_run",
+    "probe_authority_verdict",
+    "settle_authority",
+    "AuthoritySettleReport",
 ]
 
 #: Where the registry lives relative to the project root a hook or CLI
@@ -241,3 +244,140 @@ def _key_for(storage: Storage, run_id: str, action: Action) -> Any:
         if candidate.action_id == action.action_id:
             return key
     raise LookupError(f"action {action.action_id} vanished from run {run_id} mid-reconcile")
+
+
+def _parse_authority_verdict(text: str) -> bool | None | Literal["unknown"]:
+    """Parse authority probe final output line into valid True/False/unknown."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return "unknown"
+    last = lines[-1]
+    lowered = last.lower()
+    if lowered.startswith("valid="):
+        value = lowered.split("=", 1)[1]
+        if value == "true":
+            return True
+        if value == "false":
+            return False
+        return "unknown"
+    try:
+        parsed = json.loads(last)
+    except json.JSONDecodeError:
+        return "unknown"
+    if isinstance(parsed, dict):
+        valid = parsed.get("valid")
+        if isinstance(valid, bool):
+            return valid
+        if valid is None or (isinstance(valid, str) and valid.lower() == "unknown"):
+            return "unknown"
+        return "unknown"
+    return "unknown"
+
+
+def probe_authority_verdict(
+    spec: Mapping[str, Any], payload: Mapping[str, Any]
+) -> tuple[bool | None | Literal["error"], str]:
+    """Run one authority probe. Returns (verdict, detail)."""
+    try:
+        completed = subprocess.run(  # noqa: S602 - operator-configured command
+            spec["command"],
+            input=json.dumps(dict(payload)),
+            capture_output=True,
+            text=True,
+            timeout=float(spec["timeout"]),
+            shell=True,
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            "error",
+            f"authority probe timed out after {spec['timeout']}s",
+        )
+    except OSError as exc:
+        return "error", f"authority probe failed to run: {exc}"
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()[:200]
+        return "error", f"authority probe exited {completed.returncode}: {detail}"
+    verdict = _parse_authority_verdict(completed.stdout)
+    if verdict == "unknown":
+        return None, (
+            f"authority probe could not determine validity from output "
+            f"{(completed.stdout or '').strip()[:120]!r}"
+        )
+    if verdict is None:
+        return None, "authority probe returned unknown"
+    return verdict, (completed.stderr or "").strip()[:200]
+
+
+@dataclass
+class AuthoritySettleReport:
+    """What authority probe did for one authority."""
+
+    authority_id: str
+    valid: bool | None
+    detail: str
+    settled: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "authority_id": self.authority_id,
+            "valid": self.valid,
+            "detail": self.detail,
+            "settled": self.settled,
+        }
+
+
+def settle_authority(
+    storage: Storage,
+    run_id: str,
+    authority_id: str,
+    probes: dict[str, dict[str, Any]],
+    *,
+    dry_run: bool = False,
+) -> AuthoritySettleReport:
+    """Probe one authority and settle via AUTHORITY_RECONCILED when definitive."""
+    from continuum.events import EventType
+    from continuum.models import Origin
+
+    payload: dict[str, Any] = {"authority_id": authority_id}
+    for ev in reversed(list(storage.read_events(run_id))):
+        if (
+            ev.type is not None
+            and str(ev.type) == "AUTHORITY_CONSUMED"
+            and ev.payload.get("authority_id") == authority_id
+        ):
+            payload = {
+                "authority_id": authority_id,
+                "consumer_run_id": ev.payload.get("consumer_run_id"),
+                "via_action_id": ev.payload.get("via_action_id"),
+                "consumed_at": ev.payload.get("consumed_at"),
+                "sequence": ev.sequence,
+            }
+            break
+
+    spec = probes.get(authority_id) or probes.get("authority")
+    if spec is None:
+        return AuthoritySettleReport(
+            authority_id, None, "no probe registered for authority", settled=False
+        )
+
+    verdict, detail = probe_authority_verdict(spec, payload)
+    if verdict == "error":
+        return AuthoritySettleReport(authority_id, None, detail, settled=False)
+    if verdict is None:
+        return AuthoritySettleReport(authority_id, None, detail, settled=False)
+
+    if dry_run:
+        return AuthoritySettleReport(authority_id, verdict, detail, settled=False)
+
+    storage.append_event(
+        run_id,
+        EventType.AUTHORITY_RECONCILED,
+        {
+            "authority_id": authority_id,
+            "valid": verdict,
+            "reason": detail,
+            "probed_payload": payload,
+        },
+        source=Origin.DETERMINISTIC,
+    )
+    return AuthoritySettleReport(authority_id, verdict, detail, settled=True)
