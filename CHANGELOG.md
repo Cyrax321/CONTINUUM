@@ -240,6 +240,50 @@ All notable changes to this project are documented here. The format follows
   subcommand's `--help` line says what it removes. The `removed` boolean in
   `--json` is unchanged.
 
+- **The serve HTTP transport fails closed on body framing (#533).** `do_POST`
+  read the body as `int(self.headers.get("Content-Length") or 0)`, so
+  `Content-Length: abc` raised `ValueError` out of the handler and the
+  connection closed with no response at all: to the caller a refusal is
+  indistinguishable from a dead sidecar. A `Content-Length` that is not a
+  non-negative integer, including one that is present but blank, is now
+  `400 {"error": "invalid Content-Length: ..."}`. Only that one connection was
+  ever lost, since each is handled on its own thread, which is what made the
+  crash quiet enough to go unnoticed.
+
+  The same read never checked `Transfer-Encoding`. A client that omitted
+  `Content-Length` and sent a chunked body had `length` read as `0`, so the
+  request was dispatched as though its body were empty while the stream itself
+  was never bounded, which is how a chunked body got past a cap the other two
+  HTTP surfaces enforce. `chunked` (case-insensitive, anywhere in the comma
+  list) is now refused with 400 rather than decoded, after draining up to
+  `SIDECAR_DRAIN_LIMIT_BYTES` so the client can finish writing and read the
+  refusal instead of dying on a broken pipe; framing that does not parse is
+  `400 invalid chunked Transfer-Encoding`.
+
+  The transport had no body cap at all, so `MAX_SIDECAR_BODY_BYTES` (1 MB,
+  matching the dashboard rather than the gateway's 10 MB, since neither surface
+  forwards a caller's payload anywhere) is refused with 413 from the header,
+  before the body is read. The happy path is unchanged: an absent
+  `Content-Length`, or a valid `0`, still dispatches the empty object, so a
+  method that takes no params stays callable with no body.
+
+  A refusal that leaves the body unread has to close the connection.
+  `protocol_version` is `HTTP/1.1`, so the socket stays open unless the handler
+  says otherwise, and two of the 400s answered without a trustable body
+  boundary: unparseable chunk framing stops the drain mid-stream, and a
+  `Content-Length` that is not a number cannot say how many bytes to discard.
+  Whatever the client had already written was then read as the next request on
+  that same connection, so a body crafted to look like a request line was
+  dispatched as one. That is the request smuggling class rather than a plain
+  desync, and it stayed invisible because every test sent `Connection: close`.
+  Both branches now set `close_connection` before answering, matching the
+  unbounded drain path. Refusals whose boundary is known still keep the
+  connection alive: an oversize `Content-Length` drained in full, and a chunked
+  body drained to its terminal chunk. To make that second guarantee real, the
+  drain now checks that each chunk ends with its terminating CRLF instead of
+  consuming two bytes blindly, so a missing terminator is `malformed` rather
+  than a silent resync onto the middle of the next chunk header.
+
 - **A valid-JSON request that is not a JSON object is answered on both sidecar
   transports instead of killing one and hanging up on the other (#582).** Body
   framing was already fail-closed; the payload *shape* was not, and each
