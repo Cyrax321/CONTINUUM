@@ -54,6 +54,7 @@ __all__ = [
     "ConstraintPin",
     "AttemptLesson",
     "AuthorityConsumed",
+    "AuthorityReconciled",
     "ModelSpecificState",
     "ModelState",
     "Run",
@@ -200,6 +201,9 @@ class Origin(StrEnum):
 
     IMPORTED = "imported"
     """Loaded from a foreign checkpoint whose event history is unavailable."""
+
+    EXTERNAL_MONITOR = "external_monitor"
+    """Asserted by an external risk monitor such as SNAGLINE. A witness, not an authority."""
 
     @property
     def self_certified(self) -> bool:
@@ -610,6 +614,39 @@ class AuthorityConsumed(BaseModel):
         if len(cleaned) > 256:
             raise ValueError("via_action_id must be at most 256 characters")
         return cleaned
+
+
+class AuthorityReconciled(BaseModel):
+    """Payload of AUTHORITY_RECONCILED: external probe result for an authority (issue #289/#557).
+
+    Records the probe's verdict about whether a previously consumed authority
+    is still valid on the external system. The event is hash-chained and
+    never deduplicates, so the audit trail preserves every probe result.
+    """
+
+    model_config = Frozen
+
+    authority_id: str = Field(min_length=1, max_length=128)
+    valid: bool | None = None
+    reason: str = Field(default="")
+    probed_at: str = Field(default="")
+
+    @field_validator("authority_id")
+    @classmethod
+    def _authority_id_valid(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("authority_id must be non-empty")
+        if len(cleaned) > 128:
+            raise ValueError("authority_id must be 1-128 characters")
+        return cleaned
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_bounded(cls, value: str) -> str:
+        if len(value) > 512:
+            return value[:512]
+        return value
 
 
 class TrajectoryReport(BaseModel):
@@ -1046,6 +1083,10 @@ class RecoveryContract(BaseModel):
     #: never affects the recovery decision. Newest first; a trailing row with
     #: ``truncated`` marks omitted older rows when the cap bites.
     post_checkpoint_observations: list[dict[str, Any]] = Field(default_factory=list)
+    #: Liveness advisory (issue #302): last append age and breach count, informational only.
+    liveness: dict[str, Any] | None = None
+    #: Triggering risks (issue #303): RISK_OBSERVED ids that caused this decision.
+    triggering_risks: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utcnow)
     integrity_hash: str | None = None
 

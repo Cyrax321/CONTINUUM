@@ -122,8 +122,16 @@ class EventType(StrEnum):
     # authority (issue #269): a claim tried to reuse a consumed single-use grant
     GRANT_DENIED = "GRANT_DENIED"
 
+    # liveness (issue #302): silence as signal
+    LIVENESS_SILENCE_DETECTED = "LIVENESS_SILENCE_DETECTED"
+    LIVENESS_RECOVERED = "LIVENESS_RECOVERED"
+
+    # risk (issue #303): real-time risk signal
+    RISK_OBSERVED = "RISK_OBSERVED"
+
     # authority lifecycle (issue #289/#555): one-time credential was consumed
     AUTHORITY_CONSUMED = "AUTHORITY_CONSUMED"
+    AUTHORITY_RECONCILED = "AUTHORITY_RECONCILED"
 
     # structured attempt memory (issue #313): durable falsification lesson
     ATTEMPT_LESSON = "ATTEMPT_LESSON"

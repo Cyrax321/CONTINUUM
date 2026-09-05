@@ -4,10 +4,10 @@ Copy-paste recipes for wiring CONTINUUM into Codex.
 
 ## What you get
 
-- **SessionStart** injects the recovery contract.
-- **PreCompact** re-verifies constraints.
+- **SessionStart** injects the recovery contract. `continuum hooks install codex` writes it.
+- **PreCompact** re-verifies constraints. Codex publishes no compaction event, so this one is copy-paste (see below) and reuses SessionStart.
 
-Both are read-only and silent when no run is active.
+Both are read-only. The installed `briefing` entry exits 0 with no output when no run is active.
 
 ## Enable Codex hooks (one-time)
 

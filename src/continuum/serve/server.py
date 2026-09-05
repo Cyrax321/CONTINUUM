@@ -14,6 +14,11 @@ Response::
     {"id": <same>, "result": {<json>}}
     {"id": <same>, "error": {"type": "<code>", "message": "<text>"}}
 
+A line that is not a JSON object -- not valid JSON at all, or valid JSON of some
+other type -- is not a request, and there is nowhere in it to read an ``id``
+from. It is answered ``bad_request`` with ``"id": null``, and the session
+continues (#582).
+
 Only the core of CONTINUUM is imported here, so ``continuum serve`` does not
 require the ``mcp`` extra. Authentication is a fail-closed shared secret (see
 ``SidecarAuth``), the same model as the MCP server's ``AuthPolicy``.
@@ -68,6 +73,22 @@ MUTATING = {
     "reconcile_action",
 }
 
+#: HTTP requests longer than this are refused with 413 before the body is read.
+#: The sidecar carries small control messages -- a run id, two counters, a goal
+#: string -- so an unbounded read here is denial-of-service surface against the
+#: durability plane itself. Matched to the dashboard's 1 MB rather than the
+#: gateway's 10 MB: neither surface forwards a caller's payload anywhere (#533).
+MAX_SIDECAR_BODY_BYTES = 1 * 1024 * 1024
+
+#: Upper bound on how much we will drain-and-discard before giving up, the same
+#: bound the gateway and dashboard use, so all three HTTP surfaces fail closed
+#: alike (#317, #522, #533).
+SIDECAR_DRAIN_LIMIT_BYTES = 256 * 1024 * 1024
+
+#: Read granularity while draining, and the cap on one chunk-framing line.
+_DRAIN_READ_BYTES = 1024 * 1024
+_CHUNK_LINE_LIMIT = 65536
+
 
 class MalformedRunLog(RuntimeError):
     """A run's event log does not begin with RUN_STARTED."""
@@ -87,6 +108,18 @@ class NotAuthorized(SidecarError):
 
 class BadParams(SidecarError):
     code = "bad_params"
+
+
+class BadRequest(SidecarError):
+    """A body that could not be read as a request at all (issue #582).
+
+    Distinct from :class:`BadParams`, which answers a request that *was* read
+    and dispatched and so comes back carrying that request's ``id``. This one
+    has no ``id`` to carry, and on the stdio wire it reuses the ``bad_request``
+    type already answered for a line that is not JSON.
+    """
+
+    code = "bad_request"
 
 
 class SidecarAuth:
@@ -273,8 +306,11 @@ class SidecarServer:
             if not line:
                 continue
             try:
-                req = json.loads(line)
-            except json.JSONDecodeError as exc:
+                req = _request_object(json.loads(line))
+            except (json.JSONDecodeError, BadRequest) as exc:
+                # One arm for both: unreadable as JSON, or readable and not an
+                # object. Neither is a request, so neither answer can name an
+                # id, and the session has to outlive both.
                 _write(
                     outstream, {"id": None, "error": {"type": "bad_request", "message": str(exc)}}
                 )
@@ -309,6 +345,17 @@ class SidecarHTTP:
     400 bad params, 500 sidecar failure). Binds 127.0.0.1 by default; the
     transport exists so non-Python agents get the durability plane without
     embedding the library.
+
+    The body is read fail-closed, the same way the gateway and dashboard read
+    theirs (#533): over ``MAX_SIDECAR_BODY_BYTES`` is 413, a ``Content-Length``
+    that is not a non-negative integer is 400 rather than an exception that
+    closes the connection unanswered, and ``Transfer-Encoding: chunked`` is
+    refused instead of being read as an empty body -- which is how a chunked
+    stream used to get past the cap entirely.
+
+    A refusal that could not establish where the body ends also closes the
+    connection, since ``protocol_version`` is HTTP/1.1 and an unread remainder
+    on a kept-alive socket is read as the next request.
     """
 
     def __init__(self, sidecar: SidecarServer, port: int = 8765, bind: str = "127.0.0.1") -> None:
@@ -325,21 +372,164 @@ class SidecarHTTP:
             def _json(self, code: int, payload: dict[str, Any]) -> None:
                 body = json.dumps(payload).encode()
                 self.send_response(code)
+                if getattr(self, "close_connection", False):
+                    self.send_header("Connection", "close")
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _drain_chunked(self) -> str | None:
+                """Discard a chunked body, bounded, and say how that went.
+
+                ``None`` means the stream was consumed (or the client stopped
+                writing) and the caller may answer. ``"unbounded"`` means the
+                shared drain bound was crossed; ``"malformed"`` means the chunk
+                framing does not parse. Draining before answering lets the
+                client finish writing and read the refusal, instead of dying on
+                a broken pipe mid-send -- the same reason the oversize
+                Content-Length path drains.
+                """
+                drained = 0
+
+                def take(count: int) -> bytes:
+                    nonlocal drained
+                    data = self.rfile.read(count)
+                    drained += len(data)
+                    return data
+
+                while True:
+                    if drained > SIDECAR_DRAIN_LIMIT_BYTES:
+                        return "unbounded"
+                    line = self.rfile.readline(_CHUNK_LINE_LIMIT)
+                    if not line:
+                        return None
+                    drained += len(line)
+                    # A chunk header is a hex length, optionally followed by
+                    # extensions after a semicolon.
+                    header = line.strip().split(b";", 1)[0].strip()
+                    if not header:
+                        continue
+                    try:
+                        size = int(header, 16)
+                    except ValueError:
+                        return "malformed"
+                    if size < 0:
+                        return "malformed"
+                    if size == 0:
+                        # Terminal chunk: trailers, then the closing empty line.
+                        while True:
+                            if drained > SIDECAR_DRAIN_LIMIT_BYTES:
+                                return "unbounded"
+                            trailer = self.rfile.readline(_CHUNK_LINE_LIMIT)
+                            if not trailer or trailer in (b"\r\n", b"\n"):
+                                return None
+                            drained += len(trailer)
+                    remaining = size
+                    while remaining > 0:
+                        if drained > SIDECAR_DRAIN_LIMIT_BYTES:
+                            return "unbounded"
+                        chunk = take(min(_DRAIN_READ_BYTES, remaining))
+                        if not chunk:
+                            return None
+                        remaining -= len(chunk)
+                    # The chunk data must be followed by its own CRLF. Consuming
+                    # two bytes blindly would eat the front of the next chunk
+                    # header when that CRLF is missing, and the drain would then
+                    # report a clean finish from the middle of the stream -- the
+                    # one outcome whose refusal keeps the connection open.
+                    terminator = self.rfile.readline(_CHUNK_LINE_LIMIT)
+                    drained += len(terminator)
+                    if terminator.strip():
+                        return "malformed"
+
+            def _read_body(self) -> bytes | None:
+                """Return the request body, or answer the refusal and return None.
+
+                An absent or zero-length body stays the empty JSON object, so a
+                method that needs no params is still callable with no body.
+                """
+                header = self.headers.get("Transfer-Encoding") or ""
+                encodings = {v.strip().lower() for v in header.split(",")}
+                if "chunked" in encodings:
+                    # Refused rather than decoded. A chunked body carries no
+                    # length to check, so reading one means reading unbounded
+                    # framing into memory -- the very thing the cap exists to
+                    # stop -- and no sidecar client needs streaming to send a
+                    # run id and a counter (#533).
+                    try:
+                        outcome = self._drain_chunked()
+                    except OSError:
+                        outcome = "malformed"
+                    if outcome == "unbounded":
+                        self.close_connection = True
+                        self._json(413, {"error": "request body too large to drain"})
+                    elif outcome == "malformed":
+                        # Closed, not answered on a live socket: the drain stopped
+                        # at framing it could not parse, so where the body ends is
+                        # unknown. protocol_version is HTTP/1.1, so keeping the
+                        # connection means the unread remainder is read as the next
+                        # request line, and a body shaped like a request gets
+                        # dispatched instead of discarded (request smuggling).
+                        self.close_connection = True
+                        self._json(400, {"error": "invalid chunked Transfer-Encoding"})
+                    else:
+                        # Kept alive: ``None`` means the stream reached its terminal
+                        # chunk or ended, so the boundary is known and the next
+                        # bytes on this socket really are the next request.
+                        self._json(400, {"error": "chunked Transfer-Encoding is not supported"})
+                    return None
+
+                raw_length = self.headers.get("Content-Length")
+                if raw_length is None:
+                    return b"{}"
+                # Answered, not raised: int() on a malformed header used to
+                # escape the handler and close the connection with no response
+                # at all, which reads to the caller as a network fault (#533).
+                # A header that is present but blank is malformed too, not zero.
+                token = raw_length.strip()
+                if not (token.isascii() and token.isdigit()):
+                    # Closed for the same reason as unparseable chunk framing: a
+                    # length that is not a number cannot say how many bytes to
+                    # discard, so the body stays unread and any bytes the client
+                    # already wrote would be parsed as a pipelined request.
+                    self.close_connection = True
+                    self._json(400, {"error": f"invalid Content-Length: {raw_length!r}"})
+                    return None
+                length = int(token)
+                if length > MAX_SIDECAR_BODY_BYTES:
+                    drained = 0
+                    while drained < length:
+                        chunk = self.rfile.read(min(_DRAIN_READ_BYTES, length - drained))
+                        if not chunk:
+                            break
+                        drained += len(chunk)
+                        if drained > SIDECAR_DRAIN_LIMIT_BYTES:
+                            self.close_connection = True
+                            self._json(413, {"error": "request body too large to drain"})
+                            return None
+                    self._json(
+                        413,
+                        {"error": f"request body exceeds {MAX_SIDECAR_BODY_BYTES} bytes"},
+                    )
+                    return None
+                return self.rfile.read(length) if length else b"{}"
+
             def do_POST(self) -> None:  # noqa: N802
                 method = self.path.strip("/").split("?")[0]
-                length = int(self.headers.get("Content-Length") or 0)
-                raw = self.rfile.read(length) if length else b"{}"
+                raw = self._read_body()
+                if raw is None:
+                    return  # the refusal is already on the wire
                 try:
-                    params = json.loads(raw)
-                    if not isinstance(params, dict):
-                        raise BadParams("body must be a JSON object")
+                    params = _request_object(json.loads(raw))
                 except json.JSONDecodeError as exc:
                     self._json(400, {"error": f"invalid JSON body: {exc}"})
+                    return
+                except BadRequest as exc:
+                    # The arm now sits on the statement that raises. This
+                    # refusal was already spelled out here, then escaped the
+                    # handler and closed the connection unanswered (#582).
+                    self._json(400, {"error": str(exc)})
                     return
                 try:
                     result = sidecar_ref.dispatch(method, params)
@@ -383,6 +573,24 @@ class SidecarHTTP:
 def _write(stream: TextIO, payload: dict[str, Any]) -> None:
     stream.write(json.dumps(payload, default=str) + "\n")
     stream.flush()
+
+
+def _request_object(parsed: Any) -> dict[str, Any]:
+    """Refuse a parsed body that is not a JSON object (issue #582).
+
+    One check for both transports. Neither had one that worked. ``json.loads``
+    returns whatever the body happened to be, and stdio simply assumed a
+    mapping, reading ``.get`` off it one line above the guard whose comment
+    promises to report and never crash the loop, so a single ``[]`` line killed
+    a long-lived session and every request still queued behind it. The HTTP
+    handler did spell out this exact refusal, but inside a ``try`` that caught
+    only ``JSONDecodeError``, so it escaped ``do_POST`` and the connection closed
+    with no response -- indistinguishable, to a client, from a sidecar that had
+    died.
+    """
+    if not isinstance(parsed, dict):
+        raise BadRequest("body must be a JSON object")
+    return parsed
 
 
 # --------------------------------------------------------------------------- #
@@ -520,6 +728,12 @@ def _h_validate(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]
         constraint_pins = constraint_pins_payload(decision.state, rendered)
     except Exception:
         constraint_pins = {"pins": {}, "flagged": [], "grace_seconds": None}
+    try:
+        from continuum.recovery.health import advisory_for_storage
+
+        liveness = advisory_for_storage(server.storage, run_id)
+    except Exception:
+        liveness = {"breached": False, "silence_seconds": None}
     return {
         "run_id": run_id,
         "safe": decision.safe,
@@ -537,6 +751,7 @@ def _h_validate(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]
         ],
         "environment_changes": [d.render() for d in decision.environment_diff.breaking],
         "constraint_pins": constraint_pins,
+        "liveness": liveness,
     }
 
 
@@ -568,7 +783,14 @@ def _h_resume(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]:
     # continue without keeping its own task file. Read-only: returning the
     # self-reported goal confirms nothing, so a self-certified run still comes
     # back as request_human.
-    return _decision_payload(decision, goal=server.storage.get_run(run_id).goal)
+    payload = _decision_payload(decision, goal=server.storage.get_run(run_id).goal)
+    try:
+        from continuum.recovery.health import advisory_for_storage
+
+        payload["liveness"] = advisory_for_storage(server.storage, run_id)
+    except Exception:
+        payload["liveness"] = {"breached": False, "silence_seconds": None}
+    return payload
 
 
 def _h_confirm(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]:
@@ -752,6 +974,7 @@ __all__ = [
     "MethodNotFound",
     "NotAuthorized",
     "BadParams",
+    "BadRequest",
     "MalformedRunLog",
     "MUTATING",
     "list_methods",

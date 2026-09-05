@@ -95,7 +95,7 @@ Gate on `safe` or on exit code: only `resume` exits 0. `continuum resume my-task
 
 ### PostToolUse → `continuum observe`
 
-Codex hooks only traverse shell-like tool calls. The matcher is `^Bash$|^shell$` (see `src/continuum/clienthooks.py:CLIENT_PROFILES["codex"]`). That means `apply_patch` and MCP tools do not fire `observe` directly.
+Codex hooks only traverse shell-like tool calls. The matcher is `^Bash$|^shell$` (see `src/continuum/clienthooks.py:CLIENT_PROFILES["codex"]`, pinned to this page by `tests/test_cli_precompact.py` so the profile and the guide cannot drift apart). That means `apply_patch` and MCP tools do not fire `observe` directly.
 
 Recommended pattern: do file writes through a shell call so they are observed. Both of these work:
 

@@ -8,6 +8,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`examples/demo.ipynb`, the crash-recovery walkthrough as a notebook (#283).**
+  The lowest-friction way to watch a recovery was `docker run`, which still wants
+  a daemon; this wants a browser. Colab and Binder badges in the Quick Start
+  table open it, and its first cell installs CONTINUUM only when the import
+  fails, so the one file runs on both and from a clone unchanged. The walkthrough
+  is the one `examples/crash_recovery_agent.py` prints, driven through the library
+  instead of the CLI: a real child process is killed at document 400 by a real
+  `os._exit(9)`, the dataset moves v3 to v4, `RecoveryEngine.assess` answers
+  `REQUEST_HUMAN` and `continuum resume` would exit 20, a probe reconciles the
+  side effect nobody could vouch for, and the run finishes at 1,000 documents
+  with zero duplicates and one GitHub issue. It writes to a temporary directory,
+  not to `demo-run/`, and deletes it in the last cell.
+  `tests/test_demo_notebook.py` executes the cells as a plain script, so a
+  renamed API cannot rot the first thing a new reader runs. No library change.
+
 - **`.pre-commit-config.yaml`, pinned to the ruff CI runs (#537).**
   `CONTRIBUTING.md` described the file instead of shipping it, so
   `pre-commit install` on a fresh clone installed a hook that ran nothing and
@@ -22,7 +37,149 @@ All notable changes to this project are documented here. The format follows
   environments without the project's dependencies, where its results are not
   trustworthy. Contributor tooling, no runtime change.
 
+- **`hooks install` wires the compaction checkpoint (#449).** Claude Code fires
+  `PreCompact` immediately before it compacts the transcript: the one
+  interruption the harness announces in advance, and until now the only
+  lifecycle hook the installer left for the operator to hand-edit into
+  `.claude/settings.json`. Forgetting it meant compaction could discard
+  reasoning that was never recorded, which is the loss this project exists to
+  prevent. `continuum hooks install claude-code` now writes a `PreCompact`
+  entry running the new `continuum precompact` command, alongside the
+  SessionStart and PostToolUse hooks; `--no-precompact` skips it and
+  `hooks remove` takes it out with the rest. It is on by default, unlike
+  `--with-gate`, because a gate can deny a tool call and so changes how the
+  agent behaves, while this only seals state the run already has.
+
+  The documented recipe could not be installed verbatim: it names one run
+  (`continuum checkpoint my-task --reason "pre-compact"`) while `hooks install`
+  runs once and runs come and go. So `continuum precompact` resolves the run
+  itself, as `observe` and `briefing` do, and records the checkpoint with
+  trigger `context_pressure` (the harness-side, involuntary form of the signal
+  `ContextPressurePolicy` can only see when the agent volunteers its own token
+  counts). Beside the checkpoint it writes the two snapshots the guide promises,
+  at the paths the guide already names, so a recipe scripted against
+  `.continuum/precompact-resume.json` or `.continuum/precompact-verify.json`
+  keeps working. Those paths are reported in posix form on every platform, since
+  the guide names one spelling and recipes read them straight out of the JSON.
+  The checkpoint also refreshes `.continuum/resume.json`, which is what lets the
+  next session's SessionStart briefing detect the interruption without opening
+  the database at all.
+
+  The hook never fails its host. With no active run it exits 0 having sealed
+  nothing, and a snapshot it cannot write is reported in `failures` while the
+  checkpoint stands: that is the durable half, and it is already in the
+  hash-chained log. An explicit `--run-id` naming a run that does not exist is
+  still an error, since an operator who baked the wrong id into a hook command
+  needs to hear it.
+
+  The compaction recipe the guide published for hand-editing is recognised as
+  this project's own, so `hooks install` adopts it (one entry, repointed) instead
+  of appending a second hook to fire beside it, and `hooks remove` takes it out
+  rather than leaving a `continuum checkpoint` writing to a database the operator
+  believes they detached from. It cannot be recognised by shape, the way every
+  other installed hook is, because it predates the `precompact` subcommand and
+  ends in a redirect; the snapshot filenames this project named are the
+  fingerprint instead, and a command has to invoke the `continuum` CLI as well
+  before either verb will touch it. `--no-precompact` now takes out an entry an
+  earlier install wrote, rather than only declining to write one, and is the
+  supported way to keep a hand-written recipe that pins a single run: it removes
+  the command the installer writes and leaves what the operator wrote alone.
+
+  Codex and Gemini get no `PreCompact` entry: neither harness exposes a
+  compaction event, as both guides state, and wiring a hook to an event that
+  never fires would look like durability without being any. Codex observation
+  stays `^Bash$|^shell$`, now pinned by a test against both pages that document
+  it, so the profile and the guides fail together instead of drifting apart.
+
+- **Deterministic authorization identity from keys or resource tokens (#412,
+  PR #430).** Budgets need a bucket that survives an agent minting a fresh
+  idempotency key: with one bucket per key, a retry loop that re-renders its
+  key gets a fresh allowance every attempt and the cap means nothing. New
+  `resolve_authorization_id(action_type, key, arguments, *, volatile, ledger)`
+  in `src/continuum/actions/idempotency.py` derives that identity with a stated
+  precedence. An explicit key wins and arguments are ignored, so the id is
+  `stable_hash({type, key})` and the same pair resolves the same on any
+  machine. With no key, the id is the hash of the canonical leaf tokens of the
+  arguments, which collapses the renderings of one operation that differ only
+  in shape: a renamed field (`invoice_id` against `invoice`), a relative path
+  against an absolute one, a derived form such as `INV-001.sent` against
+  `INV-001`. A token under three characters or on the fixed weak/stopword lists
+  (`sent`, `true`, `tmp`, `file`, `the`, `and`, and the rest) is dropped, so
+  arguments made only of those resolve to `None`, as do arguments with neither
+  a key nor a distinctive token; that leaves the caller unbound and
+  byte-identical to before. When a ledger is supplied, only a *unique* completed
+  or interrupted match anchors the id; an ambiguous
+  multi-match returns `None` rather than guessing a bucket. Action-type drift
+  is deliberately not bridged, because two different action types are two
+  different operations. The helper reuses `identity_tokens`, `leaf_tokens`,
+  `location_tokens` and the existing stem/suffix rule rather than introducing a
+  second identity scheme, so a claim and a budget cannot disagree about what
+  the same operation is. Covered by `tests/test_authorization_identity.py`.
+
+- **Authorization-bound budget drawdown on claim (#413).** The identity above
+  is what `ActionLedger` now binds budgets to. `_budget_authorization_id`
+  deliberately passes neither the explicit key nor the ledger: passing the key
+  would give each rotated key its own bucket and undo the cap fix, and
+  anchoring on the ledger would let a prior failed attempt make its own retry
+  look unbound. A malformed registry fails closed with `LedgerError` rather
+  than proceeding unaccounted, while a `budgets.json` that does not exist means
+  budgets are unconfigured and nothing is drawn down, so runs without an
+  authorization registry stay byte-identical. `CONTINUUM_BUDGETS_PATH`
+  overrides the registry location. `continuum budget <run>` gained an
+  `AUTHORIZATION` table and a matching `authorization_budgets` JSON key, so a
+  drawdown is observable without reading the raw registry. Covered by
+  `tests/test_budget_drawdown.py`.
+
+- **Docstrings on every function in `gateway.py`, `dashboard/app.py` and
+  `cli/main.py` (#538).** The three files most recently hardened carried
+  undocumented functions, and `cli/main.py` sat at 47/59 = 79.7%, just under the
+  80% CodeRabbit threshold, so the next unrelated PR touching any of them
+  inherited a failing pre-merge check for code it did not write. All 30 are now
+  documented and each file reads 100%: 16/16, 12/12 and 59/59. The additions say
+  what the caller needs rather than restating the signature - which surfaces are
+  read-only, where an exit status carries the recovery verdict, why an oversized
+  dashboard body is drained before the 413, why `benchmark` cannot touch the
+  configured database, why a missing run answers 404 rather than 200. The
+  issue's file list is partly stale: `gateway.py`'s `_body` and `_handle` are
+  named as gaps but already documented on `main`, so the audit was rerun with an
+  AST pass over the three files rather than taken from the list. Docstrings only,
+  105 insertions and no deletions, no runtime change.
+
+- **`references/adapters.md` covers the thin hook adapters and the two transport
+  seams (#267).** The adapter reference documented the class-based adapters and
+  stopped there, so three shipped integrations and two seams lived only in README
+  bullets and source docstrings: `install_crewai_hooks`, `wrap_autogen_tool` and
+  `wrap_pydantic_ai_hooks` in `src/continuum/adapters/thin.py`, the enforcing
+  `continuum gateway` proxy, and the `continuum.otel` span processor. Someone who
+  opened the reference to wire CrewAI found no mention of it and could reasonably
+  conclude it was unsupported. Two new sections now mirror the README table, give
+  a snippet per surface, and state the parts that are easy to get wrong: `key_fn`
+  on a hook surface takes `(tool_name, args_dict)` rather than the wrapped
+  function's `(*args, **kwargs)`, the gateway settles a claim from the real
+  response status while the OTel bridge only observes and never blocks, and the
+  `[otel]` extra pins `opentelemetry-api` while `make_span_processor` imports
+  from `opentelemetry.sdk.trace`. Writing it surfaced one discrepancy, documented
+  rather than papered over: `thin.py`'s module docstring says provenance is
+  `EXTERNAL_AGENT`, but `ActionLedger` passes no source, so its events land with
+  `append_event`'s `Origin.DETERMINISTIC` default and a thin-adapter run is not
+  held for review the way an MCP-reported one is. Docs-only, no runtime change.
+
 ### Fixed
+
+- **The published image's default command runs the demo again (#280).**
+  `Dockerfile` installs the sources root-owned under `/opt/continuum` and then
+  drops to an unprivileged user, while `examples/crash_recovery_agent.py` pinned
+  its `demo-run` workspace to the source tree. So `docker run --rm
+  ghcr.io/cyrax321/continuum`, the image's documented default command, died with
+  `PermissionError: [Errno 13] Permission denied:
+  '/opt/continuum/demo-run/worker.py'` before printing a line, while the publish
+  workflow's `continuum --version` smoke test passed on that same image. The
+  workspace is now resolved against the working directory, which `Dockerfile`
+  already sets to a writable `/home/continuum` for exactly this reason. Every
+  documented entry point (`./try-it.sh`, `try-it.ps1`, and the README's
+  `python examples/crash_recovery_agent.py`) runs from the repository root, where
+  the workspace resolves to the same `demo-run` directory as before, so local
+  behaviour is unchanged.
 
 - **`resolve_authorization_id` docstring matches the token predicate (#613).**
   The function claimed that "status words" never produce an id. There is no
@@ -151,7 +308,71 @@ All notable changes to this project are documented here. The format follows
   CONTINUUM hooks found in <path>` when there was nothing to do), and the
   subcommand's `--help` line says what it removes. The `removed` boolean in
   `--json` is unchanged.
->>>>>>> 4e27e6f (fix(hooks): default the remove path to the client profile, like install (#580))
+
+- **The serve HTTP transport fails closed on body framing (#533).** `do_POST`
+  read the body as `int(self.headers.get("Content-Length") or 0)`, so
+  `Content-Length: abc` raised `ValueError` out of the handler and the
+  connection closed with no response at all: to the caller a refusal is
+  indistinguishable from a dead sidecar. A `Content-Length` that is not a
+  non-negative integer, including one that is present but blank, is now
+  `400 {"error": "invalid Content-Length: ..."}`. Only that one connection was
+  ever lost, since each is handled on its own thread, which is what made the
+  crash quiet enough to go unnoticed.
+
+  The same read never checked `Transfer-Encoding`. A client that omitted
+  `Content-Length` and sent a chunked body had `length` read as `0`, so the
+  request was dispatched as though its body were empty while the stream itself
+  was never bounded, which is how a chunked body got past a cap the other two
+  HTTP surfaces enforce. `chunked` (case-insensitive, anywhere in the comma
+  list) is now refused with 400 rather than decoded, after draining up to
+  `SIDECAR_DRAIN_LIMIT_BYTES` so the client can finish writing and read the
+  refusal instead of dying on a broken pipe; framing that does not parse is
+  `400 invalid chunked Transfer-Encoding`.
+
+  The transport had no body cap at all, so `MAX_SIDECAR_BODY_BYTES` (1 MB,
+  matching the dashboard rather than the gateway's 10 MB, since neither surface
+  forwards a caller's payload anywhere) is refused with 413 from the header,
+  before the body is read. The happy path is unchanged: an absent
+  `Content-Length`, or a valid `0`, still dispatches the empty object, so a
+  method that takes no params stays callable with no body.
+
+  A refusal that leaves the body unread has to close the connection.
+  `protocol_version` is `HTTP/1.1`, so the socket stays open unless the handler
+  says otherwise, and two of the 400s answered without a trustable body
+  boundary: unparseable chunk framing stops the drain mid-stream, and a
+  `Content-Length` that is not a number cannot say how many bytes to discard.
+  Whatever the client had already written was then read as the next request on
+  that same connection, so a body crafted to look like a request line was
+  dispatched as one. That is the request smuggling class rather than a plain
+  desync, and it stayed invisible because every test sent `Connection: close`.
+  Both branches now set `close_connection` before answering, matching the
+  unbounded drain path. Refusals whose boundary is known still keep the
+  connection alive: an oversize `Content-Length` drained in full, and a chunked
+  body drained to its terminal chunk. To make that second guarantee real, the
+  drain now checks that each chunk ends with its terminating CRLF instead of
+  consuming two bytes blindly, so a missing terminator is `malformed` rather
+  than a silent resync onto the middle of the next chunk header.
+
+- **A valid-JSON request that is not a JSON object is answered on both sidecar
+  transports instead of killing one and hanging up on the other (#582).** Body
+  framing was already fail-closed; the payload *shape* was not, and each
+  transport then failed in the way it had been written not to. On stdio,
+  `rid = req.get("id")` sat one line above the guard whose own comment reads
+  "report, never crash the loop", so a single `[]` line raised `AttributeError`
+  where nothing was catching, exited the process 1, and took every later request
+  on that long-lived session with it. On HTTP, `do_POST` already spelled out the
+  right answer, but raised it inside a `try` that caught only
+  `json.JSONDecodeError`, so the refusal escaped the handler and the connection
+  closed with no response at all: the caller saw `RemoteDisconnected`, which is
+  what a crashed sidecar looks like, three lines below code that knew the answer
+  was 400. Both now reach one shared check, since these two had already drifted
+  here: stdio answers `{"id": null, "error": {"type": "bad_request", "message":
+  "body must be a JSON object"}}` and reads the next request, and HTTP answers
+  `400 {"error": "body must be a JSON object"}`. The id is null because a
+  non-object request has nowhere to put one. Object requests, absent and empty
+  bodies (still the empty params object, so a method needing no params stays
+  callable), and the existing answers for genuinely malformed JSON are
+  unchanged.
 
 ## [0.1.0] - 2026-08-27
 

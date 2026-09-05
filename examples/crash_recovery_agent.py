@@ -85,7 +85,14 @@ print(f"    finished at {manager.restore('run_4821').state.progress.completed} d
 
 
 def main() -> int:
-    workspace = Path(__file__).resolve().parents[1] / "demo-run"
+    # Relative to the working directory, not to the source tree: the published
+    # image installs the sources root-owned under /opt/continuum and drops to an
+    # unprivileged user, so a workspace pinned to the source tree cannot be
+    # written and the image's default command dies before it starts. Every
+    # documented entry point (./try-it.sh, try-it.ps1, the README's
+    # `python examples/crash_recovery_agent.py`) runs from the repository root,
+    # where this is the same demo-run directory as before.
+    workspace = Path.cwd() / "demo-run"
     shutil.rmtree(workspace, ignore_errors=True)
     workspace.mkdir(parents=True, exist_ok=True)
     db = workspace / "agent.db"
