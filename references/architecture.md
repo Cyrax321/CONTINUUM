@@ -333,6 +333,19 @@ issue count: 1
 
 Sixty documents not reprocessed, one dataset change detected and propagated, and **exactly one issue created** despite the crash.
 
+### Restore-Point Admissibility (Issue #295)
+
+A checkpoint that is merely persisted is not yet admissible. Every completed
+action records its consumed inputs (checkpoint_seq, event_positions,
+component_ids, action_ids). On assess, the validator checks whether any
+completed downstream action consumed state after the checkpoint. If so, the
+checkpoint is inadmissible for plain RESUME. The engine maps this to
+REPAIR_AND_RESUME for re-derivable commitments and to REQUEST_HUMAN for
+action-graph commitments. The contract names each blocking commitment with
+its chain position, so an operator or agent can see exactly which downstream
+work would be lost by rewinding. The check is deterministic, hash-chained
+and survives old rows (empty consumed_inputs is admissible).
+
 ### Recovery Engine (Phase 7 - Complete)
 
 Validation says what is wrong. The ledger says what may have happened. The engine turns both into one decision.

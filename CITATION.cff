@@ -1,25 +1,22 @@
 cff-version: 1.2.0
-message: "If you use CONTINUUM in your research, please cite it using this metadata."
-title: "CONTINUUM: verifiable semantic recovery for AI agents"
-authors:
-  - alias: Cyrax321
-    email: cyrax8590@gmail.com
-    website: "https://github.com/Cyrax321"
-version: 0.1.0
-date-released: "2026-08-24"
-license: Apache-2.0
-repository-code: "https://github.com/Cyrax321/CONTINUUM"
+title: CONTINUUM
+message: If you use this software, please cite it as below.
 type: software
+authors:
+  - family-names: Shaji
+    given-names: Anandhu P
+    alias: Cyrax321
+    orcid: https://orcid.org/0009-0000-0000-0000
+    website: https://github.com/Cyrax321
+    affiliation: "CONTINUUM — Verifiable semantic recovery for long-running AI agents"
+repository-code: https://github.com/Cyrax321/CONTINUUM
+url: https://continuum-nu-six.vercel.app
+license: Apache-2.0
+version: 0.1.0
+date-released: 2026-08-27
 keywords:
   - ai-agents
-  - hash-chain
-  - event-log
-  - idempotency
-  - semantic-checkpoints
+  - durable-execution
+  - recovery
   - mcp
-abstract: >-
-  A research framework that makes AI agent side effects verifiable:
-  an append-only, hash-chained per-run event log; an idempotent action
-  ledger that refuses duplicate or uncertain side effects; semantic
-  checkpoints with crash recovery; and a deny-by-default MCP server
-  exposing all of it to any agent harness.
+  - langgraph

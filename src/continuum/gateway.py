@@ -41,13 +41,14 @@ from pathlib import Path
 from typing import Any
 
 from continuum.events import EventType
-from continuum.gate import normalize_key_value
+from continuum.gate import is_memory_key, normalize_key_value
 from continuum.models import Origin
 
 __all__ = [
     "DEFAULT_GATEWAY_CONFIG_PATH",
     "GatewayConfigError",
     "load_gateway_config",
+    "load_gateway_tenant",
     "match_route",
     "GatewayServer",
 ]
@@ -125,6 +126,29 @@ def load_gateway_config(path: Path) -> list[Route]:
     return routes
 
 
+def load_gateway_tenant(path: Path) -> str | None:
+    """Read optional bound tenant from gateway config.
+
+    When present, memory-store routes (``mem:``) are tenant-scoped: a
+    request whose ``tenant`` field does not match the bound identity is
+    denied at the gateway rather than surfacing later as a breach. This
+    is configuration and a check, not new infrastructure (issue #566,
+    parent #304).
+    """
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    bound = raw.get("bound_tenant") or raw.get("tenant")
+    if isinstance(bound, str) and bound.strip():
+        return bound.strip()
+    return None
+
+
 def render_key(template: str, body: dict[str, Any]) -> str:
     """Substitute ``{field}`` placeholders from the request body.
 
@@ -150,10 +174,31 @@ def match_route(
     body: dict[str, Any],
     actions_by_key: dict[str, Any],
     run_id: str,
+    bound_tenant: str | None = None,
+    storage: Any | None = None,
+    consumed_authorities: Any | None = None,
 ) -> Decision:
     """The gateway's verdict for one request, mirroring gate's table."""
     from continuum.actions.idempotency import idempotency_key
     from continuum.models import ActionStatus
+
+    # Authority resurrection check (issue #289b): refuse if body carries a consumed authority.
+    if consumed_authorities:
+        for _v in body.values():
+            if isinstance(_v, str) and _v in consumed_authorities:
+                ev = consumed_authorities[_v]
+                if hasattr(ev, "payload"):
+                    seq = ev.sequence
+                    payload = ev.payload or {}
+                else:
+                    seq = ev.get("sequence", "?")
+                    payload = ev.get("payload", {})
+                consumer = payload.get("consumer_run_id", "?")
+                return Decision(
+                    False,
+                    f"Authority {_v!r} consumed at seq {seq} by run {consumer!r}. Obtain a fresh authority.",
+                    route=None,
+                )
 
     candidates = [r for r in routes if r.host == host]
     if not candidates:
@@ -172,9 +217,53 @@ def match_route(
     except GatewayConfigError as exc:
         return Decision(False, f"gateway configuration error: {exc}")
 
-    key = str(idempotency_key(route.action_type, None, scope=run_id, key=rendered))
+    # Tenant deny (issue #566): memory keys carry tenant in the
+    # rendered identity. When a bound tenant is configured, a claim
+    # whose tenant prefix does not match is denied at the gate rather
+    # than surfacing later as a breach.
+    if is_memory_key(rendered) and bound_tenant is not None:
+        # Extract tenant from rendered mem key: mem:store:tenant:record
+        try:
+            parts = rendered.split(":")
+            # mem:{store_id}:{tenant}:{record_key} -> tenant is third segment
+            if len(parts) >= 4:
+                tenant_in_key = parts[2]
+                if tenant_in_key != bound_tenant:
+                    return Decision(
+                        False,
+                        f"tenant mismatch: bound {bound_tenant!r} but key {rendered!r} carries tenant {tenant_in_key!r}",
+                        route=route,
+                    )
+            else:
+                # Malformed mem key but already rendered; deny closed
+                return Decision(False, f"malformed memory key {rendered!r}", route=route)
+        except Exception:
+            return Decision(False, f"tenant check failed for {rendered!r}", route=route)
+
+    # Memory keys are global to the store, not the run, so use scope=None
+    # to let the action_index catch cross-run double-writes.
+    if is_memory_key(rendered):
+        key = str(idempotency_key(route.action_type, None, scope=None, key=rendered))
+    else:
+        key = str(idempotency_key(route.action_type, None, scope=run_id, key=rendered))
+    # For memory keys, also check foreign index when local misses
+    foreign_action = None
     action = actions_by_key.get(key)
-    if action is None or action.action_type != route.action_type:
+    if action is None and is_memory_key(rendered) and storage is not None:
+        try:
+            if getattr(storage, "supports_action_index", False):
+                foreign_action = storage.foreign_action(key, exclude_run=run_id)
+                if foreign_action is not None:
+                    return Decision(
+                        False,
+                        f"side effect {route.action_type!r} key {rendered!r} "
+                        f"already has a claim in another run "
+                        f"({foreign_action.status.value}); reconcile it first",
+                        route=route,
+                    )
+        except Exception:
+            action = None
+    if action is None or getattr(action, "action_type", None) != route.action_type:
         return Decision(
             False,
             f"side effect {route.action_type!r} key {rendered!r} has no ledger claim. "
@@ -213,16 +302,25 @@ class GatewayServer:
         run_id: str | None,
         routes: list[Route],
         port: int = 0,
+        bound_tenant: str | None = None,
     ) -> None:
+        """Bind the proxy and build the handler that enforces ``routes``.
+
+        ``port=0`` takes an ephemeral port, readable afterwards as
+        :attr:`port`. ``run_id`` of ``None`` resolves the active run per
+        request, so the proxy can start before the run does.
+        """
         self._storage_factory = storage_factory
         self._run_id = run_id
         self._routes = routes
+        self._bound_tenant = bound_tenant
         server = self
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
             def log_message(self, *args: Any) -> None:  # silence test noise
+                """Drop the stdlib access log: evidence belongs in the event log."""
                 pass
 
             def _body(self, max_bytes: int = MAX_BODY_BYTES) -> dict[str, Any]:
@@ -240,7 +338,33 @@ class GatewayServer:
                 decode (issue #323). Callers catch both and return, since the
                 response is already on the wire.
                 """
-                length = int(self.headers.get("Content-Length") or 0)
+                transfer_encodings = self.headers.get_all("Transfer-Encoding", [])
+                if transfer_encodings:
+                    self.close_connection = True
+                    self._respond(400, {"error": "transfer encoding is not supported"})
+                    raise _MalformedBody
+
+                content_lengths = self.headers.get_all("Content-Length", [])
+                if len(content_lengths) > 1:
+                    self.close_connection = True
+                    self._respond(
+                        400, {"error": "multiple Content-Length headers are not supported"}
+                    )
+                    raise _MalformedBody
+
+                cl_header = content_lengths[0] if content_lengths else None
+                if cl_header is not None:
+                    try:
+                        length = int(cl_header)
+                        if length < 0:
+                            raise ValueError("Content-Length must be non-negative")
+                    except ValueError as exc:
+                        self.close_connection = True
+                        self._respond(400, {"error": f"malformed Content-Length header: {exc}"})
+                        raise _MalformedBody from exc
+                else:
+                    length = 0
+
                 if length > max_bytes:
                     # Drain (without buffering) so the client can finish
                     # writing and read our 413, instead of dying on a broken
@@ -288,6 +412,12 @@ class GatewayServer:
                 return parsed if isinstance(parsed, dict) else {}
 
             def _respond(self, code: int, payload: dict[str, Any]) -> None:
+                """Answer with one JSON body, keeping the framing self-consistent.
+
+                ``Connection: close`` is sent only when the handler has already
+                decided to close, so a refusal that left the request body unread
+                does not advertise keep-alive it cannot honour.
+                """
                 body = json.dumps(payload).encode()
                 self.send_response(code)
                 if getattr(self, "close_connection", False):
@@ -323,6 +453,9 @@ class GatewayServer:
                     from continuum.actions.ledger import fold_action_events
 
                     actions = fold_action_events(storage.read_events(run_id))
+                    from continuum.gate import collect_consumed_authorities
+
+                    consumed = collect_consumed_authorities(storage.read_events(run_id))
                     decision = match_route(
                         server._routes,
                         host=host.split(":")[0],
@@ -330,6 +463,9 @@ class GatewayServer:
                         body=body,
                         actions_by_key=actions,
                         run_id=run_id,
+                        bound_tenant=getattr(server, "_bound_tenant", None),
+                        storage=storage,
+                        consumed_authorities=consumed,
                     )
                     if not decision.allow or decision.route is None or decision.key is None:
                         self._respond(
@@ -408,26 +544,37 @@ class GatewayServer:
                         close_storage()
 
             def do_POST(self) -> None:  # noqa: N802
+                """Route a POST through the claim check."""
                 self._handle("POST")
 
             def do_PUT(self) -> None:  # noqa: N802
+                """Route a PUT through the claim check."""
                 self._handle("PUT")
 
             def do_PATCH(self) -> None:  # noqa: N802
+                """Route a PATCH through the claim check."""
                 self._handle("PATCH")
 
             def do_DELETE(self) -> None:  # noqa: N802
+                """Route a DELETE through the claim check."""
                 self._handle("DELETE")
 
             def do_GET(self) -> None:  # noqa: N802
+                """Route a GET through the claim check, if a route registers it."""
                 self._handle("GET")
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
         self.port = int(self.httpd.server_address[1])
 
     def serve_forever(self) -> None:
+        """Serve until :meth:`shutdown`, blocking the calling thread."""
         self.httpd.serve_forever()
 
     def shutdown(self) -> None:
+        """Stop serving and release the socket.
+
+        The stop runs on its own thread because ``shutdown`` cannot be called
+        from the thread currently inside ``serve_forever``.
+        """
         threading.Thread(target=self.httpd.shutdown).start()
         self.httpd.server_close()

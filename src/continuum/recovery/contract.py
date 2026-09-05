@@ -75,6 +75,7 @@ def build_contract(
     evidence: list[str] | None = None,
     scope: Iterable[str] | None = None,
     post_checkpoint_observations: list[dict[str, Any]] | None = None,
+    admissibility: Any | None = None,
 ) -> RecoveryContract:
     """Assemble a sealed, deterministic contract.
 
@@ -111,6 +112,11 @@ def build_contract(
             verified.append(name)
         else:
             invalidated.append(f"{name} ({entry.status.value})")
+    if admissibility is not None and not admissibility.admissible:
+        for d in admissibility.details:
+            invalidated.append(
+                f"action:{d['action_id']} at position {d['chain_position']} ({d['reason']})"
+            )
     if projection_broken:
         invalidated.append(
             f"projection (invalid: log stops folding at sequence {state.unprojectable_at_sequence})"
@@ -122,6 +128,12 @@ def build_contract(
         reason = validation.report.reason
     if evidence is None:
         evidence = _validation_evidence(validation.report)
+    if admissibility is not None and not admissibility.admissible:
+        for d in admissibility.details:
+            evidence.append(
+                f"blocking commitment: action {d['action_id']} at position {d['chain_position']} type {d['action_type']} consumed {d['consumed_inputs']} reason {d['reason']}"
+            )
+        evidence = sorted(set(evidence))
     if projection_broken:
         # The validation details describe the prefix and cannot name the break;
         # without this the contract's evidence would read as a complete audit.

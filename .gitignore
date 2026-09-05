@@ -31,6 +31,9 @@ htmlcov/
 # Hypothesis
 .hypothesis/
 
+# Jupyter (examples/demo.ipynb)
+.ipynb_checkpoints/
+
 # Agents / AI tools
 .agents/
 .gemini/

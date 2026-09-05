@@ -19,8 +19,14 @@ This document scopes what CONTINUUM protects against, what it detects, and what 
 - **Duplicate side effects**  
   `ActionLedger` with stable idempotency keys and drift recognition prevents duplicate external effects. See `src/continuum/actions/ledger.py:1` and `tests/test_adapter_result_fuzz.py:1`.
 
+- **Authority resurrection**
+  A one-time credential or approval token consumed before a checkpoint must not become valid again after restore. `AUTHORITY_CONSUMED` events are hash-chained with `Origin.DETERMINISTIC` and never deduplicate, so every consumption is an auditable row. The gate checks the consumed set before forwarding and refuses reuse with `Authority <id> consumed at seq <n> by run <r>`. See `src/continuum/actions/authority.py:1` and `src/continuum/events.py:121` and `tests/test_authority_consumed.py:1`.
+
 - **Silent constraint drops**  
   `CONSTRAINT_PINNED` hash-only pins verified across compaction and briefing via `account_pins_in_context` (#391, #418). A summary that omits a pinned constraint is flagged as `absent` past grace, `unverifiable` when truncated, and escalates to `REQUIRES_REVIEW` in strict mode. See `docs/guides/constraint-pinning.md` and `docs/concepts/constraint-pinning.md` and `src/continuum/state/semantic.py:account_pins_in_context`.
+
+- **Stale causal ancestors via provenance graph (N-hop)**  
+  Evidence invalidation propagates N hops through the ``caused_by`` DAG (``evidence -> finding -> decision -> action``). When a dataset changes, every downstream finding, decision and action reachable via ``caused_by`` is marked ``STALE`` (or ``CONFLICTED`` on cycles) with reason ``via caused_by from <parent> (N-hop staleness)``. The propagation walks the transitive closure, not just direct parents, and surfaces in ``RecoveryContract.invalidated``. The graph is built from ``read_all_events`` so compaction does not launder history. See ``src/continuum/state/validator.py:_propagate_caused_by`` and ``src/continuum/provenance/graph.py``. Tested in ``tests/test_provenance_staleness.py`` (issue #553).
 
 ## What CONTINUUM does NOT protect against
 

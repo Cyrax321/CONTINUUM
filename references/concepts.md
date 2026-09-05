@@ -95,6 +95,21 @@ If the outcome of a side effect is uncertain, CONTINUUM raises `UNKNOWN_SIDE_EFF
 | `REQUEST_HUMAN`    | Side effect outcome uncertain     |
 | `ABORT`            | Unrecoverable conflict            |
 
+### Commitment Graph and Restore-Point Admissibility
+
+A checkpoint can be locally valid yet semantically invalid to resume from
+when downstream committed work depended on state produced after it. This is
+the DART admissibility problem (arXiv:2605.23311). CONTINUUM records for
+each completed action which inputs it consumed: checkpoint version,
+event positions, component ids and prior action ids. On resume, the validator
+walks forward from the checkpoint: if any completed action consumed an input
+after the checkpoint, the checkpoint is inadmissible for plain RESUME. The
+engine maps this to REPAIR_AND_RESUME when the commitment is re-derivable
+(event or component) and to REQUEST_HUMAN when it involves the prior action
+graph. The sealed contract lists each blocking commitment with its chain
+position, so the refusal is machine-readable and auditable. Empty or absent
+consumed_inputs remains admissible for backward compatibility.
+
 ### Recovery Contract
 
 Before allowing resume, CONTINUUM generates a deterministic, machine-readable contract:
