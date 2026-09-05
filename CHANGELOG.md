@@ -37,7 +37,34 @@ All notable changes to this project are documented here. The format follows
   AST pass over the three files rather than taken from the list. Docstrings only,
   105 insertions and no deletions, no runtime change.
 
+- **`references/adapters.md` covers the thin hook adapters and the two transport
+  seams (#267).** The adapter reference documented the class-based adapters and
+  stopped there, so three shipped integrations and two seams lived only in README
+  bullets and source docstrings: `install_crewai_hooks`, `wrap_autogen_tool` and
+  `wrap_pydantic_ai_hooks` in `src/continuum/adapters/thin.py`, the enforcing
+  `continuum gateway` proxy, and the `continuum.otel` span processor. Someone who
+  opened the reference to wire CrewAI found no mention of it and could reasonably
+  conclude it was unsupported. Two new sections now mirror the README table, give
+  a snippet per surface, and state the parts that are easy to get wrong: `key_fn`
+  on a hook surface takes `(tool_name, args_dict)` rather than the wrapped
+  function's `(*args, **kwargs)`, the gateway settles a claim from the real
+  response status while the OTel bridge only observes and never blocks, and the
+  `[otel]` extra pins `opentelemetry-api` while `make_span_processor` imports
+  from `opentelemetry.sdk.trace`. Writing it surfaced one discrepancy, documented
+  rather than papered over: `thin.py`'s module docstring says provenance is
+  `EXTERNAL_AGENT`, but `ActionLedger` passes no source, so its events land with
+  `append_event`'s `Origin.DETERMINISTIC` default and a thin-adapter run is not
+  held for review the way an MCP-reported one is. Docs-only, no runtime change.
+
 ### Fixed
+
+- **`resolve_authorization_id` docstring matches the token predicate (#613).**
+  The function claimed that "status words" never produce an id. There is no
+  status-word category: a token is dropped only when it is shorter than three
+  characters or appears in `_WEAK_TOKENS` or `_STOPWORDS`. Words such as
+  `pending` and `queued` therefore bind an id, and the old sentence contradicted
+  testing. The same false "status words" claim in `identity_tokens` is corrected
+  for consistency. Wording only; no runtime change.
 
 - Make `continuum complete` idempotent for runs that are already completed (#356).
 
@@ -336,7 +363,9 @@ All notable changes to this project are documented here. The format follows
   probes, executable guidance, gateway, OTel bridge, action index);
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
-  the enforced-durability work complete; test counts are current (1224).
+  the enforced-durability work complete; test counts are current
+  (~1,918 collected, ~1,880 passed, ~38 skipped on a minimal env).
+  <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
   request bodies above 10 MB with 413, draining (without buffering) up to a

@@ -90,3 +90,50 @@ output.
 with per-pin status (`present`, `absent`, `unverifiable`), grace deadline, and
 flagged set. Flagged pins render prominently in human text as `[!!]` lines
 coloured on TTY and plain when piped, byte-identical modulo colour (issue #419).
+
+`reconcile <run_id>` reads its probe registry from `.continuum/reconcilers.json`
+unless `--config <path>` names another file, and each probe's `timeout` is in
+seconds and optional:
+
+```json
+{
+  "probes": {
+    "send_invoice": {"command": "check-outbox", "timeout": 30},
+    "charge_card": {"command": "check-ledger"}
+  }
+}
+```
+
+`charge_card` gets the default of 10 seconds. A `timeout` that is not a positive
+number is refused rather than clamped, and the `probes` wrapper is required: a
+file that maps action types at the top level registers nothing, so `reconcile`
+reports every uncertain action as having no probe rather than saying the registry
+was wrong (issue #322).
+
+## hooks
+
+`continuum hooks install` writes host-side observation hooks into agent
+settings files (for example `.claude/settings.json` or `.gemini/settings.json`).
+The installed `observe` command is baked in at install time and may take one of
+two shapes:
+
+- **`continuum` on PATH**: an absolute path to the resolved executable, for
+  example `/usr/local/bin/continuum observe`.
+- **Editable / interpreter-only installs**: `/path/to/python -m continuum.cli observe`
+  when no `continuum` executable is found on PATH.
+
+If you pass `--db`, that path is baked into the command too (for example
+`continuum --db /abs/path.db observe`), because hook processes run with the
+project root as cwd and the default database path would otherwise be ambiguous.
+
+To see what was installed, inspect the settings file after install:
+
+```bash
+continuum hooks install claude-code --db /tmp/test.db
+cat .claude/settings.json
+```
+
+If the command looks unexpected after moving a virtualenv, re-run the
+same install command for that host, including the original `--db` value
+when one was used (for example `continuum hooks install claude-code --db /tmp/test.db`);
+it rewrites the baked command path without changing the database target.
