@@ -1,7 +1,0 @@
-{
-  "max_silence_seconds": 3600,
-  "phase_scopes": {
-    "open_claim": 600,
-    "otherwise": 3600
-  }
-}
