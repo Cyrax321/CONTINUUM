@@ -37,6 +37,60 @@ All notable changes to this project are documented here. The format follows
   environments without the project's dependencies, where its results are not
   trustworthy. Contributor tooling, no runtime change.
 
+- **`hooks install` wires the compaction checkpoint (#449).** Claude Code fires
+  `PreCompact` immediately before it compacts the transcript: the one
+  interruption the harness announces in advance, and until now the only
+  lifecycle hook the installer left for the operator to hand-edit into
+  `.claude/settings.json`. Forgetting it meant compaction could discard
+  reasoning that was never recorded, which is the loss this project exists to
+  prevent. `continuum hooks install claude-code` now writes a `PreCompact`
+  entry running the new `continuum precompact` command, alongside the
+  SessionStart and PostToolUse hooks; `--no-precompact` skips it and
+  `hooks remove` takes it out with the rest. It is on by default, unlike
+  `--with-gate`, because a gate can deny a tool call and so changes how the
+  agent behaves, while this only seals state the run already has.
+
+  The documented recipe could not be installed verbatim: it names one run
+  (`continuum checkpoint my-task --reason "pre-compact"`) while `hooks install`
+  runs once and runs come and go. So `continuum precompact` resolves the run
+  itself, as `observe` and `briefing` do, and records the checkpoint with
+  trigger `context_pressure` (the harness-side, involuntary form of the signal
+  `ContextPressurePolicy` can only see when the agent volunteers its own token
+  counts). Beside the checkpoint it writes the two snapshots the guide promises,
+  at the paths the guide already names, so a recipe scripted against
+  `.continuum/precompact-resume.json` or `.continuum/precompact-verify.json`
+  keeps working. Those paths are reported in posix form on every platform, since
+  the guide names one spelling and recipes read them straight out of the JSON.
+  The checkpoint also refreshes `.continuum/resume.json`, which is what lets the
+  next session's SessionStart briefing detect the interruption without opening
+  the database at all.
+
+  The hook never fails its host. With no active run it exits 0 having sealed
+  nothing, and a snapshot it cannot write is reported in `failures` while the
+  checkpoint stands: that is the durable half, and it is already in the
+  hash-chained log. An explicit `--run-id` naming a run that does not exist is
+  still an error, since an operator who baked the wrong id into a hook command
+  needs to hear it.
+
+  The compaction recipe the guide published for hand-editing is recognised as
+  this project's own, so `hooks install` adopts it (one entry, repointed) instead
+  of appending a second hook to fire beside it, and `hooks remove` takes it out
+  rather than leaving a `continuum checkpoint` writing to a database the operator
+  believes they detached from. It cannot be recognised by shape, the way every
+  other installed hook is, because it predates the `precompact` subcommand and
+  ends in a redirect; the snapshot filenames this project named are the
+  fingerprint instead, and a command has to invoke the `continuum` CLI as well
+  before either verb will touch it. `--no-precompact` now takes out an entry an
+  earlier install wrote, rather than only declining to write one, and is the
+  supported way to keep a hand-written recipe that pins a single run: it removes
+  the command the installer writes and leaves what the operator wrote alone.
+
+  Codex and Gemini get no `PreCompact` entry: neither harness exposes a
+  compaction event, as both guides state, and wiring a hook to an event that
+  never fires would look like durability without being any. Codex observation
+  stays `^Bash$|^shell$`, now pinned by a test against both pages that document
+  it, so the profile and the guides fail together instead of drifting apart.
+
 - **Deterministic authorization identity from keys or resource tokens (#412,
   PR #430).** Budgets need a bucket that survives an agent minting a fresh
   idempotency key: with one bucket per key, a retry loop that re-renders its

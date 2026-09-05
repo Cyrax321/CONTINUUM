@@ -4,8 +4,8 @@ Copy-paste recipes for wiring CONTINUUM into your harness and for consuming it a
 
 ## Recipes
 
-- **[Claude Code: SessionStart + PreCompact](claude-code.md)** – two hook entries (PostToolUse `observe` and SessionStart `briefing` via `continuum hooks install claude-code`, plus a copy-paste PreCompact `resume --json` entry). Pairs with the instant-detection work in #394 (`.continuum/resume.json` fast path, scoped confirm, slim subset).
-- **[Codex: SessionStart + PreCompact (Bash-only)](codex.md)** – `continuum hooks install codex` plus the `[features] codex_hooks = true` flag, Bash-only limitation documented, same hard-kill test as Claude Code.
+- **[Claude Code: SessionStart + PreCompact](claude-code.md)** – three hook entries, all installed by `continuum hooks install claude-code` (PostToolUse `observe`, SessionStart `briefing`, PreCompact `precompact`). Pairs with the instant-detection work in #394 (`.continuum/resume.json` fast path, scoped confirm, slim subset).
+- **[Codex: SessionStart, plus a copy-paste PreCompact (Bash-only)](codex.md)** – two hook entries from `continuum hooks install codex` (PostToolUse `observe`, SessionStart `briefing`), the `[features] codex_hooks = true` flag, Bash-only limitation documented, same hard-kill test as Claude Code. Codex publishes no compaction event, so unlike Claude Code there is no PreCompact hook for the installer to write; that section of the recipe reuses SessionStart and you paste it yourself.
 - **[Bring your own dashboard](control-plane.md)** – poll `continuum resume --json` and `continuum export-evidence` as the verification substrate; your UI owns orchestration, CONTINUUM owns `safe` and the sealed contract.
 
 ## Adapter funnel
