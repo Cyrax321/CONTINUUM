@@ -22,6 +22,21 @@ All notable changes to this project are documented here. The format follows
   environments without the project's dependencies, where its results are not
   trustworthy. Contributor tooling, no runtime change.
 
+- **Docstrings on every function in `gateway.py`, `dashboard/app.py` and
+  `cli/main.py` (#538).** The three files most recently hardened carried
+  undocumented functions, and `cli/main.py` sat at 47/59 = 79.7%, just under the
+  80% CodeRabbit threshold, so the next unrelated PR touching any of them
+  inherited a failing pre-merge check for code it did not write. All 30 are now
+  documented and each file reads 100%: 16/16, 12/12 and 59/59. The additions say
+  what the caller needs rather than restating the signature - which surfaces are
+  read-only, where an exit status carries the recovery verdict, why an oversized
+  dashboard body is drained before the 413, why `benchmark` cannot touch the
+  configured database, why a missing run answers 404 rather than 200. The
+  issue's file list is partly stale: `gateway.py`'s `_body` and `_handle` are
+  named as gaps but already documented on `main`, so the audit was rerun with an
+  AST pass over the three files rather than taken from the list. Docstrings only,
+  105 insertions and no deletions, no runtime change.
+
 - **`references/adapters.md` covers the thin hook adapters and the two transport
   seams (#267).** The adapter reference documented the class-based adapters and
   stopped there, so three shipped integrations and two seams lived only in README
