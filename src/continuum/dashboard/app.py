@@ -97,6 +97,7 @@ def _liveness_html(storage: Storage, run_id: str) -> str:
     """Read-only liveness advisory (issue #302)."""
     try:
         from continuum.recovery.health import advisory_for_storage, advisory_text
+
         advisory = advisory_for_storage(storage, run_id)
         rendered = advisory_text(advisory)
         css = "#c00" if advisory.get("breached") else "#0a0"
