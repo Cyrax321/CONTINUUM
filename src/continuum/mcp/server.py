@@ -965,6 +965,7 @@ def build_server(
             constraint_pins = {"pins": {}, "flagged": [], "grace_seconds": None}
         try:
             from continuum.recovery.health import advisory_for_storage
+
             liveness = advisory_for_storage(ctx.storage, run_id)
         except Exception:
             liveness = {"breached": False, "silence_seconds": None}
@@ -1068,6 +1069,7 @@ def build_server(
             constraint_pins = {"pins": {}, "flagged": [], "grace_seconds": None}
         try:
             from continuum.recovery.health import advisory_for_storage
+
             liveness = advisory_for_storage(ctx.storage, run_id)
         except Exception:
             liveness = {"breached": False, "silence_seconds": None}

@@ -564,6 +564,7 @@ def _h_validate(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]
         constraint_pins = {"pins": {}, "flagged": [], "grace_seconds": None}
     try:
         from continuum.recovery.health import advisory_for_storage
+
         liveness = advisory_for_storage(server.storage, run_id)
     except Exception:
         liveness = {"breached": False, "silence_seconds": None}
@@ -619,6 +620,7 @@ def _h_resume(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]:
     payload = _decision_payload(decision, goal=server.storage.get_run(run_id).goal)
     try:
         from continuum.recovery.health import advisory_for_storage
+
         payload["liveness"] = advisory_for_storage(server.storage, run_id)
     except Exception:
         payload["liveness"] = {"breached": False, "silence_seconds": None}
