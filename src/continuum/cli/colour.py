@@ -1,7 +1,7 @@
 """Terminal colour, applied only when it is safe to do so.
 
 Colour is presentation. It must never change *what* the CLI says, only how it
-looks — so this module wraps text in ANSI codes and nothing else. Exit codes,
+looks, so this module wraps text in ANSI codes and nothing else. Exit codes,
 JSON payloads and the wording of every line are untouched.
 
 When colour is suppressed

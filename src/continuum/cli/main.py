@@ -103,7 +103,7 @@ def _colourise(text: str, palette: Palette) -> str:
     Deliberately a post-processing pass rather than colour woven through every
     command: the text is produced once, identically, and this only decides how
     it looks. It cannot alter wording, ordering or exit codes, because it never
-    sees them — and when colour is off it returns the string untouched.
+    sees them, and when colour is off it returns the string untouched.
     """
     if not palette.enabled:
         return text
@@ -175,7 +175,7 @@ def _environment(args: argparse.Namespace, run_id: str) -> EnvironmentSnapshot |
     """Build a snapshot from ``--env name=version`` pairs.
 
     Returns ``None`` when nothing was supplied, which the validator treats as
-    "unverified" rather than "unchanged" — omitting the flag must not look like
+    "unverified" rather than "unchanged", omitting the flag must not look like
     a clean environment.
     """
     pairs: list[str] = list(getattr(args, "env", None) or [])
@@ -2910,7 +2910,7 @@ def cmd_verify(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         text = f"Event chain verified: {report.checked} events, no violations."
     else:
         lines = [f"INTEGRITY FAILURE: {len(report.violations)} violation(s)"]
-        lines += [f"  seq {v.sequence}: {v.kind} — {v.detail}" for v in report.violations[:20]]
+        lines += [f"  seq {v.sequence}: {v.kind}, {v.detail}" for v in report.violations[:20]]
         if len(report.violations) > 20:
             lines.append(
                 f"... and {len(report.violations) - 20} more violation(s) omitted, see --json for full list"
@@ -3037,7 +3037,7 @@ def cmd_actions(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     if uncertain:
         lines.append("")
         lines.append(
-            f"{len(uncertain)} action(s) with unresolved outcomes — reconcile before resuming."
+            f"{len(uncertain)} action(s) with unresolved outcomes, reconcile before resuming."
         )
     _emit(
         {"actions": payload},
@@ -3305,7 +3305,7 @@ def _verify_against_stored(run_id: str, storage: Storage) -> tuple[bool | None, 
     """Re-derive the stored version's own prefix and check it still projects to it.
 
     Returns (verified, human description). ``None`` means the comparison was not
-    attempted, which is reported rather than quietly counted as a pass — a
+    attempted, which is reported rather than quietly counted as a pass, a
     silent no-op that looks like a check is the bug this replaces.
 
     The prefix matters. A stored version is the projection of events up to its
@@ -3452,9 +3452,9 @@ def cmd_attest_verify(args: argparse.Namespace, storage: Storage, out: Any, err:
     """Verify a signed attestation against the run's live event chain.
 
     Three outcomes:
-      SIGNED    — signature valid and the live chain still matches the signed point.
-      ALTERED   — signature valid but the chain changed after signing.
-      UNTRUSTED — the signature does not verify against the embedded public key.
+      SIGNED    : signature valid and the live chain still matches the signed point.
+      ALTERED   : signature valid but the chain changed after signing.
+      UNTRUSTED : the signature does not verify against the embedded public key.
     """
     storage.get_run(args.run_id)
     doc = json.loads(Path(args.attest).read_text(encoding="utf-8"))

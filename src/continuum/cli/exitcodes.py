@@ -7,7 +7,7 @@ A recovery tool is most often invoked from automation::
 If the exit code did not reflect whether resuming is *safe*, that line would
 launch an agent onto stale state or an unreconciled side effect. So the rule is
 absolute: **only a fully verified, safe-to-resume run exits 0.** Every other
-outcome — repairable, uncertain, blocked, missing, corrupted — is non-zero, and
+outcome, repairable, uncertain, blocked, missing, corrupted, is non-zero, and
 the `&&` short-circuits.
 
 Distinct codes let a script react proportionately (retry a repair, page a human
@@ -44,7 +44,7 @@ class ExitCode:
     """State is recoverable but must be repaired first."""
 
     REQUIRES_HUMAN = 20
-    """A person must decide — typically an unreconciled side effect."""
+    """A person must decide, typically an unreconciled side effect."""
 
     UNSAFE = 30
     """Resuming is not safe at all."""

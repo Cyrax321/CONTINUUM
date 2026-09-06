@@ -212,7 +212,7 @@ def _declare_dependencies(server: SidecarServer, run_id: str, env: Any) -> None:
     A snapshot alone cannot invalidate anything: the validator decides staleness
     per declared dependency and returns early when a state has none, so a
     checkpoint carrying only a snapshot reports ``safe_to_resume`` even after the
-    resource underneath it moved. Mirrors ``continuum.mcp.server`` — the two
+    resource underneath it moved. Mirrors ``continuum.mcp.server``, the two
     surfaces expose the same recovery semantics and must not disagree about
     whether drift is safe.
     """
