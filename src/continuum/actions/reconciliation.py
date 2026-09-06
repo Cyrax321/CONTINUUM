@@ -7,7 +7,7 @@ Strategies, and when each is defensible
 ---------------------------------------
 
 ``ProbeReconciler``
-    Ask the external system directly — search for the issue, look up the charge.
+    Ask the external system directly, search for the issue, look up the charge.
     The only strategy that produces evidence. Prefer it wherever a read exists.
 
 ``AssumeNotOccurredReconciler``
@@ -20,7 +20,7 @@ Strategies, and when each is defensible
     operation is not idempotent. Slow, and honest about it.
 
 There is deliberately no ``AssumeOccurred`` strategy. Assuming success without
-evidence silently drops work, and a dropped side effect is invisible — nothing
+evidence silently drops work, and a dropped side effect is invisible, nothing
 in the system will ever contradict it. Optimism is the one default that cannot
 be audited after the fact.
 """
@@ -66,7 +66,7 @@ class Reconciler(ABC):
         """Return a resolution, or ``None`` if this reconciler cannot decide.
 
         Returning ``None`` is a legitimate answer and leaves the action
-        uncertain — better than a confident wrong one.
+        uncertain, better than a confident wrong one.
         """
 
 
@@ -75,7 +75,7 @@ class ProbeReconciler(Reconciler):
 
     The probe receives the recorded action and returns a ``Resolution``, or
     ``None`` if it could not find out. A probe that raises is treated as "could
-    not find out" rather than as evidence of absence — an unreachable API tells
+    not find out" rather than as evidence of absence, an unreachable API tells
     you nothing about whether your earlier request landed.
     """
 
@@ -149,7 +149,7 @@ class ReconciliationReport:
         if self.resolved_failed:
             lines.append(f"confirmed as not performed: {', '.join(self.resolved_failed)}")
         if self.unresolved:
-            lines.append(f"STILL UNKNOWN — needs human review: {', '.join(self.unresolved)}")
+            lines.append(f"STILL UNKNOWN: needs human review: {', '.join(self.unresolved)}")
         return "\n".join(lines) or "nothing to reconcile"
 
 
