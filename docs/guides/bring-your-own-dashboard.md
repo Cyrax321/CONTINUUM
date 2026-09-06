@@ -107,10 +107,10 @@ ok = verify_export(primitives)
 
 Each line in the export is one of four neutral primitives:
 
-- `transition` — every event appended to the log
-- `observation` — validations and diffs
-- `relation` — dependency edges
-- `checkpoint` — sealed checkpoints
+- `transition`, every event appended to the log
+- `observation`, validations and diffs
+- `relation`, dependency edges
+- `checkpoint`, sealed checkpoints
 
 Every primitive is content-addressed:
 
@@ -149,7 +149,7 @@ Verdicts are `SIGNED`, `ALTERED`, or `UNTRUSTED` and appear in both human text a
 A 60-line Python example you can drop in and adapt. It polls the live store, renders the contract, and streams evidence.
 
 ```python
-# dashboard_minimal.py — polling example, adapt to your framework
+# dashboard_minimal.py, polling example, adapt to your framework
 import json
 from pathlib import Path
 from flask import Flask, jsonify, render_template_string
@@ -163,7 +163,7 @@ app = Flask(__name__)
 TEMPLATE = """
 <!doctype html>
 <title>CONTINUUM dashboard</title>
-<h1>Run {{run_id}} — {{mode}} (safe={{safe}})</h1>
+<h1>Run {{run_id}}, {{mode}} (safe={{safe}})</h1>
 <p>Goal: {{goal}}</p>
 <p>Progress: {{completed}} / {{total or '?'}} completed</p>
 <h2>Contract</h2>

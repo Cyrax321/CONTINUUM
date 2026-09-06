@@ -57,13 +57,13 @@ CONTINUUM asks a narrower, harder question: can an agent resume from a compact s
 
 ## Quick Start
 
-Published to PyPI as `continuum-agent` 0.1.0 — `pip install continuum-agent` (`pip install continuum-agent==0.1.0` to pin). Release tags additionally ship built wheels attached to [GitHub Releases](https://github.com/Cyrax321/CONTINUUM/releases).
+Published to PyPI as `continuum-agent` 0.1.0, `pip install continuum-agent` (`pip install continuum-agent==0.1.0` to pin). Release tags additionally ship built wheels attached to [GitHub Releases](https://github.com/Cyrax321/CONTINUUM/releases).
 
 Zero-setup paths (no clone, no install, nothing published anywhere):
 
 | Path | How |
 |:--|:--|
-| Install from PyPI | `pip install continuum-agent==0.1.0` — then `continuum --help` |
+| Install from PyPI | `pip install continuum-agent==0.1.0`, then `continuum --help` |
 | Watch crash recovery happen end to end | `docker run --rm ghcr.io/cyrax321/continuum` |
 | Use the CLI through Docker | `docker run --rm ghcr.io/cyrax321/continuum continuum --help` |
 | Run the CLI without cloning | `uvx --from git+https://github.com/Cyrax321/CONTINUUM.git continuum --help` |
@@ -303,7 +303,7 @@ The deep reference for each concept lives in [references/concepts.md](references
 
 CONTINUUM is organised around one invariant: **every fact carries its origin, and trust is earned, never assumed.** Why this matters for a startup: an agent that runs for weeks must not lose work when its context is lost, and it must not waste tokens, cost, or fire a tool twice.
 
-### System at a glance — universal adapter, one log, any harness
+### System at a glance: universal adapter, one log, any harness
 
 Any harness plugs into the same hash chained log. The same run can be written by Claude Code, resumed by LangGraph, inspected by the CLI, and approved on the dashboard. No framework cooperation is required.
 
@@ -333,13 +333,13 @@ Any harness plugs into the same hash chained log. The same run can be written by
 |:--|:--|:--|
 | 1 In-process | `GenericAgentAdapter.intercept_action(...)` and `wrap_tool(key_fn=...)` on LangChain, LangGraph, OpenAI Agents SDK | Python frameworks, trusted writes |
 | 2 MCP server | `continuum-mcp` 12 tools over stdio (`continuum_record_progress`, `continuum_intercept_action`, `continuum_complete_action`, etc.) | Any MCP capable client, 3 read only + 8 mutating, allowlist `CONTINUUM_MCP_MUTATING_CLIENTS` |
-| 3 CLI lifecycle hooks | `continuum hooks install claude-code --with-gate` also `gemini` and `codex` | Coding CLIs: `SessionStart briefing`, `PostToolUse observe`, `PreToolUse gate` — no CLAUDE.md needed |
+| 3 CLI lifecycle hooks | `continuum hooks install claude-code --with-gate` also `gemini` and `codex` | Coding CLIs: `SessionStart briefing`, `PostToolUse observe`, `PreToolUse gate`, no CLAUDE.md needed |
 | 4 Enforcing HTTP gateway | `continuum gateway --port 8765` with `.continuum/gateway.json` | Any language, any outbound HTTP must have a claim, gateway settles from real status code |
 | 5 OpenTelemetry bridge | `make_span_processor(storage)` | Any traced app, spans become `TOOL_COMPLETED` evidence |
 
 Thin hook surfaces for CrewAI, AutoGen, Pydantic AI live in `adapters/thin.py` with no SDK required.
 
-### Enforcement pipeline — why no duplicate and no invalid call
+### Enforcement pipeline: why no duplicate and no invalid call
 
 The gate to observe pipeline closes the gap at the harness boundary. This is what saves tokens and cost and blocks invalid tool calls.
 
@@ -361,12 +361,12 @@ agent performs effect
 continuum_complete_action  (settled from reality, not from report)
     |
     v
-ledger marked COMPLETED — next replay returns cached result, not a second fire
+ledger marked COMPLETED, next replay returns cached result, not a second fire
 ```
 
 Unknown host is denied fail closed, not an open relay. Shell `Bash/curl` is the documented v1 blind spot.
 
-### Recovery decision tree — weeks until done, correct and exactly
+### Recovery decision tree: weeks until done, correct and exactly
 
 The engine takes the most cautious signal, so safety never loses to convenience.
 
@@ -379,7 +379,7 @@ Every `continuum resume` returns a sealed contract with: recovery status and `sa
 ### Why this saves tokens, cost, and invalid calls
 
 * **Tokens:** Semantic checkpoint stores `Goal + Plan + Progress` not a transcript dump. Briefing serves only verified state plus a 4096 cap reasoning summary, not the error tail that self conditioning shows degrades the next session. Informed retry `recovery/summary.py` injects an engine authored summary, not raw history.
-* **Cost:** Ledger `action_index` refuses duplicate side effects even under argument drift like relative vs absolute paths (`invoice:INV-001` stable key) — so same API is not paid twice after a resume. Budgets `budgets.py` cap retry storms at claim time. `continuum benchmark` prints `0 duplicates` for continuum vs `50` for naive.
+* **Cost:** Ledger `action_index` refuses duplicate side effects even under argument drift like relative vs absolute paths (`invoice:INV-001` stable key), so same API is not paid twice after a resume. Budgets `budgets.py` cap retry storms at claim time. `continuum benchmark` prints `0 duplicates` for continuum vs `50` for naive.
 * **Invalid calls:** Gate and gateway and `replayguard` `langgraph_protected_node` block unclaimed or replayed tool calls before they fire. Pinning `pinning.py` surfaces prompt or tool drift on resume.
 
 ### Storage architecture
@@ -392,25 +392,25 @@ Schema v6. SQLite is primary, Postgres is CI verified. One log, many projections
 | `runs` | Run metadata with `parent_run_id` for multi agent |
 | `versions` | SemanticState snapshots per checkpoint |
 | `checkpoints` | Sealed checkpoint records with `RECOVERY` anchors |
-| `action_index` | Cross run idempotency projection (schema v3+) — indexed reads, not full scans |
-| `events_archive` | Compacted prefix storage (schema v5+) — `continuum compact` bounds live log for weeks |
-| `lg_checkpoints` / `lg_writes` | LangGraph native persistence (schema v4+) — `make_continuum_checkpointer(storage)` |
+| `action_index` | Cross run idempotency projection (schema v3+), indexed reads, not full scans |
+| `events_archive` | Compacted prefix storage (schema v5+), `continuum compact` bounds live log for weeks |
+| `lg_checkpoints` / `lg_writes` | LangGraph native persistence (schema v4+), `make_continuum_checkpointer(storage)` |
 
-### Module map — one library, many surfaces
+### Module map: one library, many surfaces
 
 CONTINUUM is one library (`src/continuum`, 104 modules) plus a large test suite (98 test files, ~1,918 tests). All modules append to and replay one hash chained event log:
 
 | Module | Role |
 |:--|:--|
 | `events.py` | Append only, hash chained event log and `verify() trusted_through` |
-| `state/` | Projection `project()`, validation, extraction — staleness propagation |
+| `state/` | Projection `project()`, validation, extraction, staleness propagation |
 | `storage/` | `SQLiteStorage` v6, `postgres.py`, `migrations.py`, `actionindex.py` |
 | `actions/` | Idempotent ledger `claim/complete/reconcile`, `idempotency.py` key + canonicalization + token fallback, consumed grant tracking `GRANT_DENIED` |
 | `checkpoint/` | Policy driven checkpoints `manager.py` `policy.py` with `RECOVERY` anchors and `prune` |
 | `recovery/` | Engine, planner, sealed contract `contract.py`, `guidance` `human_steps`, `observations` disk checked, `family` rollup, `fork` semantics, `summary` informed retry |
 | `gate.py` | Pre tool use enforcement: allow or deny against ledger claims |
 | `gateway.py` | Enforcing HTTP proxy: claim before fire for outbound requests |
-| `replayguard.py` | Portable guard: `evaluate, protected_call, langgraph_protected_node` — closes ACRFence replay hazard |
+| `replayguard.py` | Portable guard: `evaluate, protected_call, langgraph_protected_node`, closes ACRFence replay hazard |
 | `hooks.py` `clienthooks.py` | Shared checkpoint hooks and installer profiles `claude-code gemini codex` |
 | `budgets.py` | Retry budget registry and evaluation per action type |
 | `pinning.py` | Version pinning normalisation and drift detection on resume |
@@ -420,9 +420,9 @@ CONTINUUM is one library (`src/continuum`, 104 modules) plus a large test suite 
 | `mcp/` | 12 stdio tools plus authz `authz.py` token auth, allowlist, confirmation token |
 | `serve/` | Sidecar stdio JSON wire + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Web dashboard `app.py` `hitl.py` with HITL buttons confirm/reconcile/complete, prefix trust advisory, pins |
-| `cli/` | 38 argparse commands, exit codes as verdict — `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 38 argparse commands, exit codes as verdict, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | OpenTelemetry span processor bridge |
-| `benchmark/` | CONTINUUM-Bench harness — 5 crash scenarios + argument drift + 12 scenario recovery suite |
+| `benchmark/` | CONTINUUM-Bench harness, 5 crash scenarios + argument drift + 12 scenario recovery suite |
 
 ### Honest limitations
 
@@ -433,7 +433,7 @@ CONTINUUM is one library (`src/continuum`, 104 modules) plus a large test suite 
 - Large payload offloading (#254) not yet implemented
 - Weeks scale benchmark with token cost table lands in #550 board (#568 to #570)
 
-Full reference in [references/architecture.md](references/architecture.md). And the months plane that builds on this — provenance causal graph, authority resurrection, admissibility, liveness — is pinned as board #550 with 20 sub issues #551 to #570.
+Full reference in [references/architecture.md](references/architecture.md). And the months plane that builds on this, provenance causal graph, authority resurrection, admissibility, liveness, is pinned as board #550 with 20 sub issues #551 to #570.
 
 ## API and CLI
 
@@ -541,7 +541,7 @@ If CONTINUUM helps your agents recover reliably, consider sponsoring to support 
 </p>
 
 <p align="center">
-  <a href="https://github.com/sponsors/Cyrax321">Become a sponsor</a> — GitHub Sponsors, or add FUNDING.yml custom link if you prefer another platform.
+  <a href="https://github.com/sponsors/Cyrax321">Become a sponsor</a>, GitHub Sponsors, or add FUNDING.yml custom link if you prefer another platform.
 </p>
 
 ## License

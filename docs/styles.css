@@ -1,4 +1,4 @@
-/* CONTINUUM — Complete Stylesheet */
+/* CONTINUUM, Complete Stylesheet */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&family=Caveat:wght@400;500;600;700&family=Anton&display=swap');
 
 :root {
@@ -55,7 +55,7 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', system-u
   overflow: visible;
 }
 
-/* Cloud A — Upper Left: cute cloud with motion */
+/* Cloud A, Upper Left: cute cloud with motion */
 .cloud-a {
   width: 340px;
   height: 140px;
@@ -156,7 +156,7 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', system-u
   75% { transform: translate(-18px, 12px); }
 }
 
-/* Cloud B — Upper Right */
+/* Cloud B, Upper Right */
 .cloud-b {
   width: 380px;
   height: 150px;
@@ -167,7 +167,7 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', system-u
   filter: brightness(1.1);
 }
 
-/* Cloud C — Mid Right */
+/* Cloud C, Mid Right */
 .cloud-c {
   width: 280px;
   height: 110px;
@@ -178,7 +178,7 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', system-u
   filter: brightness(1.1);
 }
 
-/* Cloud D — Lower Left/Mid */
+/* Cloud D, Lower Left/Mid */
 .cloud-d {
   width: 250px;
   height: 105px;
@@ -189,7 +189,7 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', system-u
   filter: brightness(1.1);
 }
 
-/* Cloud E — Lower Left */
+/* Cloud E, Lower Left */
 .cloud-e {
   width: 280px;
   height: 115px;
@@ -200,7 +200,7 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', system-u
   filter: brightness(1.1);
 }
 
-/* Cloud F — Upper Left back */
+/* Cloud F, Upper Left back */
 .cloud-f {
   width: 300px;
   height: 120px;

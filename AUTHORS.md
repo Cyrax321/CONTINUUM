@@ -2,7 +2,7 @@
 
 **Creator and Maintainer**
 
-* **Anandhu P Shaji** ([@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/)) — original design, architecture, and ongoing development. Maintains roadmap, releases, and direction.
+* **Anandhu P Shaji** ([@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/)), original design, architecture, and ongoing development. Maintains roadmap, releases, and direction.
 
 **Contributors**
 
