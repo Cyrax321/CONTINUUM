@@ -65,7 +65,7 @@ def test_stale_state_is_surfaced_not_buried() -> None:
         )
     )
     rendered = context.render()
-    assert "STALE STATE — DO NOT RELY ON" in rendered
+    assert "STALE STATE: DO NOT RELY ON" in rendered
     assert "decision_12" in rendered
     assert "dataset changed" in rendered
     assert "dependency dataset" in rendered
@@ -220,9 +220,9 @@ def test_stale_state_survives_a_tight_budget_even_with_a_next_action() -> None:
     )
     context = build_recovery_context(stale, token_budget=60, next_action="reconcile_action:x")
     assert "STALE STATE" in context.render()
-    assert "STALE STATE — DO NOT RELY ON" not in context.dropped_sections
+    assert "STALE STATE: DO NOT RELY ON" not in context.dropped_sections
     titles = [section.title for section in context.sections]
-    assert "STALE STATE — DO NOT RELY ON" in titles
+    assert "STALE STATE: DO NOT RELY ON" in titles
     assert "CURRENT GOAL" in titles
     assert "VERIFIED PROGRESS" in titles
 
@@ -249,9 +249,9 @@ def test_the_protected_sections_are_never_dropped_across_budgets() -> None:
                 next_action=next_action,
                 environment_changes=("data pipeline redeployed",),
             )
-            assert "STALE STATE — DO NOT RELY ON" not in context.dropped_sections
+            assert "STALE STATE: DO NOT RELY ON" not in context.dropped_sections
             titles = [section.title for section in context.sections]
-            assert "STALE STATE — DO NOT RELY ON" in titles
+            assert "STALE STATE: DO NOT RELY ON" in titles
             assert "CURRENT GOAL" in titles
             assert "VERIFIED PROGRESS" in titles
 

@@ -4,13 +4,13 @@ A checkpoint is only meaningful relative to an environment. "3,421 documents
 analysed" means nothing if the dataset was replaced afterwards. The snapshot is
 the fingerprint recovery compares against.
 
-Providers are pluggable because environments differ wildly — files, datasets,
+Providers are pluggable because environments differ wildly, files, datasets,
 git commits, API sessions, permissions. Each provider answers one question:
 *what does this resource look like right now?* CONTINUUM ships providers that
 need nothing but the standard library.
 
 Capture failures are recorded, not raised. If a resource cannot be inspected at
-recovery time — the API is down, the file is unreadable — that is itself a
+recovery time, the API is down, the file is unreadable, that is itself a
 finding: the resource becomes ``UNKNOWN`` rather than silently ``VALID``. An
 environment check that fails open would defeat the purpose of checking.
 """

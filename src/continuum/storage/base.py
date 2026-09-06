@@ -58,7 +58,7 @@ class RunNotFound(StorageError, KeyError):
     Subclasses ``KeyError`` so ``except KeyError`` still catches it, but
     overrides ``__str__``: ``KeyError.__str__`` applies ``repr()`` to its
     message, which would surface to CLI users as ``"no such run: 'ghost'"``
-    — quoted twice.
+    (quoted twice).
     """
 
     def __init__(self, run_id: str) -> None:

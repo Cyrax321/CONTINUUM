@@ -3,20 +3,20 @@
 Chosen defaults and why
 -----------------------
 
-* **WAL journal mode** — readers never block the writer, so `continuum inspect`
+* **WAL journal mode**, readers never block the writer, so `continuum inspect`
   can read a run while the agent is still working.
-* **`synchronous=FULL`** — the whole point of this layer is surviving power
+* **`synchronous=FULL`**, the whole point of this layer is surviving power
   loss. `NORMAL` can lose the last commits on a WAL crash, which would silently
   reintroduce the duplicate-work problem CONTINUUM exists to prevent. The cost
   is an fsync per append; correctness wins.
-* **`foreign_keys=ON`** — events cannot reference a run that was never created.
-* **`IMMEDIATE` transactions for writes** — takes the write lock up front, so a
+* **`foreign_keys=ON`**, events cannot reference a run that was never created.
+* **`IMMEDIATE` transactions for writes**, takes the write lock up front, so a
   racing writer fails at BEGIN rather than halfway through a read-modify-write.
 
 Sequence allocation is done inside the write transaction with a UNIQUE
 constraint on ``(run_id, sequence)`` as the backstop. If two processes race,
 one commits and the other hits the constraint and is reported as a
-``ConcurrentWriteError`` — never a silent overwrite.
+``ConcurrentWriteError``, never a silent overwrite.
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ class SQLiteStorage(Storage):
             try:
                 conn.close()
             except sqlite3.ProgrammingError:
-                # Already closed — safe to call close() more than once.
+                # Already closed, safe to call close() more than once.
                 pass
             finally:
                 self._connection = None  # type: ignore[assignment]
