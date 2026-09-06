@@ -2,7 +2,7 @@
 
 Phase 1 defines the *shape* of durable task state: enums, the semantic state
 tree, ledger records, environment snapshots, validation reports and recovery
-contracts. No storage or recovery logic lives here, these are pure data
+contracts. No storage or recovery logic lives here. These are pure data
 structures (mostly immutable) so they can be serialized, versioned, hashed and
 diffed without side effects.
 
@@ -12,7 +12,7 @@ Conventions
 * All IDs are stable strings (``run_..``, ``action_..``, ``finding_..``).
 * Enums are ``str`` subclasses so they serialize to readable JSON.
 * State-bearing models are frozen: mutations must produce a new version via
-  ``model_copy``, the versioning phase builds on this property.
+  ``model_copy``. The versioning phase builds on this property.
 """
 
 from __future__ import annotations
@@ -170,7 +170,7 @@ class PlanStepStatus(StrEnum):
 
 
 class Origin(StrEnum):
-    """Who asserted a fact, decides how much it can be trusted.
+    """The origin identifies who asserted a fact and decides how much it can be trusted.
 
     This describes the *writer*, not the derivation. Folding a fabricated event
     is still a faithful fold, so "the projection is reproducible" says nothing
@@ -209,7 +209,7 @@ class Origin(StrEnum):
     def self_certified(self) -> bool:
         """Whether this origin is an unverified self-report.
 
-        Such state is usable, it is often correct, but it cannot be the
+        Such state is usable. It is often correct, but it cannot be the
         grounds for declaring a run verified.
         """
         return self in (Origin.LLM, Origin.EXTERNAL_AGENT, Origin.IMPORTED)
@@ -802,8 +802,8 @@ class SemanticState(BaseModel):
     def dangling_evidence(self) -> frozenset[str]:
         """Support cited by decisions or findings that the state cannot produce.
 
-        A decision may cite either raw evidence or a finding derived from it;
-        both are legitimate provenance. Only references matching neither are
+        A decision may cite either raw evidence or a finding derived from it.
+        Both are legitimate provenance. Only references matching neither are
         dangling. Treating a cited finding as missing evidence would raise a
         false alarm on every well-formed reasoning chain, and false alarms are
         how real ones get ignored.
