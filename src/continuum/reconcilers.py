@@ -239,7 +239,7 @@ def _key_for(storage: Storage, run_id: str, action: Action) -> Any:
     """
     from continuum.actions.ledger import fold_action_events
 
-    folded = fold_action_events(storage.read_events(run_id))
+    folded = fold_action_events(storage.read_all_events(run_id))
     for key, candidate in folded.items():
         if candidate.action_id == action.action_id:
             return key
@@ -339,7 +339,7 @@ def settle_authority(
     from continuum.models import Origin
 
     payload: dict[str, Any] = {"authority_id": authority_id}
-    for ev in reversed(list(storage.read_events(run_id))):
+    for ev in reversed(list(storage.read_all_events(run_id))):
         if (
             ev.type is not None
             and str(ev.type) == "AUTHORITY_CONSUMED"
