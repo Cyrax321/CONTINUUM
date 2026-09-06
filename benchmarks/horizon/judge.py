@@ -87,7 +87,7 @@ def score_suite(results: list[JudgeResult]) -> dict[str, Any]:
     repair_needed = [r for r in results if r.repair_needed]
     repair_correct = sum(1 for r in repair_needed if r.repair_correct)
     repair_precision = round(repair_correct / len(repair_needed), 3) if repair_needed else 1.0
-    # Placeholders for the other three metrics — they are computed by the
+    # Placeholders for the other three metrics, they are computed by the
     # driver from actual storage/ledger state, not just judge labels.
     # For now, report 0 for duplicates and 1.0 for compression as the
     # horizon driver is focused on decision correctness; the full
