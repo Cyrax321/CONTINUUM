@@ -4,8 +4,8 @@ An extractor turns a trajectory (the run's recorded events) plus an environment
 into semantic state. The deterministic extractor is the default and the only
 one required: it folds the event log and calls nothing external.
 
-The optional LLM extractor exists for state that was never recorded structurally
-, free-text reasoning a framework did not emit as events. It is constrained by
+The optional LLM extractor exists for state that was never recorded structurally:
+free-text reasoning a framework did not emit as events. It is constrained by
 design:
 
 * It runs only when explicitly enabled and given a callable; there is no
