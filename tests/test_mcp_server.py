@@ -60,7 +60,7 @@ def _no_confirm_token(monkeypatch: pytest.MonkeyPatch) -> None:
 def server_ctx() -> Iterator[tuple[Any, Any]]:
     """A server whose caller is authorized to mutate.
 
-    These tests cover tool behaviour, not the authorization layer — that lives
+    These tests cover tool behaviour, not the authorization layer, that lives
     in test_mcp_authz.py. Without an explicit policy the server denies every
     mutation, and a policy failure here would look like a logic bug.
     """
@@ -269,7 +269,7 @@ async def test_a_rejected_progress_call_writes_nothing_at_all(
     """A rejected call must not even create the run (issue #203).
 
     The counter checks used to run after `ensure_run`, so a typo'd or hostile
-    call left a goal-bearing run row and a RUN_STARTED event behind — facts no
+    call left a goal-bearing run row and a RUN_STARTED event behind, facts no
     tool can delete. Validation now precedes creation, matching the guard's
     own rule that a refusal writes nothing.
     """
@@ -545,7 +545,7 @@ async def test_validate_flags_a_changed_dependency(server_ctx: tuple[Any, Any]) 
 # The test above declares the dependency by appending an event straight to
 # storage, which no MCP client can do. Checkpointing with ``env`` used to record
 # a snapshot and nothing else, and the validator returns early for a state with
-# no declared dependencies — so drift was rendered in ``environment_changes``
+# no declared dependencies, so drift was rendered in ``environment_changes``
 # while the verdict stayed ``safe``, which is precisely "reported as verified
 # when it is not". These drive the whole path through the tools.
 
@@ -579,7 +579,7 @@ async def test_drift_in_an_env_declared_dependency_blocks_resume(
     """A moved dataset must stop the run even once the self-report is confirmed.
 
     Confirming clears the REQUIRES_REVIEW on goal and progress, so nothing else
-    is left to mask the environment check — if the verdict were still ``safe``
+    is left to mask the environment check, if the verdict were still ``safe``
     the agent would resume on top of data that changed underneath it.
     """
     server, _ = server_ctx
@@ -734,7 +734,7 @@ async def test_deterministic_state_still_resumes_cleanly(
     """The provenance check must not block genuinely verified state.
 
     Written through the storage API directly (as the CLI or an in-process
-    adapter would), the same run resumes cleanly — proving the gate keys on
+    adapter would), the same run resumes cleanly, proving the gate keys on
     *who asserted it*, not on some blanket refusal.
     """
     server, ctx = server_ctx
@@ -1748,7 +1748,7 @@ def test_server_startup_never_deletes_the_write_ahead_log(tmp_path: Any) -> None
     """A blocking ``-wal`` is quarantined, not destroyed.
 
     Deleting it would turn committed transactions into silent loss, and an
-    emptied database still verifies as an intact chain — the failure would look
+    emptied database still verifies as an intact chain, the failure would look
     like success. The bytes must survive somewhere recoverable.
     """
     path = str(tmp_path / "agent.db")
@@ -2119,7 +2119,7 @@ async def test_a_log_not_beginning_with_run_started_is_refused(
     If some other writer appends before RUN_STARTED, inserting the start event
     afterwards would place the run's beginning *after* events that supposedly
     preceded it. The resulting projection would be wrong in a way nothing
-    downstream can detect, so this raises instead — naming the problem beats
+    downstream can detect, so this raises instead, naming the problem beats
     silently producing bad state.
     """
     from continuum.mcp.server import MalformedRunLog

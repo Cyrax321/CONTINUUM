@@ -6,7 +6,7 @@ overwrite each other.** One wins, the other is told it lost.
 
 These tests are the reason the engine takes an IMMEDIATE lock and keeps a
 UNIQUE constraint on ``(run_id, sequence)``. Without both, a race produces a
-forked chain that verifies clean — the worst possible failure, because it looks
+forked chain that verifies clean, the worst possible failure, because it looks
 correct.
 """
 

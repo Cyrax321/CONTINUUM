@@ -82,7 +82,7 @@ def test_truncation_is_detectable() -> None:
         _make_run(store)
         primitives = export_evidence(store, "run_1")
         assert verify_export(primitives) is True
-        # Drop a middle line — sequence and prev_hash break
+        # Drop a middle line, sequence and prev_hash break
         truncated = primitives[:2] + primitives[3:]
         assert verify_export(truncated) is False
         # Tail truncation is detectable by length and final hash mismatch

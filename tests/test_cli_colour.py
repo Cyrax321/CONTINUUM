@@ -114,7 +114,7 @@ def test_emit_routes_json_around_the_colouriser_even_with_a_live_palette() -> No
 
     JSON is protected twice: the palette is disabled for --json, *and* _emit
     never passes the JSON branch through the colouriser. Either alone suffices,
-    so this asserts the lower layer directly — otherwise a refactor could drop
+    so this asserts the lower layer directly, otherwise a refactor could drop
     it while the upper guard masked the loss.
     """
     from continuum.cli.main import _emit

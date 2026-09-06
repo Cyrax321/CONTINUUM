@@ -196,7 +196,7 @@ def test_an_unknown_action_reports_the_key_needed_to_reconcile_it(
 
 def test_an_interrupted_action_refuses_to_silently_retry(ledger: ActionLedger) -> None:
     """Crash between claim and complete: the effect may or may not have landed."""
-    ledger.claim("github.create_issue", ISSUE)  # never completed — process died
+    ledger.claim("github.create_issue", ISSUE)  # never completed, process died
 
     with pytest.raises(UnknownSideEffect, match="may or may not have occurred"):
         ledger.claim("github.create_issue", ISSUE)
@@ -603,7 +603,7 @@ def test_an_explicit_key_lets_a_repeat_be_a_genuine_second_action(
     """Argument hashing cannot express "this repeat is intentional".
 
     Two identical reminders are two sends, not one. Without an explicit key the
-    second is silently deduplicated away — failing closed, but still wrong.
+    second is silently deduplicated away, failing closed, but still wrong.
     """
     args = {"to": "x@y.z", "body": "Standup in 5"}
 

@@ -214,7 +214,7 @@ def main() -> int:
     say()
 
     heading("2. Model A becomes unavailable")
-    say(f"    [{MODEL_A} API returns 503 — capacity exhausted]")
+    say(f"    [{MODEL_A} API returns 503, capacity exhausted]")
     say("    [The agent must switch models to continue]")
     say()
 
@@ -232,7 +232,7 @@ def main() -> int:
     say(f"    Reason: {outcome_same.report.reason}")
     say()
 
-    heading("4. Recovery with Model B — CONTINUUM detects the switch")
+    heading("4. Recovery with Model B, CONTINUUM detects the switch")
     say(f"    Now validating with expected_model={MODEL_B}...")
     engine = RecoveryEngine(storage)
     decision = engine.assess(
@@ -284,7 +284,7 @@ def main() -> int:
         say("    RESULT: Recovery correctly BLOCKED until Model B revalidates")
         say("    the model-specific assumptions recorded under Model A.")
     else:
-        say("    RESULT: Recovery permitted — but model-specific state is marked")
+        say("    RESULT: Recovery permitted, but model-specific state is marked")
         say("    for review, not silently trusted.")
 
     say()

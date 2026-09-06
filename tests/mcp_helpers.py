@@ -25,8 +25,8 @@ class _Session:
 class FakeContext:
     """Stands in for an MCP request context with a declared client identity.
 
-    Mirrors the real shape the transport injects — ``session.client_params
-    .client_info.name`` — which is read from the initialize handshake and
+    Mirrors the real shape the transport injects, ``session.client_params
+    .client_info.name``, which is read from the initialize handshake and
     cannot be set by a tool argument. ``auth_token`` populates the handshake's
     ``_meta.authToken`` so authentication can be exercised without a live
     transport.

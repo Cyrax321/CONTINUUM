@@ -257,6 +257,6 @@ def test_composite_chains_without_double_applying_events() -> None:
     )
     state = composite.extract(context(log))
 
-    assert state.progress.completed == 1  # not 2 — events folded exactly once
+    assert state.progress.completed == 1  # not 2, events folded exactly once
     assert {w.task_id for w in state.pending_work} == {"t_llm"}
     assert state.decision("d1") is not None

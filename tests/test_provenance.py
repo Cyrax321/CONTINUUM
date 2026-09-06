@@ -128,7 +128,7 @@ def test_progress_stays_tainted_once_an_agent_contributes(store: SQLiteStorage) 
     """Progress is cumulative, so the weakest contributor wins.
 
     A trusted event appended after an agent's self-report does not launder the
-    running total — the agent's contribution is still inside it.
+    running total, the agent's contribution is still inside it.
     """
     store.create_run(Run(run_id="r", goal="g"))
     store.append_event("r", EventType.RUN_STARTED, {"goal": "g", "total": 100})

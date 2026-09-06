@@ -3,7 +3,7 @@
 
     python scripts/mcp_smoke.py
 
-Starts the real server as a subprocess and speaks raw JSON-RPC to it — no test
+Starts the real server as a subprocess and speaks raw JSON-RPC to it, no test
 harness, no in-process shortcut. Every frame sent and received is printed as it
 happens, so what you see is the wire, not a summary of it.
 
@@ -79,7 +79,7 @@ class MCPClient:
         env["CONTINUUM_DB"] = db_path
         # Mutating tools deny unlisted callers by default, so the demo grants
         # itself access the same way a real deployment would. Without this the
-        # server is read-only and step 2 onward is refused — which is the
+        # server is read-only and step 2 onward is refused, which is the
         # intended posture for an unconfigured server, not a bug.
         env["CONTINUUM_MCP_ALLOW"] = "mcp-smoke"
         src = Path(__file__).resolve().parents[1] / "src"
@@ -164,7 +164,7 @@ def main() -> int:
         if stale.exists():
             stale.unlink()
 
-    print(paint("CONTINUUM MCP — live stdio smoke test", BOLD))
+    print(paint("CONTINUUM MCP, live stdio smoke test", BOLD))
     print(paint(f"database: {DB_PATH} (fresh)", DIM))
     print(paint(f"server:   {sys.executable} -m continuum.mcp", DIM))
 
@@ -198,7 +198,7 @@ def main() -> int:
             print(paint(f"      [{marker}] {tool['name']}", DIM), flush=True)
 
         # 2 -- checkpoint a fresh run ------------------------------------ #
-        banner("2", "continuum_checkpoint — fresh run")
+        banner("2", "continuum_checkpoint, fresh run")
         payload = client.call_tool(
             "continuum_record_progress",
             {"run_id": run_id, "completed": 0, "total": 10, "goal": "Demo the MCP server live"},
@@ -211,7 +211,7 @@ def main() -> int:
         note(f"checkpoint v{payload.get('version')} sealed", GREEN)
 
         # 3 -- record progress ------------------------------------------- #
-        banner("3", "continuum_record_progress — 1..5 of 10")
+        banner("3", "continuum_record_progress, 1..5 of 10")
         for completed in range(1, 6):
             payload = client.call_tool(
                 "continuum_record_progress",
@@ -220,14 +220,14 @@ def main() -> int:
             show(payload)
 
         # 4 -- intercept an external action ------------------------------ #
-        banner("4", "continuum_intercept_action — first attempt")
+        banner("4", "continuum_intercept_action, first attempt")
         first = client.call_tool(
             "continuum_intercept_action",
             {"run_id": run_id, "action_type": "send_email", "arguments": action_args},
         )
         show(first)
         if first.get("proceed") is True:
-            note("proceed=true — nothing has claimed this action yet", GREEN)
+            note("proceed=true, nothing has claimed this action yet", GREEN)
         else:
             failures.append("first interception should have granted proceed=true")
             note("proceed was not true", RED)
@@ -250,7 +250,7 @@ def main() -> int:
         show(payload)
 
         # 6 -- the same action again ------------------------------------- #
-        banner("6", "continuum_intercept_action — SAME action, again")
+        banner("6", "continuum_intercept_action, SAME action, again")
         note("This is the whole point of the ledger.", "")
         second = client.call_tool(
             "continuum_intercept_action",
@@ -259,7 +259,7 @@ def main() -> int:
         show(second)
 
         if second.get("proceed") is False and second.get("external_id") == "msg_7781":
-            note("proceed=FALSE — the email is NOT sent twice", GREEN)
+            note("proceed=FALSE, the email is NOT sent twice", GREEN)
             note(f"previous result returned instead: {second.get('previous_result')}", GREEN)
         else:
             failures.append("duplicate interception was not refused")
@@ -279,8 +279,8 @@ def main() -> int:
             print(paint(f"    {line}", ""), flush=True)
 
         # Expectation changed when event provenance landed. Everything written
-        # through MCP is tagged EXTERNAL_AGENT — an agent's unverified report
-        # about its own work — so the run is deliberately NOT certified as
+        # through MCP is tagged EXTERNAL_AGENT, an agent's unverified report
+        # about its own work, so the run is deliberately NOT certified as
         # resumable on that basis alone. It previously returned mode=resume,
         # which meant an agent could fabricate progress and have CONTINUUM
         # confirm it was safe to continue. Requiring review is the fix, not a
@@ -289,14 +289,14 @@ def main() -> int:
         mode = decision.get("mode")
         uncertain = decision.get("uncertain_actions") or []
         if mode != "resume" and not uncertain:
-            note(f"mode={mode} — agent-reported state requires review (expected)", GREEN)
+            note(f"mode={mode}, agent-reported state requires review (expected)", GREEN)
             note("no uncertain side effects: the ledger itself is clean", GREEN)
         elif uncertain:
             failures.append(f"unexpected uncertain actions: {uncertain}")
             note(f"uncertain actions outstanding: {uncertain}", RED)
         else:
             failures.append("agent self-reported state was certified as resumable")
-            note(f"mode={mode} — self-reported state should not be 'resume'", RED)
+            note(f"mode={mode}, self-reported state should not be 'resume'", RED)
 
         banner("9", "ledger contents")
         show(client.call_tool("continuum_list_actions", {"run_id": run_id}))

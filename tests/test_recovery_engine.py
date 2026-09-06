@@ -428,7 +428,7 @@ def test_assessment_changes_nothing(store: SQLiteStorage) -> None:
 def test_lenient_mode_still_never_resumes_over_an_uncertain_side_effect(
     store: SQLiteStorage,
 ) -> None:
-    """Tolerating uncertainty downgrades REQUEST_HUMAN to WAIT — not to RESUME.
+    """Tolerating uncertainty downgrades REQUEST_HUMAN to WAIT, not to RESUME.
 
     Opting out of strictness may change who resolves the doubt; it must never
     make an unresolved side effect look settled.
