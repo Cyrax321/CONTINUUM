@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import io
 import json
-import shlex
 import sys
 from pathlib import Path
 
@@ -89,7 +88,9 @@ def test_settle_authority_keeps_consumption_context_after_compact(tmp_path: Path
         "assert payload.get('consumer_run_id') == 'run_1', payload\n"
         "print('valid=true')\n"
     )
-    command = f"{shlex.quote(sys.executable)} {shlex.quote(str(probe))}"
+    # Double quotes, not shlex.quote: the probe runs through the platform
+    # shell, and cmd.exe does not strip POSIX single quotes (Windows CI).
+    command = f'"{sys.executable}" "{probe}"'
     probes = {"tok-9": {"command": command, "timeout": 10}}
     with SQLiteStorage(db) as store:
         report = settle_authority(store, "run_1", "tok-9", probes, dry_run=True)
