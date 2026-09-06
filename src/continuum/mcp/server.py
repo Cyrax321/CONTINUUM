@@ -513,7 +513,9 @@ class ContinuumMCP:
         return run
 
     def ledger(self, run_id: str) -> ActionLedger:
-        return ActionLedger(self.storage, run_id)
+        # Remote agents report their own work, so their ledger writes carry
+        # EXTERNAL_AGENT like everything else this server writes (issue #653).
+        return ActionLedger(self.storage, run_id, source=AGENT_SOURCE)
 
 
 def build_server(
