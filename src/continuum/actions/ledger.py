@@ -1100,10 +1100,10 @@ class ActionLedger:
     def fail(self, key: str, error: str, *, certain: bool = True) -> Action:
         """Record that the effect did not happen.
 
-         ``certain=False`` is for failures where the effect may still have landed
-        , a timeout after the request was sent, for instance. Those become
-         ``UNKNOWN`` rather than ``FAILED``, because a timeout is not evidence of
-         absence.
+        ``certain=False`` is for failures where the effect may still have landed:
+        a timeout after the request was sent, for instance. Those become
+        ``UNKNOWN`` rather than ``FAILED``, because a timeout is not evidence of
+        absence.
         """
         key, existing = self._require(key)
         action = existing.model_copy(
