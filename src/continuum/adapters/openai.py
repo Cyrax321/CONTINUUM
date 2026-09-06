@@ -3,7 +3,7 @@
 Integrates CONTINUUM's durability, checkpointing, action ledger, and recovery
 with the OpenAI Agents SDK (``openai-agents`` package).
 
-The adapter is optional — ``openai-agents`` is not installed by default. Import
+The adapter is optional, ``openai-agents`` is not installed by default. Import
 this module only after installing the ``openai`` extra.
 
 Usage
@@ -37,10 +37,10 @@ Usage
 Design
 ------
 The OpenAI Agents SDK uses:
-- **ToolContext** (auto-injected) — we use it to carry run metadata
-- **RunHooks** — lifecycle callbacks we implement for checkpointing
-- **RunContextWrapper.context** — our custom ``ContinuumContext`` carries the run ID
-- **function_tool** — we wrap these with action ledger interception
+- **ToolContext** (auto-injected), we use it to carry run metadata
+- **RunHooks**, lifecycle callbacks we implement for checkpointing
+- **RunContextWrapper.context**, our custom ``ContinuumContext`` carries the run ID
+- **function_tool**, we wrap these with action ledger interception
 
 CONTINUUM does NOT replace the SDK's session/compaction mechanisms. It adds:
 - Idempotent side effects via the action ledger

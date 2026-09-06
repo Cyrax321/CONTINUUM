@@ -1,16 +1,16 @@
-"""Deciding how — and whether — a run may resume.
+"""Deciding how, and whether, a run may resume.
 
 The engine reduces three independent signals to one decision:
 
-* validation statuses (Phase 5) — is the state still true?
-* the action ledger (Phase 6) — did an external effect land?
-* checkpoint integrity (Phases 3–4) — is the record itself sound?
+* validation statuses (Phase 5), is the state still true?
+* the action ledger (Phase 6), did an external effect land?
+* checkpoint integrity (Phases 3–4), is the record itself sound?
 
 The decision rule
 -----------------
 
 **The most cautious applicable signal wins.** Not the first one evaluated, not
-the most common — the most cautious. Each signal proposes a mode; the engine
+the most common, the most cautious. Each signal proposes a mode; the engine
 takes the maximum on a severity ordering:
 
     RESUME < REPAIR_AND_RESUME < WAIT < REQUEST_HUMAN < ROLLBACK < ABORT
@@ -18,7 +18,7 @@ takes the maximum on a severity ordering:
 Order-independence matters because these signals genuinely co-occur. A run can
 have a stale dataset *and* an uncertain side effect at once. If the engine
 returned whichever it noticed first, the same situation would recover
-differently depending on iteration order — and the unsafe answer would win
+differently depending on iteration order, and the unsafe answer would win
 roughly half the time. Taking the maximum makes the outcome deterministic and
 always errs toward caution.
 
@@ -28,7 +28,7 @@ What the engine does not do
 It does not execute repairs, mutate the run, or contact anything external. It
 reads state and returns a decision plus a contract. Keeping it free of side
 effects means a recovery decision can be computed, logged and reviewed without
-committing to it — which is what makes ``continuum validate`` safe to run
+committing to it, which is what makes ``continuum validate`` safe to run
 against a live database.
 """
 
@@ -596,7 +596,7 @@ class RecoveryEngine:
 
         if not validation.safe:
             # Count only what actually needs repair. Reporting every status
-            # would include the VALID ones and overstate the damage — a run
+            # would include the VALID ones and overstate the damage, a run
             # with two verified components and one stale one would claim three
             # need repair. The decision itself is unaffected; the operator
             # reading the rationale is not.

@@ -5,7 +5,7 @@ trustworthy merely because it was persisted.** Before an agent resumes, every
 component is checked against the environment as it is *now*.
 
 Staleness propagates. If a dataset moves from v3 to v4, the dependency is not
-the only casualty — every finding whose evidence came from that dataset, and
+the only casualty, every finding whose evidence came from that dataset, and
 every decision resting on those findings, is now suspect. Marking only the
 dependency would leave the agent reasoning from conclusions it can no longer
 justify. Propagation walks:
@@ -17,8 +17,8 @@ Uncertainty degrades rather than resolves. An unverifiable resource yields
 resume. The system is allowed to say "I cannot tell"; it is not allowed to
 guess in its own favour.
 
-This module decides *status*. Choosing what to do about it — resume, repair,
-abort — is the recovery engine's job in Phase 7.
+This module decides *status*. Choosing what to do about it (resume, repair,
+abort) is the recovery engine's job in Phase 7.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ __all__ = [
 #: reporting "safe to resume" while that is outstanding is precisely the false
 #: assurance this layer exists to prevent. The recovery engine already refused
 #: to resume in these cases via the repair plan, but the validator's own
-#: `safe_to_resume` disagreed with it — so anything reading the validation
+#: `safe_to_resume` disagreed with it, so anything reading the validation
 #: report directly got the wrong answer.
 _UNUSABLE = frozenset(
     {

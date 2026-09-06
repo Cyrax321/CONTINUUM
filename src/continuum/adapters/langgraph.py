@@ -3,7 +3,7 @@
 Integrates CONTINUUM's durability, checkpointing, action ledger, and recovery
 with LangGraph's graph-based agent runtime.
 
-The adapter is optional — ``langgraph`` is not installed by default. Import
+The adapter is optional, ``langgraph`` is not installed by default. Import
 this module only after installing the ``langgraph`` extra.
 
 Usage
@@ -29,15 +29,15 @@ Usage
 Design
 ------
 LangGraph manages its own state via its checkpointer. CONTINUUM's role here is
-to add *semantic durability* — the action ledger prevents duplicate side effects
+to add *semantic durability*, the action ledger prevents duplicate side effects
 across graph invocations, and the recovery engine validates that resumed state
 is still consistent with the environment.
 
 The adapter does NOT replace LangGraph's checkpointer. The two serve different
 purposes:
 
-* **LangGraph checkpointer** — full state snapshots for graph resumption.
-* **CONTINUUM** — verified semantic state with environment validation and
+* **LangGraph checkpointer**, full state snapshots for graph resumption.
+* **CONTINUUM**, verified semantic state with environment validation and
   exactly-once side effect guarantees.
 """
 
@@ -192,7 +192,7 @@ class LangGraphAgentAdapter(GenericAgentAdapter):
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Decorator that wraps a LangGraph tool with action ledger interception.
 
-        The wrapped function will be idempotent across graph invocations —
+        The wrapped function will be idempotent across graph invocations:
         if the action already completed, the cached result is returned without
         re-executing the tool.
 
@@ -268,7 +268,7 @@ class LangGraphAgentAdapter(GenericAgentAdapter):
 
         Add this node to your graph at points where you want durable semantic
         state. It reads the run ID from state, projects semantic state, and
-        writes a checkpoint — then returns state unchanged so the graph can
+        writes a checkpoint, then returns state unchanged so the graph can
         continue.
 
         Parameters
@@ -280,7 +280,7 @@ class LangGraphAgentAdapter(GenericAgentAdapter):
         Returns
         -------
         dict
-            State updates (empty dict — this node is side-effect only on
+            State updates (empty dict, this node is side-effect only on
             CONTINUUM's storage).
 
         Example

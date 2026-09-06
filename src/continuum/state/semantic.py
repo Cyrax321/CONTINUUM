@@ -91,7 +91,7 @@ def _provenance(event: Event) -> Provenance:
     """Carry the event's own trust marker into the projected component.
 
     Previously this hardcoded ``DETERMINISTIC``, which was true of the *fold*
-    but said nothing about the event being folded — so an agent's self-report
+    but said nothing about the event being folded, so an agent's self-report
     projected as indistinguishable from a verified fact.
 
     For derived artifacts (issue #392) the payload may carry a stamped
@@ -291,7 +291,7 @@ class _Accumulator:
 
         # Re-derive `pending` whenever the caller moved `completed`/`failed`
         # without restating it. Keeping the old value would leave the counters
-        # summing past `total` and the update would be rejected — punishing a
+        # summing past `total` and the update would be rejected, punishing a
         # caller for omitting a field that had not changed.
         total = current["total"]
         if total is not None and "pending" not in payload:
@@ -865,7 +865,7 @@ def project(
 ) -> SemanticState:
     """Project a run's events into semantic state.
 
-    ``upto`` truncates the fold at a sequence number — the mechanism behind
+    ``upto`` truncates the fold at a sequence number, the mechanism behind
     ``continuum inspect --version`` and recovery from a partially trusted log.
 
     ``on_unprojectable`` forwards to :func:`project_incremental`: ``"raise"``
@@ -952,7 +952,7 @@ def account_pins_in_context(
             flag = None
         else:
             # If context was truncated, we cannot tell if the pin was in a
-            # dropped section — mark as unverifiable rather than absent
+            # dropped section, mark as unverifiable rather than absent
             if is_truncated:
                 # Heuristic: if the pin's marker would have been in a low-
                 # priority section that was dropped, mark unverifiable

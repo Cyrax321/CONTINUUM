@@ -3,8 +3,8 @@
 The diff is *semantic*, not textual: it compares identified components by their
 IDs, so reordering a list produces no diff while invalidating a decision does.
 
-Output is deterministic — entries are emitted in a fixed component order and
-sorted by ID within each component — because the diff feeds `continuum diff`,
+Output is deterministic, entries are emitted in a fixed component order and
+sorted by ID within each component, because the diff feeds `continuum diff`,
 recovery contracts and benchmark scoring, all of which need stable output.
 """
 
