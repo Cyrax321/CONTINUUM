@@ -166,6 +166,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Reconcile and authority settle see archived history after compaction (#647).
+  The probe-driven settle path folded only the live tail, so an archived
+  uncertain action crashed `reconcile --auto` with `LookupError` and authority
+  probes ran on an empty payload. Both scans now use full history.
+
 - Preserve archived action history in grant and authority enforcement, CLI and
   gateway gate decisions, cross-run action scans, and memory enumeration and
   forensic joins (#615, #616). Compaction no longer hides spent authority or
