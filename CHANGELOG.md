@@ -191,6 +191,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Repeated compaction works after a run has been archived (#648).**
+  Checkpoint anchoring now projects archived events together with the live tail,
+  so a long-lived run can be compacted again after new work without losing its
+  original `RUN_STARTED` state.
+
 - Preserve archived action history in grant and authority enforcement, CLI and
   gateway gate decisions, cross-run action scans, and memory enumeration and
   forensic joins (#615, #616). Compaction no longer hides spent authority or

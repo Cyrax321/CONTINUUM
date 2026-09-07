@@ -162,8 +162,12 @@ class CheckpointManager:
     # -- writing ---------------------------------------------------------- #
 
     def project_current(self, run_id: str) -> SemanticState:
-        """Fold the run's full event history into state."""
-        return project(run_id, self.storage.read_events(run_id))
+        """Fold the run's full event history into state.
+
+        Compaction moves the oldest events out of the live table, so a current
+        projection must include the archive or it cannot be anchored again.
+        """
+        return project(run_id, self.storage.read_all_events(run_id))
 
     def checkpoint(
         self,

@@ -230,6 +230,21 @@ def test_compact_requires_an_existing_version(tmp_path: Path) -> None:
     assert "anchored" in err or "no stored version" in err
 
 
+def test_repeated_compaction_succeeds_after_new_work(db: str) -> None:
+    """A compacted run remains eligible for a later compaction."""
+    work(db, 1)
+    code, _, err = run("--db", db, "compact", "run_1", "--force")
+    assert code == ExitCode.OK, err
+
+    work(db, 2)
+    code, _, err = run("--db", db, "compact", "run_1", "--force")
+    assert code == ExitCode.OK, err
+
+    with SQLiteStorage(db) as store:
+        assert len(store.read_archived_events("run_1")) > 0
+        assert store.verify_events("run_1").ok
+
+
 def test_bounded_size_after_compaction(db: str) -> None:
     """The acceptance core: compaction bounds live-log growth."""
     for i in range(40):
