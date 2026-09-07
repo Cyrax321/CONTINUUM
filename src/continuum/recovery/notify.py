@@ -285,8 +285,14 @@ def notify_blocked(
 
     Loads the registry, skips silently when nothing subscribes to request_human
     or the identical verdict was already notified, otherwise fans out and
-    records one NOTIFY_SENT per delivered endpoint plus NOTIFY_FAILED dead
+    records one NOTIFY_SENT per delivered verdict plus NOTIFY_FAILED dead
     letters for failures. Returns {url: delivered}.
+
+    Single page per verdict by design: with several endpoints where one is
+    down, the first pass delivers to the working ones, dead-letters the
+    rest, and later repeats stay silent for that verdict. A recovered
+    endpoint catches the next distinct verdict. This bounds cron-driven
+    assessments to one page per genuinely new blockage.
     """
     try:
         endpoints = load_webhooks(registry_path)
