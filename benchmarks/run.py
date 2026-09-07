@@ -1,7 +1,7 @@
 """Run the Phase 6 recovery-correctness scenario suite and emit a report.
 
 Usage:
-    uv run python benchmarks/run.py
+    uv run python benchmarks/run.py [--list]
 
 Writes ``benchmarks/out/report.json`` and ``benchmarks/out/report.md``. The run
 is reproducible: scenarios build their own in-memory state, so the output can be
@@ -25,6 +25,7 @@ Continuum bench byte counts (issue #568, #293a):
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -197,7 +198,49 @@ def _append_continuum_bench(out_dir: str | Path) -> None:
         print("continuum bench: unexpected report shape, skipping merge")
 
 
+_SUITES: dict[str, str] = {
+    "phase6": "recovery-correctness scenarios -> benchmarks/out/report.{json,md}",
+    "continuum-bench": "crash-recovery byte counts -> merged into benchmarks/out/report.json",
+    "fault-injection": "chaos suite (#397) -> benchmarks/out/fault_injection_report.{json,md}",
+    "horizon": (
+        "horizon-scale suite (#398) -> benchmarks/out/horizon_report.{json,md}; "
+        "also regenerates the README bench table"
+    ),
+}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the ``benchmarks/run.py`` argument parser.
+
+    Only ``--help`` and ``--list`` are recognised; anything else fails with
+    exit code 2 (argparse convention, matching ``src/continuum/cli/main.py``)
+    instead of silently launching the full multi-minute suite (issue #682).
+    """
+    parser = argparse.ArgumentParser(
+        prog="python benchmarks/run.py",
+        description=(
+            "Run the full benchmark suite: Phase 6 recovery-correctness scenarios, "
+            "the CONTINUUM crash-recovery byte-count bench, the fault-injection "
+            "chaos suite, and the horizon-scale suite. Takes minutes and writes "
+            "reports under benchmarks/out/."
+        ),
+        epilog="With no arguments, runs every suite in order and writes all reports.",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="print the suites this runner executes and where each report lands, then exit.",
+    )
+    return parser
+
+
 def main() -> None:
+    args = build_parser().parse_args()
+    if args.list:
+        for name, what in _SUITES.items():
+            print(f"{name}: {what}")
+        return
+
     report = run_benchmark(scenarios.ALL_SCENARIOS)
     out_dir = os.path.join(os.path.dirname(__file__), "out")
     os.makedirs(out_dir, exist_ok=True)
