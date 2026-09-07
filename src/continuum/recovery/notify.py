@@ -210,3 +210,101 @@ def record_delivery_failure(storage: Any, run_id: str, url: str, event: str, err
             EventType.NOTIFY_FAILED,
             {"url": url, "event": event, "error": str(error)[:512]},
         )
+
+
+def record_notified(storage: Any, run_id: str, mode: str, contract_hash: str) -> None:
+    """Record a delivered notification for later dedup. Best effort."""
+    from contextlib import suppress
+
+    from continuum.events import EventType
+
+    with suppress(Exception):
+        storage.append_event(
+            run_id,
+            EventType.NOTIFY_SENT,
+            {"mode": mode, "contract_hash": contract_hash},
+        )
+
+
+def already_notified(storage: Any, run_id: str, mode: str, contract_hash: str) -> bool:
+    """True when the same blocked verdict was already notified.
+
+    Dedup key is (mode, contract hash): a new verdict re-notifies, a repeat
+    assessment of the identical verdict stays silent, so a cron calling
+    resume every minute does not spam. Read failures answer False (notify
+    rather than risk silence) since delivery itself stays fail-open.
+    """
+    from continuum.events import EventType
+
+    try:
+        events = storage.read_events(run_id)
+    except Exception:
+        return False
+    for ev in reversed(events):
+        if ev.type is not EventType.NOTIFY_SENT:
+            continue
+        payload = ev.payload or {}
+        return payload.get("mode") == mode and payload.get("contract_hash") == contract_hash
+    return False
+
+
+# Contract fields that define the verdict. Volatile telemetry (liveness ages,
+# created_at, post-checkpoint observations) is excluded: hashing the whole
+# contract would never dedup because wall-clock fields move every assessment.
+_STABLE_CONTRACT_KEYS = (
+    "recovery_status",
+    "invalidated",
+    "required_actions",
+    "next_allowed_action",
+    "evidence",
+    "reason",
+    "triggering_risks",
+)
+
+
+def verdict_fingerprint(contract: dict[str, Any]) -> str:
+    """Stable hash of a blocked verdict for dedup."""
+    from continuum.security.hashing import stable_hash
+
+    if any(k in contract for k in _STABLE_CONTRACT_KEYS):
+        stable = {k: contract.get(k) for k in _STABLE_CONTRACT_KEYS}
+    else:
+        stable = dict(contract)
+    return stable_hash(stable)
+
+
+def notify_blocked(
+    storage: Any,
+    run_id: str,
+    mode: str,
+    contract: dict[str, Any],
+    *,
+    registry_path: str | Path | None = None,
+) -> dict[str, bool]:
+    """Notify subscribed endpoints about a blocked verdict. Never raises.
+
+    Loads the registry, skips silently when nothing subscribes to request_human
+    or the identical verdict was already notified, otherwise fans out and
+    records one NOTIFY_SENT per delivered endpoint plus NOTIFY_FAILED dead
+    letters for failures. Returns {url: delivered}.
+    """
+    try:
+        endpoints = load_webhooks(registry_path)
+    except Exception:
+        return {}
+    targets = [ep for ep in endpoints if ep.wants("request_human")]
+    if not targets:
+        return {}
+    try:
+        digest = verdict_fingerprint(contract)
+    except Exception:
+        return {}
+    if already_notified(storage, run_id, mode, digest):
+        return {}
+    results = notify_endpoints(targets, "request_human", {"run_id": run_id, "mode": mode})
+    if any(results.values()):
+        record_notified(storage, run_id, mode, digest)
+    for url, delivered in results.items():
+        if not delivered:
+            record_delivery_failure(storage, run_id, url, "request_human", "delivery failed")
+    return results

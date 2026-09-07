@@ -38,6 +38,7 @@ def _receiver(captured: dict, status: int = 200):
             length = int(self.headers.get("Content-Length", 0))
             captured["body"] = self.rfile.read(length)
             captured["signature"] = self.headers.get(SIGNATURE_HEADER)
+            captured["n"] = captured.get("n", 0) + 1
             self.send_response(status)
             self.end_headers()
 
@@ -238,3 +239,101 @@ def test_delivery_failure_is_audit_only(tmp_path) -> None:  # type: ignore[no-un
         assert after.progress == before.progress
         assert after.goal == before.goal
         assert store.verify_events("run_1").ok
+
+
+def _registry(tmp_path, url: str):  # type: ignore[no-untyped-def]
+    import json as _json
+
+    dot = tmp_path / ".continuum"
+    dot.mkdir(exist_ok=True)
+    path = dot / "webhooks.json"
+    path.write_text(_json.dumps({"webhooks": [{"url": url}]}))
+    return path
+
+
+def test_notify_blocked_delivers_once_per_verdict(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Repeat assessments of one verdict notify once; new verdicts renotify."""
+    from continuum.events import EventType
+    from continuum.models import Run
+    from continuum.recovery.notify import notify_blocked
+    from continuum.storage import SQLiteStorage
+
+    captured: dict = {}
+    server = _receiver(captured)
+    try:
+        db = str(tmp_path / "hookup.db")
+        with SQLiteStorage(db) as store:
+            store.create_run_started(Run(run_id="run_1", goal="g"))
+        registry = _registry(tmp_path, f"http://127.0.0.1:{server.server_port}/hook")
+        import os
+
+        cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with SQLiteStorage(db) as store:
+                first = notify_blocked(store, "run_1", "request_human", {"v": 1},
+                                       registry_path=str(registry))
+                assert list(first.values()) == [True]
+                assert captured["n"] == 1
+                repeat = notify_blocked(store, "run_1", "request_human", {"v": 1},
+                                        registry_path=str(registry))
+                assert repeat == {}
+                assert captured["n"] == 1
+                changed = notify_blocked(store, "run_1", "request_human", {"v": 2},
+                                         registry_path=str(registry))
+                assert list(changed.values()) == [True]
+                assert captured["n"] == 2
+                sent = [e for e in store.read_events("run_1") if e.type is EventType.NOTIFY_SENT]
+                assert len(sent) == 2
+                assert store.verify_events("run_1").ok
+        finally:
+            os.chdir(cwd)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_resume_notifies_blocked_run_without_changing_output(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """CLI resume pages once per verdict and keeps verdict, text, and exit code."""
+    import io
+
+    from continuum.actions import ActionLedger
+    from continuum.cli import ExitCode, main
+    from continuum.events import EventType
+    from continuum.models import Run
+    from continuum.storage import SQLiteStorage
+
+    captured: dict = {}
+    server = _receiver(captured)
+    try:
+        db = str(tmp_path / "cli.db")
+        with SQLiteStorage(db) as store:
+            store.create_run_started(Run(run_id="run_1", goal="g"))
+            ActionLedger(store, "run_1").claim("send_invoice", {}, key="invoice:1")
+        monkeypatch.chdir(tmp_path)
+
+        def resume():
+            out, err = io.StringIO(), io.StringIO()
+            code = main(["--db", db, "resume", "run_1"], out=out, err=err)
+            return code, out.getvalue()
+
+        code, text = resume()
+        assert code == ExitCode.REQUIRES_HUMAN
+        with SQLiteStorage(db) as store:
+            assert not [e for e in store.read_events("run_1") if e.type is EventType.NOTIFY_SENT]
+        _registry(tmp_path, f"http://127.0.0.1:{server.server_port}/hook")
+        code2, text2 = resume()
+        assert (code2, text2) == (code, text)
+        assert captured.get("n", 0) == 1
+        with SQLiteStorage(db) as store:
+            sent = [e for e in store.read_events("run_1") if e.type is EventType.NOTIFY_SENT]
+            assert len(sent) == 1
+            code3, text3 = resume()
+            assert (code3, text3) == (code, text)
+            assert captured["n"] == 1
+            sent2 = [e for e in store.read_events("run_1") if e.type is EventType.NOTIFY_SENT]
+            assert len(sent2) == 1
+            assert store.verify_events("run_1").ok
+    finally:
+        server.shutdown()
+        server.server_close()
