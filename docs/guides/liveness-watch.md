@@ -78,7 +78,7 @@ with the commands that act on quiet.
 ## Breach webhook
 
 For unattended runs, `--on-breach webhook` with `--webhook-url` POSTs the
-advisory as JSON instead of just exiting 20:
+advisory as JSON and still exits 20:
 
 ```bash
 continuum --db $DB watch live-demo --max-silence 1s \
@@ -87,8 +87,7 @@ continuum --db $DB watch live-demo --max-silence 1s \
 
 Delivery is fail-open like every notification path: a dead receiver prints a
 warning and never changes the verdict. The POST carries the advisory as plain
-JSON; there is no authentication on the receiver side, so put the URL behind
-your own secret path or bearer check.
+JSON with no authentication header, so use a secret URL path.
 
 ## Rules worth knowing
 
