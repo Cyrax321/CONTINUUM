@@ -340,3 +340,67 @@ def test_resume_notifies_blocked_run_without_changing_output(tmp_path, monkeypat
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_notify_test_command_reports_per_url(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """notify-test verifies wiring without a real blockage (#305)."""
+    import http.server
+    import io
+    import json as _json
+    import threading
+
+    from continuum.cli import ExitCode, main
+    from continuum.models import Run
+    from continuum.storage import SQLiteStorage
+
+    received: list = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", 0))
+            received.append(_json.loads(self.rfile.read(length)))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        db = str(tmp_path / "nt.db")
+        with SQLiteStorage(db) as store:
+            store.create_run_started(Run(run_id="run_1", goal="g"))
+        dot = tmp_path / ".continuum"
+        dot.mkdir(exist_ok=True)
+        (dot / "webhooks.json").write_text(
+            _json.dumps(
+                {
+                    "webhooks": [
+                        {"url": f"http://127.0.0.1:{server.server_port}/a"},
+                        {"url": "http://127.0.0.1:1/dead"},
+                    ]
+                }
+            )
+        )
+        monkeypatch.chdir(tmp_path)
+
+        def invoke(*argv):  # type: ignore[no-untyped-def]
+            out, err = io.StringIO(), io.StringIO()
+            code = main(["--db", db, *argv], out=out, err=err)
+            return code, out.getvalue(), err.getvalue()
+
+        code, out, _ = invoke("notify-test")
+        assert code == ExitCode.ERROR, out
+        assert "ok" in out and "FAILED" in out
+        assert received and received[0]["test"] is True
+        code, out, _ = invoke("--json", "notify-test")
+        payload = _json.loads(out)
+        assert payload["event"] == "request_human"
+        assert len(payload["results"]) == 2
+        code, _, err = invoke("notify-test", "--event", "nope")
+        assert code == ExitCode.ERROR
+        assert "unknown event" in err
+    finally:
+        server.shutdown()
+        server.server_close()
