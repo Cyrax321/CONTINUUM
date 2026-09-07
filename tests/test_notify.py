@@ -8,6 +8,8 @@ import http.server
 import json
 import threading
 
+import pytest
+
 from continuum.recovery.notify import (
     SIGNATURE_HEADER,
     post_webhook,
@@ -121,3 +123,57 @@ def test_malformed_status_line_still_fails_open() -> None:
     finally:
         stop.set()
         listener.close()
+
+
+def test_load_webhooks_absent_is_empty(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from continuum.recovery.notify import load_webhooks
+
+    assert load_webhooks(tmp_path / "nope.json") == []
+
+
+def test_load_webhooks_validates(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import json as _json
+
+    from continuum.recovery.notify import WebhookConfigError, load_webhooks
+
+    good = tmp_path / "webhooks.json"
+    good.write_text(
+        _json.dumps(
+            {
+                "webhooks": [
+                    {"url": "https://hooks.example.com/x", "secret": "s"},
+                    {
+                        "url": "http://int/hook",
+                        "events": ["request_human", "liveness_breach"],
+                        "timeout": 2,
+                        "max_retries": 3,
+                    },
+                ]
+            }
+        )
+    )
+    endpoints = load_webhooks(good)
+    assert len(endpoints) == 2
+    assert endpoints[0].events == ("request_human",)
+    assert endpoints[0].wants("request_human") and not endpoints[0].wants("liveness_breach")
+    assert endpoints[1].timeout == 2 and endpoints[1].max_retries == 3
+
+    bad_shapes = [
+        {"webhooks": [{"url": "file:///etc/passwd"}]},
+        {"webhooks": [{"url": "https://x", "events": ["nope"]}]},
+        {"webhooks": [{"url": "https://x", "events": []}]},
+        {"webhooks": [{"url": "https://x", "timeout": True}]},
+        {"webhooks": [{"url": "https://x", "timeout": -1}]},
+        {"webhooks": [{"url": "https://x", "max_retries": True}]},
+        {"webhooks": [{"url": "https://x", "max_retries": 9}]},
+        {"webhooks": [{"url": 42}]},
+    ]
+    # A missing key behaves like a missing file: no endpoints, no error.
+    empty = tmp_path / "empty.json"
+    empty.write_text(_json.dumps({"nope": []}))
+    assert load_webhooks(empty) == []
+    for i, shape in enumerate(bad_shapes):
+        p = tmp_path / f"bad{i}.json"
+        p.write_text(_json.dumps(shape))
+        with pytest.raises(WebhookConfigError):
+            load_webhooks(p)
