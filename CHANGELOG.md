@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Documented three-file ruff rev lockstep (#689).** CONTRIBUTING.md now
+  names all three places the ruff version lives (the `ruff==` pin in
+  `pyproject.toml`, `rev` in `.pre-commit-config.yaml`, and the `rev` quoted
+  in CONTRIBUTING.md itself) and the test that enforces them; the pin test's
+  failure message says "version skew, not a broken test" and lists the three
+  files to bump, so a dependabot PR that trips it (#627) is readable as
+  drift. The pre-commit ecosystem's absence from dependabot is recorded in a
+  comment there and pinned by a test: its updates cannot be grouped with pip
+  bumps and would break the lockstep in their own PR.
+
 - **External probe for consumed authorities via reconcilers.json (#557).**
   `reconcile --authority <id>` runs the configured authority probe with the
   recorded consumption payload on stdin; `valid=true` appends
