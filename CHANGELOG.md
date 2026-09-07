@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`benchmarks/run.py` answers `--help` and `--list` instead of running the
+  suite (#682).**
+  The runner parsed no arguments, so `--help` started the full multi-minute
+  benchmark suite and wrote reports. It now takes argparse: `--help` prints
+  what runs, what it writes, and where, then exits 0; `--list` names the four
+  suites (phase6, continuum-bench, fault-injection, horizon) and exits without
+  running; unknown flags fail with exit code 2. A no-argument run is unchanged.
+  Covered by `tests/test_bench_runner_cli.py`.
+
 - **External probe for consumed authorities via reconcilers.json (#557).**
   `reconcile --authority <id>` runs the configured authority probe with the
   recorded consumption payload on stdin; `valid=true` appends

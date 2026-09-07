@@ -2,6 +2,8 @@
 
 Usage:
     uv run python benchmarks/run.py
+    uv run python benchmarks/run.py --help    # what runs, what it writes, where
+    uv run python benchmarks/run.py --list    # name the suites, run nothing
 
 Writes ``benchmarks/out/report.json`` and ``benchmarks/out/report.md``. The run
 is reproducible: scenarios build their own in-memory state, so the output can be
@@ -25,6 +27,7 @@ Continuum bench byte counts (issue #568, #293a):
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -37,6 +40,45 @@ from typing import Any
 
 from continuum.benchmark import run_benchmark as run_continuum_benchmark
 from continuum.benchmark.phase6 import run_benchmark, scenarios, write_report
+
+# What main() executes, in order, for --help and --list. A full run takes
+# minutes and writes reports, so the runner must answer questions before
+# doing any work (issue #682).
+_SUITES: tuple[tuple[str, str], ...] = (
+    ("phase6", "recovery-correctness scenarios -> benchmarks/out/report.json / report.md"),
+    (
+        "continuum-bench",
+        "crash-recovery byte and token counts, merged into benchmarks/out/report.json",
+    ),
+    (
+        "fault-injection",
+        "chaos suite (#397) -> benchmarks/out/fault_injection_report.json / .md",
+    ),
+    (
+        "horizon",
+        "years-scale suite (#398) -> benchmarks/out/horizon_report.json / .md,"
+        " plus README bench table regeneration",
+    ),
+)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """The runner's CLI surface: --help and --list answer without running."""
+    return argparse.ArgumentParser(
+        prog="benchmarks/run.py",
+        description=(
+            "Run the full CONTINUUM benchmark suite: phase-6 recovery-correctness "
+            "scenarios, the crash-recovery byte-count bench, the fault-injection "
+            "chaos suite, and the horizon-scale suite. A full run takes minutes "
+            "and writes reports under benchmarks/out/."
+        ),
+        epilog="With no arguments, every suite runs. Use --list to see them first.",
+    )
+
+
+def _print_suites() -> None:
+    for name, what in _SUITES:
+        print(f"{name:<18} {what}")
 
 
 def _regenerate_readme_bench(horizon_report: Any, fault_report: Any | None = None) -> None:
@@ -198,6 +240,16 @@ def _append_continuum_bench(out_dir: str | Path) -> None:
 
 
 def main() -> None:
+    parser = _build_parser()
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="name the suites this runner executes, then exit without running",
+    )
+    args = parser.parse_args()
+    if args.list:
+        _print_suites()
+        return
     report = run_benchmark(scenarios.ALL_SCENARIOS)
     out_dir = os.path.join(os.path.dirname(__file__), "out")
     os.makedirs(out_dir, exist_ok=True)
