@@ -191,6 +191,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A run can be compacted more than once (#648).**
+  The second `compact_run` takes a fresh anchor checkpoint via
+  `CheckpointManager.project_current`, which folded only the live tail even
+  though its docstring promised full event history. After the first
+  compaction the live tail begins at the anchor markers with no
+  `RUN_STARTED`, so every later compact failed with
+  `ValueError: ... could not be anchored: ... has no goal` and long-lived
+  runs — the ones compaction exists for — accumulated an unbounded live tail.
+  `project_current` now folds archived plus live events via
+  `read_all_events`; restore still replays the live tail onto stored
+  checkpoint state by design, and the anchor checkpoint shape and the
+  single-transaction archive marker are unchanged. Covered by
+  `tests/test_compaction.py`.
+
 - Preserve archived action history in grant and authority enforcement, CLI and
   gateway gate decisions, cross-run action scans, and memory enumeration and
   forensic joins (#615, #616). Compaction no longer hides spent authority or
