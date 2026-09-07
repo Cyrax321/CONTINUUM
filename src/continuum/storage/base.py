@@ -140,8 +140,12 @@ class Storage(ABC):
         Callers that compute ``derived_origin`` over a run's history must use
         this helper so min is honest. Authority enforcement, memory enumeration,
         forensic joins, and cross-run action scans likewise require full history:
-        compaction moves facts but does not revoke their consequences. Checkpoint
-        projection may intentionally read only the live tail instead.
+        compaction moves facts but does not revoke their consequences. The
+        forced anchor checkpoint in ``compact_run`` also folds full history,
+        because the live tail of an already-compacted run carries no
+        ``RUN_STARTED`` (issue #648); per-turn checkpoint evaluation and
+        ``restore`` intentionally read only the live tail instead, trading
+        completeness for the bounded per-turn cost compaction exists for.
         Callers folding the same history more than once should reuse the returned
         sequence within that operation instead of rescanning the archive.
         Sorted to keep hash chain order stable.

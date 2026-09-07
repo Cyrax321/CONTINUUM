@@ -161,18 +161,26 @@ class CheckpointManager:
 
     # -- writing ---------------------------------------------------------- #
 
-    def project_current(self, run_id: str) -> SemanticState:
-        """Fold the run's full event history into state.
+    def project_current(self, run_id: str, *, full_history: bool = False) -> SemanticState:
+        """Fold the run's event history into state.
 
-        Full history means archived plus live events: after a compaction the
-        live log begins at the anchor markers, and folding only the tail would
-        conclude the run never started (no ``RUN_STARTED``) and refuse to
-        project — which made every ``compact_run`` after the first fail its
-        anchor checkpoint (issue #648). Restore is different: it replays the
-        live tail onto a stored checkpoint state, so it keeps reading only
-        live events by design.
+        Reads the live tail by default: the per-turn auto-checkpoint path
+        calls this every turn with no state, and folding the archive too
+        would reintroduce the O(total history) per-turn cost that compaction
+        exists to eliminate. Callers that must see pre-anchor facts pass
+        ``full_history=True``: the forced anchor checkpoint in
+        ``compact_run`` does, because after an earlier compaction the live
+        tail begins at the anchor markers with no ``RUN_STARTED`` and a
+        live-only fold would conclude the run never started (issue #648).
+        ``restore`` is different again: it replays the live tail onto a
+        stored checkpoint state, so it also never folds the archive.
         """
-        return project(run_id, self.storage.read_all_events(run_id))
+        events = (
+            self.storage.read_all_events(run_id)
+            if full_history
+            else self.storage.read_events(run_id)
+        )
+        return project(run_id, events)
 
     def checkpoint(
         self,
