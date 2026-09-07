@@ -103,6 +103,36 @@ class WebhookEndpoint:
         return event in self.events
 
 
+def notify_endpoints(
+    endpoints: list[WebhookEndpoint],
+    event: str,
+    payload: dict[str, Any],
+) -> dict[str, bool]:
+    """Deliver ``payload`` to every endpoint subscribed to ``event``.
+
+    Returns ``{url: delivered}`` in registry order. Each endpoint gets up to
+    1 + max_retries attempts with no delay between them; every failure mode
+    fails open to False. Never raises: wrap defensively so a hostile registry
+    object cannot crash the caller either.
+    """
+    results: dict[str, bool] = {}
+    try:
+        targets = [ep for ep in endpoints if ep.wants(event)]
+    except Exception:
+        return results
+    for ep in targets:
+        delivered = False
+        try:
+            for _ in range(1 + max(0, ep.max_retries)):
+                if post_webhook(ep.url, payload, secret=ep.secret, timeout=ep.timeout):
+                    delivered = True
+                    break
+        except Exception:
+            delivered = False
+        results[ep.url] = delivered
+    return results
+
+
 def load_webhooks(path: str | Path | None = None) -> list[WebhookEndpoint]:
     """Read the webhook registry. Empty list when absent; raise when malformed.
 
