@@ -191,3 +191,22 @@ def load_webhooks(path: str | Path | None = None) -> list[WebhookEndpoint]:
             )
         )
     return endpoints
+
+
+def record_delivery_failure(storage: Any, run_id: str, url: str, event: str, error: str) -> None:
+    """Append a NOTIFY_FAILED dead letter for an undelivered notification.
+
+    Audit only: the type is non-projecting, so the dead letter never changes
+    state, verdicts, or resume behavior. Best effort itself: storage errors
+    are swallowed because a failing audit write must not break the caller.
+    """
+    from contextlib import suppress
+
+    from continuum.events import EventType
+
+    with suppress(Exception):
+        storage.append_event(
+            run_id,
+            EventType.NOTIFY_FAILED,
+            {"url": url, "event": event, "error": str(error)[:512]},
+        )
