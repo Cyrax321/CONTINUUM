@@ -14,16 +14,27 @@ the caller decides how loudly to note it.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import hmac
 import http.client
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 SECRET_ENV_VAR = "CONTINUUM_WEBHOOK_SECRET"
 SIGNATURE_HEADER = "X-Continuum-Signature"
 _SIGNATURE_PREFIX = "sha256="
+
+DEFAULT_WEBHOOKS_PATH: str = ".continuum/webhooks.json"
+
+#: Events a webhook endpoint may subscribe to. Unknown names are refused at
+#: load time so a typo fails loudly instead of silently never firing.
+WEBHOOK_EVENTS = frozenset({"request_human", "requires_review", "liveness_breach"})
+
+_MAX_RETRIES = 5
+_DEFAULT_TIMEOUT = 5.0
 
 
 def signature(payload: bytes, secret: str) -> str:
@@ -71,3 +82,82 @@ def post_webhook(
         # HTTPException covers malformed status lines and truncated bodies,
         # which urlopen lets through unwrapped: all still fail open.
         return False
+
+
+class WebhookConfigError(ValueError):
+    """The webhook registry exists but cannot be honoured."""
+
+
+@dataclasses.dataclass(frozen=True)
+class WebhookEndpoint:
+    """One outbound notification target (issue #305, unit 2)."""
+
+    url: str
+    secret: str | None = None
+    events: tuple[str, ...] = ("request_human",)
+    timeout: float = _DEFAULT_TIMEOUT
+    max_retries: int = 0
+
+    def wants(self, event: str) -> bool:
+        """True when this endpoint subscribes to ``event``."""
+        return event in self.events
+
+
+def load_webhooks(path: str | Path | None = None) -> list[WebhookEndpoint]:
+    """Read the webhook registry. Empty list when absent; raise when malformed.
+
+    File shape is ``{"webhooks": [{"url", "secret"?, "events"?, "timeout"?,
+    "max_retries"?}]}``, mirroring the reconcilers.json registry convention.
+    ``url`` must be http(s): anything else (file://, gopher://) is refused so
+    a registry typo cannot turn the notifier into a local-file reader.
+    ``events`` defaults to request_human only. ``timeout`` must be a positive
+    number (bools refused, per the reconciler lesson in #322) and
+    ``max_retries`` an int in 0..5, so a typo cannot retry forever.
+    """
+    target = Path(path) if path is not None else Path(DEFAULT_WEBHOOKS_PATH)
+    if not target.exists():
+        return []
+    location = target.resolve()
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise WebhookConfigError(f"{location} is not valid JSON ({exc})") from exc
+    if not isinstance(raw, dict) or not isinstance(raw.get("webhooks", []), list):
+        raise WebhookConfigError(f"{location}: expected {{'webhooks': [...]}}")
+    endpoints: list[WebhookEndpoint] = []
+    for i, spec in enumerate(raw.get("webhooks") or []):
+        where = f"{location}: webhooks[{i}]"
+        if not isinstance(spec, dict) or not isinstance(spec.get("url"), str):
+            raise WebhookConfigError(f"{where} needs a string 'url'")
+        url = spec["url"]
+        if not url.lower().startswith(("http://", "https://")):
+            raise WebhookConfigError(f"{where} url must be http(s), got {url!r}")
+        secret = spec.get("secret")
+        if secret is not None and not isinstance(secret, str):
+            raise WebhookConfigError(f"{where} secret must be a string")
+        events = spec.get("events", ["request_human"])
+        if not isinstance(events, list) or not events:
+            raise WebhookConfigError(f"{where} events must be a non-empty list")
+        for name in events:
+            if name not in WEBHOOK_EVENTS:
+                raise WebhookConfigError(
+                    f"{where} unknown event {name!r} (known: {sorted(WEBHOOK_EVENTS)})"
+                )
+        timeout = spec.get("timeout", _DEFAULT_TIMEOUT)
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise WebhookConfigError(f"{where} timeout must be a positive number")
+        retries = spec.get("max_retries", 0)
+        if isinstance(retries, bool) or not isinstance(retries, int):
+            raise WebhookConfigError(f"{where} max_retries must be an int")
+        if not 0 <= retries <= _MAX_RETRIES:
+            raise WebhookConfigError(f"{where} max_retries must be 0..{_MAX_RETRIES}")
+        endpoints.append(
+            WebhookEndpoint(
+                url=url,
+                secret=secret,
+                events=tuple(events),
+                timeout=float(timeout),
+                max_retries=retries,
+            )
+        )
+    return endpoints
