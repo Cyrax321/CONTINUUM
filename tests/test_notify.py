@@ -271,16 +271,19 @@ def test_notify_blocked_delivers_once_per_verdict(tmp_path) -> None:  # type: ig
         os.chdir(tmp_path)
         try:
             with SQLiteStorage(db) as store:
-                first = notify_blocked(store, "run_1", "request_human", {"v": 1},
-                                       registry_path=str(registry))
+                first = notify_blocked(
+                    store, "run_1", "request_human", {"v": 1}, registry_path=str(registry)
+                )
                 assert list(first.values()) == [True]
                 assert captured["n"] == 1
-                repeat = notify_blocked(store, "run_1", "request_human", {"v": 1},
-                                        registry_path=str(registry))
+                repeat = notify_blocked(
+                    store, "run_1", "request_human", {"v": 1}, registry_path=str(registry)
+                )
                 assert repeat == {}
                 assert captured["n"] == 1
-                changed = notify_blocked(store, "run_1", "request_human", {"v": 2},
-                                         registry_path=str(registry))
+                changed = notify_blocked(
+                    store, "run_1", "request_human", {"v": 2}, registry_path=str(registry)
+                )
                 assert list(changed.values()) == [True]
                 assert captured["n"] == 2
                 sent = [e for e in store.read_events("run_1") if e.type is EventType.NOTIFY_SENT]
