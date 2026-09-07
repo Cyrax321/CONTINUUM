@@ -64,7 +64,7 @@ _SUITES: tuple[tuple[str, str], ...] = (
 
 def _build_parser() -> argparse.ArgumentParser:
     """The runner's CLI surface: --help and --list answer without running."""
-    return argparse.ArgumentParser(
+    parser = argparse.ArgumentParser(
         prog="benchmarks/run.py",
         description=(
             "Run the full CONTINUUM benchmark suite: phase-6 recovery-correctness "
@@ -74,6 +74,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         epilog="With no arguments, every suite runs. Use --list to see them first.",
     )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="name the suites this runner executes, then exit without running",
+    )
+    return parser
 
 
 def _print_suites() -> None:
@@ -240,13 +246,7 @@ def _append_continuum_bench(out_dir: str | Path) -> None:
 
 
 def main() -> None:
-    parser = _build_parser()
-    parser.add_argument(
-        "--list",
-        action="store_true",
-        help="name the suites this runner executes, then exit without running",
-    )
-    args = parser.parse_args()
+    args = _build_parser().parse_args()
     if args.list:
         _print_suites()
         return
