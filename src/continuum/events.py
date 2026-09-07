@@ -149,6 +149,9 @@ class EventType(StrEnum):
     # delivery. Audit only, never state; DETERMINISTIC because the failure
     # is observed by local code, not asserted by an agent.
     NOTIFY_FAILED = "NOTIFY_FAILED"
+    # human notification (issue #305): record of a delivered notification,
+    # used to dedup repeat assessments of the same blocked verdict.
+    NOTIFY_SENT = "NOTIFY_SENT"
 
 
 class AppendOnlyViolation(RuntimeError):
