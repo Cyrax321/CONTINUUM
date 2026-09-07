@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Blocked verdicts page subscribed webhook endpoints once per verdict (#305).
+  `continuum resume` loads `.continuum/webhooks.json` on `request_human`,
+  fans out through the shared primitive, records delivery for dedup so cron
+  re-assessments stay silent, and writes dead letters for failures. Verdict,
+  text, and exit code are unchanged.
+
 - Shared signed webhook delivery primitive for human notification (#305).
   `continuum.recovery.notify` posts JSON with an HMAC-SHA256 signature when
   `CONTINUUM_WEBHOOK_SECRET` is set and plain JSON otherwise, always
