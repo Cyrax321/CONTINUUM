@@ -177,3 +177,41 @@ def test_load_webhooks_validates(tmp_path) -> None:  # type: ignore[no-untyped-d
         p.write_text(_json.dumps(shape))
         with pytest.raises(WebhookConfigError):
             load_webhooks(p)
+
+
+def test_notify_endpoints_fans_out_by_subscription() -> None:
+    """Only subscribed endpoints receive the event; results keyed by url."""
+    from continuum.recovery.notify import WebhookEndpoint, notify_endpoints
+
+    captured: dict = {}
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", 0))
+            captured.setdefault("n", 0)
+            captured["n"] += 1
+            self.rfile.read(length)
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/hook"
+        endpoints = [
+            WebhookEndpoint(url=url, events=("request_human",)),
+            WebhookEndpoint(url="http://127.0.0.1:1/dead", events=("request_human",)),
+            WebhookEndpoint(url=url, events=("liveness_breach",)),
+        ]
+        results = notify_endpoints(endpoints, "request_human", {"run_id": "r1"})
+        assert results == {url: True, "http://127.0.0.1:1/dead": False}
+        assert captured["n"] == 1
+        assert notify_endpoints(endpoints, "requires_review", {"run_id": "r1"}) == {}
+    finally:
+        server.shutdown()
+        server.server_close()
