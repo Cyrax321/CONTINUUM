@@ -4,7 +4,7 @@ Checkpointing every turn is the obvious design and the wrong one: it costs an
 fsync per step and fills history with versions that mean nothing. Checkpointing
 too rarely loses work. A policy decides.
 
-Policies answer one question — ``should_checkpoint(...) -> Decision`` — and are
+Policies answer one question (``should_checkpoint(...) -> Decision``) and are
 pure: same inputs, same answer, no clock reads hidden inside except the one
 passed in. That makes checkpoint timing testable instead of a source of
 flakiness.
@@ -166,7 +166,7 @@ class IntervalPolicy(CheckpointPolicy):
 class EventPolicy(CheckpointPolicy):
     """Checkpoint when particular event types appear.
 
-    Defaults to side effects and milestones — the events whose loss actually
+    Defaults to side effects and milestones, the events whose loss actually
     costs something.
     """
 
@@ -203,8 +203,8 @@ class SemanticPolicy(CheckpointPolicy):
 
     Progress alone does not qualify unless it crosses a stride: counting from
     3,400 to 3,401 is not worth an fsync, but losing 500 documents of work is.
-    Structural changes — a new or invalidated decision, a new finding, a changed
-    dependency, an approval, a model switch — always qualify, because they
+    Structural changes (a new or invalidated decision, a new finding, a changed
+    dependency, an approval, a model switch) always qualify, because they
     change what the agent is allowed to do next.
     """
 

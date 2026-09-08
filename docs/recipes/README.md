@@ -6,7 +6,7 @@ Copy-paste recipes for wiring CONTINUUM into your harness and for consuming it a
 
 - **[Claude Code: SessionStart + PreCompact](claude-code.md)** – three hook entries, all installed by `continuum hooks install claude-code` (PostToolUse `observe`, SessionStart `briefing`, PreCompact `precompact`). Pairs with the instant-detection work in #394 (`.continuum/resume.json` fast path, scoped confirm, slim subset).
 - **[Codex: SessionStart, plus a copy-paste PreCompact (Bash-only)](codex.md)** – two hook entries from `continuum hooks install codex` (PostToolUse `observe`, SessionStart `briefing`), the `[features] codex_hooks = true` flag, Bash-only limitation documented, same hard-kill test as Claude Code. Codex publishes no compaction event, so unlike Claude Code there is no PreCompact hook for the installer to write; that section of the recipe reuses SessionStart and you paste it yourself.
-- **[Bring your own dashboard](control-plane.md)** – poll `continuum resume --json` and `continuum export-evidence` as the verification substrate; your UI owns orchestration, CONTINUUM owns `safe` and the sealed contract.
+- **[Bring your own dashboard](control-plane.md)** – poll `continuum --json resume` and `continuum export-evidence` as the verification substrate; your UI owns orchestration, CONTINUUM owns `safe` and the sealed contract.
 
 ## Adapter funnel
 
@@ -16,11 +16,11 @@ Copy-paste recipes for wiring CONTINUUM into your harness and for consuming it a
 
 - `docs/recipes/` (new, 4 pages, all docs-first, no CLI table overlapping #363)
 - `docs/api/adapters.md`: added four one-paragraph crash-recovery pointers (Generic, LangGraph, LangChain, OpenAI) – 12 lines total, no CLI table
-- No new runtime code; the glue was already on `main` (`continuum hooks install`, `continuum briefing`, `continuum resume --json`, `continuum export-evidence`)
+- No new runtime code; the glue was already on `main` (`continuum hooks install`, `continuum briefing`, `continuum --json resume`, `continuum export-evidence`)
 
 ## How these were tested
 
-Every recipe has a **Hard-kill test** section that is not a mock: it starts a run, claims a side effect, hard-kills the process with `os._exit(9)` mid-action, then in a fresh process runs the hook command (`continuum briefing` or `continuum resume --json`) and asserts `REQUEST_HUMAN` with one uncertain action and `safe:false`. The silent path (no `resume.json`, no active run) is also tested: the hook exits 0 with no output and no DB open. Timings above are wall-clock on a darwin Python 3.13 SSD box, measured with `time`.
+Every recipe has a **Hard-kill test** section that is not a mock: it starts a run, claims a side effect, hard-kills the process with `os._exit(9)` mid-action, then in a fresh process runs the hook command (`continuum briefing` or `continuum --json resume`) and asserts `REQUEST_HUMAN` with one uncertain action and `safe:false`. The silent path (no `resume.json`, no active run) is also tested: the hook exits 0 with no output and no DB open. Timings above are wall-clock on a darwin Python 3.13 SSD box, measured with `time`.
 
 ## Ten-minute metric (honest)
 

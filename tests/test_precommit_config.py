@@ -11,6 +11,9 @@ local gate and the CI gate honest about each other:
 * **The same paths.** Every directory the CI lint job hands to ruff is in scope
   for both hooks, and a directory CI does not lint stays out of scope, so
   `pre-commit run --all-files` on an untouched tree has nothing to say.
+* **No pre-commit ecosystem in dependabot.** Dependabot groups cannot cross
+  ecosystems, so a pre-commit update would land alone and break the ruff
+  agreement above in its own PR (issue #627, #689).
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ PRECOMMIT_CONFIG = REPO_ROOT / ".pre-commit-config.yaml"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 CONTRIBUTING = REPO_ROOT / "CONTRIBUTING.md"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+DEPENDABOT = REPO_ROOT / ".github" / "dependabot.yml"
 
 
 # --------------------------------------------------------------------------- #
@@ -80,12 +84,37 @@ def _ci_lint_directories() -> set[str]:
 
 def test_precommit_pins_the_ruff_version_from_the_dev_extra() -> None:
     expected = f"v{_pinned_ruff_version()}"
+    mismatches = []
     for path in (PRECOMMIT_CONFIG, CONTRIBUTING):
         revisions = re.findall(r"^\s*rev:\s*(\S+)\s*$", path.read_text(encoding="utf-8"), re.M)
-        assert revisions == [expected], (
-            f"{path.name} must name the ruff version pinned in pyproject's dev extra "
-            f"({expected}), got {revisions}"
-        )
+        if revisions != [expected]:
+            mismatches.append(f"{path.name} says {revisions}")
+    assert not mismatches, (
+        f"ruff version skew, not a broken test: pyproject's dev extra pins "
+        f"ruff=={expected[1:]}, but {'; '.join(mismatches)}. Bump all three pins "
+        "in the same PR: the ruff== pin in pyproject.toml, rev in "
+        ".pre-commit-config.yaml, and the rev quoted in CONTRIBUTING.md "
+        "(the lockstep note there lists them)."
+    )
+
+
+def test_dependabot_does_not_watch_the_pre_commit_ecosystem() -> None:
+    """The pre-commit ecosystem is deliberately absent from dependabot (#689).
+
+    Dependabot groups cannot cross ecosystems, so a pre-commit update would
+    arrive as its own PR bumping only ``rev`` in ``.pre-commit-config.yaml``,
+    leaving the pyproject pin and the CONTRIBUTING quote stale and failing
+    the pin test above in that PR: the #627 failure in reverse. Re-adding the
+    ecosystem should be a deliberate decision that also solves the lockstep,
+    not a drive-by completeness fix.
+    """
+    text = DEPENDABOT.read_text(encoding="utf-8")
+    ecosystems = set(re.findall(r"^\s*- package-ecosystem:\s*\"?([\w-]+)\"?\s*$", text, re.M))
+    assert "pre-commit" not in ecosystems, (
+        "dependabot watches the pre-commit ecosystem, but its updates cannot be "
+        "grouped with the pip bumps and would break the three-file ruff rev "
+        "lockstep in their own PR (see the comment in .github/dependabot.yml)"
+    )
 
 
 def test_hooks_are_scoped_to_the_directories_ci_lints() -> None:

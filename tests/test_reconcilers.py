@@ -213,6 +213,28 @@ def test_settled_events_are_sourced_deterministic(db: str, tmp_path: Path) -> No
     assert all(e.source is Origin.DETERMINISTIC for e in reconciled)
 
 
+def test_settle_run_settles_archived_actions_after_compaction(db: str, tmp_path: Path) -> None:
+    """Compaction must not break the operator path for clearing risk (issue #647).
+
+    pending() is archive-aware, so an action claimed before a compaction is
+    still listed; settle_run used to resolve its ledger key from the live tail
+    only and abort the whole report with LookupError.
+    """
+    action_id = seed_pending(db, key="invoice:9")
+    with SQLiteStorage(db) as store:
+        store.compact_run("run_1", through_sequence=store.last_sequence("run_1"))
+        assert action_id in {a.action_id for a in ActionLedger(store, "run_1").pending()}
+    probes = load_reconcilers(registry(tmp_path, {"send_invoice": "echo occurred=true"}))
+    report = settle_run(SQLiteStorage(db), "run_1", probes)
+    assert report.settled == 1 and report.settled_true
+    with SQLiteStorage(db) as store:
+        from continuum.actions.ledger import fold_action_events
+
+        folded = fold_action_events(store.read_all_events("run_1"))
+    action = next(a for a in folded.values() if a.action_id == action_id)
+    assert action.status is ActionStatus.COMPLETED
+
+
 # --- CLI ------------------------------------------------------------------------------ #
 
 

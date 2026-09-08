@@ -173,7 +173,7 @@ class GenericAgentAdapter(AgentAdapter):
         call does not prove the side effect failed to occur: a timeout or a
         dropped connection means the request may already have landed. Recording
         it as a definite failure would remove it from ``ledger.pending()``, hide
-        it from reconciliation, and let a later retry duplicate the effect —
+        it from reconciliation, and let a later retry duplicate the effect,
         exactly the hazard the ledger exists to prevent.
 
         There is no exception type in this layer that reliably proves nothing
