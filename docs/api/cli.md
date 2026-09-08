@@ -42,6 +42,7 @@ continuum --json <command>                    # machine-readable output
 | `briefing` | Session-start context: active run, progress, next steps. Read-only. |
 | `gate` | Decide whether a tool call may proceed (pre-tool-use hook). Read-only. |
 | `hooks` | Manage host-side observation hooks. |
+| `mcp` | Register the MCP server with a host. Mutates host config. |
 | `verify <run_id>` | Re-audit the event chain for tampering. |
 | `reconcile <run_id>` | Settle uncertain actions with registered probes. Mutates storage. |
 | `actions <run_id>` | List recorded side effects and flag uncertain outcomes. |
@@ -195,4 +196,47 @@ To remove all installed CONTINUUM hooks from a client settings file:
 ```bash
 continuum hooks remove claude-code
 ```
+
+## mcp
+
+`continuum mcp install` registers the MCP server with a host so the host can
+actually spawn it. The committed `.mcp.json` names the server by bare command,
+which only resolves when the host's own PATH contains the install environment —
+on Windows a bare command never resolves from the child's PATH, so a venv the
+host did not activate is unreachable and the host reports
+`CONNECTION_CLOSED`. The installer solves this on the machine that spawns the
+server: it resolves the real entry point, proves it serves the protocol by
+driving an `initialize` handshake over stdio, and only then writes the
+registration with the resolved absolute path baked in. A server that does not
+answer the handshake is refused before any config is written, with the
+server's own stderr surfaced — the diagnosis the host never shows.
+
+```bash
+continuum mcp install                    # local scope (this project): default
+continuum mcp install --scope user       # every project
+continuum mcp install --scope project    # the committed .mcp.json
+continuum mcp remove                     # drop the registration
+```
+
+Scopes mirror Claude Code's own: `local` (default) registers under the current
+project in `~/.claude.json`, `user` registers for every project, and `project`
+writes the `.mcp.json` at the project root — the file the repo ships — with a
+warning, because a baked absolute command path is machine-specific and that
+file is usually committed.
+
+### Flags
+
+- **`--db <path>`**: bakes a specific database path into the server command.
+  The default is the same relative `continuum.db` the committed `.mcp.json`
+  names, resolved by the host against the project it spawns the server in.
+- **`--scope {local,user,project}`**: where the registration lives (default:
+  `local`).
+- **`--config <path>`**: edits a specific host config file instead of the
+  per-profile default.
+
+Re-running `mcp install` converges (`present`) and a moved virtualenv repoints
+the registration (`updated`) rather than duplicating it; `mcp remove` drops
+only the `continuum-mcp` entry, leaving every other server and project key in
+the file untouched. Restart the host after installing (in Claude Code: `/mcp`)
+to connect.
 
