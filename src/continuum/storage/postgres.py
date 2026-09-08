@@ -170,7 +170,7 @@ def _require_psycopg() -> Any:
         import psycopg
     except ImportError as exc:  # pragma: no cover - depends on environment
         raise RuntimeError(
-            "PostgreSQL storage requires the 'psycopg' extra: pip install continuum[postgres]"
+            "PostgreSQL storage requires the 'psycopg' extra: pip install continuum-agent[postgres]"
         ) from exc
     return psycopg
 

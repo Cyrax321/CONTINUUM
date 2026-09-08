@@ -4,7 +4,7 @@ An idempotency key answers one question: has this exact operation already been
 performed? Get it wrong in one direction and the agent duplicates a side effect;
 wrong in the other and it refuses to do legitimate new work.
 
-The key is derived from the action type plus its arguments, canonically hashed —
+The key is derived from the action type plus its arguments, canonically hashed,
 so argument order never matters, but a changed value always does.
 
 Volatile arguments
@@ -17,7 +17,7 @@ new action. ``volatile`` names the fields to exclude.
 
 This is a sharp edge, so it is opt-in and explicit. Excluding a field that
 genuinely distinguishes two operations would collapse them into one and silently
-skip real work — the failure mode is quiet, which makes it worse than the noisy
+skip real work. The failure mode is quiet, which makes it worse than the noisy
 one. Nothing is excluded by default.
 """
 

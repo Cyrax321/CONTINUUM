@@ -7,7 +7,7 @@ Ordering is not cosmetic. Reconciling an uncertain side effect must come before
 any new work, because until the ledger knows whether that GitHub issue exists,
 the agent cannot safely act on the assumption that it does or does not.
 Similarly, a stale dependency must be re-pinned before the findings derived from
-it are re-derived — repairing in the wrong order produces work that is stale the
+it are re-derived. Repairing in the wrong order produces work that is stale the
 moment it completes.
 
 Steps are declarative. The planner does not execute anything; it produces the
@@ -158,7 +158,7 @@ def _step_for(entry: ComponentValidationEntry, *, strict_unknown: bool = True) -
                 reason=entry.detail,
                 # An unverifiable resource normally needs a person, because
                 # nobody knows what is true. Callers who opted into tolerating
-                # uncertainty get an automatic step instead — the policy has to
+                # uncertainty get an automatic step instead: the policy has to
                 # hold here too, or the setting would be silently ignored.
                 requires_human=entry.status is StateStatus.UNKNOWN and strict_unknown,
             )
@@ -215,7 +215,7 @@ def plan_repairs(
 
     Steps are deduplicated by identity and sorted so that prerequisites precede
     the work that depends on them. Sorting is stable and total, so the same
-    inputs always yield the same plan — a contract that varied between runs
+    inputs always yield the same plan, since a contract that varied between runs
     would be impossible to audit.
 
     ``unprojectable`` is ``(sequence, event_type, reason)`` for a log whose fold

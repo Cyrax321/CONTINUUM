@@ -2,7 +2,7 @@
 
 Phase 1 defines the *shape* of durable task state: enums, the semantic state
 tree, ledger records, environment snapshots, validation reports and recovery
-contracts. No storage or recovery logic lives here — these are pure data
+contracts. No storage or recovery logic lives here: these are pure data
 structures (mostly immutable) so they can be serialized, versioned, hashed and
 diffed without side effects.
 
@@ -12,7 +12,7 @@ Conventions
 * All IDs are stable strings (``run_..``, ``action_..``, ``finding_..``).
 * Enums are ``str`` subclasses so they serialize to readable JSON.
 * State-bearing models are frozen: mutations must produce a new version via
-  ``model_copy`` — the versioning phase builds on this property.
+  ``model_copy``; the versioning phase builds on this property.
 """
 
 from __future__ import annotations
@@ -144,6 +144,7 @@ class Component(StrEnum):
     MODEL = "model"
     APPROVAL = "approval"
     ENVIRONMENT = "environment"
+    PIN = "pin"
 
 
 class DiffKind(StrEnum):
@@ -170,7 +171,7 @@ class PlanStepStatus(StrEnum):
 
 
 class Origin(StrEnum):
-    """Who asserted a fact — decides how much it can be trusted.
+    """Who asserted a fact, which decides how much it can be trusted.
 
     This describes the *writer*, not the derivation. Folding a fabricated event
     is still a faithful fold, so "the projection is reproducible" says nothing
@@ -182,7 +183,7 @@ class Origin(StrEnum):
     """Recorded by trusted local code: the CLI, or CONTINUUM's own in-process
     orchestration (serve loop, replay guard, benchmarks).
 
-    Not a claim that the fact is *correct* — only that it was not asserted by an
+    Not a claim that the fact is *correct*, only that it was not asserted by an
     autonomous agent reporting on itself. Framework adapters that execute tools
     on an agent's behalf record EXTERNAL_AGENT instead (issue #612).
     """
@@ -211,7 +212,7 @@ class Origin(StrEnum):
     def self_certified(self) -> bool:
         """Whether this origin is an unverified self-report.
 
-        Such state is usable — it is often correct — but it cannot be the
+        Such state is usable (it is often correct) but it cannot be the
         grounds for declaring a run verified.
         """
         return self in (Origin.LLM, Origin.EXTERNAL_AGENT, Origin.IMPORTED)
@@ -704,7 +705,7 @@ class ModelState(BaseModel):
 class SemanticState(BaseModel):
     """The compact, durable representation of task state.
 
-    This is what survives crashes and context loss — NOT the transcript.
+    This is what survives crashes and context loss, NOT the transcript.
 
     A state is a *projection* of an event prefix. ``source_sequence`` records
     how far into the log the projection consumed, which makes the state
@@ -804,7 +805,7 @@ class SemanticState(BaseModel):
     def dangling_evidence(self) -> frozenset[str]:
         """Support cited by decisions or findings that the state cannot produce.
 
-        A decision may cite either raw evidence or a finding derived from it —
+        A decision may cite either raw evidence or a finding derived from it;
         both are legitimate provenance. Only references matching neither are
         dangling. Treating a cited finding as missing evidence would raise a
         false alarm on every well-formed reasoning chain, and false alarms are
@@ -919,6 +920,15 @@ class Action(BaseModel):
     consumed_inputs: ConsumedInputs = Field(default_factory=ConsumedInputs)
     """Commitment inputs consumed to produce this action (issue #295)."""
 
+    @field_validator("origin_digest")
+    @classmethod
+    def _origin_digest_is_sha256(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not _SHA256_PATTERN.fullmatch(value):
+            raise ValueError("origin_digest must be 64 lowercase hex characters")
+        return value
+
 
 class ActionRecordPayload(BaseModel):
     """Payload for ACTION_RECORDED (issue #551).
@@ -972,15 +982,6 @@ def validate_caused_by(caused_by: list[str] | None, known_ids: set[str] | None =
     if known_ids is not None:
         _validate_caused_by_known(caused_by, known_ids)
     return list(caused_by)
-
-    @field_validator("origin_digest")  # type: ignore[misc]
-    @classmethod
-    def _origin_digest_is_sha256(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        if not _SHA256_PATTERN.fullmatch(value):
-            raise ValueError("origin_digest must be 64 lowercase hex characters")
-        return value
 
 
 class UnknownSideEffect(RuntimeError):

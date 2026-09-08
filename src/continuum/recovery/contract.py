@@ -2,7 +2,7 @@
 
 A contract is the machine-readable answer to "what am I allowed to do now?".
 It names what was verified, what was invalidated, what must happen before
-normal work resumes, and — critically — the *single* next permitted action.
+normal work resumes, and (critically) the *single* next permitted action.
 
 One action, not a set. If a contract listed everything currently allowed, an
 agent could pick the convenient one and skip reconciling the side effect it was
@@ -12,7 +12,7 @@ and the ordering meaningful.
 Contracts are deterministic: the same state, environment and ledger always
 produce a byte-identical contract. That is what makes them auditable, diffable
 and safe to compare in tests. They are sealed with an integrity hash for the
-same reason checkpoints are — a contract that could be edited between issue and
+same reason checkpoints are: a contract that could be edited between issue and
 enforcement would gate nothing.
 """
 

@@ -31,7 +31,7 @@ continuum hooks install codex --with-gate
 
 If the flag is absent the install prints:
 
-```
+```text
 note: 'codex_hooks' was not found in ~/.codex/config.toml; add '[features]
 codex_hooks = true', then restart Codex.
 ```
@@ -58,8 +58,8 @@ Expected entries in `.codex/hooks.json`:
 Manual verification without starting Codex:
 
 ```bash
-continuum briefing --json | python -m json.tool
-continuum resume my-task --json | python -m json.tool
+continuum --json briefing | python -m json.tool
+continuum --json resume my-task | python -m json.tool
 ```
 
 As with Claude Code, `briefing` exits 0 with no output when no interrupted run exists (checked via `.continuum/resume.json` before any DB open), so cold starts stay fast.
@@ -70,12 +70,12 @@ As with Claude Code, `briefing` exits 0 with no output when no interrupted run e
 
 Same behavior as the Claude Code recipe: banner when `.continuum/resume.json` exists, full `RecoveryEngine.assess` otherwise. The banner before compaction looks like:
 
-```
+```text
 Interrupted run my-task – resume pending
-  run: continuum resume my-task --json
+  run: continuum --json resume my-task
 ```
 
-Example `resume --json` contract while safe:
+Example `--json resume` contract while safe:
 
 ```json
 {
@@ -114,7 +114,7 @@ If you cannot route through Bash, the durability alternative is `continuum obser
 
 With `--with-gate`, Codex shell calls are denied before they fire when unclaimed:
 
-```
+```text
 [!!] deny: slack.notify is gated and has no claim for key notify:O-9
 ```
 
@@ -137,7 +137,7 @@ Codex does not yet expose a PreCompact-equivalent event. Mirror the Claude Code 
 ```bash
 # append to your agent loop or as a stop hook
 continuum checkpoint my-task --reason "periodic" || true
-continuum resume my-task --json > .continuum/precompact-resume.json
+continuum --json resume my-task > .continuum/precompact-resume.json
 ```
 
 Or use the tiny glue script:
@@ -161,7 +161,7 @@ If you prefer to hand-edit rather than running `hooks install`:
         "hooks": [
           {
             "type": "command",
-            "command": "continuum briefing --json"
+            "command": "continuum --json briefing"
           }
         ]
       }
@@ -213,7 +213,7 @@ store.append_event("my-task", EventType.CONSTRAINT_PINNED, ConstraintPinned(cons
 Check drift on resume:
 
 ```bash
-continuum resume my-task --pinning '{"prompt_sha256":"abc...","tool_schema_sha256":"def..."}' --json | python -m json.tool | grep pinning_drift -A3
+continuum --json resume my-task --pinning '{"prompt_sha256":"abc...","tool_schema_sha256":"def..."}' | python -m json.tool | grep pinning_drift -A3
 ```
 
 Non-empty drift is surfaced as informational lines in the resume text and as `pinning_drift` in JSON. It does not block resume, it is the verification layer.
@@ -243,7 +243,7 @@ PY
 
 # SIGKILL simulation: no cleanup runs, ledger stays STARTED
 
-continuum --db /tmp/embed-codex-demo.db resume hardkill-codex --json | python -m json.tool
+continuum --db /tmp/embed-codex-demo.db --json resume hardkill-codex | python -m json.tool
 echo "exit code: $?"
 ```
 
@@ -264,7 +264,7 @@ Expected (real output from this repo, ids vary per run):
 }
 ```
 
-Exit code 20 (`REQUIRES_HUMAN`). After `continuum reconcile` or manual reconcile settling the claim, a fresh `continuum resume hardkill-codex --json` reports `resume` with `safe: true` and exit 0.
+Exit code 20 (`REQUIRES_HUMAN`). After `continuum reconcile` or manual reconcile settling the claim, a fresh `continuum --json resume hardkill-codex` reports `resume` with `safe: true` and exit 0.
 
 Clean-run case (no uncertain actions) stays `resume` / `safe: true` and exit 0, identical to the Claude Code path.
 
@@ -279,7 +279,7 @@ Measured from a fresh `git clone`:
 3. `continuum hooks install codex --with-gate` (1s)
 4. Do work, claim an action, checkpoint (any adapter or raw events)
 5. `kill -9` (instant)
-6. `continuum resume my-task --json` shows `request_human` with reconciliate step when uncertain, `resume` when clean (under 1s)
+6. `continuum --json resume my-task` shows `request_human` with reconciliate step when uncertain, `resume` when clean (under 1s)
 
 Gap list: Codex file writes via `apply_patch` are not hook-traversed and therefore not observed unless routed through `Bash`/`shell`. That is a Codex hook scope limit, not a CONTINUUM missing glue, and the workaround (write via shell) is copy-paste. No gap for Bash-mediated runs. If a future Codex release expands hook traversal, this line becomes stale and should be deleted.
 

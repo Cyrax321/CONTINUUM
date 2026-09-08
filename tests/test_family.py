@@ -175,6 +175,38 @@ def test_uncertain_child_blocks_the_parent_resume(db: str) -> None:
     assert payload["safe"] is True
 
 
+def test_a_family_blocked_parent_never_exits_zero(db: str) -> None:
+    """The exit-code contract: only a verified safe-to-resume run exits 0.
+
+    A clean parent with an unsafe child presented request_human in the JSON
+    but still exited 0, so `resume "$PARENT" && ./start-agent.sh` launched an
+    agent onto a family holding an unreconciled side effect (issue #741).
+    """
+    run("--db", db, "start", "par", "--goal", "supervise")
+    run("--db", db, "start", "kid", "--goal", "work", "--parent", "par")
+    ActionLedger(SQLiteStorage(db), "kid").claim("send_invoice", {}, key="invoice:I-9")
+
+    code, out, err = run("--db", db, "--json", "resume", "par")
+    payload = json.loads(out)
+    assert payload["mode"] == "request_human"
+    assert payload["safe"] is False
+    assert code == ExitCode.REQUIRES_HUMAN, err
+
+    # Text mode agrees: the decision line and permitted action follow the
+    # family overlay, not the parent's own per-run verdict.
+    code, out, _ = run("--db", db, "resume", "par")
+    assert code == ExitCode.REQUIRES_HUMAN
+    assert "Recovery decision: REQUEST_HUMAN" in out
+    assert "FAMILY BLOCKED" in out
+    assert "Next permitted action: continue" not in out
+
+    # Settling the child restores the zero exit.
+    key = idempotency_key("send_invoice", None, scope="kid", key="invoice:I-9")
+    ActionLedger(SQLiteStorage(db), "kid").reconcile(str(key), occurred=True)
+    code, _, _ = run("--db", db, "--json", "resume", "par")
+    assert code == ExitCode.OK
+
+
 def test_clean_children_do_not_block_the_parent(db: str) -> None:
     run("--db", db, "start", "par", "--goal", "supervise")
     code, out, _ = run("--db", db, "--json", "resume", "par")

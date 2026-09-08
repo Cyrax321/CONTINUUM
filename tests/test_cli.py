@@ -2,7 +2,7 @@
 
 ``continuum resume "$RUN" && ./start-agent.sh`` is the line these tests exist to
 protect. If an unsafe run ever exits 0, an agent gets launched onto stale state
-or an unreconciled side effect — so the exit code is treated as a safety
+or an unreconciled side effect, so the exit code is treated as a safety
 guarantee, not a formatting detail.
 """
 
@@ -193,7 +193,7 @@ def test_no_command_reports_success_for_a_run_that_does_not_exist(
     """A typo'd run name must never look like a clean bill of health.
 
     An empty run has a trivially valid (empty) event chain and no recorded
-    actions, so `verify` and `actions` would happily exit 0 — letting
+    actions, so `verify` and `actions` would happily exit 0, letting
     `continuum verify $TYPO && deploy` succeed against a name nobody has ever
     written to. Mutating commands owe the same distinction: `checkpoint`
     diagnosed a missing run as a projection error until issue #202.

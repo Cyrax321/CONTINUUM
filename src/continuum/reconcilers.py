@@ -236,10 +236,14 @@ def _key_for(storage: Storage, run_id: str, action: Action) -> Any:
     The fold is keyed by derived idempotency key while the Action record does
     not carry it, so recover the key by matching action_id against the run's
     folded ledger.
+
+    Folds full history, not the live tail: pending actions claimed before a
+    compaction live on as archived events (issue #647), and a live-only fold
+    would make every one of them "vanish mid-reconcile" and abort settle_run.
     """
     from continuum.actions.ledger import fold_action_events
 
-    folded = fold_action_events(storage.read_events(run_id))
+    folded = fold_action_events(storage.read_all_events(run_id))
     for key, candidate in folded.items():
         if candidate.action_id == action.action_id:
             return key
@@ -339,7 +343,10 @@ def settle_authority(
     from continuum.models import Origin
 
     payload: dict[str, Any] = {"authority_id": authority_id}
-    for ev in reversed(list(storage.read_events(run_id))):
+    # Full history, not the live tail: the AUTHORITY_CONSUMED row can predate a
+    # compaction (issue #647), and a live-only scan would hand the probe a bare
+    # authority_id, silently dropping the consumption context.
+    for ev in reversed(list(storage.read_all_events(run_id))):
         if (
             ev.type is not None
             and str(ev.type) == "AUTHORITY_CONSUMED"

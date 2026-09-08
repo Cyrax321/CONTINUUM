@@ -1,4 +1,4 @@
-"""Atomic dual-state rewind (issue #292) — 6 acceptance criteria."""
+"""Atomic dual-state rewind (issue #292): 6 acceptance criteria."""
 
 from __future__ import annotations
 
