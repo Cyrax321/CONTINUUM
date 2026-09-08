@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 
+
+@pytest.mark.slow
 def test_horizon_scenarios_run_with_at_least_100_reconstruction_cycles() -> None:
     from benchmarks.horizon.runner import run_horizon_suite
 
@@ -40,6 +43,7 @@ def test_judge_labels_exist_for_every_scenario_and_disagreements_resolved() -> N
     assert "Disagreements resolved" in doc or "resolved" in doc.lower()
 
 
+@pytest.mark.slow
 def test_all_six_metrics_emitted_per_run_and_rendered() -> None:
     from benchmarks.horizon.emitter import emit_horizon_report
     from benchmarks.horizon.runner import run_horizon_suite
@@ -82,6 +86,7 @@ def test_all_six_metrics_emitted_per_run_and_rendered() -> None:
             assert metric.lower() in md.lower()
 
 
+@pytest.mark.slow
 def test_table_regenerates_from_runner_no_invented_numbers(tmp_path: Path) -> None:
     # Prove the table is not hand-edited: delete it and re-run, it should reappear identical
     from benchmarks.horizon.emitter import emit_horizon_report
@@ -122,6 +127,7 @@ def test_table_regenerates_from_runner_no_invented_numbers(tmp_path: Path) -> No
             readme.write_text(original, encoding="utf-8")
 
 
+@pytest.mark.slow
 def test_shared_emitter_schema_with_fault_injection() -> None:
     # Both suites share the same BenchmarkReport envelope
     import json

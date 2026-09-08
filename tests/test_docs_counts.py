@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 COUNTED_FILES = (
     ROOT / "README.md",
@@ -62,6 +64,7 @@ def test_documented_counts_agree() -> None:
     assert len(set(totals.values())) == 1, f"documented counts disagree: {totals}"
 
 
+@pytest.mark.slow
 def test_documented_count_matches_suite() -> None:
     documented = documented_total(COUNTED_FILES[0])
     live = live_total()
