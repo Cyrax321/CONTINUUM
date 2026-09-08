@@ -4,9 +4,9 @@ An extractor turns a trajectory (the run's recorded events) plus an environment
 into semantic state. The deterministic extractor is the default and the only
 one required: it folds the event log and calls nothing external.
 
-The optional LLM extractor exists for state that was never recorded structurally
-— free-text reasoning a framework did not emit as events. It is constrained by
-design:
+The optional LLM extractor exists for state that was never recorded
+structurally: free-text reasoning a framework did not emit as events. It is
+constrained by design:
 
 * It runs only when explicitly enabled and given a callable; there is no
   provider SDK, no network default, no API key handling.
@@ -37,7 +37,7 @@ from continuum.models import (
     SemanticState,
     StateStatus,
 )
-from continuum.state.semantic import ProjectionReport, project_incremental
+from continuum.state.semantic import ProjectionReport, _as_str_list, project_incremental
 
 __all__ = [
     "ExtractionContext",
@@ -106,9 +106,10 @@ LLMCallable = Callable[[ExtractionContext, SemanticState], LLMProposal]
 class LLMExtractor:
     """Optional enrichment layer over a base extractor.
 
-    ``llm`` is supplied by the caller — CONTINUUM has no provider dependency.
-    If it raises, extraction falls back to the deterministic result rather than
-    failing the run: losing an optional enrichment must never cost a recovery.
+    ``llm`` is supplied by the caller, since CONTINUUM has no provider
+    dependency. If it raises, extraction falls back to the deterministic result
+    rather than failing the run: losing an optional enrichment must never cost a
+    recovery.
     """
 
     name = "llm"
@@ -155,7 +156,7 @@ class LLMExtractor:
                     decision_id=decision_id,
                     decision=str(raw.get("decision", "")),
                     reason=str(raw.get("reason", "")),
-                    evidence=[str(e) for e in raw.get("evidence", [])],
+                    evidence=_as_str_list(raw.get("evidence")),
                     status=StateStatus.REQUIRES_REVIEW,
                     provenance=provenance,
                 )
@@ -173,7 +174,7 @@ class LLMExtractor:
                 Finding(
                     finding_id=finding_id,
                     claim=str(raw.get("claim", "")),
-                    evidence=[str(e) for e in raw.get("evidence", [])],
+                    evidence=_as_str_list(raw.get("evidence")),
                     confidence=min(max(confidence, 0.0), 1.0),
                     status=StateStatus.REQUIRES_REVIEW,
                     provenance=provenance,

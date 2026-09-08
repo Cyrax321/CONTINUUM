@@ -4,6 +4,12 @@ The `continuum` command is the command-line surface, also usable in scripts. Exi
 codes are a safety contract: only a verified-safe run exits `0`, so
 `continuum resume "$RUN" && ./start-agent.sh` cannot launch onto stale state.
 
+Typing bare `continuum` at an interactive terminal opens the full-screen
+dashboard on its landing splash (issue #782); piped or non-terminal output,
+`--json`, and platforms without curses print the help text instead, so scripts
+that run `continuum` blind never find a curses screen where they expected
+usage text.
+
 ```bash
 continuum <command> [args]                    # storage defaults to ./continuum.db
 continuum --db <url-or-path> <command>        # storage URL or path (default: continuum.db)
@@ -47,6 +53,7 @@ continuum --json <command>                    # machine-readable output
 | `attest-verify <run_id> --attest <file>` | Verify a signed attestation against the live chain. |
 | `serve` | Run the Tier 0 newline-delimited JSON sidecar (no MCP dependency). |
 | `dashboard` | Serve the dashboard (presentation over run data). |
+| `tui [--refresh <seconds>]` | Full-screen terminal dashboard: monitor and control runs, read-only until an action is confirmed (`q` quits). |
 | `export-evidence` | Export evidence as content-addressed JSON lines. Read-only. |
 | `forget` | Enumerate and tombstone memory records for a tenant. Mutates unless --dry-run. |
 | `health` | Advisory prefix-trust health check. Read-only. |
@@ -142,6 +149,8 @@ per-client notes for Gemini and Codex):
   (`^Bash$|^shell$`).
 - **`SessionStart` (`briefing`)**: runs `continuum briefing` to inject the active
   run id, goal, progress, and recovery next steps at session start or resume.
+  For a ready-made out-of-band alternative that prints `continuum --json resume`
+  (no model turn), see [`scripts/session_start_resume.sh`](../../scripts/session_start_resume.sh).
 - **`PreCompact` (`precompact`)**: runs `continuum precompact` to seal a
   checkpoint before context compaction discards unverified transcript state
   (configured by default on clients with a compaction event, such as Claude Code).

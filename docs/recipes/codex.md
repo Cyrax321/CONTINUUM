@@ -47,7 +47,7 @@ cat .codex/hooks.json | python -m json.tool
         "hooks": [
           {
             "type": "command",
-            "command": "/absolute/path/to/.venv/bin/continuum resume --json"
+            "command": "/absolute/path/to/.venv/bin/continuum --json resume"
           }
         ]
       }

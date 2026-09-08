@@ -26,3 +26,13 @@ The script:
 
 The deliverable for #6 is the captured sequence plus the deviations noted in the
 issue, not a passing unit test.
+
+## Hook-path speedup micro-benchmark
+
+`speedup_demo.py` measures checkpoint/ledger machinery cost with no LLM: five
+per-section sync checkpoints versus one async checkpoint at the end, then prints
+the wall-clock ratio.
+
+```bash
+PYTHONPATH=src python benchmarks/speedup_demo.py
+```

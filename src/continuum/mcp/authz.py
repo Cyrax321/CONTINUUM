@@ -1,8 +1,8 @@
 """Which MCP callers may change a run.
 
 The problem this solves is coexistence, not intrusion. Several agents can be
-configured against the same database at once — Kilo, Gemini CLI and Claude Code
-have all pointed at this project's ``continuum.db`` simultaneously — and until
+configured against the same database at once (Kilo, Gemini CLI and Claude Code
+have all pointed at this project's ``continuum.db`` simultaneously), and until
 now any of them could overwrite another's progress, checkpoint over its state,
 or claim its actions. This layer keeps honestly-named agents out of each other's
 runs.
@@ -73,7 +73,7 @@ POLICY_ENV_VAR = "CONTINUUM_MCP_ALLOW"
 
 #: Alias for ``POLICY_ENV_VAR``, preserved from the closed PR #3. The longer
 #: name states what is being allowed rather than leaving it to be inferred, so
-#: it wins when both are set — a reader who followed that PR's history will
+#: it wins when both are set: a reader who followed that PR's history will
 #: reach for it first, and silently preferring the vaguer name would surprise
 #: them. Same precedence position: an alias, not an extra config source.
 POLICY_ENV_VAR_ALIAS = "CONTINUUM_MCP_MUTATING_CLIENTS"
@@ -327,7 +327,7 @@ class AuthorizationPolicy:
     """Decides whether a named caller may invoke a mutating tool.
 
     Deny by default. An unlisted caller is not a caller we have decided to
-    trust — it is one nobody has made a decision about, and treating an absent
+    trust. It is one nobody has made a decision about, and treating an absent
     decision as approval is how the whole point of the layer gets lost. This
     mirrors the validator's stance elsewhere in CONTINUUM: uncertainty degrades
     rather than resolving in its own favour.
@@ -446,8 +446,8 @@ def caller_name(context: Any) -> str | None:
     """Extract the client's declared name from an MCP request context.
 
     Read from the initialize handshake, which the transport injects server-side.
-    A caller cannot override it by passing ``clientInfo`` in tool arguments —
-    verified by test. It is still only what the client *claims* to be.
+    A caller cannot override it by passing ``clientInfo`` in tool arguments
+    (verified by test). It is still only what the client *claims* to be.
     """
     if context is None:
         return None

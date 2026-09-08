@@ -8,7 +8,7 @@ because they demand different responses:
 ``UNKNOWN``    we could not tell
 
 ``UNKNOWN`` is not a softer ``UNCHANGED``. A resource that could not be
-inspected — an API that timed out, a file that is now unreadable — must not be
+inspected (an API that timed out, a file that is now unreadable) must not be
 treated as intact just because nothing contradicted it. Recovery downgrades on
 uncertainty rather than assuming the best.
 """
@@ -159,6 +159,8 @@ def diff_environments(
             reason = str(
                 current.metadata.get("error")
                 or previous.metadata.get("error")
+                or current.metadata.get("skipped")
+                or previous.metadata.get("skipped")
                 or "resource could not be inspected"
             )
             deltas.append(

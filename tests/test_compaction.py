@@ -230,16 +230,25 @@ def test_compact_requires_an_existing_version(tmp_path: Path) -> None:
     assert "anchored" in err or "no stored version" in err
 
 
-def test_repeated_compaction_succeeds_after_new_work(db: str) -> None:
-    """A compacted run remains eligible for a later compaction."""
+def test_repeated_compaction_replays_only_the_live_tail(
+    db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A compacted run remains eligible without rescanning its archive."""
     work(db, 1)
     code, _, err = run("--db", db, "compact", "run_1", "--force")
     assert code == ExitCode.OK, err
 
     work(db, 2)
+    original = SQLiteStorage.read_archived_events
+
+    def reject_archive_read(self: SQLiteStorage, run_id: str):
+        raise AssertionError(f"project_current rescanned the archive for {run_id}")
+
+    monkeypatch.setattr(SQLiteStorage, "read_archived_events", reject_archive_read)
     code, _, err = run("--db", db, "compact", "run_1", "--force")
     assert code == ExitCode.OK, err
 
+    monkeypatch.setattr(SQLiteStorage, "read_archived_events", original)
     with SQLiteStorage(db) as store:
         assert len(store.read_archived_events("run_1")) > 0
         assert store.verify_events("run_1").ok
@@ -361,3 +370,32 @@ def test_anchor_event_is_non_projecting(db: str) -> None:
     assert not report.ignored_types, (
         "EVENT_LOG_ANCHORED must be declared non-projecting, not silently ignored"
     )
+
+
+def test_compact_run_rejects_through_sequence_that_would_eat_the_anchor(db: str) -> None:
+    """Issue #705: through_sequence at or above the anchor's own sequence
+    must be rejected. Accepting it archived and deleted the anchor (and with
+    it the whole live log), so the next append minted a fresh genesis and
+    forked the hash chain away from the archive."""
+    for i in range(4):
+        work(db, i)
+    with SQLiteStorage(db) as store:
+        pre_live = len(store.read_events("run_1"))
+
+        with pytest.raises(ValueError, match="anchor"):
+            store.compact_run("run_1", through_sequence=10_000)
+
+        # The rejected call leaves a healthy, verifiable log behind: nothing
+        # was archived, only the forced checkpoint marker was appended.
+        report = store.verify_events("run_1")
+        assert report.ok, [v.kind for v in report.violations]
+        live = store.read_events("run_1")
+        assert len(live) == pre_live + 1
+        assert store.read_events("run_1")[0].sequence == 1, "live rows must not have moved"
+
+        # A bounded value below the anchor still compacts normally.
+        result = store.compact_run("run_1", through_sequence=1)
+        assert result["archived"] >= 1
+        assert any(e.type is EventType.EVENT_LOG_ANCHORED for e in store.read_events("run_1"))
+        report = store.verify_events("run_1")
+        assert report.ok, [v.kind for v in report.violations]

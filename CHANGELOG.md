@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Documented three-file ruff rev lockstep (#689).** CONTRIBUTING.md now
+  names all three places the ruff version lives (the `ruff==` pin in
+  `pyproject.toml`, `rev` in `.pre-commit-config.yaml`, and the `rev` quoted
+  in CONTRIBUTING.md itself) and the test that enforces them; the pin test's
+  failure message says "version skew, not a broken test" and lists the three
+  files to bump, so a dependabot PR that trips it (#627) is readable as
+  drift. The pre-commit ecosystem's absence from dependabot is recorded in a
+  comment there and pinned by a test: its updates cannot be grouped with pip
+  bumps and would break the lockstep in their own PR.
+
 - **External probe for consumed authorities via reconcilers.json (#557).**
   `reconcile --authority <id>` runs the configured authority probe with the
   recorded consumption payload on stdin; `valid=true` appends
@@ -195,6 +205,20 @@ All notable changes to this project are documented here. The format follows
   Checkpoint anchoring now projects archived events together with the live tail,
   so a long-lived run can be compacted again after new work without losing its
   original `RUN_STARTED` state.
+
+- **`reconcile --auto` settles archived actions and probes authorities with
+  full consumption context after compaction (#647).**
+  `ActionLedger.pending` folds archived plus live events, but
+  `reconcilers._key_for` folded only the live tail, so one action claimed
+  before a compaction aborted the whole settle report with `LookupError`;
+  `settle_authority` scanned only live events for the `AUTHORITY_CONSUMED`
+  row, silently handing the probe a bare `authority_id` payload without
+  `consumer_run_id`, `via_action_id`, or `sequence`. Both now read full
+  history via `read_all_events`, the same archive-aware pattern the library
+  reconciliation path already used. Covered by `tests/test_reconcilers.py`
+  and `tests/test_authority_probe.py`.
+- The missing-MCP-extra subprocess test now imports the working tree even when
+  CONTINUUM is not installed or an older copy is installed (#810).
 
 - Preserve archived action history in grant and authority enforcement, CLI and
   gateway gate decisions, cross-run action scans, and memory enumeration and
@@ -588,7 +612,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,053 collected, ~2,030 passed, ~23 skipped on a minimal env).
+  (~2,122 collected, ~2,030 passed, ~23 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

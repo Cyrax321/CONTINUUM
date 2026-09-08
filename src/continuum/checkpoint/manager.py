@@ -7,11 +7,11 @@ integrity hash makes it the unit recovery trusts.
 Ordering matters here. The manager writes the version, then the checkpoint,
 then records ``STATE_CHECKPOINTED``. If the process dies partway:
 
-* died before the version was written — nothing is lost; the state is still
+* died before the version was written: nothing is lost; the state is still
   derivable from the events.
-* died after the version but before the checkpoint — a version exists with no
+* died after the version but before the checkpoint: a version exists with no
   checkpoint. Harmless: the next checkpoint reuses it.
-* died after the checkpoint but before the event — the checkpoint exists and is
+* died after the checkpoint but before the event: the checkpoint exists and is
   valid; the log simply lacks the annotation. ``restore`` reads checkpoints, not
   the annotation, so recovery is unaffected.
 
@@ -62,7 +62,7 @@ class RestoredRun:
     """What recovery gets back: verified state plus how stale it is.
 
     ``pending_events`` is the gap between the checkpoint and the end of the
-    log — work that happened after the last checkpoint. It is replayed onto the
+    log: work that happened after the last checkpoint. It is replayed onto the
     checkpoint rather than ignored, so a crash between checkpoints does not
     discard the work in between.
     """
@@ -164,10 +164,13 @@ class CheckpointManager:
     def project_current(self, run_id: str) -> SemanticState:
         """Fold the run's full event history into state.
 
-        Compaction moves the oldest events out of the live table, so a current
-        projection must include the archive or it cannot be anchored again.
+        Before the first checkpoint, projection includes any archived prefix so
+        a compacted run can still recover its original state. Once a checkpoint
+        exists, restore uses it as the fold base and replays only the live tail.
         """
-        return project(run_id, self.storage.read_all_events(run_id))
+        if self.storage.latest_checkpoint(run_id) is None:
+            return project(run_id, self.storage.read_all_events(run_id))
+        return self.restore(run_id, replay=True).state
 
     def checkpoint(
         self,

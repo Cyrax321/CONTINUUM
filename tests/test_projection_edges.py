@@ -142,6 +142,22 @@ def test_granting_an_approval_that_was_never_requested_still_records_it() -> Non
     assert approval.reason == "out of band"
 
 
+def test_naive_expires_at_is_folded_as_utc() -> None:
+    """Issue #704: an expires_at payload without a UTC offset must not fold to
+    a naive datetime, because everything downstream compares against the
+    tz-aware utcnow(), and a naive value would TypeError and brick validation."""
+    log = started(EventLog())
+    log.append(
+        "run_1",
+        EventType.APPROVAL_GRANTED,
+        {"approval_id": "ap_10", "subject": "deploy", "expires_at": "2027-01-01"},
+    )
+    approval = project("run_1", log.events("run_1")).approvals[0]
+    assert approval.expires_at is not None
+    assert approval.expires_at.tzinfo is not None, "naive expires_at must be normalized to UTC"
+    assert approval.expires_at.utcoffset().total_seconds() == 0
+
+
 def test_model_assumptions_can_be_recorded_before_any_model_is_known() -> None:
     log = started(EventLog())
     log.append(

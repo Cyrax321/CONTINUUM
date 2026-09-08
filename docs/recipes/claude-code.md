@@ -45,7 +45,7 @@ instead if you want the compaction boundary to report without writing:
         "hooks": [
           {
             "type": "command",
-            "command": "/absolute/path/to/.venv/bin/continuum briefing --json"
+            "command": "/absolute/path/to/.venv/bin/continuum --json briefing"
           }
         ]
       }
@@ -56,7 +56,7 @@ instead if you want the compaction boundary to report without writing:
 
 Replace `/absolute/path/to/.venv/bin/continuum` with `which continuum`.
 
-For an explicit `resume --json` variant (pairs with #394):
+For an explicit `--json resume` variant (pairs with #394):
 
 ```json
 {
@@ -67,7 +67,7 @@ For an explicit `resume --json` variant (pairs with #394):
         "hooks": [
           {
             "type": "command",
-            "command": "/absolute/path/to/.venv/bin/continuum resume --json"
+            "command": "/absolute/path/to/.venv/bin/continuum --json resume"
           }
         ]
       }
@@ -78,7 +78,7 @@ For an explicit `resume --json` variant (pairs with #394):
         "hooks": [
           {
             "type": "command",
-            "command": "/absolute/path/to/.venv/bin/continuum resume --json"
+            "command": "/absolute/path/to/.venv/bin/continuum --json resume"
           }
         ]
       }
@@ -114,7 +114,7 @@ Measured: briefing silent 0.01 ms, resume 0.05 ms with resume.json, well under 1
 
 ## Constraint verification
 
-`continuum resume --json` includes `pins` from `SemanticState`. The PreCompact hook sees the same contract.
+`continuum --json resume` includes `pins` from `SemanticState`. The PreCompact hook sees the same contract.
 
 ## Troubleshooting
 

@@ -10,6 +10,7 @@ See issue #111.
 
 from __future__ import annotations
 
+import argparse
 import tempfile
 import time
 from pathlib import Path
@@ -23,7 +24,26 @@ def _make_repo(root: Path, n_files: int) -> None:
         f.write_text("import os\nimport sys\nimport numpy\nimport pandas\n", encoding="utf-8")
 
 
+def build_parser() -> argparse.ArgumentParser:
+    """Build the ``benchmarks/graph_build_overhead.py`` argument parser.
+
+    Only ``--help`` is recognised; anything else fails with exit code 2
+    (argparse convention) instead of silently launching the measurement
+    (issue #773).
+    """
+    return argparse.ArgumentParser(
+        prog="python benchmarks/graph_build_overhead.py",
+        description=(
+            "Micro-benchmark for source DependencyGraph build time over a "
+            "synthetic repository. Reports timings for several sizes; makes "
+            "no claim about caching or production scale."
+        ),
+        epilog="With no arguments, runs the measurement for 50, 100, and 200 files.",
+    )
+
+
 def main() -> None:
+    build_parser().parse_args()
     print("Source DependencyGraph build overhead (synthetic fixture, no caching claim)")
     for n in (50, 100, 200):
         with tempfile.TemporaryDirectory() as tmp:
