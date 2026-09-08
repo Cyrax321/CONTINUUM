@@ -1,4 +1,10 @@
 version: 2
+# The pre-commit ecosystem is deliberately not watched (#689). Dependabot
+# groups cannot cross ecosystems, so a pre-commit update would land as its own
+# PR bumping only .pre-commit-config.yaml, and the three-way ruff rev lockstep
+# (pyproject.toml, .pre-commit-config.yaml, CONTRIBUTING.md, enforced by
+# tests/test_precommit_config.py) would fail CI in that PR. Bump ruff in all
+# three places by hand in one PR.
 updates:
   - package-ecosystem: "pip"
     directory: "/"

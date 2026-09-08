@@ -196,7 +196,7 @@ def test_an_unknown_action_reports_the_key_needed_to_reconcile_it(
 
 def test_an_interrupted_action_refuses_to_silently_retry(ledger: ActionLedger) -> None:
     """Crash between claim and complete: the effect may or may not have landed."""
-    ledger.claim("github.create_issue", ISSUE)  # never completed — process died
+    ledger.claim("github.create_issue", ISSUE)  # never completed, process died
 
     with pytest.raises(UnknownSideEffect, match="may or may not have occurred"):
         ledger.claim("github.create_issue", ISSUE)
@@ -293,6 +293,81 @@ def test_complete_refuses_every_status_that_is_not_in_flight(
 
     with pytest.raises(LedgerError, match=expected_status):
         ledger.complete(outcome.key, external_id="txn-1")
+
+
+@pytest.mark.parametrize(
+    ("settle", "expected_status"),
+    [
+        (lambda led, key: led.complete(key, external_id="txn-1"), "completed"),
+        (lambda led, key: led.compensate(key, note="refunded"), "compensated"),
+        (lambda led, key: led.flag_for_review(key, "amount looks wrong"), "requires_review"),
+    ],
+)
+def test_fail_refuses_every_status_that_is_not_in_flight(
+    ledger: ActionLedger,
+    settle: Any,
+    expected_status: str,
+) -> None:
+    """The mirror of complete's guard (issue #366) for fail (issue #733).
+
+    A COMPLETED action flipped to FAILED by a late report reopened the key and
+    let the next claim re-fire a side effect that had already happened. The
+    other settled statuses are corrections of outcomes already on record, which
+    belong to `reconcile`.
+    """
+    outcome = ledger.claim("payment.charge", {"amount": 100})
+    settle(ledger, outcome.key)
+
+    with pytest.raises(LedgerError, match=expected_status):
+        ledger.fail(outcome.key, "late failure report")
+
+
+def test_a_refused_fail_leaves_the_completed_outcome_settled(ledger: ActionLedger) -> None:
+    """The point of the guard: dedup must survive the refused late report.
+
+    The COMPLETED action keeps its receipt, stays out of pending(), and the
+    same claim remains a cache hit instead of re-opening as a fresh attempt.
+    """
+    outcome = ledger.claim("payment.charge", {"amount": 100})
+    ledger.complete(outcome.key, external_id="txn-1")
+
+    with pytest.raises(LedgerError, match="erase a recorded outcome"):
+        ledger.fail(outcome.key, "late timeout report")
+
+    still = ledger.get(str(outcome.key))
+    assert still is not None
+    assert still.status is ActionStatus.COMPLETED
+    assert still.external_id == "txn-1"
+    assert not ledger.pending()
+
+    retry = ledger.claim("payment.charge", {"amount": 100})
+    assert retry.fresh is False, "a refused fail must not reopen the key"
+
+
+def test_failing_an_already_failed_action_is_still_allowed(ledger: ActionLedger) -> None:
+    """A caller repeating a failure report after a dropped response asserts
+    nothing new (same allowance complete makes for COMPLETED, issue #366)."""
+    outcome = ledger.claim("payment.charge", {"amount": 100})
+    ledger.fail(outcome.key, "500 from upstream")
+
+    again = ledger.fail(outcome.key, "500 from upstream, re-reported")
+    assert again.status is ActionStatus.FAILED
+
+
+def test_fail_refuses_an_unknown_action_and_reconcile_remains_the_route(
+    ledger: ActionLedger,
+) -> None:
+    """An uncertain outcome cannot be resolved by assertion; the evidence
+    goes through `reconcile`, exactly as for complete (issue #366)."""
+    outcome = ledger.claim("payment.charge", {"amount": 100})
+    ledger.fail(outcome.key, "gateway timeout", certain=False)
+
+    with pytest.raises(LedgerError, match="unknown"):
+        ledger.fail(outcome.key, "definitely did not happen")
+
+    settled = ledger.reconcile(outcome.key, occurred=False, note="gateway has no trace of it")
+    assert settled.status is ActionStatus.FAILED
+    assert not ledger.pending()
 
 
 def test_completing_an_already_completed_action_is_still_allowed(
@@ -603,7 +678,7 @@ def test_an_explicit_key_lets_a_repeat_be_a_genuine_second_action(
     """Argument hashing cannot express "this repeat is intentional".
 
     Two identical reminders are two sends, not one. Without an explicit key the
-    second is silently deduplicated away — failing closed, but still wrong.
+    second is silently deduplicated away, failing closed, but still wrong.
     """
     args = {"to": "x@y.z", "body": "Standup in 5"}
 

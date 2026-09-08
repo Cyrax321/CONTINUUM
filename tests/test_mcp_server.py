@@ -17,6 +17,7 @@ import sqlite3
 import subprocess
 import sys
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -60,7 +61,7 @@ def _no_confirm_token(monkeypatch: pytest.MonkeyPatch) -> None:
 def server_ctx() -> Iterator[tuple[Any, Any]]:
     """A server whose caller is authorized to mutate.
 
-    These tests cover tool behaviour, not the authorization layer — that lives
+    These tests cover tool behaviour, not the authorization layer, which lives
     in test_mcp_authz.py. Without an explicit policy the server denies every
     mutation, and a policy failure here would look like a logic bug.
     """
@@ -202,6 +203,73 @@ async def test_progress_accumulates_across_calls(server_ctx: tuple[Any, Any]) ->
 
 
 @pytest.mark.asyncio
+async def test_record_plan_upserts_units_and_rejects_bad_payloads(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """Exercise continuum_record_plan the way the MCP audit claims (issue #759)."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, ctx = server_ctx
+    await seed_run(server)
+    units = [
+        {"id": "u2", "title": "second", "status": "pending"},
+        {"id": "u1", "title": "first", "status": "working", "depends_on": []},
+    ]
+    payload = await call(
+        server,
+        "continuum_record_plan",
+        run_id="run_1",
+        plan_id="plan-a",
+        units=units,
+    )
+    assert payload["plan_id"] == "plan-a"
+    assert payload["units"] == 2
+    assert [step["id"] for step in payload["plan"]] == ["u1", "u2"]
+    assert {step["id"]: step["status"] for step in payload["plan"]}["u1"] in {
+        "working",
+        "in_progress",
+    }
+    assert {step["id"]: step["status"] for step in payload["plan"]}["u2"] == "pending"
+    assert any(e.type == EventType.PLAN_UPSERT for e in ctx.storage.read_events("run_1"))
+
+    with pytest.raises(ToolError, match="plan_id"):
+        await server.call_tool(
+            "continuum_record_plan",
+            {"run_id": "run_1", "plan_id": "  ", "units": units},
+            context=_ctx(TEST_CLIENT),
+        )
+    with pytest.raises(ToolError, match="units"):
+        await server.call_tool(
+            "continuum_record_plan",
+            {"run_id": "run_1", "plan_id": "plan-a", "units": []},
+            context=_ctx(TEST_CLIENT),
+        )
+    with pytest.raises(ToolError, match="duplicate"):
+        await server.call_tool(
+            "continuum_record_plan",
+            {
+                "run_id": "run_1",
+                "plan_id": "plan-a",
+                "units": [
+                    {"id": "u1", "title": "a", "status": "pending"},
+                    {"id": "u1", "title": "b", "status": "pending"},
+                ],
+            },
+            context=_ctx(TEST_CLIENT),
+        )
+    with pytest.raises(ToolError, match="status"):
+        await server.call_tool(
+            "continuum_record_plan",
+            {
+                "run_id": "run_1",
+                "plan_id": "plan-a",
+                "units": [{"id": "u1", "title": "a", "status": "nope"}],
+            },
+            context=_ctx(TEST_CLIENT),
+        )
+
+
+@pytest.mark.asyncio
 async def test_over_total_progress_is_rejected_before_being_written(
     server_ctx: tuple[Any, Any],
 ) -> None:
@@ -269,7 +337,7 @@ async def test_a_rejected_progress_call_writes_nothing_at_all(
     """A rejected call must not even create the run (issue #203).
 
     The counter checks used to run after `ensure_run`, so a typo'd or hostile
-    call left a goal-bearing run row and a RUN_STARTED event behind — facts no
+    call left a goal-bearing run row and a RUN_STARTED event behind, facts no
     tool can delete. Validation now precedes creation, matching the guard's
     own rule that a refusal writes nothing.
     """
@@ -545,7 +613,7 @@ async def test_validate_flags_a_changed_dependency(server_ctx: tuple[Any, Any]) 
 # The test above declares the dependency by appending an event straight to
 # storage, which no MCP client can do. Checkpointing with ``env`` used to record
 # a snapshot and nothing else, and the validator returns early for a state with
-# no declared dependencies — so drift was rendered in ``environment_changes``
+# no declared dependencies, so drift was rendered in ``environment_changes``
 # while the verdict stayed ``safe``, which is precisely "reported as verified
 # when it is not". These drive the whole path through the tools.
 
@@ -579,7 +647,7 @@ async def test_drift_in_an_env_declared_dependency_blocks_resume(
     """A moved dataset must stop the run even once the self-report is confirmed.
 
     Confirming clears the REQUIRES_REVIEW on goal and progress, so nothing else
-    is left to mask the environment check — if the verdict were still ``safe``
+    is left to mask the environment check. If the verdict were still ``safe``
     the agent would resume on top of data that changed underneath it.
     """
     server, _ = server_ctx
@@ -734,7 +802,7 @@ async def test_deterministic_state_still_resumes_cleanly(
     """The provenance check must not block genuinely verified state.
 
     Written through the storage API directly (as the CLI or an in-process
-    adapter would), the same run resumes cleanly — proving the gate keys on
+    adapter would), the same run resumes cleanly, proving the gate keys on
     *who asserted it*, not on some blanket refusal.
     """
     server, ctx = server_ctx
@@ -1748,8 +1816,8 @@ def test_server_startup_never_deletes_the_write_ahead_log(tmp_path: Any) -> None
     """A blocking ``-wal`` is quarantined, not destroyed.
 
     Deleting it would turn committed transactions into silent loss, and an
-    emptied database still verifies as an intact chain — the failure would look
-    like success. The bytes must survive somewhere recoverable.
+    emptied database still verifies as an intact chain, so the failure would
+    look like success. The bytes must survive somewhere recoverable.
     """
     path = str(tmp_path / "agent.db")
     SQLiteStorage(path).close()
@@ -1992,7 +2060,7 @@ raise SystemExit(main(["--db", "agent.db"]))
 
 
 def test_main_reports_a_missing_mcp_extra_instead_of_a_traceback(tmp_path: Any) -> None:
-    """Regression for #87: `pip install continuum` ships the script, not the SDK.
+    """Regression for #87: `pip install continuum-agent` ships the script, not the SDK.
 
     Run in a subprocess because blocking an already-imported package in-process
     would corrupt the import state of every later test.
@@ -2004,9 +2072,13 @@ def test_main_reports_a_missing_mcp_extra_instead_of_a_traceback(tmp_path: Any) 
     stdio the client parses that stream as protocol frames, so diagnostics must
     never be printed there, however tempting it is.
     """
+    env = os.environ.copy()
+    source_path = str(Path(__file__).resolve().parents[1] / "src")
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [source_path, env.get("PYTHONPATH")]))
     proc = subprocess.run(
         [sys.executable, "-c", _WITHOUT_MCP_SDK],
         cwd=tmp_path,
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -2014,7 +2086,7 @@ def test_main_reports_a_missing_mcp_extra_instead_of_a_traceback(tmp_path: Any) 
     assert proc.returncode == 1, proc.stderr
     assert proc.stdout == "", "the protocol stream must stay clean"
     assert "Traceback" not in proc.stderr
-    assert "continuum[mcp]" in proc.stderr, "the operator needs the fix, not just the fault"
+    assert "continuum-agent[mcp]" in proc.stderr, "the operator needs the fix, not just the fault"
     assert not (tmp_path / "agent.db").exists(), "a server that never started created a database"
 
 
@@ -2024,7 +2096,7 @@ def test_a_missing_unrelated_module_keeps_its_traceback(
     """The extra is blamed only when the extra is what is missing.
 
     A broken install of something else must not be reported as "install
-    continuum[mcp]", which would send the operator after the wrong fix.
+    continuum-agent[mcp]", which would send the operator after the wrong fix.
     """
     monkeypatch.chdir(tmp_path)
 
@@ -2119,7 +2191,7 @@ async def test_a_log_not_beginning_with_run_started_is_refused(
     If some other writer appends before RUN_STARTED, inserting the start event
     afterwards would place the run's beginning *after* events that supposedly
     preceded it. The resulting projection would be wrong in a way nothing
-    downstream can detect, so this raises instead — naming the problem beats
+    downstream can detect, so this raises instead: naming the problem beats
     silently producing bad state.
     """
     from continuum.mcp.server import MalformedRunLog
@@ -2274,6 +2346,65 @@ async def test_a_completed_action_still_deduplicates_at_budget(
     assert again["status"] == ActionStatus.COMPLETED.value
     assert again["external_id"] == "receipt-1"
     assert again["previous_result"] == {"cents": 500}
+
+
+@pytest.mark.asyncio
+async def test_the_retry_budget_survives_compaction(
+    server_ctx: tuple[Any, Any],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate counted attempts from the live log only (issue #734).
+
+    Compaction archives the ACTION_RECORDED events of the failed attempts, so a
+    live-tail-only count dropped to zero and an exhausted budget re-opened,
+    granting a fresh allowance to a model hammering a failing upstream after
+    every compaction.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".continuum").mkdir()
+    (tmp_path / ".continuum" / "budgets.json").write_text('{"default_max_attempts": 2}')
+    server, ctx = server_ctx
+    await seed_run(server)
+
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    for _ in range(2):
+        stuck = await call(
+            server,
+            "continuum_intercept_action",
+            run_id="run_1",
+            action_type="charge",
+            key="charge:stuck",
+        )
+        await call(
+            server,
+            "continuum_fail_action",
+            run_id="run_1",
+            action_key=stuck["action_key"],
+            error="500 from upstream",
+            certain=True,
+        )
+    with pytest.raises(ToolError, match="retry budget exhausted"):
+        await call(
+            server,
+            "continuum_intercept_action",
+            run_id="run_1",
+            action_type="charge",
+            key="charge:stuck",
+        )
+
+    # Compaction moves the failed attempts into the archive; the exhausted
+    # budget must survive that.
+    ctx.storage.compact_run("run_1")
+    with pytest.raises(ToolError, match="retry budget exhausted"):
+        await call(
+            server,
+            "continuum_intercept_action",
+            run_id="run_1",
+            action_type="charge",
+            key="charge:stuck",
+        )
 
 
 @pytest.mark.asyncio

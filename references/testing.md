@@ -8,13 +8,17 @@ need nothing but this repository; higher levels need the named tool.
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest            # ~1224 passed, 13 skipped in under 30s
-ruff check src tests        # lint
-ruff format --check src tests
-mypy src                    # strict type check
+pytest --tb=short -q --cov=continuum --cov-report=xml --cov-report=term-missing
+ruff check src/ tests/ examples/        # lint
+ruff format --check src/ tests/ examples/
+mypy src/continuum                     # strict type check
 ```
 
-What those 1200+ tests cover without any SDK or network: event-chain
+On the current main branch, collection reports approximately 2,058 tests; the
+exact count and pass/skip totals vary with Python version, platform, optional
+dependencies, and external services.
+
+What those 2,000+ tests cover without any SDK or network: event-chain
 integrity and tamper detection, semantic projection, checkpoint policy and
 restore, ledger claim/dedup/fail/reconcile (including cross-run unscoped
 claims through the action index), validator staleness propagation, recovery

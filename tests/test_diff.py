@@ -4,6 +4,7 @@ import pytest
 
 from continuum.models import (
     Component,
+    ConstraintPin,
     Decision,
     DiffKind,
     Evidence,
@@ -13,6 +14,7 @@ from continuum.models import (
     ModelState,
     PendingWork,
     Progress,
+    Provenance,
     SemanticState,
     StateStatus,
 )
@@ -53,6 +55,43 @@ def test_added_and_removed_components_are_reported() -> None:
     after = make_state(findings=[Finding(finding_id="f81", claim="new")])
     diff = diff_states(before, after)
     assert kinds(diff, Component.FINDING) == {DiffKind.ADDED, DiffKind.REMOVED}
+
+
+def test_pin_add_and_retract_are_reported() -> None:
+    """Pins are the active constraint set a resuming agent must honour.
+
+    The diff predates pins, so adding or retracting one used to yield an empty
+    diff and `continuum diff` said "no semantic change" (issue #740).
+    """
+    pin = ConstraintPin(
+        constraint_id="c1", sha256="a" * 64, status="active", provenance=Provenance()
+    )
+    added = diff_states(make_state(), make_state(pins={"c1": pin}))
+    assert kinds(added, Component.PIN) == {DiffKind.ADDED}
+
+    retracted = diff_states(make_state(pins={"c1": pin}), make_state())
+    assert kinds(retracted, Component.PIN) == {DiffKind.REMOVED}
+
+
+def test_a_pin_whose_digest_changes_is_reported() -> None:
+    """Same label, different constraint text: the digest is the identity."""
+    before = make_state(
+        pins={"c1": ConstraintPin(constraint_id="c1", sha256="a" * 64, provenance=Provenance())}
+    )
+    after = make_state(
+        pins={"c1": ConstraintPin(constraint_id="c1", sha256="b" * 64, provenance=Provenance())}
+    )
+    diff = diff_states(before, after)
+    assert kinds(diff, Component.PIN) == {DiffKind.CHANGED}
+
+
+def test_unchanged_pins_produce_no_entries() -> None:
+    pin = ConstraintPin(
+        constraint_id="c1", sha256="a" * 64, status="active", provenance=Provenance()
+    )
+    before = make_state(pins={"c1": pin})
+    after = make_state(pins={"c1": pin})
+    assert diff_states(before, after).entries == []
 
 
 def test_invalidation_is_distinguished_from_an_ordinary_change() -> None:

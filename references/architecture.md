@@ -183,11 +183,11 @@ newer than that checkpoint is inverted from the hash-chained evidence log.
 continuum rewind <run_id> --to <checkpoint> [--force] [--dry-run]
 ```
 
-* **Deterministic revert set** — from ``TOOL_COMPLETED`` events, not model judgment.
-* **Digest-verified** — current file digest must match the last observed digest after the checkpoint; on mismatch the file is reported as a conflict and left untouched.
-* **Fail-closed** — external edits since the checkpoint surface as conflicts; nothing is clobbered silently.
-* **Snapshot-backed** — file content for each observed digest is stored under ``.continuum/file-snapshots/<sha256>`` at observation time, so the bytes for any past digest are recoverable. Large or unreadable files (>10 MiB) are reported as unrecoverable.
-* **Validated** — after reverting files, revalidation is run against the rewound world before issuing a resume verdict.
+* **Deterministic revert set**: from ``TOOL_COMPLETED`` events, not model judgment.
+* **Digest-verified**: current file digest must match the last observed digest after the checkpoint; on mismatch the file is reported as a conflict and left untouched.
+* **Fail-closed**: external edits since the checkpoint surface as conflicts; nothing is clobbered silently.
+* **Snapshot-backed**: file content for each observed digest is stored under ``.continuum/file-snapshots/<sha256>`` at observation time, so the bytes for any past digest are recoverable. Large or unreadable files (>10 MiB) are reported as unrecoverable.
+* **Validated**: after reverting files, revalidation is run against the rewound world before issuing a resume verdict.
 
 Untracked-file writes (created after checkpoint) are deleted; tracked-file writes are restored from the snapshot for the digest at checkpoint, or listed as unrecoverable when no snapshot exists.
 

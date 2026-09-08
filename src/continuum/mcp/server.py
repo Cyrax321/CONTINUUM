@@ -12,14 +12,14 @@ The action-interception split
 -----------------------------
 
 ``continuum_intercept_action`` cannot execute the side effect itself: a Python
-callable does not cross the MCP boundary. So the protocol is two calls —
+callable does not cross the MCP boundary. So the protocol is two calls:
 
 1. ``continuum_intercept_action`` claims the action and answers *may I?*
 2. the caller performs the effect, then reports back with
    ``continuum_complete_action`` (or ``continuum_fail_action``)
 
 That split matters. Between the two calls the ledger holds a ``STARTED``
-record, so a crash in the gap is indistinguishable from a completed effect —
+record, so a crash in the gap is indistinguishable from a completed effect,
 which is exactly the state the ledger is designed to surface rather than
 paper over. A caller that never reports back leaves the action uncertain, and
 recovery will refuse to resume until it is reconciled. That is the intended
@@ -28,7 +28,7 @@ behaviour, not a leak.
 The optional dependency
 -----------------------
 
-The ``mcp`` SDK is an optional extra, but ``pip install continuum`` installs
+The ``mcp`` SDK is an optional extra, but ``pip install continuum-agent`` installs
 the ``continuum-mcp`` console script regardless. So the entry point exists in
 environments where its dependency does not, and importing the SDK at module
 scope makes that combination fail with a bare ``ModuleNotFoundError``.
@@ -144,7 +144,7 @@ def _open_server_storage(database: str) -> SQLiteStorage:
 
     ``<db>-wal`` is not reconstructable. It holds transactions that were
     committed but not yet checkpointed into the main database, which for a
-    write-heavy run can be the entire history — deleting it turns durable work
+    write-heavy run can be the entire history; deleting it turns durable work
     into silent loss, and an emptied database still verifies as an intact chain.
     So it is moved aside rather than unlinked: the server comes up, and the
     committed data remains on disk for recovery instead of being destroyed. If
@@ -400,7 +400,7 @@ def _environment(run_id: str, env: Mapping[str, str] | None) -> EnvironmentSnaps
     """Build a snapshot from a ``{name: version}`` mapping.
 
     Returns ``None`` when nothing was supplied. The validator treats that as
-    *unverified*, not *unchanged* — omitting the environment must never look
+    *unverified*, not *unchanged*: omitting the environment must never look
     like having checked it and found nothing wrong.
     """
     if not env:
@@ -417,7 +417,7 @@ def _declare_dependencies(ctx: ContinuumMCP, run_id: str, env: Mapping[str, str]
     Capturing a snapshot is not enough to make drift matter. The validator
     decides staleness per ``external_dependencies`` entry and returns early when
     a state has none, so a checkpoint carrying only a snapshot produces a
-    visible environment diff that invalidates nothing — the run reports
+    visible environment diff that invalidates nothing; the run reports
     ``safe_to_resume`` while the dataset underneath it has moved. Declaring each
     resource the agent pinned is what gives the diff something to invalidate,
     and what lets staleness propagate to the evidence resting on it.
@@ -426,7 +426,7 @@ def _declare_dependencies(ctx: ContinuumMCP, run_id: str, env: Mapping[str, str]
     the log is the durable record, so the declaration survives later projections
     and restores, is covered by the hash chain, and carries the same
     ``EXTERNAL_AGENT`` provenance as everything else this server writes. That
-    provenance does not weaken the check — unlike goal and progress, a
+    provenance does not weaken the check: unlike goal and progress, a
     dependency's status comes from comparing two snapshots rather than from
     trusting the claim, so the *comparison* stays independent of the agent that
     named the resource.
@@ -472,8 +472,8 @@ class ContinuumMCP:
 
         The run row and the ``RUN_STARTED`` event are separate facts: a row can
         exist without the event when the run was created directly through the
-        storage API. Projection needs the event — without it, folding the log
-        fails with "the log never recorded RUN_STARTED" — so it is backfilled
+        storage API. Projection needs the event; without it, folding the log
+        fails with "the log never recorded RUN_STARTED", so it is backfilled
         when the log is empty.
 
         ``RUN_STARTED`` must be the *first* event, and this checks for exactly
@@ -485,7 +485,7 @@ class ContinuumMCP:
         A non-empty log whose first event is not ``RUN_STARTED`` raises instead
         of backfilling. Appending it at that point would place the run's start
         *after* events that supposedly preceded it, and any state projected
-        from that log would be quietly wrong — a worse outcome than an error
+        from that log would be quietly wrong, a worse outcome than an error
         naming the problem.
         """
         try:
@@ -530,7 +530,7 @@ def build_server(
 
     ``policy`` decides which callers may use mutating tools. Omitted, it is
     resolved from the environment and then the project policy file, falling
-    back to denying every mutation — an unconfigured server is read-only.
+    back to denying every mutation: an unconfigured server is read-only.
 
     ``auth`` verifies a shared secret before any mutating tool runs. Omitted,
     it is resolved from ``CONTINUUM_MCP_TOKEN`` and is disabled when that is
@@ -608,7 +608,7 @@ def build_server(
         tool carries this.
 
         The check runs before the handler body, so a refused call writes
-        nothing — the denial precedes the side effect rather than following it.
+        nothing; the denial precedes the side effect rather than following it.
         """
 
         @functools.wraps(fn)
@@ -623,7 +623,7 @@ def build_server(
                 return fn(*args, **kwargs)
 
         # The SDK locates the context parameter via get_type_hints(), and
-        # functools.wraps copies the *wrapped* function's annotations — which
+        # functools.wraps copies the *wrapped* function's annotations, which
         # have no `ctx`. Re-advertise it in both the annotations and the
         # signature, or the guard is never handed a context and every caller
         # looks unidentified.
@@ -684,7 +684,7 @@ def build_server(
         description=(
             "Record how far through a task you are. Call this as you complete units "
             "of work so progress survives a crash. Creates the run on first call if "
-            "'goal' is given. Cheap — call it often."
+            "'goal' is given. Cheap: call it often."
         ),
         annotations=mutating,
     )
@@ -938,7 +938,7 @@ def build_server(
         description=(
             "Check whether saved state is still trustworthy, without changing "
             "anything. Pass 'env' as {resource: version} to declare what the world "
-            "looks like now — a dependency that moved since the checkpoint "
+            "looks like now; a dependency that moved since the checkpoint "
             "invalidates the findings built on it. Read-only: safe to call anytime."
         ),
         annotations=read_only,
@@ -1194,7 +1194,7 @@ def build_server(
             "Ask permission before performing an external side effect (creating an "
             "issue, sending a message, charging a card). Returns proceed=true if you "
             "should do it, or proceed=false with the previous result if it was "
-            "already done — do NOT repeat it in that case. If a previous attempt was "
+            "already done; do NOT repeat it in that case. If a previous attempt was "
             "interrupted, returns proceed=false with status='unknown': the effect may "
             "or may or may not have happened, so stop and ask a human. After performing the "
             "action, always call continuum_complete_action.\n\n"
@@ -1276,7 +1276,10 @@ def build_server(
         )
 
         if not settled:
-            events = ctx.storage.read_events(run_id)
+            # Archive-aware (issue #734): attempts live in the event log, and
+            # compaction moves failed attempts into the archive. Counting only
+            # the live tail reset an exhausted budget after every compaction.
+            events = ctx.storage.read_all_events(run_id)
             # Counted per key, so the budget caps retries of *this* operation
             # rather than the run's distinct work of this type (issue #368).
             claim_key = str(
@@ -1419,7 +1422,7 @@ def build_server(
         description=(
             "Report that an intercepted action failed. Set certain=true only if you "
             "know nothing happened (e.g. the request was rejected before it was "
-            "sent). For timeouts or dropped connections leave certain=false — the "
+            "sent). For timeouts or dropped connections leave certain=false: the "
             "effect may still have landed, and treating it as failed could cause a "
             "duplicate."
         ),
@@ -1449,7 +1452,7 @@ def build_server(
             "Settle an action whose outcome was unknown, after checking the external "
             "system. occurred=true records it as done (never repeated); "
             "occurred=false frees it to be retried. Only call this with real "
-            "evidence — guessing here causes either a duplicate or lost work.\n\n"
+            "evidence; guessing here causes either a duplicate or lost work.\n\n"
             "'action_key' accepts either the action_key from continuum_intercept_action "
             "or the action_id that continuum_resume and continuum_list_actions report, "
             "so the identifier named in next_allowed_action can be passed as-is."
@@ -1526,7 +1529,7 @@ def build_server(
                         # been *escalated* to UNKNOWN. An action still STARTED
                         # because the process died mid-flight has not been
                         # escalated yet, so the flag reads false while the
-                        # outcome is in fact unresolved — which is what a
+                        # outcome is in fact unresolved, which is what a
                         # recovering caller needs to see per row, not just in
                         # the aggregate count.
                         "outcome_unresolved": a.action_id in unresolved,
@@ -1609,7 +1612,7 @@ def main(argv: list[str] | None = None) -> int:
             raise
         print(
             f"error: the MCP server needs the optional 'mcp' dependency, which is "
-            f"not importable ({exc}). Install it with: pip install 'continuum[mcp]'",
+            f"not importable ({exc}). Install it with: pip install continuum-agent[mcp]",
             file=sys.stderr,
         )
         return 1
