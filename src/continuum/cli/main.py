@@ -53,6 +53,7 @@ from continuum.gate import (
 from continuum.gate import (
     decide as gate_decide,
 )
+from continuum.mcp.install import MCP_PROFILES
 from continuum.models import (
     ActionStatus,
     EnvironmentSnapshot,
@@ -2737,6 +2738,176 @@ def cmd_hooks_remove(args: argparse.Namespace, storage: Storage, out: Any, err: 
     return ExitCode.OK
 
 
+def _mcp_config_path(args: argparse.Namespace, profile: dict[str, Any]) -> Path:
+    """The host config file an ``mcp`` action edits.
+
+    ``--config`` wins so tests (and operators with unusual setups) can point at a
+    scratch file; otherwise the scope decides: local and user registrations live
+    in the host's user config, a project registration in the ``.mcp.json`` at the
+    project root.
+    """
+    if args.config:
+        return Path(args.config).expanduser()
+    if args.scope == "project":
+        return Path(profile["project_config"])
+    return Path(os.path.expanduser(profile["user_config"]))
+
+
+def cmd_mcp_install(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Register the MCP server with a host, resolved on this machine (issue #834).
+
+    A bare ``continuum-mcp`` in a committed config only works when the host's own
+    PATH happens to contain the install environment — on Windows it never resolves
+    from the child's PATH (#699), and no one committed file can name the venv path
+    on every platform at once. So the registration is written here, where the
+    entry point can actually be found: resolve it, prove it serves the protocol
+    with a real handshake, then bake the resolved path into the host's config.
+    """
+    from continuum.mcp.install import (
+        ProbeError,
+        build_registration,
+        install_server,
+        probe_server,
+        resolve_server_command,
+    )
+
+    profile = MCP_PROFILES[args.client]
+    command = resolve_server_command()
+    try:
+        server_info = probe_server(command)
+    except ProbeError as exc:
+        print(f"error: refusing to register the MCP server: {exc}", file=err)
+        print(
+            "The command was resolved but did not complete the MCP handshake; fix the "
+            "installation (for a source checkout: pip install '.[mcp]') and retry.",
+            file=err,
+        )
+        return ExitCode.ERROR
+    registration = build_registration(command, db=args.db, client=profile["mutating_client"])
+    config_path = _mcp_config_path(args, profile)
+    try:
+        status = install_server(
+            config_path, registration, scope=args.scope, project_dir=Path.cwd(), profile=profile
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=err)
+        return ExitCode.ERROR
+
+    rendered = " ".join([registration["command"], *registration["args"]])
+    lines = [
+        f"MCP server registered with {args.client} (scope: {args.scope})",
+        f"  config: {config_path}",
+    ]
+    if args.scope == "local":
+        lines.append(f"  project: {Path.cwd().resolve().as_posix()}")
+    lines += [
+        f"  status: {status}",
+        f"  command: {rendered}",
+        f"  verified: initialize handshake with {server_info.get('name')} "
+        f"{server_info.get('version') or 'unknown version'}",
+    ]
+    if args.scope == "project":
+        # The one scope whose file is usually committed: what was just written is
+        # correct only on this machine, and the operator should know before the
+        # file reaches anyone else's clone.
+        note = (
+            "this file is usually committed; the command path above is specific to "
+            "this machine (scope 'local' is the per-machine default)"
+        )
+        lines.append(f"  note: {note}")
+    lines.append("restart the host (in Claude Code: /mcp) to connect")
+    payload: dict[str, Any] = {
+        "client": args.client,
+        "scope": args.scope,
+        "config": str(config_path),
+        "status": status,
+        "server": registration,
+        "verified": server_info,
+    }
+    if args.scope == "project":
+        payload["note"] = note
+    _emit(
+        payload,
+        "\n".join(lines),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK
+
+
+def cmd_mcp_doctor(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Diagnose why the MCP server cannot connect, naming cause and fix (issue #835).
+
+    ``CONNECTION_CLOSED`` is all a host ever shows, and the causes — an
+    executable the host cannot spawn, a missing optional dependency — produce
+    identical client output while the server's useful stderr never reaches the
+    user. The doctor runs each check against a fresh subprocess, reports one
+    actionable line per finding, and exits non-zero when any check failed, so
+    ``continuum mcp doctor && <reconnect>`` is safe to script.
+    """
+    from continuum.mcp.doctor import run_doctor
+
+    report = run_doctor()
+    lines = ["MCP doctor"]
+    for check in report["checks"]:
+        marker = {"ok": "[ok]", "warn": "[warn]", "fail": "[FAIL]", "info": "[info]"}[
+            check["status"]
+        ]
+        lines.append(f"  {marker} {check['name']}: {check['detail']}")
+        if check.get("fix"):
+            lines.append(f"        fix: {check['fix']}")
+    if not report["ok"]:
+        lines.append("the MCP server is not healthy as this machine can reach it")
+    _emit(
+        report,
+        "\n".join(lines),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK if report["ok"] else ExitCode.ERROR
+
+
+def cmd_mcp_remove(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Drop the ``continuum-mcp`` registration from a host config (issue #834).
+
+    The mirror of ``mcp install``: same client/scope/config selectors, so the
+    documented uninstall finds exactly what the documented install wrote. Only
+    the ``continuum-mcp`` key is touched — other servers in the same file are
+    the operator's, not ours.
+    """
+    from continuum.mcp.install import remove_server
+
+    profile = MCP_PROFILES[args.client]
+    config_path = _mcp_config_path(args, profile)
+    try:
+        removed = remove_server(
+            config_path, scope=args.scope, project_dir=Path.cwd(), profile=profile
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=err)
+        return ExitCode.ERROR
+    text = (
+        f"Removed continuum-mcp from {config_path} (scope: {args.scope})"
+        if removed
+        else f"No continuum-mcp registration found in {config_path} (scope: {args.scope})"
+    )
+    _emit(
+        {
+            "client": args.client,
+            "scope": args.scope,
+            "config": str(config_path),
+            "removed": removed,
+        },
+        text,
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK
+
+
 def cmd_gate(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Decide whether one tool call may proceed (issue #217).
 
@@ -3915,6 +4086,63 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hooks_client(remove, cmd_hooks_remove)
 
+    mcp = add("mcp", cmd_mcp_install, "Register the MCP server with a host. Mutates host config.")
+    mcp_sub = mcp.add_subparsers(dest="mcp_command", metavar="ACTION", required=True)
+
+    def mcp_client(p: argparse.ArgumentParser, func: Any) -> None:
+        """Give an ``mcp`` action its client/scope selectors and config override."""
+        p.add_argument(
+            "client",
+            nargs="?",
+            default="claude-code",
+            choices=tuple(MCP_PROFILES),
+            metavar="client",
+            help="which host to configure (default: claude-code).",
+        )
+        p.add_argument(
+            "--scope",
+            default="local",
+            choices=("local", "user", "project"),
+            help=(
+                "where the registration lives: local (this project, default), user "
+                "(every project), or project (.mcp.json, usually committed)."
+            ),
+        )
+        p.add_argument(
+            "--config",
+            default=None,
+            help="path to the host's config file (default: per client profile).",
+        )
+        p.set_defaults(func=func)
+
+    mcp_install = mcp_sub.add_parser(
+        "install",
+        help=(
+            "Resolve the server on this machine, verify the handshake, and write the "
+            "registration. Mutates host config."
+        ),
+    )
+    mcp_install.add_argument(
+        "--db",
+        default=None,
+        help=(
+            "bake a specific database path into the server command "
+            "(default: continuum.db, resolved by the host per project)."
+        ),
+    )
+    mcp_client(mcp_install, cmd_mcp_install)
+
+    mcp_remove = mcp_sub.add_parser(
+        "remove", help="Remove the continuum-mcp registration. Mutates host config."
+    )
+    mcp_client(mcp_remove, cmd_mcp_remove)
+
+    mcp_doctor = mcp_sub.add_parser(
+        "doctor",
+        help="Diagnose why the MCP server cannot connect. Read-only; runs a live handshake.",
+    )
+    mcp_doctor.set_defaults(func=cmd_mcp_doctor)
+
     verify = with_run(add("verify", cmd_verify, "Re-audit the event chain."))
     verify.add_argument(
         "--index",
@@ -4147,9 +4375,9 @@ def main(
     if getattr(args, "func", None) is None:
         return _bare_invocation(parser, args, out, err)
 
-    # hooks never touches a run, so it must not create an empty database as a
-    # side effect of editing a settings file.
-    if args.command in ("benchmark", "attest-keygen", "serve", "hooks"):
+    # hooks and mcp never touch a run, so they must not create an empty database
+    # as a side effect of editing a settings file.
+    if args.command in ("benchmark", "attest-keygen", "serve", "hooks", "mcp"):
         return int(args.func(args, None, out, err))
 
     # Instant resume detection (issue #394): SessionStart hook reads

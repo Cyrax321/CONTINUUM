@@ -27,7 +27,7 @@ Welcome. This guide gets you from clone to green tests without re-deriving conte
 Install once with `uv sync --extra dev` (or `pip install -e ".[dev]"`).
 
 - Run all tests: `uv run pytest` or `pytest -q`. Expect `~2,030 passed, ~23 skipped`
-  on main at this writing (`~2,089` collected).
+  on main at this writing (`~2,136` collected).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
   Skips are environmental (Postgres without `CONTINUUM_TEST_POSTGRES_DSN`, adapter tests without `langgraph` or `openai-agents`).
 - Run a single area: `uv run pytest tests/test_checkpoint_phase4.py -v`

@@ -8,6 +8,47 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`continuum mcp doctor` turns `CONNECTION_CLOSED` into a diagnosis (#835).**
+  When the MCP server fails to connect the host shows one opaque string, and
+  the real causes — an executable the host cannot spawn (#699), a missing
+  optional dependency (#697) — produce identical output while the server's
+  useful stderr never reaches the user. The doctor checks each failure class
+  in order, every one against a fresh subprocess (not this process, whose
+  `sys.path` a host's spawn would not share): `mcp` SDK importability with the
+  exact install command, whether a fresh process can resolve `continuum-mcp`
+  on PATH, and a live `initialize` + `tools/list` handshake against the
+  command `mcp install` would register — surfacing the server's own stderr,
+  which the host swallows. On Windows it also detects the SDK's CRLF stdio
+  framing on the wire (modelcontextprotocol/python-sdk#2433), invisible to
+  text-mode pipes. Exit status is scriptable: zero only when no check failed.
+  Covered by `tests/test_mcp_doctor.py`, which reproduces the missing-extra
+  state in a fresh interpreter via a `sitecustomize` import blocker.
+
+- **`continuum mcp install` / `mcp remove` register the MCP server on the machine
+  that spawns it (#834).** A bare `continuum-mcp` in `.mcp.json` only resolves when
+  the host's own PATH contains the install environment — on Windows `CreateProcess`
+  never consults the child's PATH (#699), and no one committed file can carry the
+  venv path on every platform at once. `mcp install` resolves the entry point the
+  way `hooks install` does (executable → sibling of the running `continuum` →
+  `python -m continuum.mcp`), proves it serves the protocol by driving a real
+  `initialize` handshake over stdio — surfacing the server's own stderr, which the
+  host never shows, and refusing to touch the host's config when it fails (the
+  #697 state) — then bakes the resolved absolute path into the host's config in the
+  shape the host itself writes, for the `local` (default), `user`, and `project`
+  scopes. Re-running converges (`present`) and a moved venv repoints (`updated`);
+  `mcp remove` drops only the `continuum-mcp` key, leaving every other server and
+  project entry alone. Covered by `tests/test_mcp_install.py`.
+
+- **The installed `continuum-mcp` entry point is exercised over real stdio (#834).**
+  `tests/test_mcp_entrypoint.py` spawns the console script a host actually
+  spawns — by absolute path, through pipes, no shell — and drives
+  `initialize` plus `tools/list`; the `python -m continuum.mcp` fallback form
+  gets the same handshake. A Windows-only test pins the mechanism behind
+  `CONNECTION_CLOSED` (#699): `CreateProcess` resolves a bare command name
+  against the calling process's PATH, never the environment passed to the
+  child, so the suite can now tell a broken entry point (#697) from an
+  unreachable one.
+
 - **Documented three-file ruff rev lockstep (#689).** CONTRIBUTING.md now
   names all three places the ruff version lives (the `ruff==` pin in
   `pyproject.toml`, `rev` in `.pre-commit-config.yaml`, and the `rev` quoted
@@ -593,7 +634,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,089 collected, ~2,030 passed, ~23 skipped on a minimal env).
+  (~2,136 collected, ~2,030 passed, ~23 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
