@@ -216,7 +216,19 @@ continuum mcp install                    # local scope (this project): default
 continuum mcp install --scope user       # every project
 continuum mcp install --scope project    # the committed .mcp.json
 continuum mcp remove                     # drop the registration
+continuum mcp doctor                     # diagnose a connection failure
 ```
+
+`continuum mcp doctor` turns `CONNECTION_CLOSED` into a diagnosis: it checks
+the `mcp` SDK importability in a fresh interpreter, whether a fresh process
+can resolve `continuum-mcp` on PATH, and runs a live `initialize` +
+`tools/list` handshake against the resolved command, surfacing the server's
+own stderr — the message a host never shows. It exits non-zero when any check
+fails, so `continuum mcp doctor && <reconnect>` is safe to script, and its
+`--json` report names the command it diagnosed for comparison against the
+host's config. On Windows it also reports the SDK's CRLF stdio framing
+(upstream modelcontextprotocol/python-sdk#2433): tolerated by Claude Code,
+rejected by strict NDJSON clients.
 
 Scopes mirror Claude Code's own: `local` (default) registers under the current
 project in `~/.claude.json`, `user` registers for every project, and `project`

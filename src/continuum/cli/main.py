@@ -2836,6 +2836,39 @@ def cmd_mcp_install(args: argparse.Namespace, storage: Storage, out: Any, err: A
     return ExitCode.OK
 
 
+def cmd_mcp_doctor(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Diagnose why the MCP server cannot connect, naming cause and fix (issue #835).
+
+    ``CONNECTION_CLOSED`` is all a host ever shows, and the causes — an
+    executable the host cannot spawn, a missing optional dependency — produce
+    identical client output while the server's useful stderr never reaches the
+    user. The doctor runs each check against a fresh subprocess, reports one
+    actionable line per finding, and exits non-zero when any check failed, so
+    ``continuum mcp doctor && <reconnect>`` is safe to script.
+    """
+    from continuum.mcp.doctor import run_doctor
+
+    report = run_doctor()
+    lines = ["MCP doctor"]
+    for check in report["checks"]:
+        marker = {"ok": "[ok]", "warn": "[warn]", "fail": "[FAIL]", "info": "[info]"}[
+            check["status"]
+        ]
+        lines.append(f"  {marker} {check['name']}: {check['detail']}")
+        if check.get("fix"):
+            lines.append(f"        fix: {check['fix']}")
+    if not report["ok"]:
+        lines.append("the MCP server is not healthy as this machine can reach it")
+    _emit(
+        report,
+        "\n".join(lines),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK if report["ok"] else ExitCode.ERROR
+
+
 def cmd_mcp_remove(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Drop the ``continuum-mcp`` registration from a host config (issue #834).
 
@@ -4103,6 +4136,12 @@ def build_parser() -> argparse.ArgumentParser:
         "remove", help="Remove the continuum-mcp registration. Mutates host config."
     )
     mcp_client(mcp_remove, cmd_mcp_remove)
+
+    mcp_doctor = mcp_sub.add_parser(
+        "doctor",
+        help="Diagnose why the MCP server cannot connect. Read-only; runs a live handshake.",
+    )
+    mcp_doctor.set_defaults(func=cmd_mcp_doctor)
 
     verify = with_run(add("verify", cmd_verify, "Re-audit the event chain."))
     verify.add_argument(

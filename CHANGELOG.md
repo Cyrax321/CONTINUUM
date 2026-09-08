@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`continuum mcp doctor` turns `CONNECTION_CLOSED` into a diagnosis (#835).**
+  When the MCP server fails to connect the host shows one opaque string, and
+  the real causes — an executable the host cannot spawn (#699), a missing
+  optional dependency (#697) — produce identical output while the server's
+  useful stderr never reaches the user. The doctor checks each failure class
+  in order, every one against a fresh subprocess (not this process, whose
+  `sys.path` a host's spawn would not share): `mcp` SDK importability with the
+  exact install command, whether a fresh process can resolve `continuum-mcp`
+  on PATH, and a live `initialize` + `tools/list` handshake against the
+  command `mcp install` would register — surfacing the server's own stderr,
+  which the host swallows. On Windows it also detects the SDK's CRLF stdio
+  framing on the wire (modelcontextprotocol/python-sdk#2433), invisible to
+  text-mode pipes. Exit status is scriptable: zero only when no check failed.
+  Covered by `tests/test_mcp_doctor.py`, which reproduces the missing-extra
+  state in a fresh interpreter via a `sitecustomize` import blocker.
+
 - **`continuum mcp install` / `mcp remove` register the MCP server on the machine
   that spawns it (#834).** A bare `continuum-mcp` in `.mcp.json` only resolves when
   the host's own PATH contains the install environment — on Windows `CreateProcess`
@@ -618,7 +634,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,130 collected, ~2,030 passed, ~23 skipped on a minimal env).
+  (~2,136 collected, ~2,030 passed, ~23 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
