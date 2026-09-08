@@ -173,7 +173,10 @@ warn_required_dynamic_aliases = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-q"
+addopts = "-q --strict-markers"
+markers = [
+    "slow: integration test that takes more than about 2 seconds. Deselect it during development with `pytest -m 'not slow'`; CI runs the suite unfiltered.",
+]
 # The MCP server's tools are async; without this, pytest silently skips them
 # as "not natively supported" rather than failing, which would let the whole
 # suite pass while testing nothing.
