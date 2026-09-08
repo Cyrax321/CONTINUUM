@@ -1,16 +1,16 @@
-"""Deciding how — and whether — a run may resume.
+"""Deciding how, and whether, a run may resume.
 
 The engine reduces three independent signals to one decision:
 
-* validation statuses (Phase 5) — is the state still true?
-* the action ledger (Phase 6) — did an external effect land?
-* checkpoint integrity (Phases 3–4) — is the record itself sound?
+* validation statuses (Phase 5): is the state still true?
+* the action ledger (Phase 6): did an external effect land?
+* checkpoint integrity (Phases 3–4): is the record itself sound?
 
 The decision rule
 -----------------
 
 **The most cautious applicable signal wins.** Not the first one evaluated, not
-the most common — the most cautious. Each signal proposes a mode; the engine
+the most common: the most cautious. Each signal proposes a mode; the engine
 takes the maximum on a severity ordering:
 
     RESUME < REPAIR_AND_RESUME < WAIT < REQUEST_HUMAN < ROLLBACK < ABORT
@@ -18,7 +18,7 @@ takes the maximum on a severity ordering:
 Order-independence matters because these signals genuinely co-occur. A run can
 have a stale dataset *and* an uncertain side effect at once. If the engine
 returned whichever it noticed first, the same situation would recover
-differently depending on iteration order — and the unsafe answer would win
+differently depending on iteration order, and the unsafe answer would win
 roughly half the time. Taking the maximum makes the outcome deterministic and
 always errs toward caution.
 
@@ -28,7 +28,7 @@ What the engine does not do
 It does not execute repairs, mutate the run, or contact anything external. It
 reads state and returns a decision plus a contract. Keeping it free of side
 effects means a recovery decision can be computed, logged and reviewed without
-committing to it — which is what makes ``continuum validate`` safe to run
+committing to it, which is what makes ``continuum validate`` safe to run
 against a live database.
 """
 
@@ -229,8 +229,20 @@ class RecoveryEngine:
         # Scoped confirm (issue #394) narrows this to named components only;
         # the payload may carry "components" or "scope" as a list, a single
         # string, or be absent (legacy full confirm of both).
+        # The scan includes the archived prefix so compaction cannot silently
+        # discard a human's confirmation (same archive-blindness family as
+        # issue #553): without it, a confirmed run re-escalates to
+        # request_human after every compaction.
         confirmed_components: set[str] = set()
-        for _ev in self.storage.read_events(run_id):
+        # Both archive-aware scans below (confirmations and provenance) share
+        # this one fetch: read_all_events walks the archived prefix too, and
+        # re-walking it twice per assess() doubles the archive scan for no
+        # gain.
+        try:
+            archive_aware_events = self.storage.read_all_events(run_id)
+        except Exception:
+            archive_aware_events = self.storage.read_events(run_id)
+        for _ev in archive_aware_events:
             if _ev.type is not EventType.REVIEW_CONFIRMED:
                 continue
             # Only human confirmations clear self-certification; an agent
@@ -253,11 +265,8 @@ class RecoveryEngine:
             else:
                 confirmed_components.update(["goal", "progress"])
 
-        # Provenance N-hop staleness (issue #553): include archived events so compaction does not launder
-        try:
-            provenance_events = self.storage.read_all_events(run_id)
-        except Exception:
-            provenance_events = self.storage.read_events(run_id)
+        # Provenance N-hop staleness (issue #553): the shared archive-aware
+        # fetch above feeds the validator so compaction does not launder it.
         validation = self.validator.validate(
             restored.state,
             current_environment=current_environment,
@@ -266,7 +275,7 @@ class RecoveryEngine:
             expected_model=expected_model,
             confirmed=confirmed_components,
             scope=scope,
-            events=provenance_events,
+            events=archive_aware_events,
         )
 
         ledger = ActionLedger(self.storage, run_id)
@@ -596,7 +605,7 @@ class RecoveryEngine:
 
         if not validation.safe:
             # Count only what actually needs repair. Reporting every status
-            # would include the VALID ones and overstate the damage — a run
+            # would include the VALID ones and overstate the damage: a run
             # with two verified components and one stale one would claim three
             # need repair. The decision itself is unaffected; the operator
             # reading the rationale is not.

@@ -66,6 +66,37 @@ def test_compact_keeps_anchors_and_recent_and_stays_verifiable(ledger: RecoveryL
     assert ok is True
 
 
+def test_append_after_compact_keeps_chain_and_clears_gate(ledger: RecoveryLedger) -> None:
+    """Entries appended after a compaction must not collide with the sparse
+    sequences the survivors kept: verify() must stay ok on an untampered
+    ledger, and a post-compaction gate approval must clear the pending gate.
+    """
+    for _ in range(55):
+        ledger.record_attempt("run_1")
+    ledger.append_decision("run_1", _contract(), gate="required")
+    for _ in range(5):
+        ledger.record_attempt("run_1")
+
+    removed = ledger.compact("run_1", keep=10)
+    assert removed == 51
+    ok, _ = ledger.verify("run_1")
+    assert ok is True
+    # Precondition: the gate-required decision survived the compaction and is
+    # still pending, so the post-approval assertion below actually tests
+    # clearing rather than an already-empty gate.
+    assert ledger.pending_gate("run_1") is not None
+
+    max_sequence = max(e.sequence for e in ledger.entries("run_1"))
+    approved = ledger.record_gate("run_1", "approved")
+    assert approved.sequence == max_sequence + 1
+
+    sequences = [e.sequence for e in ledger.entries("run_1")]
+    assert len(set(sequences)) == len(sequences), "sequences must not collide"
+    ok, broken_at = ledger.verify("run_1")
+    assert ok is True, f"untampered ledger reported broken at index {broken_at}"
+    assert ledger.pending_gate("run_1") is None
+
+
 def test_attempts_and_requires_human(ledger: RecoveryLedger) -> None:
     ledger.record_attempt("run_1")
     ledger.record_attempt("run_1")

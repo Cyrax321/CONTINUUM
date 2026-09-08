@@ -16,14 +16,14 @@ The protocol
 
 A crash can land anywhere:
 
-* **before 1** — nothing happened. Retry is safe.
-* **between 1 and 2** — intent recorded, effect may or may not have occurred.
+* **before 1**: nothing happened. Retry is safe.
+* **between 1 and 2**: intent recorded, effect may or may not have occurred.
   On recovery the action is ``STARTED`` with no result: **the effect is of
   unknown status.** The ledger refuses to guess.
-* **between 2 and 3** — the effect definitely happened but was never recorded.
+* **between 2 and 3**: the effect definitely happened but was never recorded.
   Indistinguishable from the previous case *from the ledger alone*, which is
   precisely why it must not be resolved by assumption.
-* **after 3** — fully recorded. A repeat call returns the stored result.
+* **after 3**: fully recorded. A repeat call returns the stored result.
 
 Why not just retry?
 -------------------
@@ -32,7 +32,7 @@ Retrying an unrecorded action is only safe if the operation is naturally
 idempotent. Creating a GitHub issue, charging a card and sending an email are
 not. Retrying duplicates them; skipping may drop them. Neither default is
 correct, so the ledger raises ``UnknownSideEffect`` and requires the caller to
-supply a reconciler — usually a cheap read against the external system that can
+supply a reconciler, usually a cheap read against the external system that can
 answer "did this actually happen?".
 
 This is honest at-least-once with mandatory reconciliation, not exactly-once.
@@ -294,7 +294,7 @@ class ActionOutcome:
     """What a claim returned.
 
     ``fresh`` distinguishes "go ahead and perform this" from "already done,
-    here is the previous result" — the single most important bit for callers.
+    here is the previous result"; the single most important bit for callers.
     """
 
     key: IdempotencyKey
@@ -1100,12 +1100,31 @@ class ActionLedger:
     def fail(self, key: str, error: str, *, certain: bool = True) -> Action:
         """Record that the effect did not happen.
 
-        ``certain=False`` is for failures where the effect may still have landed
-        — a timeout after the request was sent, for instance. Those become
+        ``certain=False`` is for failures where the effect may still have landed,
+        a timeout after the request was sent for instance. Those become
         ``UNKNOWN`` rather than ``FAILED``, because a timeout is not evidence of
         absence.
+
+        Only in-flight statuses settle here (issue #733). Re-reporting a
+        ``FAILED`` action is allowed, because a caller repeating itself after a
+        dropped response is not asserting anything new. Every other status is
+        refused, mirroring :meth:`complete` (issue #366): a late ``fail`` on a
+        ``COMPLETED`` action used to flip it to ``FAILED`` while its recorded
+        result stayed on the books, which reopened the key and let the next
+        claim re-fire a side effect that had already happened. ``UNKNOWN`` is
+        refused for the same reason ``complete`` refuses it: resolving an
+        uncertain outcome is a correction that needs evidence, which is what
+        :meth:`reconcile` records.
         """
         key, existing = self._require(key)
+        if existing.status not in (ActionStatus.STARTED, ActionStatus.FAILED):
+            raise LedgerError(
+                f"action {existing.action_type!r} is {existing.status.value}, not in flight, so "
+                f"failing it would erase a recorded outcome. If a check confirmed "
+                f"the effect did not happen, call reconcile(occurred=False) "
+                f"(continuum_reconcile_action over MCP), which records the evidence "
+                f"and the note alongside the correction."
+            )
         action = existing.model_copy(
             update={
                 "status": ActionStatus.FAILED if certain else ActionStatus.UNKNOWN,

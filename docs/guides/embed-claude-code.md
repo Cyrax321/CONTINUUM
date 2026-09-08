@@ -34,7 +34,7 @@ Expected hooks installed:
 Verify without starting Claude Code:
 
 ```bash
-continuum briefing --json | python -m json.tool
+continuum --json briefing | python -m json.tool
 ```
 
 With no active run you get a silent exit (no DB open, no latency). With an interrupted run you get a banner similar to:
@@ -44,10 +44,10 @@ With no active run you get a silent exit (no DB open, no latency). With an inter
   "active_run": "my-task",
   "mode": "resume",
   "safe": true,
-  "context": "Interrupted run my-task – resume pending\n  run: continuum resume my-task --json\n\nCONTINUUM active run: my-task\ngoal: Summarize quarterly reports from dataset v3\nprogress: 3/10 completed\nrecovery: resume (safe=True)",
+  "context": "Interrupted run my-task – resume pending\n  run: continuum --json resume my-task\n\nCONTINUUM active run: my-task\ngoal: Summarize quarterly reports from dataset v3\nprogress: 3/10 completed\nrecovery: resume (safe=True)",
   "hookSpecificOutput": {
     "hookEventName": "SessionStart",
-    "additionalContext": "Interrupted run my-task – resume pending\n  run: continuum resume my-task --json\n\nCONTINUUM active run: my-task\ngoal: Summarize quarterly reports from dataset v3\nprogress: 3/10 completed\nrecovery: resume (safe=True)"
+    "additionalContext": "Interrupted run my-task – resume pending\n  run: continuum --json resume my-task\n\nCONTINUUM active run: my-task\ngoal: Summarize quarterly reports from dataset v3\nprogress: 3/10 completed\nrecovery: resume (safe=True)"
   }
 }
 ```
@@ -68,7 +68,7 @@ Fast path keeps cold starts under a second: if `.continuum/resume.json` does not
 To consume the JSON resume contract directly inside an agent turn, use:
 
 ```bash
-continuum resume my-task --json | python -m json.tool
+continuum --json resume my-task | python -m json.tool
 ```
 
 Key fields:
@@ -101,7 +101,7 @@ Claude Code fires `PreCompact` before context compaction. Use it to force a chec
 `continuum hooks install claude-code` wires this for you: the `PreCompact` entry runs `continuum precompact`, which resolves the active run itself, seals a checkpoint with trigger `context_pressure`, and writes both snapshots below. Pass `--no-precompact` to keep the managed entry off the event, which also takes out one an earlier install wrote, and `continuum hooks remove claude-code` takes it out again with the rest.
 
 ```bash
-continuum precompact --json   # what the hook runs; safe to try by hand
+continuum --json precompact   # what the hook runs; safe to try by hand
 ```
 
 It never fails its host: with no active run it exits 0 with nothing sealed, and a snapshot it cannot write is reported in `failures` while the checkpoint stands.
@@ -117,7 +117,7 @@ If you want to pin one run instead of following the active one, the hand-written
         "hooks": [
           {
             "type": "command",
-            "command": "continuum checkpoint my-task --reason \"pre-compact\" || true; continuum resume my-task --json > .continuum/precompact-resume.json; continuum verify my-task --json > .continuum/precompact-verify.json"
+            "command": "continuum checkpoint my-task --reason \"pre-compact\" || true; continuum --json resume my-task > .continuum/precompact-resume.json; continuum --json verify my-task > .continuum/precompact-verify.json"
           }
         ]
       }
@@ -141,10 +141,10 @@ What this gives:
 - `.continuum/precompact-resume.json` with the recovery decision as of that checkpoint (inspect `contract.verified` and `contract.invalidated`)
 - `.continuum/precompact-verify.json` proving the chain is intact up to the checkpoint
 
-Constraint verification: if your run pins constraints by digest (see below), `resume --json` surfaces `pinning_drift` when the current environment pins differ from the recorded set. A non-empty drift does not block resume, it is informational. Check it in PreCompact:
+Constraint verification: if your run pins constraints by digest (see below), `--json resume` surfaces `pinning_drift` when the current environment pins differ from the recorded set. A non-empty drift does not block resume, it is informational. Check it in PreCompact:
 
 ```bash
-continuum resume my-task --pinning '{"prompt_sha256":"abc...","tool_schema_sha256":"def..."}' --json | python -c "import json,sys; j=json.load(sys.stdin); print(j['pinning_drift'])"
+continuum --json resume my-task --pinning '{"prompt_sha256":"abc...","tool_schema_sha256":"def..."}' | python -c "import json,sys; j=json.load(sys.stdin); print(j['pinning_drift'])"
 ```
 
 If you need to record constraint pins at run start (hash-only, plaintext never stored):
@@ -180,7 +180,7 @@ With `--with-gate`, every tool call checks `.continuum/gate.json`:
 
 Unclaimed effects are denied before they fire (exit 2, message fed back to the model):
 
-```
+```text
 [!!] deny: slack.notify is gated and has no claim for key notify:O-9; call continuum_intercept_action first
 ```
 
@@ -199,7 +199,7 @@ If you prefer to hand-edit instead of running `hooks install`:
         "hooks": [
           {
             "type": "command",
-            "command": "continuum briefing --json"
+            "command": "continuum --json briefing"
           }
         ]
       }
@@ -232,7 +232,7 @@ If you prefer to hand-edit instead of running `hooks install`:
         "hooks": [
           {
             "type": "command",
-            "command": "continuum checkpoint my-task --reason \"pre-compact\" || true; continuum resume my-task --json > .continuum/precompact-resume.json"
+            "command": "continuum checkpoint my-task --reason \"pre-compact\" || true; continuum --json resume my-task > .continuum/precompact-resume.json"
           }
         ]
       }
@@ -272,7 +272,7 @@ PY
 # (the ledger STILL holds the claim as STARTED; no cleanup ran)
 
 # fresh session resumes (new process, same DB, no prompt needed)
-continuum --db /tmp/embed-claude-demo.db resume hardkill-demo --json | python -m json.tool
+continuum --db /tmp/embed-claude-demo.db --json resume hardkill-demo | python -m json.tool
 echo "exit code: $?"
 ```
 
@@ -295,7 +295,7 @@ Expected contract (real output from this repo, ids vary per run):
 
 Exit code is 20 (`REQUIRES_HUMAN`), not 0, so a guarded launch stops. Resolve by reconciling or, if the effect indeed never landed, retrying with a budget-aware claim, then `continuum resume` returns `resume` with `safe: true`.
 
-With a clean run (no uncertain actions), the same `resume --json` reports:
+With a clean run (no uncertain actions), the same `--json resume` reports:
 
 ```json
 {
@@ -310,7 +310,7 @@ Exit code 0 means launch is safe.
 
 Real hard-kill with `os._exit(9)` (subprocess, no cleanup) also verified:
 
-```
+```text
 CLAIMED da7942fd0ff97d66197da9ab8c6623e4aeb4db60489fb5857c6a95b067bcd2c9 fresh=True
 exit code: 9
 mode=request_human safe=False reason=1 external side effect(s) have unknown outcomes
@@ -325,7 +325,7 @@ A newcomer with only this guide should have crash recovery inside ten minutes. S
 3. `continuum hooks install claude-code` (1s)
 4. Do any work (write a file, claim an action via adapter, checkpoint)
 5. `kill -9` the agent (or `os._exit(9)` in the example) (instant)
-6. New shell: `continuum resume my-task --json` shows correct mode and next steps (under 1s)
+6. New shell: `continuum --json resume my-task` shows correct mode and next steps (under 1s)
 
 Gap list as of this doc (honest): LangChain/LangGraph/Codex adapters require their optional dependency (`pip install "continuum-agent[langchain]"` etc.) which adds install time but stays inside ten minutes on a warm cache. No gap found for generic adapter path.
 
@@ -335,7 +335,7 @@ Gap list as of this doc (honest): LangChain/LangGraph/Codex adapters require the
 - Hook writes stale command path after moving a virtualenv: re-run `continuum hooks install claude-code` (reports `updated` and rewrites the command).
 - `CONNECTION_CLOSED` from MCP: see `docs/api/mcp.md` troubleshooting; hook path issues, not CONTINUUM.
 - PreCompact never fires: confirm your Claude Code version supports the event, then confirm the entry is actually there. `hooks install` writes it by default (PostToolUse, SessionStart, PreCompact, and PreToolUse only under `--with-gate`), so a missing entry means the install ran with `--no-precompact` or predates #449; re-run `continuum hooks install claude-code` and look for `precompact` in the output.
-- Resume still `request_human` after reconcile: run `continuum actions my-task --json` to confirm no STARTED/UNKNOWN remains, then `continuum resume` again.
+- Resume still `request_human` after reconcile: run `continuum --json actions my-task` to confirm no STARTED/UNKNOWN remains, then `continuum resume` again.
 
 ## See also
 

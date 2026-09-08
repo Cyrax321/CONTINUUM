@@ -12,6 +12,8 @@ issue #106.
 
 from __future__ import annotations
 
+import argparse
+
 from continuum.checkpoint import CheckpointManager
 from continuum.environment import StaticProvider, capture
 from continuum.events import EventType
@@ -66,7 +68,27 @@ def _preserved(decision) -> int:
     return sum(1 for it in items if it.status.value == "valid")
 
 
+def build_parser() -> argparse.ArgumentParser:
+    """Build the ``benchmarks/localized_repair.py`` argument parser.
+
+    Only ``--help`` is recognised; anything else fails with exit code 2
+    (argparse convention) instead of silently launching the measurement
+    (issue #773).
+    """
+    return argparse.ArgumentParser(
+        prog="python benchmarks/localized_repair.py",
+        description=(
+            "Synthetic localized-repair measurement: compare how many state "
+            "items stay VALID under a scoped recovery assessment versus a "
+            "naive global reset. Runs against an in-memory store; no external "
+            "world claims."
+        ),
+        epilog="With no arguments, runs the measurement and prints the summary.",
+    )
+
+
 def main() -> None:
+    build_parser().parse_args()
     storage = _build()
     engine = RecoveryEngine(storage)
 

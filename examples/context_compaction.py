@@ -4,7 +4,7 @@
 
 An agent processes a long sequence of items over many turns. Its context
 window fills up, the platform compacts it, and the full conversation
-history is gone. What survives is CONTINUUM's semantic checkpoint — and
+history is gone. What survives is CONTINUUM's semantic checkpoint, and
 from that alone it reconstructs a bounded recovery context sufficient to
 continue the task.
 
@@ -214,7 +214,7 @@ def simulate_transcript(state: SemanticState) -> str:
         )
         if i % 50 == 0 and i > 0:
             lines.append(
-                f"Assistant: Progress update — {i} papers done. "
+                f"Assistant: Progress update: {i} papers done. "
                 f"Current trend: hypothesis X broadly supported but "
                 f"effect size varies. {state.progress.total - i} remaining."
             )
@@ -254,7 +254,7 @@ def main() -> int:
     say(f"    Checkpoint version: v{checkpoint.version}")
     say()
 
-    heading("2. The context window fills up — platform compacts the transcript")
+    heading("2. The context window fills up; platform compacts the transcript")
     transcript = simulate_transcript(state)
     transcript_chars = len(transcript)
     transcript_tokens = estimate_tokens(transcript)
@@ -263,7 +263,7 @@ def main() -> int:
     say(f"      characters:         {transcript_chars:,}")
     say(f"      est. tokens (heuristic, chars/4): {transcript_tokens:,}")
     say()
-    say("    [compaction occurs — full conversation history is discarded]")
+    say("    [compaction occurs; full conversation history is discarded]")
     say("    [the LLM can no longer see any previous turn, tool call, or reasoning]")
     say()
 
@@ -332,7 +332,7 @@ def main() -> int:
         say("    The semantic checkpoint carried everything that matters;")
         say("    the transcript carried everything that doesn't need to survive.")
     else:
-        say("    RESULT: Recovery blocked — see rationale above.")
+        say("    RESULT: Recovery blocked; see rationale above.")
 
     say()
     say(f"    Database: {db_path}")

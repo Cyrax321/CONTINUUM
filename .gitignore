@@ -47,3 +47,6 @@ demo-run/*
 
 # opencode local state
 .opencode/
+
+# Benchmark artifacts
+benchmarks/out/

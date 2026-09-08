@@ -69,7 +69,9 @@ Next permitted action: reconcile_action:action_0243135b37757b236f1dfd7bf386ec83
 The contract is immutable and hash-chained. Its Phase 1 fields carry the
 decision's justification: `reason` is the threaded rationale and `evidence`
 names what drove it. Whatever resumes this run has one permitted next action,
-and it is the reconciliation, not the retry.
+and it is the reconciliation, not the retry. When outside signals drive the
+verdict, the contract names them in `triggering_risks`; that flow is walked
+through in `docs/guides/risk-policy.md`.
 
 ```
 == 3. the sealed contract explains itself (Phase 1 fields) ==

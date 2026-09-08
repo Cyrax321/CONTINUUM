@@ -3,20 +3,20 @@
 Chosen defaults and why
 -----------------------
 
-* **WAL journal mode** — readers never block the writer, so `continuum inspect`
+* **WAL journal mode**: readers never block the writer, so `continuum inspect`
   can read a run while the agent is still working.
-* **`synchronous=FULL`** — the whole point of this layer is surviving power
+* **`synchronous=FULL`**: the whole point of this layer is surviving power
   loss. `NORMAL` can lose the last commits on a WAL crash, which would silently
   reintroduce the duplicate-work problem CONTINUUM exists to prevent. The cost
   is an fsync per append; correctness wins.
-* **`foreign_keys=ON`** — events cannot reference a run that was never created.
-* **`IMMEDIATE` transactions for writes** — takes the write lock up front, so a
+* **`foreign_keys=ON`**: events cannot reference a run that was never created.
+* **`IMMEDIATE` transactions for writes**: takes the write lock up front, so a
   racing writer fails at BEGIN rather than halfway through a read-modify-write.
 
 Sequence allocation is done inside the write transaction with a UNIQUE
 constraint on ``(run_id, sequence)`` as the backstop. If two processes race,
 one commits and the other hits the constraint and is reported as a
-``ConcurrentWriteError`` — never a silent overwrite.
+``ConcurrentWriteError``, never a silent overwrite.
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ class SQLiteStorage(Storage):
             try:
                 conn.close()
             except sqlite3.ProgrammingError:
-                # Already closed — safe to call close() more than once.
+                # Already closed, and close() is safe to call more than once.
                 pass
             finally:
                 self._connection = None  # type: ignore[assignment]
@@ -478,6 +478,12 @@ class SQLiteStorage(Storage):
         crash in between leave an anchored live log whose prefix never
         reached the archive, so verify would trust a genesis that was never
         earned.
+
+        ``through_sequence`` must stay below the anchor marker's sequence:
+        the live log always retains its anchor, so a value at or above it is
+        rejected (issue #705) instead of silently deleting the anchor and
+        every live row, which would leave the next append minting a fresh
+        genesis and fork the hash chain away from the archive.
         """
         from continuum.checkpoint.manager import CheckpointManager
 
@@ -493,6 +499,14 @@ class SQLiteStorage(Storage):
         storage_version = lv
         if storage_version is None:
             raise ValueError(f"run {run_id!r} could not be anchored: no projectable state")
+        # The anchor marker is appended at the head of the log in the
+        # transaction below, so its sequence is the current head + 1.
+        anchor_sequence = self.last_sequence(run_id) + 1
+        if through_sequence is not None and through_sequence >= anchor_sequence:
+            raise ValueError(
+                f"through_sequence {through_sequence} would archive the anchor marker"
+                f" at sequence {anchor_sequence}: the live log must retain its anchor"
+            )
         through = (
             through_sequence
             if through_sequence is not None
