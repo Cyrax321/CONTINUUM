@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from continuum.events import Event, EventType
@@ -91,7 +91,7 @@ def _provenance(event: Event) -> Provenance:
     """Carry the event's own trust marker into the projected component.
 
     Previously this hardcoded ``DETERMINISTIC``, which was true of the *fold*
-    but said nothing about the event being folded — so an agent's self-report
+    but said nothing about the event being folded, so an agent's self-report
     projected as indistinguishable from a verified fact.
 
     For derived artifacts (issue #392) the payload may carry a stamped
@@ -193,6 +193,18 @@ def _as_str_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Interpret a naive datetime as UTC; aware values pass through.
+
+    Event payloads are external input: an ``expires_at`` ISO string without a
+    UTC offset (``"2027-01-01"``) parses to a naive datetime, and everything
+    downstream compares against the tz-aware ``utcnow()``, which would raise
+    TypeError and brick validation for the run (issue #704). The project
+    convention is UTC everywhere, so a missing offset is read as UTC.
+    """
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+
 def _replace(items: list[Any], key: str, identifier: str, updated: Any) -> bool:
     for index, item in enumerate(items):
         if getattr(item, key) == identifier:
@@ -291,7 +303,7 @@ class _Accumulator:
 
         # Re-derive `pending` whenever the caller moved `completed`/`failed`
         # without restating it. Keeping the old value would leave the counters
-        # summing past `total` and the update would be rejected — punishing a
+        # summing past `total` and the update would be rejected, punishing a
         # caller for omitting a field that had not changed.
         total = current["total"]
         if total is not None and "pending" not in payload:
@@ -467,7 +479,9 @@ class _Accumulator:
                     if event.payload.get("granted_by") is not None
                     else None
                 ),
-                "expires_at": datetime.fromisoformat(str(expires_raw)) if expires_raw else None,
+                "expires_at": (
+                    _as_utc(datetime.fromisoformat(str(expires_raw))) if expires_raw else None
+                ),
                 "reason": (
                     str(event.payload["reason"])
                     if event.payload.get("reason") is not None
@@ -867,7 +881,7 @@ def project(
 ) -> SemanticState:
     """Project a run's events into semantic state.
 
-    ``upto`` truncates the fold at a sequence number — the mechanism behind
+    ``upto`` truncates the fold at a sequence number: the mechanism behind
     ``continuum inspect --version`` and recovery from a partially trusted log.
 
     ``on_unprojectable`` forwards to :func:`project_incremental`: ``"raise"``
@@ -954,7 +968,7 @@ def account_pins_in_context(
             flag = None
         else:
             # If context was truncated, we cannot tell if the pin was in a
-            # dropped section — mark as unverifiable rather than absent
+            # dropped section; mark as unverifiable rather than absent
             if is_truncated:
                 # Heuristic: if the pin's marker would have been in a low-
                 # priority section that was dropped, mark unverifiable

@@ -14,6 +14,41 @@ All notable changes to this project are documented here. The format follows
   fail-open. The liveness watch webhook path now routes through it with
   identical wire behavior when unconfigured.
 
+- **Documented three-file ruff rev lockstep (#689).** CONTRIBUTING.md now
+  names all three places the ruff version lives (the `ruff==` pin in
+  `pyproject.toml`, `rev` in `.pre-commit-config.yaml`, and the `rev` quoted
+  in CONTRIBUTING.md itself) and the test that enforces them; the pin test's
+  failure message says "version skew, not a broken test" and lists the three
+  files to bump, so a dependabot PR that trips it (#627) is readable as
+  drift. The pre-commit ecosystem's absence from dependabot is recorded in a
+  comment there and pinned by a test: its updates cannot be grouped with pip
+  bumps and would break the lockstep in their own PR.
+
+- **External probe for consumed authorities via reconcilers.json (#557).**
+  `reconcile --authority <id>` runs the configured authority probe with the
+  recorded consumption payload on stdin; `valid=true` appends
+  `AUTHORITY_RECONCILED` and clears the consumed mark, `valid=false` keeps it
+  blocked, and anything else leaves it blocked. Covered by
+  `tests/test_authority_probe.py`, including the negative test that a restore
+  does not resurrect.
+
+- **Liveness watchdog and risk-informed recovery (#302, #303).**
+  Cadence contracts drive `continuum watch`, which appends
+  `LIVENESS_SILENCE_DETECTED` on breach and `LIVENESS_RECOVERED` on recovery
+  (webhook delivery is fail-open); `RISK_OBSERVED` ingestion maps through
+  `.continuum/risk-policy.json` with risks arriving as `EXTERNAL_MONITOR`
+  witnesses, and the contract carries a `triggering_risks` section. Covered
+  by the liveness, risk, and watch suites.
+
+- **Reconciler registry accepts documented shapes and refuses bool timeouts (#322).**
+  Probe entries require a command and a positive numeric timeout; a boolean
+  timeout is refused rather than read as seconds. The registry shape and the
+  default timeout are pinned by `tests/test_reconcilers.py`.
+
+- **Bench harness records byte counts, revalidation calls, and resume tokens (#568).**
+  Per-strategy counters flow into the shared report envelope, covered by
+  `tests/test_benchmark_counters.py`.
+
 - **`examples/demo.ipynb`, the crash-recovery walkthrough as a notebook (#283).**
   The lowest-friction way to watch a recovery was `docker run`, which still wants
   a daemon; this wants a browser. Colab and Binder badges in the Quick Start
@@ -171,6 +206,20 @@ All notable changes to this project are documented here. The format follows
   held for review the way an MCP-reported one is. Docs-only, no runtime change.
 
 ### Fixed
+
+- **`reconcile --auto` settles archived actions and probes authorities with
+  full consumption context after compaction (#647).**
+  `ActionLedger.pending` folds archived plus live events, but
+  `reconcilers._key_for` folded only the live tail, so one action claimed
+  before a compaction aborted the whole settle report with `LookupError`;
+  `settle_authority` scanned only live events for the `AUTHORITY_CONSUMED`
+  row, silently handing the probe a bare `authority_id` payload without
+  `consumer_run_id`, `via_action_id`, or `sequence`. Both now read full
+  history via `read_all_events`, the same archive-aware pattern the library
+  reconciliation path already used. Covered by `tests/test_reconcilers.py`
+  and `tests/test_authority_probe.py`.
+- The missing-MCP-extra subprocess test now imports the working tree even when
+  CONTINUUM is not installed or an older copy is installed (#810).
 
 - Preserve archived action history in grant and authority enforcement, CLI and
   gateway gate decisions, cross-run action scans, and memory enumeration and
@@ -564,7 +613,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~1,918 collected, ~1,880 passed, ~38 skipped on a minimal env).
+  (~2,122 collected, ~2,030 passed, ~23 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

@@ -5,7 +5,7 @@ trustworthy merely because it was persisted.** Before an agent resumes, every
 component is checked against the environment as it is *now*.
 
 Staleness propagates. If a dataset moves from v3 to v4, the dependency is not
-the only casualty — every finding whose evidence came from that dataset, and
+the only casualty: every finding whose evidence came from that dataset, and
 every decision resting on those findings, is now suspect. Marking only the
 dependency would leave the agent reasoning from conclusions it can no longer
 justify. Propagation walks:
@@ -17,14 +17,15 @@ Uncertainty degrades rather than resolves. An unverifiable resource yields
 resume. The system is allowed to say "I cannot tell"; it is not allowed to
 guess in its own favour.
 
-This module decides *status*. Choosing what to do about it — resume, repair,
-abort — is the recovery engine's job in Phase 7.
+This module decides *status*. Choosing what to do about it (resume, repair,
+abort) is the recovery engine's job in Phase 7.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC
 from typing import Any
 
 from continuum.environment.diff import EnvironmentDiff, ResourceChange, diff_environments
@@ -58,7 +59,7 @@ __all__ = [
 #: reporting "safe to resume" while that is outstanding is precisely the false
 #: assurance this layer exists to prevent. The recovery engine already refused
 #: to resume in these cases via the repair plan, but the validator's own
-#: `safe_to_resume` disagreed with it — so anything reading the validation
+#: `safe_to_resume` disagreed with it, so anything reading the validation
 #: report directly got the wrong answer.
 _UNUSABLE = frozenset(
     {
@@ -433,19 +434,44 @@ class StateValidator:
             else:
                 evidence.append(item)
 
+        # A finding's support may be evidence or another finding
+        # (`dangling_evidence` blesses citing finding ids), so taint has to
+        # cascade along finding-to-finding edges too, and the pass repeats
+        # until no new finding is affected: a finding can cite one listed
+        # after it, which a single ordered pass would miss (issue #739).
         tainted_findings: set[str] = set()
+        finding_details: dict[str, str] = {}
+        changed = True
+        while changed:
+            changed = False
+            for finding in state.findings:
+                if finding.finding_id in tainted_findings:
+                    continue
+                if finding.status is not StateStatus.VALID:
+                    continue
+                affected_evidence = sorted(set(finding.evidence) & tainted_evidence)
+                affected_findings = sorted(set(finding.evidence) & tainted_findings)
+                if not (affected_evidence or affected_findings):
+                    continue
+                changed = True
+                tainted_findings.add(finding.finding_id)
+                parts = []
+                if affected_evidence:
+                    parts.append(f"changed evidence: {', '.join(affected_evidence)}")
+                if affected_findings:
+                    parts.append(f"stale finding: {', '.join(affected_findings)}")
+                finding_details[finding.finding_id] = "; ".join(parts)
+
         findings = []
         for finding in state.findings:
-            affected = sorted(set(finding.evidence) & tainted_evidence)
-            if affected and finding.status is StateStatus.VALID:
-                tainted_findings.add(finding.finding_id)
+            if finding.finding_id in tainted_findings:
                 findings.append(finding.model_copy(update={"status": StateStatus.STALE}))
                 entries.append(
                     ComponentValidationEntry(
                         component=Component.FINDING,
                         component_id=finding.finding_id,
                         status=StateStatus.STALE,
-                        detail=f"rests on changed evidence: {', '.join(affected)}",
+                        detail=f"rests on {finding_details[finding.finding_id]}",
                     )
                 )
             else:
@@ -867,14 +893,21 @@ class StateValidator:
     def _check_approvals(state: SemanticState, entries: list[ComponentValidationEntry]) -> None:
         now = utcnow()
         for approval in state.approvals:
+            # A naive expires_at (persisted by versions before issue #704, or
+            # constructed directly) must grade, not raise: comparing it against
+            # the tz-aware `now` would TypeError and take down the whole
+            # validation pass. Read a missing offset as UTC, as the fold does.
+            expires_at = approval.expires_at
+            if expires_at is not None and expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=UTC)
             if approval.status is ApprovalStatus.REVOKED:
                 status, detail = StateStatus.INVALID, "approval was revoked"
             elif approval.status is ApprovalStatus.EXPIRED:
                 status, detail = StateStatus.EXPIRED, "approval expired"
-            elif approval.expires_at is not None and approval.expires_at <= now:
+            elif expires_at is not None and expires_at <= now:
                 status, detail = (
                     StateStatus.EXPIRED,
-                    f"expired at {approval.expires_at.isoformat()}",
+                    f"expired at {expires_at.isoformat()}",
                 )
             elif approval.status is ApprovalStatus.PENDING:
                 status, detail = StateStatus.REQUIRES_REVIEW, "approval never granted"

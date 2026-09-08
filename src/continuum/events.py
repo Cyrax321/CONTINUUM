@@ -201,7 +201,7 @@ class Event(BaseModel):
     Included in ``content()`` deliberately. A trust marker outside the hash
     could be edited without breaking verification, which would make it useless
     for the one job it has. The cost is that chains written before this field
-    existed no longer verify — accepted as a clean break rather than carrying a
+    existed no longer verify, accepted as a clean break rather than carrying a
     permanently-untrusted legacy tier.
     """
 
@@ -376,7 +376,7 @@ class EventLog:
         so an edited event is reported twice: ``TAMPERED_CONTENT`` on the event
         itself and ``BROKEN_CHAIN`` on its successor, whose link no longer
         matches. The walk then re-syncs, because untampered events remain
-        internally consistent — so the violation list localises damage instead
+        internally consistent, so the violation list localises damage instead
         of flooding.
 
         Trust is expressed separately by ``trusted_through``: only the prefix

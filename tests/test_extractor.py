@@ -257,6 +257,26 @@ def test_composite_chains_without_double_applying_events() -> None:
     )
     state = composite.extract(context(log))
 
-    assert state.progress.completed == 1  # not 2 — events folded exactly once
+    assert state.progress.completed == 1  # not 2, events folded exactly once
     assert {w.task_id for w in state.pending_work} == {"t_llm"}
     assert state.decision("d1") is not None
+
+
+def test_a_string_evidence_field_is_wrapped_not_split_into_characters() -> None:
+    """LLM proposals are stringly by nature; a bare-string evidence field is
+    the most common shape drift. Iterating it split the citation into
+    per-character ids (['e','v','_','4','2']), corrupting the persisted state
+    and blocking resume under strict_unknown via phantom dangling evidence."""
+    log = build_log()
+    extractor = LLMExtractor(
+        lambda ctx, state: LLMProposal(
+            decisions=[{"decision_id": "d_llm", "decision": "inferred", "evidence": "ev_42"}],
+            findings=[{"finding_id": "f_llm", "claim": "inferred", "evidence": "ev_42"}],
+        )
+    )
+    state = extractor.extract(context(log))
+
+    decision = next(d for d in state.decisions if d.decision_id == "d_llm")
+    finding = next(f for f in state.findings if f.finding_id == "f_llm")
+    assert decision.evidence == ["ev_42"]
+    assert finding.evidence == ["ev_42"]

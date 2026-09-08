@@ -1,4 +1,4 @@
-"""CONTINUUM — verifiable semantic recovery layer for long-running AI agents.
+"""CONTINUUM: verifiable semantic recovery layer for long-running AI agents.
 
 Agents that can lose their context without losing their work.
 

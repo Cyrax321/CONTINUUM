@@ -23,10 +23,16 @@ from continuum.storage import SQLiteStorage
 #: The API reference page whose tool table mirrors ``tools/list``.
 MCP_DOC = Path(__file__).resolve().parents[1] / "docs" / "api" / "mcp.md"
 
+#: The MCP adversarial audit report whose coverage table must also stay complete.
+MCP_AUDIT = Path(__file__).resolve().parents[1] / "docs" / "TESTING_MCP.md"
+
 #: One documented tool: name and kind. The purpose column is prose and is left
 #: to a human reviewer, as is the sentence of totals under the table; the two
 #: columns that can silently contradict the server are not.
 ROW = re.compile(r"^\| `(continuum_\w+)` \| (mutate|read) \|", re.MULTILINE)
+
+#: Tool names listed in the audit coverage table (issue #759).
+AUDIT_TOOL = re.compile(r"^\| `(continuum_\w+)` \|", re.MULTILINE)
 
 #: The character house style bans, by code point so this file carries none.
 EM_DASH = chr(0x2014)
@@ -67,6 +73,23 @@ async def test_the_table_lists_every_served_tool_with_its_kind(server: Any) -> N
     rows = ROW.findall(MCP_DOC.read_text(encoding="utf-8"))
     assert len(rows) == len({name for name, _ in rows}), "a tool is documented twice"
     assert dict(rows) == kinds(await server.list_tools())
+
+
+@pytest.mark.asyncio
+async def test_the_audit_coverage_table_lists_every_served_tool(server: Any) -> None:
+    """``docs/TESTING_MCP.md`` must name every tool ``tools/list`` exposes.
+
+    The audit once claimed "all 11 tools" while ``continuum_record_plan`` was
+    already served (issue #759). Pinning the coverage table to ``tools/list``
+    keeps that claim from rotting again.
+    """
+    text = MCP_AUDIT.read_text(encoding="utf-8")
+    section = text.split("## Tool coverage", 1)[1].split("## Findings", 1)[0]
+    covered = AUDIT_TOOL.findall(section)
+    assert len(covered) == len(set(covered)), "a tool is audited twice"
+    served = {tool.name for tool in await server.list_tools()}
+    assert set(covered) == served
+    assert "All 12 tools were exercised" in text
 
 
 def test_the_page_carries_no_em_dashes() -> None:

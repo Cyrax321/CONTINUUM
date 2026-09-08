@@ -2,7 +2,7 @@
 
     python examples/crash_recovery_agent.py
 
-An agent analysing 1,000 documents is killed mid-run with os._exit(9) —
+An agent analysing 1,000 documents is killed mid-run with os._exit(9):
 no cleanup, no flush. While it is down, the dataset it depends on moves from
 v3 to v4. It restarts and must work out what, if anything, it can trust.
 

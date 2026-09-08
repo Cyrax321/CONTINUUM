@@ -245,12 +245,18 @@ class RecoveryLedger:
         anchor: bool = False,
         note: str = "",
     ) -> RecoveryLedgerEntry:
-        prev = entries[-1].content_hash if entries else GENESIS
+        # Sequence and prev_hash must follow the highest-sequence entry, not
+        # the last position of the backend's load order: after compact() the
+        # survivors keep their original (sparse) sequences, so len(entries)
+        # would mint a colliding sequence that sorts before them, breaking
+        # the chain walk in verify() and the approval ordering in
+        # pending_gate().
+        head = max(entries, key=lambda e: e.sequence) if entries else None
         partial = RecoveryLedgerEntry(
             entry_id=make_id("ledger"),
             run_id=run_id,
-            sequence=len(entries),
-            prev_hash=prev,
+            sequence=head.sequence + 1 if head else 0,
+            prev_hash=head.content_hash if head else GENESIS,
             content_hash="",
             kind=kind.value,
             contract=contract,
