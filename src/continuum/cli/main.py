@@ -103,7 +103,7 @@ def _colourise(text: str, palette: Palette) -> str:
     Deliberately a post-processing pass rather than colour woven through every
     command: the text is produced once, identically, and this only decides how
     it looks. It cannot alter wording, ordering or exit codes, because it never
-    sees them — and when colour is off it returns the string untouched.
+    sees them; and when colour is off it returns the string untouched.
     """
     if not palette.enabled:
         return text
@@ -175,7 +175,7 @@ def _environment(args: argparse.Namespace, run_id: str) -> EnvironmentSnapshot |
     """Build a snapshot from ``--env name=version`` pairs.
 
     Returns ``None`` when nothing was supplied, which the validator treats as
-    "unverified" rather than "unchanged" — omitting the flag must not look like
+    "unverified" rather than "unchanged": omitting the flag must not look like
     a clean environment.
     """
     pairs: list[str] = list(getattr(args, "env", None) or [])
@@ -1217,7 +1217,16 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     text = decision.render()
     if family_blocked and decision.mode.value == "resume":
         # House rule: the most cautious signal wins (#243). A clean parent
-        # with an unsafe child is presented as request_human.
+        # with an unsafe child is presented as request_human on every surface:
+        # this text, the JSON payload and the exit code. The engine's per-run
+        # verdict stays visible in the rationale, but it must not read as
+        # permission to continue (issue #741).
+        text = text.replace(
+            "Recovery decision: RESUME", "Recovery decision: REQUEST_HUMAN"
+        ).replace(
+            "Next permitted action: continue",
+            "Next permitted action: none (settle the children below first)",
+        )
         text += "\n\nFAMILY BLOCKED: children of this run are not resumable.\n" + "\n".join(
             f"  !! {r}" for r in family_rationale
         )
@@ -1251,12 +1260,18 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             print(f"error: --pinning: {exc}", file=err)
             return ExitCode.ERROR
 
-    presented_mode = (
-        "request_human"
-        if (family_blocked and decision.mode.value == "resume")
-        else decision.mode.value
+    # The same house rule, as a mode: what the exit code and the JSON report.
+    # Following the engine's per-run mode here let `resume "$PARENT" &&
+    # ./start-agent.sh` exit 0 onto a family holding an unreconciled side
+    # effect, breaking the only-a-verified-safe-run-exits-0 contract
+    # (issue #741).
+    effective_mode = (
+        RecoveryMode.REQUEST_HUMAN
+        if (family_blocked and decision.mode is RecoveryMode.RESUME)
+        else decision.mode
     )
-    presented_safe = decision.safe and not (family_blocked and decision.mode.value == "resume")
+    presented_mode = effective_mode.value
+    presented_safe = decision.safe and effective_mode is decision.mode
     # Advisory prefix-trust (issue #401): deterministic, read-only, never gates.
     try:
         from continuum.analysis.prefix_trust import trust_over_prefix
@@ -1303,7 +1318,7 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         palette=getattr(args, "_palette", None),
     )
 
-    if decision.mode is not RecoveryMode.RESUME and not args.repair:
+    if effective_mode is not RecoveryMode.RESUME and not args.repair:
         print(
             "\nRun with --repair to record the repair plan, or resolve the items above first.",
             file=err,
@@ -1331,7 +1346,7 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             file=err,
         )
 
-    return exit_code_for(decision.mode)
+    return exit_code_for(effective_mode)
 
 
 def cmd_confirm(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
@@ -1400,7 +1415,10 @@ def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         print(f"error: budget registry invalid: {exc}", file=err)
         return ExitCode.ERROR
 
-    events = storage.read_events(args.run_id)
+    # Archive-aware (issue #734): compaction moves attempts into the archive,
+    # so a live-tail-only count understates attempts and overstates remaining
+    # after every compaction.
+    events = storage.read_all_events(args.run_id)
     types_seen = sorted(
         {
             e.payload.get("action", {}).get("action_type")
@@ -2902,7 +2920,7 @@ def cmd_verify(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         text = f"Event chain verified: {report.checked} events, no violations."
     else:
         lines = [f"INTEGRITY FAILURE: {len(report.violations)} violation(s)"]
-        lines += [f"  seq {v.sequence}: {v.kind} — {v.detail}" for v in report.violations[:20]]
+        lines += [f"  seq {v.sequence}: {v.kind}: {v.detail}" for v in report.violations[:20]]
         if len(report.violations) > 20:
             lines.append(
                 f"... and {len(report.violations) - 20} more violation(s) omitted, see --json for full list"
@@ -3029,7 +3047,7 @@ def cmd_actions(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     if uncertain:
         lines.append("")
         lines.append(
-            f"{len(uncertain)} action(s) with unresolved outcomes — reconcile before resuming."
+            f"{len(uncertain)} action(s) with unresolved outcomes: reconcile before resuming."
         )
     _emit(
         {"actions": payload},
@@ -3297,7 +3315,7 @@ def _verify_against_stored(run_id: str, storage: Storage) -> tuple[bool | None, 
     """Re-derive the stored version's own prefix and check it still projects to it.
 
     Returns (verified, human description). ``None`` means the comparison was not
-    attempted, which is reported rather than quietly counted as a pass — a
+    attempted, which is reported rather than quietly counted as a pass; a
     silent no-op that looks like a check is the bug this replaces.
 
     The prefix matters. A stored version is the projection of events up to its
@@ -3444,9 +3462,9 @@ def cmd_attest_verify(args: argparse.Namespace, storage: Storage, out: Any, err:
     """Verify a signed attestation against the run's live event chain.
 
     Three outcomes:
-      SIGNED    — signature valid and the live chain still matches the signed point.
-      ALTERED   — signature valid but the chain changed after signing.
-      UNTRUSTED — the signature does not verify against the embedded public key.
+      SIGNED    : signature valid and the live chain still matches the signed point.
+      ALTERED   : signature valid but the chain changed after signing.
+      UNTRUSTED : the signature does not verify against the embedded public key.
     """
     storage.get_run(args.run_id)
     doc = json.loads(Path(args.attest).read_text(encoding="utf-8"))
@@ -4002,6 +4020,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="bind address (default: 127.0.0.1; 0.0.0.0 exposes recovery data).",
     )
 
+    def cmd_tui(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+        """Open the full-screen terminal dashboard (issue #782), q quits.
+
+        Read-only until an action is confirmed: browsing and refreshing never
+        write, and every mutating verb shows its exact write in the footer and
+        waits for a further y before performing it. Refuses rather than
+        half-rendering when curses is unavailable or stdout is not a TTY.
+        """
+        from continuum.tui import run_tui
+
+        return run_tui(storage, refresh_seconds=args.refresh, err=err)
+
+    tui = add(
+        "tui",
+        cmd_tui,
+        "Full-screen terminal dashboard: monitor and control runs (q quits).",
+    )
+    tui.add_argument(
+        "--refresh",
+        type=float,
+        default=0.0,
+        help="auto-refresh interval in seconds (default: 0, refresh on demand with r).",
+    )
+
     watch = with_run(
         add("watch", cmd_watch, "Watch a run for liveness breach, optionally notify via webhook.")
     )
@@ -4033,6 +4075,48 @@ def build_parser() -> argparse.ArgumentParser:
 # --------------------------------------------------------------------------- #
 
 
+def _bare_invocation(
+    parser: argparse.ArgumentParser, args: argparse.Namespace, out: Any, err: Any
+) -> int:
+    """`continuum` with no subcommand: open the TUI, or print help.
+
+    The interactive path is what an operator typing bare `continuum` at a
+    shell expects (issue #782): the full-screen dashboard with its landing
+    splash. Piped output, `--json` and platforms without curses keep the
+    help text unchanged: a script that runs `continuum` blind must never
+    find a curses screen where it expected usage text.
+    """
+    interactive = not args.json and _stream_is_a_tty(out) and _curses_available()
+    if not interactive:
+        parser.print_help(file=out)
+        return ExitCode.OK
+    from continuum.tui import run_tui
+
+    try:
+        storage = open_storage(args.db)
+    except (StorageError, ValueError, NotImplementedError, RuntimeError) as exc:
+        print(f"error: {exc}", file=err)
+        return ExitCode.ERROR
+    except sqlite3.Error as exc:
+        print(f"error: cannot open storage at '{args.db}': {exc}", file=err)
+        return ExitCode.ERROR
+    try:
+        return run_tui(storage, err=err)
+    finally:
+        storage.close()
+
+
+def _stream_is_a_tty(out: Any) -> bool:
+    isatty = getattr(out, "isatty", None)
+    return callable(isatty) and bool(isatty())
+
+
+def _curses_available() -> bool:
+    from importlib.util import find_spec
+
+    return find_spec("curses") is not None
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -4053,8 +4137,7 @@ def main(
         Palette(False) if args.json else Palette.for_stream(out, force=getattr(args, "color", None))
     )
     if getattr(args, "func", None) is None:
-        parser.print_help(file=out)
-        return ExitCode.OK
+        return _bare_invocation(parser, args, out, err)
 
     # hooks never touches a run, so it must not create an empty database as a
     # side effect of editing a settings file.

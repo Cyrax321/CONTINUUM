@@ -3,36 +3,36 @@
 Every term here is used in issues and in code. Definitions point to the implementation so they can be verified, not inferred.
 
 - **Anchor**  
-  A checkpoint or ledger entry that must survive cleanup and compaction. In code a checkpoint with `trigger == CheckpointTrigger.RECOVERY` (`src/continuum/checkpoint/policy.py:62`) and a ledger entry with `anchor == True` (`src/continuum/recovery/ledger.py:89`) are anchors. `CheckpointManager.prune` and `RecoveryLedger.compact` keep anchors while dropping older ephemeral entries. See `src/continuum/recovery/cleanup.py:1` for the cleanup rule that preserves referenced anchors.
+  A checkpoint or ledger entry that must survive cleanup and compaction. In code a checkpoint with `trigger == CheckpointTrigger.RECOVERY` (`src/continuum/checkpoint/policy.py:62`) and a ledger entry with `anchor == True` (`src/continuum/recovery/ledger.py:88`) are anchors. `CheckpointManager.prune` and `RecoveryLedger.compact` keep anchors while dropping older ephemeral entries. See `src/continuum/recovery/cleanup.py:20` for the cleanup rule that preserves referenced anchors.
 
 - **Lease**  
-  A short lived, per run ownership claim that prevents two recoveries from acting as authority at once. Implemented in `src/continuum/concurrency/lease.py:1`. The recovery ledger can be constructed with a `LeaseCoordinator` (`src/continuum/recovery/ledger.py:209`) so `append_decision` and `record_attempt` acquire the lease for the run. `Phase 4` added the `RECOVERY` trigger to `CheckpointTrigger` and the `StateCheckpoint.reason` field so a lease protected anchor can be created atomically via `CheckpointManager.checkpoint_on_recovery`.
+  A short lived, per run ownership claim that prevents two recoveries from acting as authority at once. Implemented by `LeaseCoordinator` in `src/continuum/concurrency/lease.py:58`. The recovery ledger can be constructed with a `LeaseCoordinator` (`src/continuum/recovery/ledger.py:208`) so `append_decision` and `record_attempt` acquire the lease for the run. `Phase 4` added the `RECOVERY` trigger to `CheckpointTrigger` and the `StateCheckpoint.reason` field so a lease protected anchor can be created atomically via `CheckpointManager.checkpoint_on_recovery`.
 
 - **Contract**  
-  The machine readable verdict `RecoveryContract` (`src/continuum/models.py:555`) sealed by hash. It carries `recovery_status`, `checkpoint_version`, `verified` and `invalidated` lists, `required_actions`, a single `next_allowed_action`, plus the Phase 1 fields `evidence` and `reason`. Built in `src/continuum/recovery/contract.py:1` and surfaced by `RecoveryEngine.assess`. The contract is the single permitted next step. Rendering is in `src/continuum/recovery/contract.py`.
+  The machine readable verdict `RecoveryContract` (`src/continuum/models.py:1060`) sealed by hash. It carries `recovery_status`, `checkpoint_version`, `verified` and `invalidated` lists, `required_actions`, a single `next_allowed_action`, plus the Phase 1 fields `evidence` and `reason`. Built by `build_contract` in `src/continuum/recovery/contract.py:83` and surfaced by `RecoveryEngine.assess`. The contract is the single permitted next step. Rendering is in `src/continuum/recovery/contract.py`.
 
 - **Provenance**  
-  The three orthogonal axes that trace a fact back to its origin: `Origin` (who asserted it, `src/continuum/models.py:163`), `TrustLevel` (how verified it is, `src/continuum/security/provenance.py:1`), and `StateStatus` (what validity state it is in, `src/continuum/models.py:199`). `src/continuum/provenance_map.py:1` projects these onto `CanonicalProvenance` without deleting the source enums. `ProvenanceView` carries all three source values alongside the canonical labels.
+  The three orthogonal axes that trace a fact back to its origin: `Origin` (who asserted it, `src/continuum/models.py:172`), `TrustLevel` (how verified it is, `src/continuum/security/provenance.py:19`), and `StateStatus` (what validity state it is in, `src/continuum/models.py:94`). `src/continuum/provenance_map.py:60` projects these onto `CanonicalProvenance` without deleting the source enums. `ProvenanceView` carries all three source values alongside the canonical labels.
 
 - **Checkpoint**  
-  A sealed `StateCheckpoint` (`src/continuum/models.py:601`) bundling the projected `SemanticState` at a version, the event cursor it covers, and the `EnvironmentSnapshot` it was verified against. Created in `src/continuum/checkpoint/manager.py:160` via `checkpoint`, restored via `restore` which replays events recorded after the checkpoint. The checkpoint policy that decides when to write lives in `src/continuum/checkpoint/policy.py:1`.
+  A sealed `StateCheckpoint` (`src/continuum/models.py:1133`) bundling the projected `SemanticState` at a version, the event cursor it covers, and the `EnvironmentSnapshot` it was verified against. Created in `src/continuum/checkpoint/manager.py:168` via `checkpoint`, restored via `restore` which replays events recorded after the checkpoint. The checkpoint policy that decides when to write lives in `src/continuum/checkpoint/policy.py:52`.
 
 - **EnvironmentSnapshot**  
-  A capture of the current external world for a run (`src/continuum/models.py:555` nearby). Each `EnvResource` (`src/continuum/models.py:605`) records a named resource and its version or checksum. Comparison of a checkpoint environment and a live environment drives `EnvironmentDiff` and the validator's staleness propagation.
+  A capture of the current external world for a run (`src/continuum/models.py:1024`). Each `EnvResource` (`src/continuum/models.py:1014`) records a named resource and its version or checksum. Comparison of a checkpoint environment and a live environment drives `EnvironmentDiff` and the validator's staleness propagation.
 
 - **Validation**  
-  `StateValidator` in `src/continuum/state/validator.py:1` decides per component whether the checkpointed state is still true against the live environment. Staleness propagates `dependency -> evidence -> finding -> decision`. This propagation is mirrored by the `DependencyGraph` in `src/continuum/recovery/impact.py:1` for localized repair.
+  `StateValidator` in `src/continuum/state/validator.py:218` decides per component whether the checkpointed state is still true against the live environment. Staleness propagates `dependency -> evidence -> finding -> decision`. This propagation is mirrored by the `DependencyGraph` in `src/continuum/recovery/impact.py:47` for localized repair.
 
 - **Ledger**  
   The append only, tamper evident `RecoveryLedger` (`src/continuum/recovery/ledger.py:205`) over a `LedgerBackend` (memory or JSONL file). Entries are hash chained from `GENESIS`. `verify` reports the last trusted index. `record_attempt` tracks retry counts and writes an anchored `human_required` gate when a threshold is reached. `compact` drops a prefix while re sealing the chain. Reconciliation (`reconcile`) detects drift between the ledger chain and the live state version.
 
 - **Repair plan**  
-  `RepairPlan` in `src/continuum/recovery/planner.py:1` listing ordered `RepairStep`s derived from validation statuses and uncertain actions (`plan_repairs`). Steps are ordered so inputs are re-derived before consumers.
+  `RepairPlan` in `src/continuum/recovery/planner.py:111` listing ordered `RepairStep`s derived from validation statuses and uncertain actions (`plan_repairs`). Steps are ordered so inputs are re-derived before consumers.
 
 - **Adapter action**  
-  `AdapterAction` (`src/continuum/adapters/actions.py:1`) is the uniform `name + params + dep_scope` operation that every adapter emits. `AdapterResult` carries the outcome. `run_action` is the facade over `AgentAdapter.intercept_action` where the ledger provides idempotency and the telemetry hook (`on_event`, issue 162) can observe each execution.
+  `AdapterAction` (`src/continuum/adapters/actions.py:24`) is the uniform `name + params + dep_scope` operation that every adapter emits. `AdapterResult` carries the outcome. `run_action` is the facade over `AgentAdapter.intercept_action` where the ledger provides idempotency and the telemetry hook (`on_event`, issue 162) can observe each execution.
 
 - **Telemetry**  
-  Optional observer callback `on_event` on `run_action` (`src/continuum/adapters/actions.py:55`). Disabled by default. Receives `(AdapterAction, AdapterResult)` for every execution, whether completed or failed. A raising observer is suppressed so observability cannot break the action it observes.
+  Optional observer callback `on_event` on `run_action` (`src/continuum/adapters/actions.py:53`). Disabled by default. Receives `(AdapterAction, AdapterResult)` for every execution, whether completed or failed. A raising observer is suppressed so observability cannot break the action it observes.
 
 Reference from the master plan: these terms appear throughout `docs/CONTINUUM_MASTER_PLAN.md` and `docs/ARCHITECTURE_EVOLUTION.md`. The walkthrough in `docs/recovery_walkthrough.md` shows them interacting in one concrete failure.

@@ -25,6 +25,7 @@ from continuum.events import EventType  # noqa: E402
 from continuum.models import ActionStatus, Run  # noqa: E402
 from continuum.replayguard import (  # noqa: E402
     GuardKind,
+    ReplayBlocked,
     evaluate,
     langgraph_protected_node,
     protected_call,
@@ -92,6 +93,32 @@ def test_decision_table_matches_the_gate_contract(db: str) -> None:
     assert verdict(db, "send_invoice", "i:4").kind is GuardKind.DENY_RECLAIM
 
 
+def test_block_uncertain_decision_carries_its_key(db: str) -> None:
+    # The decision table contract: every decision names the ledger key it is
+    # about, so protected_call can act on it. BLOCK_UNCERTAIN used to be built
+    # without the key, which turned the documented ReplayBlocked into a bare
+    # AssertionError at the `decision.key is not None` checkpoint (issue #735).
+    seed(db, "send_invoice", "i:3", ActionStatus.UNKNOWN)
+    assert verdict(db, "send_invoice", "i:3").key is not None
+
+
+def test_protected_call_raises_replayblocked_for_an_uncertain_action(db: str) -> None:
+    # The public contract: uncertain states raise ReplayBlocked rather than
+    # guessing. With the key missing the wrapper died on an AssertionError
+    # first, so callers could not catch the documented exception (issue #735).
+    seed(db, "send_invoice", "i:5", ActionStatus.UNKNOWN)
+    with pytest.raises(ReplayBlocked) as excinfo:
+        protected_call(
+            SQLiteStorage(db),
+            "run_1",
+            action_type="send_invoice",
+            key="i:5",
+            fn=lambda: "SHOULD_NOT_RUN",
+        )
+    assert excinfo.value.decision.kind is GuardKind.BLOCK_UNCERTAIN
+    assert excinfo.value.decision.key is not None
+
+
 def make_run(db: str) -> None:
     with SQLiteStorage(db) as store:
         store.create_run(Run(run_id="run_1", goal="g"))
@@ -150,6 +177,67 @@ def test_protected_call_executes_once_then_returns_cached_result(db: str) -> Non
     assert kind2 is GuardKind.SKIP_DUPLICATE
     assert result2 == {"sent": True}
     assert len(calls) == 1, "side effect must not re-fire"
+
+
+def test_replay_returns_the_callers_own_dict_even_with_a_return_key(db: str) -> None:
+    # A dict result containing the literal key "return" used to be journalled
+    # as-is and then unwrapped on replay, so the second call returned one
+    # member of the dict while the first returned the whole thing (issue #736).
+    payload = {"return": "receipt-1", "amount": 100}
+
+    kind1, result1 = protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="send_invoice",
+        key="inv:9",
+        fn=lambda: payload,
+    )
+    kind2, result2 = protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="send_invoice",
+        key="inv:9",
+        fn=lambda: payload,
+    )
+    assert kind1 is GuardKind.ALLOW and kind2 is GuardKind.SKIP_DUPLICATE
+    assert result2 == result1 == payload, "replay must answer as the first call did"
+
+
+def test_non_dict_results_round_trip_through_the_envelope(db: str) -> None:
+    kind1, result1 = protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="charge_card",
+        key="card:2",
+        fn=lambda: "charged",
+    )
+    kind2, result2 = protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="charge_card",
+        key="card:2",
+        fn=lambda: "charged",
+    )
+    assert kind1 is GuardKind.ALLOW and result1 == "charged"
+    assert kind2 is GuardKind.SKIP_DUPLICATE and result2 == "charged"
+
+
+def test_a_legacy_return_journal_still_unwraps_on_replay(db: str) -> None:
+    # Records written before the envelope (issue #736) wrap non-dict results
+    # as {"return": ...}; replay must keep unwrapping those.
+    with SQLiteStorage(db) as store:
+        ledger = ActionLedger(store, "run_1")
+        outcome = ledger.claim("legacy_call", {}, key="legacy:1")
+        ledger.complete(outcome.key, result={"return": "legacy-value"})
+    kind, value = protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="legacy_call",
+        key="legacy:1",
+        fn=lambda: "SHOULD_NOT_RUN",
+    )
+    assert kind is GuardKind.SKIP_DUPLICATE
+    assert value == "legacy-value"
 
 
 def test_exception_marks_uncertain_failure_and_reraises(db: str) -> None:

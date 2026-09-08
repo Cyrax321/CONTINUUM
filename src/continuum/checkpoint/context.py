@@ -1,6 +1,6 @@
 """Bounded recovery context.
 
-When an agent resumes, it needs to be told what it was doing — but handing it
+When an agent resumes, it needs to be told what it was doing, but handing it
 the transcript defeats the purpose. This module renders the *minimum sufficient
 context*: what the goal is, what is verified, what is no longer trustworthy, and
 what it is allowed to do next.
@@ -52,7 +52,7 @@ _NEVER_DROPPED = frozenset(
     {
         "CURRENT GOAL",
         "VERIFIED PROGRESS",
-        "STALE STATE — DO NOT RELY ON",
+        "STALE STATE: DO NOT RELY ON",
     }
 )
 
@@ -184,7 +184,7 @@ def _stale_section(state: SemanticState) -> ContextSection:
     if dangling:
         lines.append(f"evidence cited but unavailable: {', '.join(dangling)}")
 
-    return ContextSection("STALE STATE — DO NOT RELY ON", tuple(lines), priority=2)
+    return ContextSection("STALE STATE: DO NOT RELY ON", tuple(lines), priority=2)
 
 
 def _review_section(state: SemanticState) -> ContextSection:
