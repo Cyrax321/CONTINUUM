@@ -161,9 +161,26 @@ class CheckpointManager:
 
     # -- writing ---------------------------------------------------------- #
 
-    def project_current(self, run_id: str) -> SemanticState:
-        """Fold the run's full event history into state."""
-        return project(run_id, self.storage.read_events(run_id))
+    def project_current(self, run_id: str, *, full_history: bool = False) -> SemanticState:
+        """Fold the run's event history into state.
+
+        Reads the live tail by default: the per-turn auto-checkpoint path
+        calls this every turn with no state, and folding the archive too
+        would reintroduce the O(total history) per-turn cost that compaction
+        exists to eliminate. Callers that must see pre-anchor facts pass
+        ``full_history=True``: the forced anchor checkpoint in
+        ``compact_run`` does, because after an earlier compaction the live
+        tail begins at the anchor markers with no ``RUN_STARTED`` and a
+        live-only fold would conclude the run never started (issue #648).
+        ``restore`` is different again: it replays the live tail onto a
+        stored checkpoint state, so it also never folds the archive.
+        """
+        events = (
+            self.storage.read_all_events(run_id)
+            if full_history
+            else self.storage.read_events(run_id)
+        )
+        return project(run_id, events)
 
     def checkpoint(
         self,
