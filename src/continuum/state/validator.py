@@ -194,13 +194,16 @@ class ValidationOutcome:
 
     @property
     def safe(self) -> bool:
+        """True when all validated components permit resuming without repair."""
         return self.report.safe_to_resume
 
     @property
     def downgraded(self) -> tuple[ComponentValidationEntry, ...]:
+        """All component entries whose status was degraded away from valid."""
         return tuple(e for e in self.report.statuses if e.status is not StateStatus.VALID)
 
     def render(self) -> str:
+        """Render a human-readable summary of the validation report."""
         lines = [f"Run: {self.report.run_id}", f"Checkpoint: v{self.report.checkpoint_version}", ""]
         symbols = {StateStatus.VALID: "[ok]"}
         for entry in self.report.statuses:
@@ -256,6 +259,14 @@ class StateValidator:
         scope: Iterable[str] | None = None,
         events: Iterable[Event] | None = None,
     ) -> ValidationOutcome:
+        """Validate semantic state against environment diff and causal history.
+
+        Compares ``checkpoint_environment`` and ``current_environment``,
+        propagating staleness through dependencies, evidence, findings, and
+        decisions. Checks plan topology, approvals, model alignment, and
+        optional causal events. Returns a :class:`ValidationOutcome` with
+        the revised state and detailed component statuses.
+        """
         if isinstance(confirmed, bool):
             self.confirmed = {"goal", "progress"} if confirmed else set()
         else:
@@ -585,6 +596,7 @@ class StateValidator:
         visited_dfs: set[str] = set()
 
         def dfs(node: str, stack: set[str]) -> bool:
+            """Detect cycles in downstream causal event paths using DFS."""
             if node in stack:
                 return True
             if node in visited_dfs:
@@ -811,6 +823,7 @@ class StateValidator:
         cycle: list[str] | None = None
 
         def dfs(node: str) -> bool:
+            """Detect dependency cycles within plan steps using DFS."""
             nonlocal cycle
             if node in visited:
                 return False
