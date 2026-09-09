@@ -103,6 +103,7 @@ class RepairStep(BaseModel):
         return f"{self.kind.value}:{self.target}"
 
     def render(self) -> str:
+        """Render a single-line summary of this repair step."""
         mark = "[human]" if self.requires_human else "[auto] "
         detail = f" - {self.reason}" if self.reason else ""
         return f"{mark} {self.kind.value} {self.target}{detail}"
@@ -123,10 +124,12 @@ class RepairPlan(BaseModel):
 
     @property
     def blocking(self) -> tuple[RepairStep, ...]:
+        """All steps in this plan that block resumption until settled."""
         return tuple(s for s in self.steps if s.blocking)
 
     @property
     def requires_human(self) -> bool:
+        """True if any step in this plan requires human intervention."""
         return any(s.requires_human for s in self.steps)
 
     @property
@@ -135,9 +138,11 @@ class RepairPlan(BaseModel):
         return self.steps[0] if self.steps else None
 
     def of_kind(self, kind: RepairKind) -> tuple[RepairStep, ...]:
+        """Return all steps in this plan matching ``kind``."""
         return tuple(s for s in self.steps if s.kind is kind)
 
     def render(self) -> str:
+        """Render a formatted, numbered multi-line summary of the repair plan."""
         if not self.steps:
             return "No repairs required."
         return "\n".join(f"  {i}. {s.render()}" for i, s in enumerate(self.steps, 1))
