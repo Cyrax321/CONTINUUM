@@ -46,6 +46,7 @@ def _window_events(storage: Storage, run_id: str, start: int, end: int) -> list[
 
 
 def is_quiet_window(events: list[Event]) -> bool:
+    """Return True if the event window contains no progress or decision events."""
     for ev in events:
         if ev.type is EventType.WORK_COMPLETED:
             try:
@@ -178,6 +179,7 @@ def build_trajectory_report(
     *,
     now: datetime | None = None,
 ) -> TrajectoryReport:
+    """Distill metrics and failure patterns across an event window into a report."""
     from continuum.security.hashing import stable_hash
 
     events = _window_events(storage, run_id, window_start, window_end)
@@ -234,6 +236,7 @@ def build_trajectory_report(
 def record_trajectory_report(
     storage: Storage, run_id: str, report: TrajectoryReport
 ) -> TrajectoryReport:
+    """Persist a trajectory report event to storage if not already recorded."""
     try:
         existing_events = list(storage.read_events(run_id)) + list(
             storage.read_archived_events(run_id)
@@ -299,6 +302,7 @@ def maybe_generate_trajectory_report(
     window_start: int | None = None,
     window_end: int | None = None,
 ) -> TrajectoryReport | None:
+    """Generate and record a trajectory report if the target window is quiet."""
     if window_start is None or window_end is None:
         window = _last_compaction_window(storage, run_id)
         if window is None:
@@ -331,6 +335,7 @@ def maybe_generate_trajectory_report(
 def health_maybe_generate_trajectory_report(
     storage: Storage, run_id: str
 ) -> TrajectoryReport | None:
+    """Generate a trajectory report for the latest anchored compaction window."""
     window = _last_compaction_window(storage, run_id, require_anchor=True)
     if window is None:
         return None
@@ -341,6 +346,7 @@ def health_maybe_generate_trajectory_report(
 
 
 def render_trajectory_report(report: TrajectoryReport) -> list[str]:
+    """Format a trajectory report into human-readable lines for display."""
     label = (
         "unverified (derived)"
         if report.derived_origin in ("external_agent", "llm")
