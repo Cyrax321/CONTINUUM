@@ -15,6 +15,7 @@ from pathlib import Path
 from continuum.cli.main import build_parser
 
 TABLE = Path(__file__).resolve().parents[1] / "docs" / "api" / "cli.md"
+REF_CLI = Path(__file__).resolve().parents[1] / "references" / "cli.md"
 
 
 def _row_pattern(name: str) -> re.Pattern[str]:
@@ -27,6 +28,19 @@ def test_every_subcommand_has_a_table_row() -> None:
     assert subs, "parser exposes no subcommands"
     missing = [name for name in subs if not _row_pattern(name).search(table)]
     assert not missing, f"subcommands without a docs/api/cli.md row: {missing}"
+
+
+def test_references_cli_names_every_subcommand() -> None:
+    """Every CLI subcommand must appear in references/cli.md (#795)."""
+    text = REF_CLI.read_text(encoding="utf-8")
+    subs = sorted(build_parser()._subparsers._group_actions[0].choices.keys())
+    assert subs, "parser exposes no subcommands"
+    missing = [
+        name
+        for name in subs
+        if not re.search(r"^continuum " + re.escape(name) + r"\b", text, re.MULTILINE)
+    ]
+    assert not missing, f"subcommands omitted from references/cli.md: {missing}"
 
 
 def _hooks_section() -> str:
