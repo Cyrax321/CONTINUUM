@@ -18,11 +18,25 @@ __all__ = ["RewindResult", "RewindError", "rewind_to_checkpoint", "resolve_check
 
 
 class RewindError(RuntimeError):
+    """Raised when an atomic dual-state rewind fails or is refused.
+
+    Raised when a target checkpoint cannot be resolved, when unresolvable
+    file conflicts or unrecoverable snapshots are detected without ``force=True``,
+    or when lineage and gate precondition checks fail.
+    """
+
     pass
 
 
 @dataclass(frozen=True, slots=True)
 class RewindResult:
+    """Outcome of an atomic dual-state rewind to a target checkpoint.
+
+    Records restored and deleted workspace files, content conflict warnings,
+    unrecoverable snapshot notices, the resulting state version, and post-rewind
+    recovery assessment verdicts.
+    """
+
     run_id: str
     target_checkpoint: StateCheckpoint
     reverted_files: tuple[str, ...] = ()
@@ -35,10 +49,17 @@ class RewindResult:
 
     @property
     def ok(self) -> bool:
+        """True when rewind completed cleanly without conflicts or unrecoverable files."""
         return not self.conflicts and not self.unrecoverable
 
 
 def resolve_checkpoint(storage: Storage, run_id: str, to: str) -> StateCheckpoint:
+    """Resolve a target checkpoint identifier or version for a run.
+
+    Attempts lookup by exact checkpoint ID, then by integer checkpoint version,
+    and finally by event source sequence number. Raises :class:`RewindError`
+    if no matching checkpoint exists for ``run_id``.
+    """
     try:
         cp = storage.get_checkpoint(to)
         if cp.run_id == run_id:
@@ -71,6 +92,14 @@ def rewind_to_checkpoint(
     dry_run: bool = False,
     carry_forward: Collection[str] | None = None,
 ) -> RewindResult:
+    """Rewind semantic state and workspace files back to a target checkpoint.
+
+    Synchronizes dual state by rolling back event state to the checkpoint's
+    source sequence and restoring modified workspace files from file snapshots.
+    Deletes files created after the checkpoint, detects file conflicts, and
+    stamps lineage when successful. Raises :class:`RewindError` if conflicts
+    or unrecoverable snapshots are encountered without ``force=True``.
+    """
     target = resolve_checkpoint(storage, run_id, to)
     # Gate wiring (#408): restore must pass the shared precondition gate
     # before it discards (anchor, head]. The rewind discards history, so the
