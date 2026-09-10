@@ -41,6 +41,7 @@ from continuum.events import EventType
 __all__ = [
     "DEFAULT_GATE_CONFIG_PATH",
     "Decision",
+    "GateConfigError",
     "MEMORY_KEY_PREFIX",
     "MEMORY_REQUIRED_FIELDS",
     "is_memory_template",

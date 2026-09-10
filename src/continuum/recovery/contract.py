@@ -33,7 +33,12 @@ from continuum.recovery.planner import RepairPlan
 from continuum.security.hashing import stable_hash
 from continuum.state.validator import ValidationOutcome
 
-__all__ = ["build_contract", "seal_contract", "verify_contract"]
+__all__ = [
+    "build_contract",
+    "render_contract",
+    "seal_contract",
+    "verify_contract",
+]
 
 
 def _identifier(component: Component, component_id: str | None) -> str:

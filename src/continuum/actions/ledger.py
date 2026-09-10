@@ -108,6 +108,7 @@ __all__ = [
     "LedgerError",
     "DuplicateAction",
     "ClaimLockError",
+    "fold_action_events",
     "forensic_join_across_runs",
 ]
 

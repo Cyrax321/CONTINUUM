@@ -59,6 +59,7 @@ __all__ = [
     "enforce",
     "render_preserved_summary",
     "render_refusal_text",
+    "stamp_lineage",
     "summary_payload",
 ]
 
