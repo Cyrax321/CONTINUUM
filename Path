@@ -1,0 +1,24 @@
+class RestoredRun:
+    ...
+    @classmethod
+    def from_checkpoint(cls, path: Path | str) -> "RestoredRun":
+        """Restore a previously saved run instance from a checkpoint directory or file.
+
+        Args:
+            path: Path to the checkpoint file or directory containing run state.
+
+        Returns:
+            A RestoredRun instance populated with the checkpointed state.
+        """
+        ...
+
+class CheckpointManager:
+    ...
+    @property
+    def history(self) -> list[CheckpointInfo]:
+        """Retrieve the historical log of all checkpoints created or managed by this manager.
+
+        Returns:
+            A list of CheckpointInfo objects detailing past checkpoints.
+        """
+        ...
