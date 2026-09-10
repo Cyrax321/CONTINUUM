@@ -230,6 +230,22 @@ CONTINUUM 针对真实 LLM 智能体、真实协议边界和硬进程崩溃进�
 - **规模**：约 2,053 个测试被收集（约 2,030 通过，其余在缺少可选服务时跳过），覆盖 Python 3.11、3.12 和 3.13（单元、`hypothesis` 属性测试、并发、对抗）。CONTINUUM-Bench 运行五个崩溃场景加一个专门的参数漂移场景，对 CONTINUUM 测量到 0 重复工作和 0 重复副作用，而对朴素重放则为完全重复，另有一个 12 场景恢复正确性套件（`continuum.benchmark.phase6`）将持久执行调研中的崩溃点编码为可执行断言。
 - **对抗审计**：完整 MCP 面已在真实协议上被审计，发现并修复了三个缺陷。方法和复现步骤见 [test.md](test.md)。
 
+<!-- BENCH:START -->
+### 地平线规模基准（真实运行，无虚构数字）
+
+Generated: 2026-09-10T07:38:24.375062  Horizon scenarios: 5  Passed: 3  Failed: 2
+
+Accuracy: 0.6  Unnecessary escalation: 0.2  Repair precision: 0.8  Duplicate side effects: 0  Duplicate work: 0.0  Compression: 1.694
+
+| Scenario | Cycles | Years | Correct | Actual | Accuracy |
+| --- | --- | --- | --- | --- | --- |
+| horizon_steady_progress_year | 131 | 2.3 | resume | resume | 1.0 |
+| horizon_quarterly_drift_year | 131 | 2.3 | repair | request_human | 0.0 |
+| horizon_budget_exhaustion_year | 131 | 2.3 | request_human | request_human | 1.0 |
+| horizon_compaction_stress_year | 164 | 2.87 | resume | resume | 1.0 |
+| horizon_abort_condition_year | 131 | 2.3 | abort | request_human | 0.0 |
+<!-- BENCH:END -->
+
 ## MCP 集成
 
 CONTINUUM 交付 MCP 服务器，因此智能体可以在不嵌入库的情况下记录进度、打检查点并通过账本路由外部副作用：
