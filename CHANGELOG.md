@@ -504,6 +504,21 @@ All notable changes to this project are documented here. The format follows
   callable), and the existing answers for genuinely malformed JSON are
   unchanged.
 
+## [0.1.2] - 2026-08-31
+
+### Fixed
+
+- **Version reconciliation after `v0.1.2` was tagged without the version bump
+  (#838).** The `v0.1.2` tag and its GitHub Release (67 commits over
+  `v0.1.0`: the `tree --limit` fix #544, the rewind carry-forward passthrough
+  #531, the hook-installer refactor #536, and docs) shipped while
+  `pyproject.toml` and `src/continuum/__init__.py` still declared `0.1.0`, so
+  every artifact built from the tag self-reported as 0.1.0. This section and
+  the version bump align the declared version with the newest tag, and the
+  release checklist now compares `pyproject.toml`, the tag, and PyPI so the
+  drift cannot recur silently. PyPI still serves 0.1.0 until the maintainer
+  publishes the reconciling 0.1.2 build.
+
 ## [0.1.0] - 2026-08-27
 
 ### Added
