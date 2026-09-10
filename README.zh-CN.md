@@ -227,7 +227,7 @@ CONTINUUM 针对真实 LLM 智能体、真实协议边界和硬进程崩溃进�
 - **第三方客户端**：Gemini CLI 和 Kilo Code 通过 stdio JSON-RPC 对接真实 SQLite 存储，验证多智能体共存和鉴权隔离。
 - **协议合规**：使用 `@modelcontextprotocol/inspector --cli` 在进程死亡间端到端驱动，变更工具默认拒绝并位于 `CONTINUUM_MCP_MUTATING_CLIENTS` 后，外部声明降级为 `REQUIRES_REVIEW`（`safe: false`）。
 - **自愈**：硬杀的服务器在启动时通过单次重试清理孤立的 SQLite `-wal`/`-shm` 伴生文件来恢复。
-- **规模**：约 1,380 个测试被收集（约 1,360 通过，其余在缺少可选服务时跳过），覆盖 Python 3.11、3.12 和 3.13（单元、`hypothesis` 属性测试、并发、对抗）。CONTINUUM-Bench 运行五个崩溃场景加一个专门的参数漂移场景，对 CONTINUUM 测量到 0 重复工作和 0 重复副作用，而对朴素重放则为完全重复，另有一个 12 场景恢复正确性套件（`continuum.benchmark.phase6`）将持久执行调研中的崩溃点编码为可执行断言。
+- **规模**：约 2,053 个测试被收集（约 2,030 通过，其余在缺少可选服务时跳过），覆盖 Python 3.11、3.12 和 3.13（单元、`hypothesis` 属性测试、并发、对抗）。CONTINUUM-Bench 运行五个崩溃场景加一个专门的参数漂移场景，对 CONTINUUM 测量到 0 重复工作和 0 重复副作用，而对朴素重放则为完全重复，另有一个 12 场景恢复正确性套件（`continuum.benchmark.phase6`）将持久执行调研中的崩溃点编码为可执行断言。
 - **对抗审计**：完整 MCP 面已在真实协议上被审计，发现并修复了三个缺陷。方法和复现步骤见 [test.md](test.md)。
 
 ## MCP 集成
