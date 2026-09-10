@@ -70,3 +70,38 @@ def test_documented_count_matches_suite() -> None:
         "re-sync README.md, docs/CONTRIBUTING_ONBOARDING.md, and CHANGELOG.md "
         "(pytest --collect-only -q; pytest -q)"
     )
+
+
+def test_documented_extras_exist_in_pyproject() -> None:
+    """No doc installs an extra that pyproject.toml does not declare.
+
+    ``docs/cloud_api.md`` taught ``uv pip install -e ".[cloud]"`` for an extra
+    that never existed (#840): a reader following it got an error from pip and
+    nowhere to turn. Every extras bracket in an install context, both the
+    ``continuum-agent[x]`` and the editable ``.[x]`` spelling, is checked
+    against the declared optional-dependencies.
+    """
+    import tomllib
+
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    declared = set(data["project"]["optional-dependencies"])
+
+    scanned = [
+        ROOT / "README.md",
+        *sorted(ROOT.joinpath("docs").rglob("*.md")),
+        *sorted(ROOT.joinpath("references").rglob("*.md")),
+    ]
+    for path in scanned:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            # Only install-command lines carry extras, and the bracket must
+            # sit directly on `continuum-agent` or the editable `.` target;
+            # anything else (Codex's `[features]` toml section, markdown
+            # links, regex examples) is not a pip extra.
+            if "install" not in line.lower():
+                continue
+            for group in re.findall(r"(?:continuum-agent|\.)\[([\w,-]+)\]", line):
+                for extra in group.split(","):
+                    assert extra in declared, (
+                        f"{path} installs the [{extra}] extra, but pyproject.toml "
+                        f"declares only {sorted(declared)}"
+                    )

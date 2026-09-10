@@ -68,6 +68,28 @@ Twelve tools: three read-only, nine mutating.
 Read-only responses `continuum_resume` and `continuum_validate` include a
 `constraint_pins` block: per-pin status (`present`, `absent`, `unverifiable`), grace deadline, and flagged set derived from reconstruction accounting (hash-tagged markers in the recovery context, issue #419). The CLI renders flagged pins prominently with TTY-aware colour while piped output stays byte-identical modulo colour codes. No gating changes live here; strict escalation remains in the accounting layer.
 
+## Environment variables
+
+`CONTINUUM_MCP_ALLOW`
+: The primary authorization variable: a comma-separated list of client names
+allowed to call mutating tools (for example
+`CONTINUUM_MCP_ALLOW=claude-code,cline`). Everything else is denied, and the
+read-only tools above stay open to every caller.
+
+`CONTINUUM_MCP_MUTATING_CLIENTS`
+: An older alias for `CONTINUUM_MCP_ALLOW`, kept from PR #3. It states what is
+being allowed more explicitly, so it wins when both are set; otherwise the two
+behave identically.
+
+Either variable takes precedence over `.continuum/mcp-policy.json`, and an
+explicit `allow` passed by an API caller takes precedence over both; each
+source replaces the ones below it rather than merging, so `policy.source`
+always names exactly where a grant came from.
+
+`CONTINUUM_DB`
+: The database path the server opens when `--db` is not passed on the command
+line (default `./continuum.db`).
+
 ## build_server
 
 `continuum.mcp.server.build_server(database=None, *, policy=None, auth=None) -> tuple[Server, Storage]`

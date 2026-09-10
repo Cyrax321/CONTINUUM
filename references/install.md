@@ -6,7 +6,7 @@ Deep install and dependency material. The [README Quick Start](../README.md#quic
 
 | Requirement | Version / Notes |
 |:--|:--|
-| Python | **3.11+** (3.12 recommended for development; CI tests 3.11 / 3.12 / 3.13) |
+| Python | **3.11+** (3.12 recommended for development; CI tests 3.11 / 3.12 / 3.13). 3.14 works in practice but is not yet in the CI matrix, so it is not part of the support claim. |
 | git | any recent version |
 | uv **or** pip | `uv` is recommended (faster, lockfile-aware). `pip` works with a manual venv. |
 | SQLite | bundled with Python, no extra install (WAL mode is used) |
@@ -26,7 +26,7 @@ uv pip install -e ".[dev]"
 uv pip install -e .
 
 # Composable extras
-uv pip install -e ".[mcp]"           # MCP server (11 stdio tools), requires mcp>=2.0
+uv pip install -e ".[mcp]"           # MCP server (12 stdio tools), requires mcp>=2.0
 uv pip install -e ".[otel]"          # OpenTelemetry bridge, opentelemetry-api>=1.20
 uv pip install -e ".[langgraph]"     # LangGraph adapter
 uv pip install -e ".[openai]"        # OpenAI Agents SDK adapter (also pulls mcp transitively)
@@ -55,7 +55,7 @@ Combine freely: `[dev]` already includes `mcp`, `langgraph`, `langchain`, `opena
 | **Dev / test tooling** (all in `pyproject.toml:33-50` `[dev]`) | | | Only for contributors |
 | `pytest>=8.0`, `pytest-cov>=5.0`, `pytest-asyncio>=0.23` |  | Test runner + coverage + async MCP tests | Dev |
 | `hypothesis>=6.0` |  | Property-based tests (hashing, models) | Dev |
-| `ruff==0.16.3` |  | Lint + format (CI enforces `ruff check` + `ruff format --check`) | Dev |
+| `ruff==0.16.5` |  | Lint + format (CI enforces `ruff check` + `ruff format --check`) | Dev |
 | `mypy>=1.13` + `pydantic.mypy` |  | Strict type-check (CI runs `mypy src/continuum`) | Dev |
 
 No other runtime dependencies. The CLI, storage, recovery engine, and checkpointing use only the Python standard library.

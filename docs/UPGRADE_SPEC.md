@@ -48,7 +48,7 @@ Core invariant: every fact carries its origin, and trust is earned, never assume
 Five integration seams, all funneling into `GenericAgentAdapter`:
 
 * Seam 1: in-process adapters (generic, LangChain, LangGraph, OpenAI)
-* Seam 2: MCP server (11 tools over stdio, 3 read-only, 8 mutating)
+* Seam 2: MCP server (12 tools over stdio, 3 read-only, 9 mutating)
 * Seam 3: CLI lifecycle hooks (`continuum hooks install`, `continuum observe`, `continuum gate`, `continuum briefing`)
 * Seam 4: enforcing HTTP gateway (`continuum gateway`)
 * Seam 5: OpenTelemetry bridge (`make_span_processor`)
@@ -424,7 +424,7 @@ Reviewers: check that no section invents a number that is not cited, that every 
 
 ## 19. Appendix C: file inventory for reviewers
 
-Core: 60 files in `src/continuum` as listed in section 3.2. Entry points: `continuum.cli.main:main`, `continuum.mcp.server:main`. Tests: 99 files. Examples: `crash_recovery_agent.py`, `context_compaction.py`, `model_switch.py`, `recovery_walkthrough.py`, plus real-LLM crash harnesses. Docs: `README.md` (11 tools, 33 commands, 5 seams), `docs/*` research notes, `references/*` specs.
+Core: 60 files in `src/continuum` as listed in section 3.2. Entry points: `continuum.cli.main:main`, `continuum.mcp.server:main`. Tests: 99 files. Examples: `crash_recovery_agent.py`, `context_compaction.py`, `model_switch.py`, `recovery_walkthrough.py`, plus real-LLM crash harnesses. Docs: `README.md` (12 tools, 33 commands, 5 seams), `docs/*` research notes, `references/*` specs.
 
 ---
 

@@ -28,7 +28,7 @@ help, and the re-raise when there is nothing to clear. Recorded in CHANGELOG.md
 under Fixed.
 
 **The server is verified usable through Claude Code.** Registered as an MCP
-server, it reports `✔ Connected`, exposes all eleven tools with the correct
+server, it reports `✔ Connected`, exposes all twelve tools with the correct
 read-only/mutating split, and the full `continuum_record_progress` to
 `continuum_checkpoint` to `continuum_intercept_action` to
 `continuum_complete_action` to `continuum_resume` cycle returns correct,

@@ -27,7 +27,7 @@ and replays one append-only, hash-chained event log per run.
 | Checkpoint | `checkpoint/` | `CheckpointManager`, policy stack (`policy.py`), `build_recovery_context` |
 | Recovery | `recovery/` | `RecoveryEngine.assess()`, `planner.py` (repair plan), `contract.py` |
 | Adapters | `adapters/` | `AgentAdapter` base + Generic / LangChain / LangGraph / OpenAI |
-| MCP | `mcp/` | `server.py` (10 stdio tools), `authz.py` (allowlist + shared secret) |
+| MCP | `mcp/` | `server.py` (12 stdio tools), `authz.py` (allowlist + shared secret) |
 | Serve | `serve/` | newline-JSON sidecar mirroring the MCP surface |
 | CLI | `cli/` | `argparse` commands, exit codes as verdict |
 | Environment | `environment/` | `EnvironmentProvider` ABC + File/Git/Value/Callable/Static providers |
