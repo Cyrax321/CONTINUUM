@@ -17,6 +17,10 @@ from pathlib import Path
 
 from continuum.benchmark import METHODS, SCENARIOS, MethodResult, run_benchmark
 
+#: The repo root, so the file reads below work no matter where pytest runs
+#: from (issue #837: relative paths only passed from the repo root).
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def test_method_result_has_byte_count_fields() -> None:
     r = MethodResult(
@@ -101,12 +105,12 @@ def test_byte_counts_are_deterministic() -> None:
 
 
 def test_deterministic_tokenizer_note_documented() -> None:
-    text = Path("src/continuum/benchmark/__init__.py").read_text(encoding="utf-8")
+    text = (ROOT / "src/continuum/benchmark/__init__.py").read_text(encoding="utf-8")
     assert "Deterministic tokenizer" in text
     assert "estimate_tokens" in text
     assert "No vendor tokenizer" in text
     # Also check benchmarks/run.py documents it
-    run_text = Path("benchmarks/run.py").read_text(encoding="utf-8")
+    run_text = (ROOT / "benchmarks/run.py").read_text(encoding="utf-8")
     assert "checkpoint_bytes_written" in run_text
     assert "estimate_tokens" in run_text or "deterministic" in run_text.lower()
 
@@ -165,5 +169,5 @@ def test_no_em_dash_in_harness() -> None:
         "benchmarks/run.py",
         "tests/test_benchmark_counters.py",
     ):
-        content = Path(path).read_text(encoding="utf-8")
+        content = (ROOT / path).read_text(encoding="utf-8")
         assert "\u2014" not in content, f"em dash found in {path}"

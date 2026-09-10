@@ -136,16 +136,29 @@ def test_codex_install_hints_when_feature_flag_commented_out(
 def test_gemini_payload_shape_matches_the_observation_contract() -> None:
     """Gemini AfterTool payloads carry the same tool_name/tool_input fields;
     prove `continuum observe` accepts one verbatim through the real CLI."""
+    import os
     import tempfile
 
     project = Path(tempfile.mkdtemp())
+    # The worktree's src comes first on PYTHONPATH so the subprocesses import
+    # the tree under test, not an installed continuum (issue #837).
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            filter(
+                None,
+                [str(Path(__file__).resolve().parents[1] / "src"), os.environ.get("PYTHONPATH")],
+            )
+        ),
+    }
     subprocess.run(
-        [sys.executable, "-m", "continuum.cli", "init"], cwd=project, capture_output=True
+        [sys.executable, "-m", "continuum.cli", "init"], cwd=project, capture_output=True, env=env
     )
     subprocess.run(
         [sys.executable, "-m", "continuum.cli", "start", "g", "--goal", "gemini"],
         cwd=project,
         capture_output=True,
+        env=env,
     )
     artifact = project / "out.txt"
     artifact.write_text("written by gemini")
@@ -162,6 +175,7 @@ def test_gemini_payload_shape_matches_the_observation_contract() -> None:
         capture_output=True,
         text=True,
         cwd=project,
+        env=env,
     )
     assert result.returncode == ExitCode.OK, result.stderr
 
