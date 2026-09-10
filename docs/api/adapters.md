@@ -82,6 +82,203 @@ can capture state or intercept its own side effects.
 Subclass of `GenericAgentAdapter` wrapping LCEL runnable pipelines and the
 `langchain.agents.create_agent` tool-calling loop.
 
+## BrowserAdapter
+
+`continuum.adapters.BrowserAdapter(storage, *, engine=None)`
+
+A `GenericAgentAdapter` subclass for browser automation driven via Playwright.
+
+### `navigate(run_id, url, *, dep_scope=None) -> AdapterResult`
+
+Navigates to `url` using Playwright Chromium in a headless context, extracts page
+content, and records the step through the `ActionLedger` under action name
+`"browser.navigate"`.
+
+```python
+from continuum.adapters import BrowserAdapter
+from continuum.models import Run
+from continuum.storage import SQLiteStorage
+
+storage = SQLiteStorage(":memory:")
+storage.create_run(Run(run_id="run_1", goal="browse"))
+adapter = BrowserAdapter(storage)
+if adapter.available():
+    result = adapter.navigate("run_1", "https://example.com")
+```
+
+**The easy-to-get-wrong part:** Requires the optional `playwright` package and its
+browser binaries. The adapter imports Playwright lazily at navigation time so
+importing `BrowserAdapter` is always safe, but `navigate()` raises `RuntimeError`
+when Playwright is absent. Use `BrowserAdapter.available()` to check readiness.
+Covered in `tests/test_environment_adapters.py`.
+
+## ContainerAdapter
+
+`continuum.adapters.ContainerAdapter(storage, image, *, engine=None)`
+
+A `GenericAgentAdapter` subclass that runs isolated shell commands inside a
+Docker container.
+
+### `run_in_container(run_id, command, *, dep_scope=None) -> AdapterResult`
+
+Executes `command` inside the configured container image via `docker run --rm`,
+returning an `AdapterResult` with captured stdout and recording the execution in
+the `ActionLedger` under action name `"container"`.
+
+```python
+from continuum.adapters import ContainerAdapter
+from continuum.models import Run
+from continuum.storage import SQLiteStorage
+
+storage = SQLiteStorage(":memory:")
+storage.create_run(Run(run_id="run_1", goal="container-task"))
+adapter = ContainerAdapter(storage, image="alpine:latest")
+if adapter.available():
+    result = adapter.run_in_container("run_1", "echo hi")
+```
+
+**The easy-to-get-wrong part:** `image` is bound at adapter construction time rather
+than per call. Requires the `docker` CLI on `PATH` and an active Docker daemon.
+When `docker` is missing, `run_in_container()` raises `RuntimeError`. Check
+availability with `ContainerAdapter.available()`. Covered in
+`tests/test_environment_adapters.py`.
+
+## KubernetesAdapter
+
+`continuum.adapters.KubernetesAdapter(storage, *, namespace="default", engine=None)`
+
+A `GenericAgentAdapter` subclass for executing one-shot batch jobs on a Kubernetes
+cluster.
+
+### `run_job(run_id, image, command, *, dep_scope=None) -> AdapterResult`
+
+Launches a one-shot pod job in the specified `namespace` using `kubectl run`,
+captures output, and records the step in the `ActionLedger` under action name
+`"k8s.job"`.
+
+```python
+from continuum.adapters import KubernetesAdapter
+from continuum.models import Run
+from continuum.storage import SQLiteStorage
+
+storage = SQLiteStorage(":memory:")
+storage.create_run(Run(run_id="run_1", goal="k8s-task"))
+adapter = KubernetesAdapter(storage, namespace="default")
+if adapter.available():
+    result = adapter.run_job("run_1", "alpine:latest", "echo hi")
+```
+
+**The easy-to-get-wrong part:** Unlike `ContainerAdapter`, `KubernetesAdapter` takes
+the container `image` as a parameter to `run_job()` rather than at initialization.
+It requires both `kubectl` on `PATH` and the `kubernetes` Python package. If either
+is unavailable, `run_job()` raises `RuntimeError`. Check with
+`KubernetesAdapter.available()`. Covered in `tests/test_environment_adapters.py`.
+
+## FilesystemSandboxAdapter
+
+`continuum.adapters.FilesystemSandboxAdapter(storage, sandbox_dir, *, engine=None)`
+
+A `GenericAgentAdapter` subclass providing a local filesystem sandbox for shell
+actions without external container or browser dependencies.
+
+### `run_shell(run_id, command, *, dep_scope=None) -> AdapterResult`
+
+Executes `command` with `shell=True` and `cwd=sandbox_dir`, recording the command
+as an idempotent `ActionLedger` action (`action_type="shell"`).
+
+```python
+import tempfile
+from continuum.adapters import FilesystemSandboxAdapter
+from continuum.models import Run
+from continuum.storage import SQLiteStorage
+
+with tempfile.TemporaryDirectory() as sandbox:
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="sandbox-task"))
+    adapter = FilesystemSandboxAdapter(storage, sandbox)
+    result = adapter.run_shell("run_1", "echo 'hello from sandbox'")
+    assert result.status == "completed"
+```
+
+**The easy-to-get-wrong part:** The sandbox directory is created automatically on
+adapter initialization (`mkdir(parents=True, exist_ok=True)`). Because executions
+record through the `ActionLedger`, identical shell commands with matching
+arguments within the same run are deduplicated on replay. Covered in
+`tests/test_filesystem_adapter.py`.
+
+## PythonInProcAdapter
+
+`continuum.adapters.python_inproc.PythonInProcAdapter(storage, workdir, *, engine=None)`
+
+A `GenericAgentAdapter` subclass (in `continuum.adapters.python_inproc`) that
+executes Python snippets in a dedicated working directory using the host
+interpreter. Also exported from `continuum.adapters`.
+
+### `run_python(run_id, code, *, dep_scope=None) -> AdapterResult`
+
+Executes `code` in a subprocess using `sys.executable` with `cwd=workdir`,
+recording the execution in the `ActionLedger` under action name `"python"`.
+
+```python
+import tempfile
+from continuum.adapters import PythonInProcAdapter
+from continuum.models import Run
+from continuum.storage import SQLiteStorage
+
+with tempfile.TemporaryDirectory() as workdir:
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="python-task"))
+    adapter = PythonInProcAdapter(storage, workdir)
+    result = adapter.run_python("run_1", "print(1 + 1)")
+    assert result.status == "completed"
+```
+
+**The easy-to-get-wrong part:** Code executes in an isolated subprocess using
+`sys.executable`, not in the calling process's global scope. Like
+`FilesystemSandboxAdapter`, the working directory is created automatically at
+initialization. Covered in `tests/test_environment_adapters.py`.
+
+## AdapterRegistry
+
+`continuum.adapters.AdapterRegistry()`
+
+Registry and discovery mechanism mapping adapter names to lazy factories.
+Enables framework discovery while preventing premature imports of optional
+dependencies.
+
+### Functions
+
+- `register_adapter(name, factory)`: Register a callable factory `() -> type`
+  returning an adapter class.
+- `get_adapter(name) -> type`: Look up and invoke the registered factory for
+  `name`, raising `ValueError` for unknown names.
+- `list_adapters() -> list[str]`: List sorted names of all registered adapters.
+- `recover(name, run_id, storage, ...) -> RecoveryDecision`: Look up the adapter
+  by name, instantiate it with `storage`, and invoke its `resume()` method.
+
+```python
+from continuum.adapters import AdapterRegistry, get_adapter, list_adapters
+from continuum.adapters.generic import GenericAgentAdapter
+
+# Built-in registered adapters: "generic", "langchain", "langgraph", "openai"
+names = list_adapters()
+assert "generic" in names
+
+adapter_cls = get_adapter("generic")
+assert adapter_cls is GenericAgentAdapter
+
+# Custom registration uses a lazy factory
+registry = AdapterRegistry()
+registry.register("custom", lambda: GenericAgentAdapter)
+assert registry.get("custom") is GenericAgentAdapter
+```
+
+**The easy-to-get-wrong part:** `register_adapter` expects a zero-argument callable
+factory (`Callable[[], type]`) that returns the adapter class, not an instance or
+the bare class directly. The four built-in factories (`generic`, `langchain`,
+`langgraph`, `openai`) resolve their modules lazily only when requested. Covered in
+`tests/test_adapters_registry.py`.
+
 ## Crash recovery in under ten minutes
 
 Each adapter recovers the same way. The generic path needs no extra
