@@ -2,10 +2,25 @@
 """Drive the CONTINUUM MCP server live over stdio and print the protocol traffic.
 
     python scripts/mcp_smoke.py
+    python scripts/mcp_smoke.py --entry-point module
 
 Starts the real server as a subprocess and speaks raw JSON-RPC to it: no test
 harness, no in-process shortcut. Every frame sent and received is printed as it
 happens, so what you see is the wire, not a summary of it.
+
+By default the smoke test spawns the installed ``continuum-mcp`` console
+script, because PATH resolution of that entry point is the single most common
+way a real installation fails while every module-form test still passes
+(issue #839). When the script is not on PATH it falls back to
+``python -m continuum.mcp`` against the worktree's ``src`` and says so; pass
+``--entry-point console-script`` to refuse the fallback, or
+``--entry-point module`` to force it.
+
+The transcript also reports the observed wire framing of the response frames
+(``\\n`` or ``\\r\\n``): on Windows the MCP SDK terminates stdio frames with
+CRLF (modelcontextprotocol/python-sdk#2433), which lenient clients absorb and
+strict NDJSON clients reject, so the smoke output states which one this server
+actually produced.
 
 The point of the transcript is step 7. The same action is intercepted twice with
 identical arguments; the second call must answer ``proceed: false`` and hand back
@@ -19,6 +34,7 @@ else.
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import os
@@ -71,10 +87,38 @@ def note(text: str, colour: str = YELLOW) -> None:
     print(paint(f"    {text}", colour), flush=True)
 
 
+#: The console script a real MCP host spawns; also the name ``.mcp.json``
+#: declares, resolved by the host through PATH.
+CONSOLE_SCRIPT = "continuum-mcp"
+
+
+def _resolve_command(choice: str) -> tuple[list[str], bool]:
+    """Return the argv to spawn and whether the module fallback was used.
+
+    The console script is resolved through PATH because PATH resolution is
+    the failure mode this smoke test exists to cover (#839): a bare command
+    name in ``.mcp.json`` is looked up by the host, so the smoke test must
+    look it up the same way instead of bypassing it with ``python -m``.
+    """
+    if choice == "module":
+        return [sys.executable, "-u", "-m", "continuum.mcp"], False
+    resolved = shutil.which(CONSOLE_SCRIPT)
+    if resolved:
+        return [resolved], False
+    if choice == "console-script":
+        raise SystemExit(
+            f"error: {CONSOLE_SCRIPT} is not on PATH. Install it (pip install "
+            '"continuum-agent[mcp]") or pass --entry-point module to smoke-test '
+            "the worktree source instead."
+        )
+    return [sys.executable, "-u", "-m", "continuum.mcp"], True
+
+
 class MCPClient:
     """A minimal JSON-RPC client over the server's stdin/stdout."""
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, entry_point: str = "auto") -> None:
+        cmd, self.fell_back = _resolve_command(entry_point)
         env = dict(os.environ)
         env["CONTINUUM_DB"] = db_path
         # Mutating tools deny unlisted callers by default, so the demo grants
@@ -82,21 +126,33 @@ class MCPClient:
         # server is read-only and step 2 onward is refused, which is the
         # intended posture for an unconfigured server, not a bug.
         env["CONTINUUM_MCP_ALLOW"] = "mcp-smoke"
-        src = Path(__file__).resolve().parents[1] / "src"
-        if src.is_dir():
-            existing = env.get("PYTHONPATH")
-            env["PYTHONPATH"] = f"{src}{os.pathsep}{existing}" if existing else str(src)
+        # The PYTHONPATH injection belongs to the module form only: against
+        # the worktree's src it is how a source-tree run works, but pointed at
+        # the console script it would shadow the very install under test.
+        if "-m" in cmd:
+            src = Path(__file__).resolve().parents[1] / "src"
+            if src.is_dir():
+                existing = env.get("PYTHONPATH")
+                env["PYTHONPATH"] = f"{src}{os.pathsep}{existing}" if existing else str(src)
 
+        # Binary pipes wrapped by hand: Popen's text=True would enable
+        # universal newlines and silently rewrite \r\n to \n, hiding the wire
+        # framing this script reports (#839). newline="" preserves what the
+        # server actually wrote; newline="\n" keeps what we send as LF.
         self.proc = subprocess.Popen(
-            [sys.executable, "-u", "-m", "continuum.mcp"],
+            cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
-            text=True,
-            bufsize=1,  # line buffered: frames appear as they are written
         )
+        assert self.proc.stdin is not None and self.proc.stdout is not None
+        self._stdin = io.TextIOWrapper(self.proc.stdin, encoding="utf-8", newline="\n")
+        self._stdout = io.TextIOWrapper(self.proc.stdout, encoding="utf-8", newline="")
         self._id = 0
+        #: The terminator observed on response frames so far: "CRLF (\r\n)",
+        #: "LF (\n)", or None before the first frame arrives.
+        self.wire_framing: str | None = None
         # Drain stderr on a thread so a chatty server cannot deadlock us by
         # filling the pipe buffer while we block reading stdout.
         self._errors: list[str] = []
@@ -104,24 +160,31 @@ class MCPClient:
 
     def _drain_stderr(self) -> None:
         assert self.proc.stderr is not None
-        for line in self.proc.stderr:
-            self._errors.append(line.rstrip())
+        for raw in self.proc.stderr:
+            self._errors.append(raw.decode("utf-8", errors="replace").rstrip())
 
     def _send(self, payload: dict[str, Any]) -> None:
-        assert self.proc.stdin is not None
         raw = json.dumps(payload)
         print(paint("  --> ", GREEN) + paint(raw, DIM), flush=True)
-        self.proc.stdin.write(raw + "\n")
-        self.proc.stdin.flush()
+        self._stdin.write(raw + "\n")
+        self._stdin.flush()
 
     def _read(self) -> dict[str, Any]:
-        assert self.proc.stdout is not None
-        line = self.proc.stdout.readline()
+        line = self._stdout.readline()
         if not line:
             errors = "\n".join(self._errors[-20:])
             raise RuntimeError(f"server closed the connection.\nstderr:\n{errors}")
+        self._observe_framing(line)
         print(paint("  <-- ", CYAN) + paint(line.rstrip(), DIM), flush=True)
         return json.loads(line)
+
+    def _observe_framing(self, line: str) -> None:
+        ending = "CRLF (\\r\\n)" if line.endswith("\r\n") else "LF (\\n)"
+        if self.wire_framing is None:
+            self.wire_framing = ending
+        elif ending not in self.wire_framing:
+            print(paint(f"    note: frame terminator changed to {ending}", YELLOW), flush=True)
+            self.wire_framing = f"mixed, last seen {ending}"
 
     def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         self._id += 1
@@ -141,8 +204,7 @@ class MCPClient:
         return json.loads(content[0]["text"])
 
     def close(self) -> None:
-        if self.proc.stdin:
-            self.proc.stdin.close()
+        self._stdin.close()
         try:
             self.proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -157,6 +219,20 @@ def show(payload: dict[str, Any], *, indent: str = "    ") -> None:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Drive the CONTINUUM MCP server live over stdio and print the protocol traffic."
+    )
+    parser.add_argument(
+        "--entry-point",
+        choices=("auto", "console-script", "module"),
+        default="auto",
+        help=(
+            "how to spawn the server: the installed console script (auto uses it when "
+            "on PATH), or python -m against the worktree source"
+        ),
+    )
+    args = parser.parse_args()
+
     if Path(DB_PATH).exists():
         Path(DB_PATH).unlink()
     for suffix in ("-wal", "-shm"):
@@ -166,9 +242,16 @@ def main() -> int:
 
     print(paint("CONTINUUM MCP: live stdio smoke test", BOLD))
     print(paint(f"database: {DB_PATH} (fresh)", DIM))
-    print(paint(f"server:   {sys.executable} -m continuum.mcp", DIM))
-
-    client = MCPClient(DB_PATH)
+    client = MCPClient(DB_PATH, entry_point=args.entry_point)
+    print(paint(f"server:   {' '.join(client.proc.args)}", DIM))
+    if client.fell_back:
+        print(
+            paint(
+                f"note:     {CONSOLE_SCRIPT} is not on PATH, so the module form runs against "
+                "the worktree source. This covers the code, not the installation.",
+                YELLOW,
+            )
+        )
     run_id = "run_demo_1"
     action_args = {"to": "team@example.com"}
     failures: list[str] = []
@@ -186,6 +269,7 @@ def main() -> int:
         )
         server_info = response.get("result", {}).get("serverInfo", {})
         note(f"connected to {server_info.get('name')} ({server_info.get('title')})", GREEN)
+        note(f"response frames end with {client.wire_framing}", GREEN)
         client.notify("notifications/initialized")
 
         banner("1b", "tools/list")
@@ -311,6 +395,7 @@ def main() -> int:
             return 1
         print(paint("  SMOKE TEST PASSED", BOLD + GREEN))
         print(paint(f"    handshake ok · {len(tools)} tools · progress durable ·", GREEN))
+        print(paint(f"    wire framing {client.wire_framing} ·", GREEN))
         print(paint("    side effect performed exactly once ·", GREEN))
         print(paint("    agent-reported state correctly withheld from 'resume'", GREEN))
         return 0

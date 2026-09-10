@@ -174,3 +174,26 @@ in use. Do not resolve it with `claude mcp remove continuum-mcp -s project`, whi
 edits the committed `.mcp.json` and unregisters the server for everyone who clones
 the repository. Leave the diagnostic in place, or drop the local entry with
 `-s local` once the environment is on `PATH`.
+
+### Windows: response frames end with `\r\n`
+
+On Windows the MCP Python SDK terminates its stdio frames with CRLF instead of
+the LF the JSON-RPC-over-stdio transport specifies (upstream
+[modelcontextprotocol/python-sdk#2433](https://github.com/modelcontextprotocol/python-sdk/issues/2433);
+confirmed against this server, every response line ends `b"\r\n"`). Lenient
+clients, Claude Code among them, absorb the extra byte. Strict NDJSON clients
+reject every frame, so the same install works in one client and reports a
+protocol error in another, on Windows only, which is why it lands in
+troubleshooting rather than in a release note.
+
+The defect is upstream, so CONTINUUM neither patches nor vendors it. What the
+repository does instead:
+
+- `scripts/mcp_smoke.py` reads the wire with `newline=""` (universal newlines
+  would rewrite the bytes and hide the difference) and states the observed
+  framing in its output: a Windows run reports `CRLF (\r\n)`, a Linux run
+  reports `LF (\n)`. Run it when a Windows client fails in a way a Linux one
+  does not.
+- A strict client has to tolerate both terminators or fail everywhere on
+  Windows; if yours does not, that is the client side of the upstream issue,
+  not a CONTINUUM configuration.
