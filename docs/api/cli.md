@@ -137,6 +137,14 @@ was wrong (issue #322).
 settings files (for example `.claude/settings.json`, `.gemini/settings.json`, or
 `.codex/hooks.json`).
 
+Supported clients (`CLIENT_PROFILES` in `src/continuum/clienthooks.py`):
+
+| Profile | Settings file | Events | Write matcher | Any matcher |
+|:--|:--|:--|:--|:--|
+| `claude-code` | `.claude/settings.json` | `SessionStart`, `PostToolUse`, `PreToolUse`, `PreCompact` | `Write|Edit|MultiEdit|NotebookEdit` | `*` |
+| `gemini` | `.gemini/settings.json` | `SessionStart`, `AfterTool`, `BeforeTool` | `write_file|replace` | `.*` |
+| `codex` | `.codex/hooks.json` | `SessionStart`, `PostToolUse`, `PreToolUse` | `^Bash$|^shell$` | `^Bash$|^shell$` |
+
 By default, `hooks install` configures up to three entries (depending on the
 client profile; event names and matchers below are Claude Code's, see the
 per-client notes for Gemini and Codex):

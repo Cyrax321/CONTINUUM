@@ -138,10 +138,16 @@ class ProvenanceView:
 
     @property
     def who(self) -> CanonicalProvenance:
+        """Map the asserting entity (*who*) to its canonical provenance label."""
         return canonical_origin(self.origin)
 
     @property
     def how_trusted(self) -> CanonicalProvenance:
+        """Map the claim verification level (*how*) to its canonical label.
+
+        Returns ``CanonicalProvenance.UNKNOWN`` when trust information is
+        absent (``None``) rather than assuming untrusted.
+        """
         if self.trust is None:
             # Absent trust information is not the same as a known-untrusted
             # claim; the source value (None) is preserved on the view.
@@ -150,10 +156,16 @@ class ProvenanceView:
 
     @property
     def what_state(self) -> CanonicalProvenance:
+        """Map the validity state (*what*) to its canonical label."""
         return canonical_state_status(self.state_status)
 
     @property
     def primary(self) -> CanonicalProvenance:
+        """Select the single most decision-relevant canonical label.
+
+        Prioritizes the validity state when the fact is not valid, followed by
+        trust verification level if present, falling back to the origin.
+        """
         if self.state_status is not StateStatus.VALID:
             return self.what_state
         if self.trust is not None:
@@ -195,12 +207,24 @@ _CANONICAL_TO_ORIGIN: dict[CanonicalProvenance, Origin] = {
 
 
 def min_canonical(provenances: list[CanonicalProvenance]) -> CanonicalProvenance:
+    """Find the weakest canonical provenance label by authority ranking.
+
+    Implements the non-amplification invariant: cumulative trust cannot
+    exceed its weakest contributor. If ``provenances`` is empty, returns
+    ``CanonicalProvenance.AGENT_ASSERTED``.
+    """
     if not provenances:
         return CanonicalProvenance.AGENT_ASSERTED
     return min(provenances, key=lambda p: _AUTHORITY_RANK[p])
 
 
 def derived_origin(origins: list[Origin]) -> Origin:
+    """Derive the effective origin across multiple contributors.
+
+    Projects each origin to its canonical label, selects the weakest via
+    :func:`min_canonical`, and maps back to an authoritative Origin. Returns
+    ``Origin.EXTERNAL_AGENT`` if ``origins`` is empty.
+    """
     if not origins:
         return Origin.EXTERNAL_AGENT
     canonicals = [canonical_origin(o) for o in origins]
@@ -209,6 +233,12 @@ def derived_origin(origins: list[Origin]) -> Origin:
 
 
 def derived_provenance_for_events(events: Any) -> Origin:
+    """Calculate the aggregate derived origin across a sequence of events.
+
+    Extracts the source attribute from each event, defaulting unparseable or
+    missing sources to ``Origin.EXTERNAL_AGENT``, and computes the weakest
+    contributing origin via :func:`derived_origin`.
+    """
     origins: list[Origin] = []
     for e in events:
         src = getattr(e, "source", None)

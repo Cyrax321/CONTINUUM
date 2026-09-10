@@ -15,7 +15,7 @@ jobs:
     steps:
       - name: Check if first contribution
         id: check
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const login = context.payload.sender.login;

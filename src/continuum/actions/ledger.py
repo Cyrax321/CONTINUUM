@@ -73,7 +73,7 @@ from continuum.budgets import (
 )
 from continuum.concurrency.lease import LeaseCoordinator
 from continuum.events import Event, EventType
-from continuum.models import Action, ActionStatus, ConsumedInputs, UnknownSideEffect, utcnow
+from continuum.models import Action, ActionStatus, ConsumedInputs, Origin, UnknownSideEffect, utcnow
 from continuum.security.hashing import stable_hash
 from continuum.storage.base import Storage
 
@@ -360,7 +360,17 @@ class ActionLedger:
         lease: LeaseCoordinator | None = None,
         holder_id: str | None = None,
         ttl: timedelta | None = None,
+        source: Origin = Origin.DETERMINISTIC,
     ) -> None:
+        """Bind this ledger to a run.
+
+        ``source`` stamps the action records this ledger writes
+        (issue #612): the writer, not the derivation. Callers whose
+        claims are asserted by an autonomous agent about its own work
+        pass ``Origin.EXTERNAL_AGENT`` so the validator holds the run
+        for review. Denial records stay ``DETERMINISTIC``: they are the
+        ledger's own verdicts, not caller assertions.
+        """
         if lease is not None and not holder_id:
             raise ValueError(
                 "holder_id is required when a lease is supplied: a shared default "
@@ -369,6 +379,7 @@ class ActionLedger:
             )
         self.storage = storage
         self.run_id = run_id
+        self._source = source
         self._lease = lease
         self._holder_id = holder_id or ""
         self._ttl = ttl
@@ -759,7 +770,7 @@ class ActionLedger:
             # rather than explicit key; keep forensic searchable.
             with suppress(Exception):
                 payload["rendered_key"] = str(action.arguments.get("record_key"))
-        self.storage.append_event(self.run_id, event_type, payload)
+        self.storage.append_event(self.run_id, event_type, payload, source=self._source)
         return action
 
     @_single_writer

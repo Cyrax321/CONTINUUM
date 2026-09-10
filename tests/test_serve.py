@@ -236,6 +236,40 @@ def test_intercept_then_complete_action() -> None:
     assert listed["actions"][0]["status"] == "completed"
 
 
+def test_complete_and_reconcile_forward_consumed_inputs() -> None:
+    """Sidecar complete/reconcile record caller-supplied consumed_inputs (#558)."""
+    from continuum.actions.ledger import fold_action_events
+
+    srv = make_server()
+    srv.dispatch("record_progress", {"run_id": "r1", "completed": 1, "goal": "g"})
+    claim = srv.dispatch("intercept_action", {"run_id": "r1", "action_type": "x.do", "key": "k1"})
+    ci = {
+        "checkpoint_seq": 2,
+        "event_positions": [1],
+        "component_ids": ["d1"],
+        "action_ids": ["a1"],
+    }
+    done = srv.dispatch(
+        "complete_action",
+        {"run_id": "r1", "action_key": claim["action_key"], "consumed_inputs": ci},
+    )
+    assert done["status"] == "completed"
+    folded = fold_action_events(srv.storage.read_events("r1"))
+    assert folded[claim["action_key"]].consumed_inputs.checkpoint_seq == 2
+    assert folded[claim["action_key"]].consumed_inputs.action_ids == ["a1"]
+    srv.dispatch(
+        "reconcile_action",
+        {
+            "run_id": "r1",
+            "action_key": claim["action_key"],
+            "occurred": True,
+            "consumed_inputs": {"checkpoint_seq": 3},
+        },
+    )
+    refolded = fold_action_events(srv.storage.read_events("r1"))
+    assert refolded[claim["action_key"]].consumed_inputs.checkpoint_seq == 3
+
+
 def test_unknown_method_is_not_found() -> None:
     srv = make_server()
     with pytest.raises(MethodNotFound):
@@ -498,3 +532,31 @@ def json_line(rid: int, method: str, params: dict) -> str:
     import json
 
     return json.dumps({"id": rid, "method": method, "params": params})
+
+
+def test_malformed_consumed_inputs_is_bad_params_not_internal() -> None:
+    """Ledger validation failures surface as parameter errors (#645 review)."""
+    from continuum.serve.server import BadParams
+
+    srv = make_server()
+    srv.dispatch("record_progress", {"run_id": "r1", "completed": 1, "goal": "g"})
+    claim = srv.dispatch("intercept_action", {"run_id": "r1", "action_type": "x.do", "key": "k1"})
+    with pytest.raises(BadParams, match="greater than or equal"):
+        srv.dispatch(
+            "complete_action",
+            {
+                "run_id": "r1",
+                "action_key": claim["action_key"],
+                "consumed_inputs": {"checkpoint_seq": -1},
+            },
+        )
+    with pytest.raises(BadParams, match="consumed_inputs"):
+        srv.dispatch(
+            "reconcile_action",
+            {
+                "run_id": "r1",
+                "action_key": claim["action_key"],
+                "occurred": True,
+                "consumed_inputs": [1, 2],
+            },
+        )

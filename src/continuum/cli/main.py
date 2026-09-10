@@ -730,6 +730,28 @@ def cmd_events(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     return ExitCode.OK
 
 
+def _page_bounds(
+    total: int, limit: int | None, offset: int, err: Any
+) -> tuple[int, int, int] | None:
+    """Validate --limit/--offset and return (start, end, hidden) for display paging.
+
+    Paging truncates display only; the underlying graph stays whole, so a
+    truncated listing can never change what staleness or validation conclude
+    (issues #321, #597). Returns None after reporting usage errors to err.
+    """
+    if limit is not None and limit < 1:
+        # Refuse rather than clamp: --limit 0 would print an empty-looking
+        # graph for a run that has nodes, which this listing must never do.
+        print(f"--limit must be 1 or more (got {limit})", file=err)
+        return None
+    if offset < 0:
+        print(f"--offset must be 0 or more (got {offset})", file=err)
+        return None
+    start = min(offset, total)
+    end = total if limit is None else min(total, start + limit)
+    return start, end, total - (end - start)
+
+
 def cmd_provenance(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Show provenance DAG with per-node Origin (issue #554). Read-only, compaction-aware."""
     storage.get_run(args.run_id)
@@ -748,22 +770,41 @@ def cmd_provenance(args: argparse.Namespace, storage: Storage, out: Any, err: An
         else:
             print(dot, file=out)
         return ExitCode.OK
+    ordered = sorted(graph.nodes.values(), key=lambda n: n.sequence)
+    page = _page_bounds(
+        len(ordered),
+        getattr(args, "limit", None),
+        getattr(args, "offset", None) or 0,
+        err,
+    )
+    if page is None:
+        return ExitCode.ERROR
+    start, end, hidden = page
+    shown = ordered[start:end]
     if getattr(args, "json", False):
         payload = graph.to_dict()
         payload["run_id"] = args.run_id
+        payload["nodes"] = payload["nodes"][start:end]
+        payload["nodes_total"] = len(ordered)
+        payload["nodes_hidden"] = hidden
         _emit(payload, "", as_json=True, stream=out)
         return ExitCode.OK
     lines = [
         f"run: {args.run_id}  (provenance DAG)",
         f"nodes: {len(graph.nodes)}  edges: {sum(len(v) for v in graph.edges.values())}",
     ]
-    for node in sorted(graph.nodes.values(), key=lambda n: n.sequence):
+    for node in shown:
         parents = graph.reverse_edges.get(node.event_id, [])
         children = graph.edges.get(node.event_id, [])
         parents_str = ",".join(p[:8] for p in parents) if parents else "-"
         children_str = ",".join(c[:8] for c in children) if children else "-"
         lines.append(
             f"  {node.sequence:>3}  {node.type.value:<18} {node.event_id[:8]}  origin={node.origin.value}  parents={parents_str}  children={children_str}  {node.label}"
+        )
+    if hidden:
+        lines.append(
+            f"  ... {hidden} of {len(ordered)} nodes hidden by paging; "
+            "run without --limit/--offset to see the whole graph"
         )
     _emit({}, "\n".join(lines), as_json=False, stream=out, palette=getattr(args, "_palette", None))
     return ExitCode.OK
@@ -782,6 +823,16 @@ def cmd_impact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         events = storage.read_events(args.run_id)
     graph = build_provenance_graph(events)
     downstream = downstream_of(graph, evidence_id)
+    page = _page_bounds(
+        len(downstream),
+        getattr(args, "limit", None),
+        getattr(args, "offset", None) or 0,
+        err,
+    )
+    if page is None:
+        return ExitCode.ERROR
+    start, end, hidden = page
+    shown = downstream[start:end]
     if getattr(args, "json", False):
         payload = {
             "run_id": args.run_id,
@@ -794,8 +845,10 @@ def cmd_impact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
                     "origin": n.origin.value,
                     "label": n.label,
                 }
-                for n in downstream
+                for n in shown
             ],
+            "downstream_total": len(downstream),
+            "downstream_hidden": hidden,
         }
         _emit(payload, "", as_json=True, stream=out)
         return ExitCode.OK
@@ -806,9 +859,14 @@ def cmd_impact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         f"run: {args.run_id}  impact of {evidence_id!r}",
         f"downstream: {len(downstream)} node(s)",
     ]
-    for node in downstream:
+    for node in shown:
         lines.append(
             f"  {node.sequence:>3}  {node.type.value:<18} {node.event_id[:8]}  origin={node.origin.value}  {node.label}"
+        )
+    if hidden:
+        lines.append(
+            f"  ... {hidden} of {len(downstream)} nodes hidden by paging; "
+            "run without --limit/--offset to see the whole impact"
         )
     _emit({}, "\n".join(lines), as_json=False, stream=out, palette=getattr(args, "_palette", None))
     return ExitCode.OK
@@ -1021,7 +1079,9 @@ def cmd_watch(args: argparse.Namespace, storage: Storage, out: Any, err: Any) ->
 
         # Use override if provided, else load contract
         if override_threshold is not None:
-            contract = CadenceContract(max_silence_seconds=override_threshold)
+            # Empty scopes so the explicit operator value wins: otherwise the
+            # default otherwise scope (3600s) would silently override the flag (#670).
+            contract = CadenceContract(max_silence_seconds=override_threshold, phase_scopes={})
             # We need to compute advisory manually with override
             from datetime import UTC, datetime
 
@@ -1093,19 +1153,11 @@ def cmd_watch(args: argparse.Namespace, storage: Storage, out: Any, err: Any) ->
         else f"Liveness ok for {run_id}: {advisory.get('silence_seconds')}"
     )
     if breached and on_breach == "webhook" and webhook_url:
-        try:
-            import json as _json
-            import urllib.request
+        from continuum.recovery.notify import post_webhook
 
-            data = _json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(
-                webhook_url, data=data, headers={"Content-Type": "application/json"}, method="POST"
-            )
-            with urllib.request.urlopen(req, timeout=5):
-                pass
-        except Exception as exc:
-            # Fail-open delivery, like dashboard token path
-            print(f"warning: webhook delivery failed: {exc}", file=err)
+        # Fail-open delivery, like dashboard token path
+        if not post_webhook(webhook_url, payload):
+            print("warning: webhook delivery failed", file=err)
     # Emit result
     _emit(
         payload,
@@ -3626,12 +3678,28 @@ def build_parser() -> argparse.ArgumentParser:
     prov_parser.add_argument(
         "--dot", action="store_true", help="emit Graphviz DOT with per-node Origin color"
     )
+    prov_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="show at most N nodes, display only; the graph behind staleness stays whole",
+    )
+    prov_parser.add_argument(
+        "--offset", type=int, default=0, help="skip the first M nodes in sequence order"
+    )
     impact = with_run(
         add("impact", cmd_impact, "Show downstream impact of an evidence item. Read-only.")
     )
     impact.add_argument(
         "--evidence", required=True, help="evidence event id or payload evidence_id"
     )
+    impact.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="show at most N downstream nodes, display only",
+    )
+    impact.add_argument("--offset", type=int, default=0, help="skip the first M downstream nodes")
 
     events = with_run(add("events", cmd_events, "List recorded events."))
     events.add_argument("--after", type=int, default=0)
@@ -3649,7 +3717,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     health = with_run(add("health", cmd_health, "Advisory prefix-trust health check. Read-only."))
-    health.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    # Subparser default SUPPRESS: accepts trailing --json without shadowing the global flag (#677).
+    health.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     # health is advisory only; it never gates, never moves mode, never changes exit code
     # (issue #401). It reports trust_score with per-dimension breakdown.
 
@@ -4073,7 +4142,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="webhook URL for --on-breach webhook",
     )
-    watch.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    # Subparser default SUPPRESS: accepts trailing --json without shadowing the global flag (#677).
+    watch.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
 
     return parser
 

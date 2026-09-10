@@ -1394,7 +1394,10 @@ def build_server(
             "Report that an intercepted action succeeded. Call this immediately "
             "after performing the side effect, using the action_key returned by "
             "continuum_intercept_action. Skipping it leaves the action uncertain "
-            "and blocks recovery."
+            "and blocks recovery. You may also pass consumed_inputs naming the "
+            "checkpoint and prior outputs this effect was computed from "
+            "(checkpoint_seq, event_positions, component_ids, action_ids); it is "
+            "recorded for restore-point admissibility and defaults to none."
         ),
         annotations=mutating,
     )
@@ -1404,9 +1407,12 @@ def build_server(
         action_key: str,
         external_id: str | None = None,
         result: dict[str, Any] | None = None,
+        consumed_inputs: dict[str, Any] | None = None,
     ) -> str:
         """Mark a claimed action as completed."""
-        action = ctx.ledger(run_id).complete(action_key, external_id=external_id, result=result)
+        action = ctx.ledger(run_id).complete(
+            action_key, external_id=external_id, result=result, consumed_inputs=consumed_inputs
+        )
         return _json(
             {
                 "run_id": run_id,
@@ -1467,18 +1473,21 @@ def build_server(
         external_id: str | None = None,
         result: dict[str, Any] | None = None,
         note: str = "",
+        consumed_inputs: dict[str, Any] | None = None,
     ) -> str:
         """Resolve an uncertain action using external evidence."""
         # `result` is accepted here because `complete` refuses an UNKNOWN action
         # (issue #366) and this is the route it points at. Without it, structured
         # evidence gathered by the probe had nowhere to go over MCP even though
-        # `ActionLedger.reconcile` has always stored it.
+        # `ActionLedger.reconcile` has always stored it. `consumed_inputs` rides
+        # the same route for the same reason (issue #558).
         action = ctx.ledger(run_id).reconcile(
             action_key,
             occurred=occurred,
             external_id=external_id,
             result=result,
             note=note,
+            consumed_inputs=consumed_inputs,
         )
         return _json(
             {

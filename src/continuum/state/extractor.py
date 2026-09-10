@@ -69,7 +69,13 @@ class StateExtractor(Protocol):
 
     name: str
 
-    def extract(self, context: ExtractionContext) -> SemanticState: ...
+    def extract(self, context: ExtractionContext) -> SemanticState:
+        """Derive semantic state from an extraction context.
+
+        Implementations must be side-effect free and should fold events onto
+        any base state supplied in ``context``.
+        """
+        ...
 
 
 class DeterministicExtractor:
@@ -81,6 +87,13 @@ class DeterministicExtractor:
         self.last_report: ProjectionReport | None = None
 
     def extract(self, context: ExtractionContext) -> SemanticState:
+        """Fold recorded events into deterministic semantic state.
+
+        Applies events from ``context.trajectory`` onto ``context.base`` (or
+        from scratch when base is absent) using :func:`project_incremental`.
+        Updates :attr:`last_report` with projection metrics and returns the
+        resulting state.
+        """
         state, report = project_incremental(
             context.run_id,
             context.trajectory,
@@ -127,6 +140,15 @@ class LLMExtractor:
         self.last_error: Exception | None = None
 
     def extract(self, context: ExtractionContext) -> SemanticState:
+        """Enrich base state with candidate proposals from the configured model.
+
+        Runs the underlying base extractor first. If disabled, returns the base
+        state directly. When enabled, invokes the LLM callable and merges
+        suggested decisions, findings, and pending work tagged as
+        ``Origin.LLM`` and ``REQUIRES_REVIEW``. If the LLM callable raises,
+        records the exception in :attr:`last_error` and falls back to base
+        state so recovery is never blocked.
+        """
         state = self._base.extract(context)
         if not self.enabled:
             return state
@@ -221,6 +243,13 @@ class CompositeExtractor:
             raise ValueError("CompositeExtractor requires at least one extractor")
 
     def extract(self, context: ExtractionContext) -> SemanticState:
+        """Run each configured extractor in sequence, chaining intermediate states.
+
+        The first extractor receives the full context and folds recorded
+        trajectory events. Downstream extractors receive the accumulated state
+        as ``context.base`` with an empty trajectory, preventing double-counting
+        of events while allowing successive enrichments.
+        """
         first, *rest = self._extractors
         state = first.extract(context)
         for extractor in rest:

@@ -46,6 +46,17 @@ RESULT_ENVELOPE_KEY = "__return_value__"
 
 
 class GuardKind(StrEnum):
+    """Enumeration of replay-guard verdicts for intended side effects.
+
+    Classifies an action against the folded ledger into one of:
+    ``ALLOW`` (live claim, proceed with execution),
+    ``SKIP_DUPLICATE`` (already completed, return memoized result),
+    ``DENY_UNCLAIMED`` (no claim registered yet),
+    ``DENY_DUPLICATE`` (explicit duplicate refusal),
+    ``BLOCK_UNCERTAIN`` (outcome in doubt, requires reconciliation), or
+    ``DENY_RECLAIM`` (previous attempt closed, requires new claim).
+    """
+
     ALLOW = "allow"
     SKIP_DUPLICATE = "skip_duplicate"
     DENY_UNCLAIMED = "deny_unclaimed"
@@ -56,6 +67,12 @@ class GuardKind(StrEnum):
 
 @dataclass(frozen=True)
 class GuardDecision:
+    """Verdict and rationale produced by evaluating an action against the ledger.
+
+    Carries the evaluated :class:`GuardKind`, an explanatory human-readable
+    reason, and the optional resolved idempotency key string.
+    """
+
     kind: GuardKind
     reason: str
     key: str | None = None
@@ -214,9 +231,11 @@ def langgraph_protected_node(
     import hashlib
 
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        """Wrap a node function with identity calculation and replay protection."""
         node_name = getattr(fn, "__name__", "node")
 
         def identity(state: dict[str, Any]) -> str:
+            """Compute a stable idempotency key for node execution from state."""
             if key_fields:
                 basis = {k: state.get(k) for k in key_fields}
             else:
@@ -228,6 +247,7 @@ def langgraph_protected_node(
             return f"node:{node_name}:{digest}"
 
         def wrapped(state: dict[str, Any]) -> dict[str, Any]:
+            """Execute or short-circuit node invocation using memoized results."""
             kind, value = protected_call(
                 storage,
                 run_id,

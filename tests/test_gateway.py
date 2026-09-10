@@ -383,3 +383,37 @@ def test_compacted_consumed_authority_still_denies(db: str, gateway: str) -> Non
     status, body = post(gateway, "/v1/invoices", {"id": "new", "authority_id": "spent"})
     assert status == 403
     assert "spent" in body["reason"] and "consumed at seq" in body["reason"]
+
+
+@pytest.mark.parametrize("bad_length", ["abc", "-5"])
+def test_malformed_length_smuggled_body_is_never_dispatched(
+    db: str, gateway: str, bad_length: str
+) -> None:
+    """A refused body must not become the next request on a live socket (#611).
+
+    The refused head carries no trustable body boundary, so the gateway must
+    answer once and close. Whatever the client already wrote stays unread and
+    must never be parsed as a second request.
+    """
+    host, port = gateway.split(":")
+    smuggled = (
+        b"POST /v1/invoices HTTP/1.1\r\n"
+        b"Host: api.example.com\r\n"
+        b"Content-Length: 11\r\n"
+        b"\r\n"
+        b'{"id":"X1"}'
+    )
+    request = (
+        b"POST /v1/invoices HTTP/1.1\r\n"
+        b"Host: api.example.com\r\n"
+        b"Content-Length: " + bad_length.encode() + b"\r\n"
+        b"\r\n" + smuggled
+    )
+    with socket.create_connection((host, int(port)), timeout=10) as sock:
+        sock.sendall(request)
+        response = recv_until_close(sock)
+
+    assert response.count(b"HTTP/1.1") == 1
+    assert b"400 Bad Request" in response
+    assert b"Connection: close" in response
+    assert b"malformed Content-Length" in response

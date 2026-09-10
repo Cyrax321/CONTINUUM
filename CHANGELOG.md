@@ -8,6 +8,35 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The installed `continuum-mcp` entry point is exercised over real stdio (#834).**
+  `tests/test_mcp_entrypoint.py` spawns the console script a host actually
+  spawns (by absolute path, through pipes, no shell) and drives
+  `initialize` plus `tools/list`; the `python -m continuum.mcp` fallback form
+  gets the same handshake. A Windows-only test pins the mechanism behind
+  `CONNECTION_CLOSED` (#699): `CreateProcess` resolves a bare command name
+  against the calling process's PATH, never the environment passed to the
+  child, so the suite can now tell a broken entry point (#697) from an
+  unreachable one.
+- **Completed actions record consumed inputs for restore-point admissibility (#558).**
+  `ActionLedger.complete` and `reconcile` accept an optional `consumed_inputs`
+  mapping (`checkpoint_seq`, `event_positions`, `component_ids`, `action_ids`),
+  validated and stored on the action row and in the `action_index` projection.
+  Rows written before the field existed load as empty and stay admissible. The
+  MCP `complete` and `reconcile` tools and the sidecar `complete_action` and
+  `reconcile_action` handlers forward the field, so agent-driven callers can
+  declare what state an effect was computed from.
+- **Plan-aware bench scenario reports zero duplicate work (#468).**
+  `plan_aware_resume_skips_completed_units` starts a 5-unit linear plan via
+  `PLAN_UPSERT`, completes 2 units, reprojects from the log as a post-crash
+  resume would, and asserts units 1-2 never re-execute while 3-5 remain,
+  recording the duplicate count in the report metrics. It runs in CI through
+  the parametrized phase-6 suite.
+- Shared signed webhook delivery primitive for human notification (#305).
+  `continuum.recovery.notify` posts JSON with an HMAC-SHA256 signature when
+  `CONTINUUM_WEBHOOK_SECRET` is set and plain JSON otherwise, always
+  fail-open. The liveness watch webhook path now routes through it with
+  identical wire behavior when unconfigured.
+
 - **Documented three-file ruff rev lockstep (#689).** CONTRIBUTING.md now
   names all three places the ruff version lives (the `ruff==` pin in
   `pyproject.toml`, `rev` in `.pre-commit-config.yaml`, and the `rev` quoted
@@ -199,12 +228,52 @@ All notable changes to this project are documented here. The format follows
   `append_event`'s `Origin.DETERMINISTIC` default and a thin-adapter run is not
   held for review the way an MCP-reported one is. Docs-only, no runtime change.
 
+- **`src/continuum/adapters/thin.py` is fully documented (#680, follows #607).**
+  The thin hook adapters carried 12 undocumented public names (14 counting the
+  two async capability methods the issue's AST snippet misses because
+  `ast.AsyncFunctionDef` is not `ast.FunctionDef`), including the entry points
+  contributors actually call: the three `*_available` probes, the shared
+  guard's `ledger`, `claim`, `complete` and `fail`, the CrewAI `before`/`after`
+  hooks and their `uninstall`, the AutoGen `run_json_wrapped`, and
+  `ContinuumPydanticHooks`. Every docstring says what a caller needs: what the
+  name binds or settles, what it returns, and the pass-through/no-op rules that
+  keep wrapping durability-only. Docstrings only, no runtime change.
+
 ### Fixed
 
 - **Repeated compaction works after a run has been archived (#648).**
   Checkpoint anchoring now projects archived events together with the live tail,
   so a long-lived run can be compacted again after new work without losing its
-  original `RUN_STARTED` state.
+  original `RUN_STARTED` state. Once a checkpoint exists it becomes the fold
+  base, so repeat projection replays only the live tail.
+  now folds the full archived and live event history when listing uncertain
+  actions, so an operator can still see and reconcile a claim whose action
+  events moved into the archive.
+- Thin-adapter ledger writes carry EXTERNAL_AGENT provenance (#612).
+  `ContinuumToolGuard` claims about framework-executed tools were recorded
+  `deterministic`, so agent-asserted effects laundered to trusted and derived
+  provenance hid the writer. `ActionLedger` accepts a `source` (default
+  unchanged) and the guard stamps `EXTERNAL_AGENT`, matching its docstring
+  and the OpenAI adapter. Denial records stay deterministic as ledger verdicts.
+- Provenance listings paginate with --limit/--offset, display only (#597).
+  `continuum provenance` and `continuum impact` truncate the rendered nodes
+  (JSON carries nodes_total/nodes_hidden and downstream totals) while the
+  in-memory graph behind staleness stays whole. `--limit 0` is refused.
+- FINDING_ADDED accepts caused_by causal links like decisions and actions (#597).
+  Findings derived from evidence link back under the same 32-id, 1-128-char
+  caps and unknown-id refusal, validated on every append path (memory log,
+  SQLite, Postgres) behind one shared CAUSED_BY_TYPES constant. The graph
+  fold already edges any node type, so finding-to-evidence edges appear with
+  no projection change. PLAN_UPSERT nodes stay a separate design question.
+- `watch --max-silence` override wins without an open claim (#670).
+  The override kept the default phase scopes, so the `otherwise` scope
+  (3600s) silently replaced the flag value. The override contract now
+  carries empty scopes and falls back to the requested seconds.
+- `health` and `watch` honor the global `--json` flag (#677).
+  Both re-registered the flag on their subparser, whose default silently
+  replaced the global value, so machine output never appeared. The subparser
+  defaults are now SUPPRESS: both flag positions work and trailing `--json`
+  keeps working.
 
 - **`reconcile --auto` settles archived actions and probes authorities with
   full consumption context after compaction (#647).**
@@ -219,6 +288,10 @@ All notable changes to this project are documented here. The format follows
   and `tests/test_authority_probe.py`.
 - The missing-MCP-extra subprocess test now imports the working tree even when
   CONTINUUM is not installed or an older copy is installed (#810).
+- Runs compact more than once: the anchor checkpoint folds full history (#648).
+  It read only the live tail, so after the first compaction RUN_STARTED lived
+  in the archive and the second compact died with ValueError: could not be
+  anchored. Checkpointing a compacted run works again.
 
 - Preserve archived action history in grant and authority enforcement, CLI and
   gateway gate decisions, cross-run action scans, and memory enumeration and
@@ -612,7 +685,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,122 collected, ~2,030 passed, ~23 skipped on a minimal env).
+  (~2,163 collected, ~2,030 passed, ~23 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

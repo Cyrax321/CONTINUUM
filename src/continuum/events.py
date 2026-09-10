@@ -35,6 +35,7 @@ from continuum.security.hashing import make_id, stable_hash
 
 __all__ = [
     "EventType",
+    "CAUSED_BY_TYPES",
     "Event",
     "EventLog",
     "IntegrityViolation",
@@ -70,7 +71,7 @@ class EventType(StrEnum):
     # semantic state
     # DECISION_CREATED payload may include caused_by: list[str] (1-128 chars each, max 32,
     # default []). Unknown ids raise ValueError. Field is hash-covered and old events
-    # without it load as [].
+    # without it load as []. FINDING_ADDED accepts the same links (issue #597).
     DECISION_CREATED = "DECISION_CREATED"
     DECISION_INVALIDATED = "DECISION_INVALIDATED"
     EVIDENCE_ADDED = "EVIDENCE_ADDED"
@@ -144,6 +145,17 @@ class EventType(StrEnum):
 
     # memory governance (issue #304, #567): per-tenant tombstone for erasure
     MEMORY_TOMBSTONED = "MEMORY_TOMBSTONED"
+
+
+#: Event types whose payloads may carry ``caused_by`` causal links
+#: (issues #551, #597). Findings joined decisions and actions here:
+#: a finding derived from evidence links back to it under the same
+#: 32-id, 1-128-char caps and unknown-id refusal.
+CAUSED_BY_TYPES = (
+    EventType.DECISION_CREATED,
+    EventType.ACTION_RECORDED,
+    EventType.FINDING_ADDED,
+)
 
 
 class AppendOnlyViolation(RuntimeError):
@@ -286,7 +298,7 @@ class EventLog:
     ) -> Event:
         """Append an event and return the sealed (hashed) record."""
         chain = self._by_run.setdefault(run_id, [])
-        if type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED) and payload is not None:
+        if type in CAUSED_BY_TYPES and payload is not None:
             caused_by = payload.get("caused_by") if isinstance(payload, Mapping) else None
             if caused_by is not None:
                 if not isinstance(caused_by, list):

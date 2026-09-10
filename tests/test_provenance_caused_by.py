@@ -177,3 +177,59 @@ def test_action_record_caused_by_round_trip() -> None:
     assert [e for e in events if e.type == EventType.ACTION_RECORDED][0].payload["caused_by"] == [
         ev.event_id
     ]
+
+
+def test_finding_caused_by_links_evidence_in_graph() -> None:
+    """FINDING_ADDED accepts caused_by and the graph gains the edge (#597)."""
+    from continuum.models import Run
+    from continuum.provenance.graph import build_provenance_graph
+
+    storage = SQLiteStorage(":memory:")
+    run_id = "run_finding_links"
+    storage.create_run(Run(run_id=run_id, goal="g"))
+    ev = storage.append_event(run_id, EventType.EVIDENCE_ADDED, {"evidence_id": "ev1"})
+    finding = storage.append_event(
+        run_id,
+        EventType.FINDING_ADDED,
+        {"finding_id": "f1", "claim": "c", "caused_by": [ev.event_id]},
+    )
+    assert finding.payload["caused_by"] == [ev.event_id]
+    graph = build_provenance_graph(storage.read_events(run_id))
+    assert ev.event_id in graph.edges
+    assert finding.event_id in graph.edges[ev.event_id]
+
+
+def test_finding_unknown_caused_by_raises() -> None:
+    """Unknown ids are refused for findings exactly as for decisions (#597)."""
+    from continuum.models import Run
+
+    storage = SQLiteStorage(":memory:")
+    run_id = "run_finding_unknown"
+    storage.create_run(Run(run_id=run_id, goal="g"))
+    with pytest.raises(ValueError, match="unknown caused_by"):
+        storage.append_event(
+            run_id,
+            EventType.FINDING_ADDED,
+            {"finding_id": "f1", "claim": "c", "caused_by": ["event_nope_1"]},
+        )
+
+
+def test_finding_caused_by_caps_are_enforced() -> None:
+    """The 32-id and 1-128-char caps apply to findings (#597)."""
+    from continuum.models import Run
+
+    storage = SQLiteStorage(":memory:")
+    run_id = "run_finding_caps"
+    storage.create_run(Run(run_id=run_id, goal="g"))
+    with pytest.raises(ValueError, match="at most 32"):
+        storage.append_event(
+            run_id,
+            EventType.FINDING_ADDED,
+            {"finding_id": "f1", "claim": "c", "caused_by": [f"e{i}" for i in range(33)]},
+        )
+    with pytest.raises(ValueError, match="1-128"):
+        storage.append_event(
+            run_id,
+            EventType.FINDING_ADDED,
+            {"finding_id": "f1", "claim": "c", "caused_by": ["x" * 129]},
+        )

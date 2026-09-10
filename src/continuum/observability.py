@@ -74,22 +74,49 @@ class Metrics:
     gauges: dict[str, float] = field(default_factory=dict)
 
     def increment(self, name: str, by: int = 1) -> None:
+        """Increment a monotonic counter by ``by``.
+
+        Counters are initialized to zero on first use. Raises
+        :class:`ValueError` if ``by`` is negative, preserving counter
+        monotonicity.
+        """
         if by < 0:
             raise ValueError("counters may only increase")
         self.counters[name] = self.counters.get(name, 0) + by
 
     def set_gauge(self, name: str, value: float) -> None:
+        """Set the instantaneous value of the named gauge.
+
+        Unlike monotonic counters, gauges record point-in-time values that
+        can fluctuate across updates.
+        """
         self.gauges[name] = value
 
     def record_time(self, name: str, seconds: float) -> None:
+        """Accumulate elapsed duration in seconds for ``name``.
+
+        Adds ``seconds`` to the named timer. Raises :class:`ValueError`
+        if ``seconds`` is negative.
+        """
         if seconds < 0:
             raise ValueError("elapsed time may not be negative")
         self.timers[name] = self.timers.get(name, 0.0) + seconds
 
     def timer(self, name: str) -> _Timer:
+        """Return a context manager that measures and records elapsed duration.
+
+        Measures wall-clock time using :func:`time.perf_counter` while the
+        block executes, adding the elapsed seconds to ``name`` upon exit.
+        """
         return _Timer(self, name)
 
     def snapshot(self) -> dict[str, Any]:
+        """Return a point-in-time copy of all recorded metrics.
+
+        Returns a dictionary with shallow copies of ``counters``,
+        ``timers``, and ``gauges`` so callers can inspect or serialize
+        metrics without mutating internal state.
+        """
         return {
             "counters": dict(self.counters),
             "timers": dict(self.timers),
@@ -97,6 +124,7 @@ class Metrics:
         }
 
     def reset(self) -> None:
+        """Clear all recorded counters, timers, and gauges in place."""
         self.counters.clear()
         self.timers.clear()
         self.gauges.clear()

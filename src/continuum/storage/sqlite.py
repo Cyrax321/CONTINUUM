@@ -31,7 +31,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from continuum.events import Event, EventType, IntegrityReport, IntegrityViolation
+from continuum.events import CAUSED_BY_TYPES, Event, EventType, IntegrityReport, IntegrityViolation
 from continuum.models import Action, Origin, Run, RunStatus, SemanticState, StateCheckpoint, utcnow
 from continuum.security.hashing import make_id
 from continuum.state.versioning import canonical_state_json, state_fingerprint
@@ -351,7 +351,7 @@ class SQLiteStorage(Storage):
         (compaction) reuse this instead of :meth:`append_event`, which would
         try to nest a second transaction.
         """
-        if type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED) and payload is not None:
+        if type in CAUSED_BY_TYPES and payload is not None:
             caused_by = payload.get("caused_by") if isinstance(payload, dict) else None
             if caused_by is not None:
                 if not isinstance(caused_by, list):
@@ -395,7 +395,7 @@ class SQLiteStorage(Storage):
         return event
 
     def append_sealed(self, event: Event) -> Event:
-        if event.type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED):
+        if event.type in CAUSED_BY_TYPES:
             caused_by = event.payload.get("caused_by") if isinstance(event.payload, dict) else None
             if caused_by is not None:
                 if not isinstance(caused_by, list):
@@ -406,7 +406,7 @@ class SQLiteStorage(Storage):
                     if not isinstance(cid, str) or not 1 <= len(cid) <= 128:
                         raise ValueError("caused_by entries must be 1-128 chars")
         with self._write() as conn:
-            if event.type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED):
+            if event.type in CAUSED_BY_TYPES:
                 caused_by = (
                     event.payload.get("caused_by") if isinstance(event.payload, dict) else None
                 )

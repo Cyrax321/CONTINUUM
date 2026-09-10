@@ -180,10 +180,12 @@ class Origin(StrEnum):
     """
 
     DETERMINISTIC = "deterministic"
-    """Recorded by trusted local code: the CLI, or an adapter called in-process.
+    """Recorded by trusted local code: the CLI, or CONTINUUM's own in-process
+    orchestration (serve loop, replay guard, benchmarks).
 
     Not a claim that the fact is *correct*, only that it was not asserted by an
-    autonomous agent reporting on itself.
+    autonomous agent reporting on itself. Framework adapters that execute tools
+    on an agent's behalf record EXTERNAL_AGENT instead (issue #612).
     """
 
     HUMAN = "human"

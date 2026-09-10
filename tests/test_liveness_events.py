@@ -209,3 +209,35 @@ def test_contract_liveness_section(tmp_path: Path) -> None:
         assert "last_append_age" in decision.contract.liveness
         assert "breaches" in decision.contract.liveness
         assert "breached" in decision.contract.liveness
+
+
+def test_max_silence_override_wins_without_open_claim(tmp_path: Path) -> None:
+    """An explicit --max-silence beats the default otherwise scope (#670)."""
+    db = str(tmp_path / "watch_override.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_watch_override"
+        store.create_run_started(Run(run_id=run_id, goal="watch test"))
+        from continuum.events import Event
+
+        old_ts = datetime.now(UTC) - timedelta(seconds=30)
+        last_seq = store.last_sequence(run_id)
+        ev = Event(
+            run_id=run_id,
+            sequence=last_seq + 1,
+            type=EventType.TASK_UPDATED,
+            timestamp=old_ts,
+            payload={"completed": 1},
+            prev_hash=store.read_events(run_id)[-1].hash,
+        ).sealed()
+        store.append_sealed(ev)
+
+    out, err = io.StringIO(), io.StringIO()
+    code = main(
+        ["--db", db, "watch", run_id, "--max-silence", "5", "--on-breach", "exit"],
+        out=out,
+        err=err,
+    )
+    assert code == 20, out.getvalue()
+    with SQLiteStorage(db) as store:
+        types = [e.type for e in store.read_events(run_id)]
+        assert EventType.LIVENESS_SILENCE_DETECTED in types

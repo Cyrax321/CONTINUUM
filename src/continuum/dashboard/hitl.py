@@ -90,7 +90,7 @@ def pending_actions_with_keys(storage: Storage, run_id: str) -> list[tuple[str, 
     """Uncertain actions paired with their full ledger key (for buttons)."""
     from continuum.actions.ledger import fold_action_events
 
-    folded = fold_action_events(storage.read_events(run_id))
+    folded = fold_action_events(storage.read_all_events(run_id))
     out: list[tuple[str, Any]] = []
     for key, action in folded.items():
         if action.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):

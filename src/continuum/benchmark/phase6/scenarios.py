@@ -282,6 +282,56 @@ def scenario_human_verdict_honored(ctx: ScenarioContext) -> None:
     assert ledger.pending_gate("run_1") is None
 
 
+def scenario_plan_aware_resume_skips_completed_units(ctx: ScenarioContext) -> None:
+    """Plan-aware resume does zero duplicate work for completed units (#468).
+
+    Starts a 5-unit linear plan via PLAN_UPSERT, completes 2 units, then
+    reprojects from the log the way a post-crash resume would. Units 1-2
+    must not be re-executed while 3-5 remain. Mirrors examples/plan_milestones.py.
+    """
+    from continuum.state.semantic import project
+
+    store = _new_store()
+    units = [
+        {
+            "id": f"u{i}",
+            "title": f"milestone {i}",
+            "status": "pending",
+            "depends_on": [f"u{i - 1}"] if i > 1 else [],
+        }
+        for i in range(1, 6)
+    ]
+    store.append_event("run_1", EventType.PLAN_UPSERT, {"plan_id": "p1", "units": units})
+    store.append_event(
+        "run_1",
+        EventType.PLAN_UPSERT,
+        {
+            "plan_id": "p1",
+            "units": [
+                {"id": "u1", "title": "milestone 1", "status": "done", "depends_on": []},
+                {
+                    "id": "u2",
+                    "title": "milestone 2",
+                    "status": "done",
+                    "depends_on": ["u1"],
+                },
+            ],
+        },
+    )
+    # Post-crash resume reads the log fresh rather than trusting memory.
+    # Both lists derive from the full projected plan in one pass: the metric
+    # must be able to fire on its own, not inherit an already-filtered list.
+    resumed = project("run_1", store.read_events("run_1"))
+    completed = [u.step_id for u in resumed.plan if u.status.value == "completed"]
+    remaining = [u.step_id for u in resumed.plan if u.status.value != "completed"]
+    assert remaining == ["u3", "u4", "u5"], remaining
+    scheduled = set(remaining)
+    duplicates = [c for c in completed if c in scheduled]
+    ctx.metrics["duplicate_completed_units"] = len(duplicates)
+    ctx.metrics["remaining_units"] = remaining
+    assert not duplicates, f"completed units would re-execute: {duplicates}"
+
+
 def scenario_transient_network_failure_on_install(ctx: ScenarioContext) -> None:
     store = _new_store()
     store.append_event(
@@ -310,4 +360,5 @@ ALL_SCENARIOS: list[tuple[str, ScenarioFn]] = [
     ("missing_dependency_graph_fallback", scenario_missing_dependency_graph_fallback),
     ("human_verdict_honored", scenario_human_verdict_honored),
     ("transient_network_failure_on_install", scenario_transient_network_failure_on_install),
+    ("plan_aware_resume_skips_completed_units", scenario_plan_aware_resume_skips_completed_units),
 ]

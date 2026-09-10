@@ -32,7 +32,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from typing import Any
 
-from continuum.events import Event, EventType, IntegrityReport, IntegrityViolation
+from continuum.events import CAUSED_BY_TYPES, Event, EventType, IntegrityReport, IntegrityViolation
 from continuum.models import (
     Action,
     Origin,
@@ -427,7 +427,7 @@ class PostgresStorage(Storage):
         (compaction) reuse this instead of :meth:`append_event`, which would
         commit the marker in its own autocommit transaction.
         """
-        if type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED) and payload is not None:
+        if type in CAUSED_BY_TYPES and payload is not None:
             caused_by = payload.get("caused_by") if isinstance(payload, dict) else None
             if caused_by is not None:
                 if not isinstance(caused_by, list):
@@ -471,7 +471,7 @@ class PostgresStorage(Storage):
         return event
 
     def append_sealed(self, event: Event) -> Event:
-        if event.type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED):
+        if event.type in CAUSED_BY_TYPES:
             caused_by = event.payload.get("caused_by") if isinstance(event.payload, dict) else None
             if caused_by is not None:
                 if not isinstance(caused_by, list):
@@ -482,7 +482,7 @@ class PostgresStorage(Storage):
                     if not isinstance(cid, str) or not 1 <= len(cid) <= 128:
                         raise ValueError("caused_by entries must be 1-128 chars")
         with self._write():
-            if event.type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED):
+            if event.type in CAUSED_BY_TYPES:
                 caused_by = (
                     event.payload.get("caused_by") if isinstance(event.payload, dict) else None
                 )

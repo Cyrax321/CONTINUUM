@@ -139,6 +139,11 @@ Repairs required:
 Next permitted action: revalidate_dependency:dataset
 ```
 
+Live `resume` output also carries a liveness reading after the permitted
+action (`Liveness: ok/breached ...`); `continuum watch` evaluates it on
+demand with its own contract, walked through in
+docs/guides/liveness-watch.md.
+
 ## What just happened
 
 - No duplicate Slack message: the interrupted effect was reconciled by probe

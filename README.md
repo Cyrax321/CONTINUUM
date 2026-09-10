@@ -99,7 +99,7 @@ Verify:
 ```bash
 continuum --help                 # CLI entrypoint
 continuum-mcp --help             # MCP server entrypoint (needs [mcp] or [dev])
-pytest -q                        # ~2,122 collected, ~2,030 passed, ~23 skipped on a minimal env (exact counts vary)
+pytest -q                        # ~2,163 collected, ~2,030 passed, ~23 skipped on a minimal env (exact counts vary)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # the three gates CI enforces
 ```
@@ -232,7 +232,7 @@ CONTINUUM is verified against real LLM agents, live protocol boundaries, and har
 - **Third-party clients**: Gemini CLI and Kilo Code connected over stdio JSON-RPC against the live SQLite store, validating multi-agent co-existence and authorization isolation.
 - **Protocol compliance**: driven end to end with `@modelcontextprotocol/inspector --cli` across process deaths; mutating tools deny by default behind `CONTINUUM_MCP_MUTATING_CLIENTS`; external claims degrade to `REQUIRES_REVIEW` (`safe: false`).
 - **Self-healing**: hard-killed servers recover from orphaned SQLite `-wal`/`-shm` sidecars via single-retry cleanup at startup.
-- **Scale**: roughly 2,122 tests collected (~2,030 passing; the rest skip without optional services) on Python 3.11, 3.12, and 3.13 (unit, `hypothesis` property-based, concurrency, adversarial). CONTINUUM-Bench runs five crash scenarios plus a dedicated argument-drift scenario, measuring 0 duplicate work and 0 duplicate side effects for CONTINUUM against full duplication for naive replay; a separate 12-scenario recovery-correctness suite (`continuum.benchmark.phase6`) encodes the crash points from the durable-execution survey as executable assertions.
+- **Scale**: roughly 2,163 tests collected (~2,030 passing; the rest skip without optional services) on Python 3.11, 3.12, and 3.13 (unit, `hypothesis` property-based, concurrency, adversarial). CONTINUUM-Bench runs five crash scenarios plus a dedicated argument-drift scenario, measuring 0 duplicate work and 0 duplicate side effects for CONTINUUM against full duplication for naive replay; a separate 12-scenario recovery-correctness suite (`continuum.benchmark.phase6`) encodes the crash points from the durable-execution survey as executable assertions.
 - **Adversarial audit**: the full MCP surface was audited over the live protocol; three defects were found and fixed. Method and reproduction steps in [test.md](test.md).
 
 ## MCP Integration
@@ -398,7 +398,7 @@ Schema v6. SQLite is primary, Postgres is CI verified. One log, many projections
 
 ### Module map: one library, many surfaces
 
-CONTINUUM is one library (`src/continuum`, 104 modules) plus a large test suite (155 test files, ~2,122 tests). All modules append to and replay one hash chained event log:
+CONTINUUM is one library (`src/continuum`, 124 modules) plus a large test suite (161 test files, ~2,163 tests). All modules append to and replay one hash chained event log:
 
 | Module | Role |
 |:--|:--|
@@ -531,6 +531,24 @@ Open an issue before submitting large PRs. See [CONTRIBUTING.md](CONTRIBUTING.md
 <a href="https://github.com/Cyrax321/CONTINUUM/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=Cyrax321/CONTINUUM" />
 </a>
+
+Thanks to our community contributors, ordered by contributions:
+[@Adhi1-2](https://github.com/Adhi1-2), [@abyyxhek](https://github.com/abyyxhek),
+[@Amiirhosseini](https://github.com/Amiirhosseini), [@yuki-fuyutsuki](https://github.com/yuki-fuyutsuki),
+[@vjymisal0](https://github.com/vjymisal0), [@adity982](https://github.com/adity982),
+[@dchaudhari7177](https://github.com/dchaudhari7177), [@tasodoufu](https://github.com/tasodoufu),
+[@anya-research](https://github.com/anya-research), [@lesbass](https://github.com/lesbass),
+[@Parthipashok04](https://github.com/Parthipashok04), [@Samearth17](https://github.com/Samearth17),
+[@stoppo22](https://github.com/stoppo22),
+[@timothyanderson096-ocdealcheck](https://github.com/timothyanderson096-ocdealcheck),
+[@unmoha](https://github.com/unmoha), [@aastha-m22](https://github.com/aastha-m22),
+[@as950118](https://github.com/as950118), [@asarakhatun17-lgtm](https://github.com/asarakhatun17-lgtm),
+[@challenge456](https://github.com/challenge456),
+[@gouthamkrishnak2003](https://github.com/gouthamkrishnak2003), [@ItzSaurav](https://github.com/ItzSaurav),
+[@mhaye9545](https://github.com/mhaye9545), [@Newer1107](https://github.com/Newer1107),
+[@okestroHjJeong](https://github.com/okestroHjJeong), [@quangshuynh](https://github.com/quangshuynh), [@Rahul-pamula](https://github.com/Rahul-pamula),
+[@Shaisolaris](https://github.com/Shaisolaris), [@VedantMadane](https://github.com/VedantMadane),
+[@zynx-real](https://github.com/zynx-real).
 
 ## Sponsor
 

@@ -372,6 +372,21 @@ def test_anchor_event_is_non_projecting(db: str) -> None:
     )
 
 
+def test_read_all_events_merges_in_sequence_order(db: str) -> None:
+    """Full history stays sequence-ordered across the archive boundary (#650 review)."""
+    with SQLiteStorage(db) as store:
+        for i in range(3):
+            store.append_event("run_1", EventType.WORK_COMPLETED, {"n": i})
+        store.compact_run("run_1")
+        for i in range(3, 6):
+            store.append_event("run_1", EventType.WORK_COMPLETED, {"n": i})
+        full = store.read_all_events("run_1")
+    seqs = [e.sequence for e in full]
+    assert seqs == sorted(seqs)
+    assert len(seqs) == len(set(seqs))
+    assert [e.payload["n"] for e in full if e.type is EventType.WORK_COMPLETED] == list(range(6))
+
+
 def test_compact_run_rejects_through_sequence_that_would_eat_the_anchor(db: str) -> None:
     """Issue #705: through_sequence at or above the anchor's own sequence
     must be rejected. Accepting it archived and deleted the anchor (and with

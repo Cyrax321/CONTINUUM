@@ -246,6 +246,15 @@ def build_attempt_lesson(
     ledger_entries: Any | None = None,
     now: Any | None = None,
 ) -> Any:
+    """Build a bounded AttemptLesson capturing why an attempt failed.
+
+    Derives the attempt ID deterministically from the decision rationale,
+    uncertain action scars, and ledger length. Extracts the falsified
+    premise, environment delta, avoidance rules, and supporting evidence
+    from validation statuses. Enforces per-field character limits and a
+    total size budget of 2048 bytes, progressively trimming fields if
+    necessary to prevent context bloating.
+    """
     from continuum.security.hashing import stable_hash
 
     run_id = getattr(decision, "run_id", "unknown")
@@ -335,6 +344,13 @@ def build_attempt_lesson(
 
 
 def render_attempt_lesson(lesson: Any) -> list[str]:
+    """Format an AttemptLesson into human-readable summary lines.
+
+    Accepts an AttemptLesson model instance or a raw dictionary and returns
+    concise lines summarizing the attempt identifier, falsified rationale,
+    environment changes, uncertain action scars, avoidance rules, and
+    supporting evidence items.
+    """
     if isinstance(lesson, dict):
         attempt_id = str(lesson.get("attempt_id", ""))
         falsified = str(lesson.get("falsified", ""))
@@ -373,6 +389,12 @@ def record_attempt_lesson(
     uncertain_actions: Any | None = None,
     ledger_entries: Any | None = None,
 ) -> Any:
+    """Build and append an ATTEMPT_LESSON event to the run log.
+
+    Constructs an AttemptLesson via :func:`build_attempt_lesson` and commits
+    it to ``storage`` as an ``EventType.ATTEMPT_LESSON`` event signed with
+    ``Origin.DETERMINISTIC``. Returns the created lesson instance.
+    """
     lesson = build_attempt_lesson(
         decision, uncertain_actions=uncertain_actions, ledger_entries=ledger_entries
     )

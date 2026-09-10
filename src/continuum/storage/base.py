@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
+from heapq import merge
 from types import TracebackType
 from typing import Any, ClassVar
 
@@ -152,7 +153,10 @@ class Storage(ABC):
             return live
         if not live:
             return archived
-        return tuple(sorted([*archived, *live], key=lambda e: e.sequence))
+        # Both streams arrive sequence-ordered, so merge linearly instead of
+        # re-sorting: full-history folds on long compacted runs pay O(n).
+        # merge is stable, matching sorted() for equal sequences.
+        return tuple(merge(archived, live, key=lambda e: e.sequence))
 
     def foreign_action(self, key: str, *, exclude_run: str) -> Action | None:
         """Newest action recorded under ``key`` outside ``exclude_run``.
