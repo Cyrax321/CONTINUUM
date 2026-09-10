@@ -103,6 +103,7 @@ class RepairStep(BaseModel):
         return f"{self.kind.value}:{self.target}"
 
     def render(self) -> str:
+        """Format the step as a single human-readable status line"""
         mark = "[human]" if self.requires_human else "[auto] "
         detail = f" - {self.reason}" if self.reason else ""
         return f"{mark} {self.kind.value} {self.target}{detail}"
@@ -123,10 +124,12 @@ class RepairPlan(BaseModel):
 
     @property
     def blocking(self) -> tuple[RepairStep, ...]:
+        """The function return tuple of blocking steps in original order"""
         return tuple(s for s in self.steps if s.blocking)
 
     @property
     def requires_human(self) -> bool:
+        """Check if any step in this plan needs a person to step in. Returns True if at least one step has requires_human=True."""
         return any(s.requires_human for s in self.steps)
 
     @property
@@ -135,9 +138,16 @@ class RepairPlan(BaseModel):
         return self.steps[0] if self.steps else None
 
     def of_kind(self, kind: RepairKind) -> tuple[RepairStep, ...]:
+        """Get only the steps that match a specific kind in ReapirKind Enum.
+            Args:
+                kind: The RepairKind to filter by.
+            Returns:
+                All steps where step.kind is the given kind, in original order.
+            """
         return tuple(s for s in self.steps if s.kind is kind)
 
     def render(self) -> str:
+        """The function return steps in serial order with descreption if present else no repairs required"""
         if not self.steps:
             return "No repairs required."
         return "\n".join(f"  {i}. {s.render()}" for i, s in enumerate(self.steps, 1))
