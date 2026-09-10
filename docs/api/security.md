@@ -81,3 +81,62 @@ may use mutating tools; read-only tools stay open.
 
 The policy object and the errors raised when a caller is not permitted, did not
 identify itself, or failed authentication.
+
+## Confirmation token flow
+
+Runs created or updated via MCP carry `Origin.EXTERNAL_AGENT`, meaning their
+goal and progress are self-reported. To uphold the anti-self-certification
+guarantee, `continuum_resume` marks these runs with `REQUIRES_REVIEW`
+(`mode="request_human"`). While progress recording and checkpointing continue
+to operate normally, the run cannot resume without review. Confirming records a
+`REVIEW_CONFIRMED` event, clearing the review requirement.
+
+### Host CLI fallback
+
+By default, confirmation over MCP is disabled and fail-closed. Calling
+`continuum_confirm` over MCP refuses every caller with `NotAuthenticated`. The
+default and recommended workflow is human-driven out-of-band: an operator
+confirms the run on the host machine using the CLI:
+
+```bash
+continuum confirm <run_id>
+```
+
+This writes a `REVIEW_CONFIRMED` event with `Origin.HUMAN`, attesting the run
+without exposing confirmation credentials over MCP. Operators can also confirm
+only specific components using `--scope goal` or `--scope progress`.
+
+### `CONTINUUM_MCP_CONFIRM_TOKEN`
+
+To permit confirmation over MCP, an operator must explicitly set the
+`CONTINUUM_MCP_CONFIRM_TOKEN` environment variable.
+
+When configured:
+
+- The calling client must be included in the mutating allowlist
+  (`CONTINUUM_MCP_MUTATING_CLIENTS` or `.continuum/mcp-policy.json`).
+- The caller must present this exact token in the handshake's
+  `_meta.authToken`.
+- **Disjoint credential requirement**: The confirmation secret must be
+  distinct from all mutating credentials. At server startup,
+  `_reject_reused_confirmation_secret` verifies that
+  `CONTINUUM_MCP_CONFIRM_TOKEN` does not match `CONTINUUM_MCP_TOKEN` or any
+  entry in `CONTINUUM_MCP_CLIENT_TOKENS`. If an overlap is found, startup
+  raises `ValueError`. An agent trusted to record progress must never also
+  hold the secret required to confirm that progress.
+
+### `load_confirm(expected=None, *, env=None) -> ConfirmPolicy`
+
+Resolve the confirmation policy. Precedence: explicit `expected` argument,
+then the `CONTINUUM_MCP_CONFIRM_TOKEN` environment variable, then the refusing
+default. Unlike `load_auth`, an unset variable refuses every caller rather than
+leaving the tool open.
+
+### `ConfirmPolicy(expected=None, *, source="default (refusing)")`
+
+Gates `continuum_confirm` behind a dedicated secret. When no secret is
+configured, `disabled` is `True` and `verify(token)` raises
+`NotAuthenticated`, instructing the operator to run
+`continuum confirm <run_id>` on the host. When configured, `verify(token)`
+raises `NotAuthenticated` unless `token` matches the configured secret.
+
