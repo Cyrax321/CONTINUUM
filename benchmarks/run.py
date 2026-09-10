@@ -45,9 +45,8 @@ def _regenerate_readme_bench(horizon_report: Any, fault_report: Any | None = Non
 
     Looks for markers <!-- BENCH:START --> and <!-- BENCH:END --> in README.md
     and replaces the content between them with a table derived from the
-    horizon and fault-injection reports. If markers are missing, appends the
-    section. Deleting the table and re-running `python benchmarks/run.py`
-    regenerates it identically, proving no hand-edited numbers.
+    horizon and fault-injection reports. If markers are missing, skips update
+    to avoid duplicate table appends (issue #776).
     """
     readme = Path(__file__).resolve().parent.parent / "README.md"
     if not readme.exists():
@@ -129,8 +128,8 @@ def _regenerate_readme_bench(horizon_report: Any, fault_report: Any | None = Non
         new_text = re.sub(r"<!-- BENCH:START -->.*<!-- BENCH:END -->", table, text, flags=re.DOTALL)
         readme.write_text(new_text, encoding="utf-8")
     else:
-        # Append if no markers
-        readme.write_text(text.rstrip() + "\n\n" + table + "\n", encoding="utf-8")
+        # Require markers in README.md instead of appending duplicate sections (issue #776)
+        return
 
 
 def _append_continuum_bench(out_dir: str | Path) -> None:
