@@ -93,7 +93,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI 진입점
 continuum-mcp --help             # MCP 서버 진입점 ([mcp] 또는 [dev] 필요)
-pytest -q                        # 약 1,380개 테스트 수집 (정확한 수와 스킵 수는 환경에 따라 다름)
+pytest -q                        # 최소 환경에서 약 2,163개 수집, 약 2,030개 통과, 약 23개 스킵 (정확한 수는 환경에 따라 다름)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI가 강제하는 세 가지 게이트
 ```
@@ -226,7 +226,7 @@ CONTINUUM은 목업 단위 테스트뿐만 아니라 실제 LLM 에이전트, �
 - **서드파티 클라이언트**: Gemini CLI와 Kilo Code가 stdio JSON-RPC로 라이브 SQLite 저장소에 연결되어 다중 에이전트 공존과 인가 분리를 검증.
 - **프로토콜 준수**: `@modelcontextprotocol/inspector --cli`로 프로세스 죽음을 가로질러 엔드투엔드로 구동. 변경 도구는 기본적으로 `CONTINUUM_MCP_MUTATING_CLIENTS` 뒤에서 거부되며, 외부 클레임은 `REQUIRES_REVIEW`(`safe: false`)로 강등된다.
 - **자기 치유**: 하드킬된 서버는 시작 시 한 번의 재시도로 고립된 SQLite `-wal`/`-shm` 사이드카를 정리하여 복구한다.
-- **규모**: 약 1,380개 테스트가 수집됨(약 1,360개 통과, 나머지는 선택적 서비스 없이 스킵), Python 3.11, 3.12, 3.13에서 실행(unit, `hypothesis` 기반 속성 테스트, 동시성, 적대적). CONTINUUM-Bench는 다섯 개의 크래시 시나리오에 전용 argument-drift 시나리오를 더해 실행하며, CONTINUUM에 대해 0 중복 작업과 0 중복 사이드 이펙트를, 단순 재생에 대해 완전한 중복을 측정한다. 추가로 12 시나리오 복구 정확성 스위트(`continuum.benchmark.phase6`)가 내구성 실행 서베이의 크래시 지점을 실행 가능한 어설션으로 인코딩한다.
+- **규모**: 약 2,163개 테스트가 수집됨(약 2,030개 통과, 나머지는 선택적 서비스 없이 스킵), Python 3.11, 3.12, 3.13에서 실행(unit, `hypothesis` 기반 속성 테스트, 동시성, 적대적). CONTINUUM-Bench는 다섯 개의 크래시 시나리오에 전용 argument-drift 시나리오를 더해 실행하며, CONTINUUM에 대해 0 중복 작업과 0 중복 사이드 이펙트를, 단순 재생에 대해 완전한 중복을 측정한다. 추가로 12 시나리오 복구 정확성 스위트(`continuum.benchmark.phase6`)가 내구성 실행 서베이의 크래시 지점을 실행 가능한 어설션으로 인코딩한다.
 - **적대적 감사**: 전체 MCP 표면이 라이브 프로토콜 위에서 감사되었고, 세 가지 결함이 발견되어 수정되었다. 방법과 재현 단계는 [test.md](test.md)에 있다.
 
 ## MCP 통합
@@ -392,7 +392,7 @@ RESUME < REPAIR_AND_RESUME < REPLAN < WAIT < REQUEST_HUMAN < ROLLBACK < ABORT
 
 ### 모듈 맵, 하나의 라이브러리, 많은 표면
 
-CONTINUUM은 하나의 라이브러리(`src/continuum`, 104 모듈) plus 대규모 테스트 스위트(98 테스트 파일, 약 1,380 테스트)이다. 모든 모듈은 하나의 해시 체인 이벤트 로그에 추가하고 재생한다.
+CONTINUUM은 하나의 라이브러리(`src/continuum`, 124 모듈) plus 대규모 테스트 스위트(161 테스트 파일, 약 2,163 테스트)이다. 모든 모듈은 하나의 해시 체인 이벤트 로그에 추가하고 재생한다.
 
 | 모듈 | 역할 |
 |:--|:--|
