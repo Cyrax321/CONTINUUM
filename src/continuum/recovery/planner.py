@@ -138,12 +138,14 @@ class RepairPlan(BaseModel):
         return self.steps[0] if self.steps else None
 
     def of_kind(self, kind: RepairKind) -> tuple[RepairStep, ...]:
-        """Get only the steps that match a specific kind in ReapirKind Enum.
+        """Get only the steps that match a specific RepairKind.
+
             Args:
                 kind: The RepairKind to filter by.
+
             Returns:
                 All steps where step.kind is the given kind, in original order.
-            """
+        """
         return tuple(s for s in self.steps if s.kind is kind)
 
     def render(self) -> str:
