@@ -240,14 +240,14 @@ All notable changes to this project are documented here. The format follows
   keep wrapping durability-only. Docstrings only, no runtime change.
 
 - **`src/continuum/recovery/planner.py` is fully documented (#806).**
-  The planner's `RepairStep` and `RepairPlan` classes carried 4 undocumented
-  (or blank-docstring) public names: `RepairStep.render`, and
+  The planner's `RepairStep` and `RepairPlan` classes carried 5 undocumented
+  (or blank-docstring) public names: `RepairStep.render`, `RepairPlan.render` and
   `RepairPlan.requires_human`, `RepairPlan.blocking`, and `RepairPlan.of_kind`.
   Every docstring says what a caller needs: what `render` formats and how the
   `[auto]`/`[human]` prefix is chosen, what `requires_human` and `blocking`
   filter down to and in what order, and what `of_kind` matches on. Docstrings
   only, no runtime change.
-  
+
 ### Fixed
 
 - **Dashboard HITL actions remain visible after compaction (#809).** The dashboard

@@ -124,7 +124,7 @@ class RepairPlan(BaseModel):
 
     @property
     def blocking(self) -> tuple[RepairStep, ...]:
-        """The function return tuple of blocking steps in original order"""
+        """The blocking steps, in original order."""
         return tuple(s for s in self.steps if s.blocking)
 
     @property
@@ -140,16 +140,16 @@ class RepairPlan(BaseModel):
     def of_kind(self, kind: RepairKind) -> tuple[RepairStep, ...]:
         """Get only the steps that match a specific RepairKind.
 
-            Args:
-                kind: The RepairKind to filter by.
+        Args:
+            kind: The RepairKind to filter by.
 
-            Returns:
-                All steps where step.kind is the given kind, in original order.
+        Returns:
+            All steps where step.kind is the given kind, in original order.
         """
         return tuple(s for s in self.steps if s.kind is kind)
 
     def render(self) -> str:
-        """The function return steps in serial order with descreption if present else no repairs required"""
+        """The function return steps in serial order with description if present else no repairs required"""
         if not self.steps:
             return "No repairs required."
         return "\n".join(f"  {i}. {s.render()}" for i, s in enumerate(self.steps, 1))
