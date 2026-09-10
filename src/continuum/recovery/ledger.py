@@ -68,6 +68,12 @@ class LedgerLockError(LedgerError):
 
 
 class LedgerEntryKind(StrEnum):
+    """Categorisation of recovery ledger entries.
+
+    Differentiates sealed contracts (``DECISION``), human approval gating
+    events (``GATE``), and individual recovery execution attempts (``ATTEMPT``).
+    """
+
     DECISION = "decision"
     GATE = "gate"
     ATTEMPT = "attempt"
@@ -109,10 +115,16 @@ class RecoveryLedgerEntry:
         return self.content_hash == stable_hash(self.content())
 
     def to_record(self) -> dict[str, Any]:
+        """Convert the entry to a JSON-serializable dictionary including its hash."""
         return self.content() | {"content_hash": self.content_hash}
 
     @classmethod
     def from_record(cls, rec: dict[str, Any]) -> RecoveryLedgerEntry:
+        """Construct a ledger entry from a serialized record dictionary.
+
+        Reconstitutes the optional :class:`~continuum.models.RecoveryContract`
+        and parses timestamps from ISO 8601 strings.
+        """
         contract = rec.get("contract")
         return cls(
             entry_id=rec["entry_id"],
@@ -133,26 +145,38 @@ class LedgerBackend:
     """Where ledger entries live. Storage-agnostic by design."""
 
     def load(self, run_id: str) -> list[RecoveryLedgerEntry]:
+        """Load all persisted ledger entries for a run in storage order."""
         raise NotImplementedError
 
     def save(self, entry: RecoveryLedgerEntry) -> None:
+        """Append a single sealed ledger entry to durable storage."""
         raise NotImplementedError
 
     def replace(self, run_id: str, entries: Sequence[RecoveryLedgerEntry]) -> None:
+        """Atomically overwrite all ledger entries for a run with new entries."""
         raise NotImplementedError
 
 
 class MemoryLedgerBackend(LedgerBackend):
+    """In-memory ledger backend for testing and ephemeral runs.
+
+    Stores lists of :class:`RecoveryLedgerEntry` objects in an internal
+    dictionary keyed by run ID.
+    """
+
     def __init__(self) -> None:
         self._store: dict[str, list[RecoveryLedgerEntry]] = {}
 
     def load(self, run_id: str) -> list[RecoveryLedgerEntry]:
+        """Return a copy of the in-memory ledger entries for a run."""
         return list(self._store.get(run_id, []))
 
     def save(self, entry: RecoveryLedgerEntry) -> None:
+        """Append a ledger entry to the in-memory list for its run."""
         self._store.setdefault(entry.run_id, []).append(entry)
 
     def replace(self, run_id: str, entries: Sequence[RecoveryLedgerEntry]) -> None:
+        """Replace the in-memory entry list for a run with a new sequence."""
         self._store[run_id] = list(entries)
 
 
@@ -170,6 +194,10 @@ class FileLedgerBackend(LedgerBackend):
         os.makedirs(self._directory, exist_ok=True)
 
     def load(self, run_id: str) -> list[RecoveryLedgerEntry]:
+        """Read and deserialize all JSONL records for a run from disk.
+
+        Returns an empty list if the ledger file does not yet exist.
+        """
         path = self._path(run_id)
         if not os.path.exists(path):
             return []
@@ -183,11 +211,13 @@ class FileLedgerBackend(LedgerBackend):
         return out
 
     def save(self, entry: RecoveryLedgerEntry) -> None:
+        """Append a serialized JSON record for the entry to the run's JSONL file."""
         self._ensure_directory()
         with open(self._path(entry.run_id), "a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry.to_record()) + "\n")
 
     def replace(self, run_id: str, entries: Sequence[RecoveryLedgerEntry]) -> None:
+        """Rewrite the run's JSONL file with the provided sequence of entries."""
         self._ensure_directory()
         with open(self._path(run_id), "w", encoding="utf-8") as handle:
             for entry in entries:
@@ -337,6 +367,7 @@ class RecoveryLedger:
             return count
 
     def attempts(self, run_id: str) -> int:
+        """Return the count of recorded recovery attempts for a run."""
         return sum(1 for e in self.entries(run_id) if e.kind == LedgerEntryKind.ATTEMPT.value)
 
     def requires_human(self, run_id: str, *, max_attempts: int = 3) -> bool:
@@ -376,9 +407,11 @@ class RecoveryLedger:
     # -- reading ---------------------------------------------------------- #
 
     def entries(self, run_id: str) -> list[RecoveryLedgerEntry]:
+        """Return all ledger entries for a run sorted by ascending sequence."""
         return sorted(self._backend.load(run_id), key=lambda e: e.sequence)
 
     def last_decision(self, run_id: str) -> RecoveryLedgerEntry | None:
+        """Return the latest sealed decision entry for a run, or ``None`` if none exists."""
         decisions = [e for e in self.entries(run_id) if e.kind == LedgerEntryKind.DECISION.value]
         return decisions[-1] if decisions else None
 
