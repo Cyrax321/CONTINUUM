@@ -191,6 +191,37 @@ def test_an_absolute_path_is_not_mangled_into_a_relative_one() -> None:
     assert _resolve_path("/plain/abs.db") == "/plain/abs.db"
 
 
+def test_a_drive_letter_survives_the_three_slash_form() -> None:
+    """``sqlite:///C:/db`` is the absolute form of ``C:/db`` on Windows (#842).
+
+    The leftover third slash produced ``/C:/db``, which sqlite3 rejects on
+    Windows, so the URL grammar's slash is dropped and the drive letter kept.
+    POSIX absolute paths must keep theirs, which the sibling assertions pin.
+    """
+    from continuum.storage.sqlite import _resolve_path
+
+    assert _resolve_path("sqlite:///C:/data/agent.db") == "C:/data/agent.db"
+    assert _resolve_path("sqlite:///d:/agent.db") == "d:/agent.db"
+    # A plain drive-letter path was already fine and stays untouched.
+    assert _resolve_path("C:/data/agent.db") == "C:/data/agent.db"
+    # POSIX forms regress to nothing: the slash before a non-drive stem stays.
+    assert _resolve_path("sqlite:///var/db/agent.db") == "/var/db/agent.db"
+    assert _resolve_path("sqlite:////var/db/agent.db") == "//var/db/agent.db"
+
+
+def test_a_drive_letter_url_opens_on_windows(tmp_path: Path) -> None:
+    """End to end: the three-slash drive form must open a real database.
+
+    Runs on every platform so the POSIX green path is pinned too; the
+    interesting failure (sqlite3 rejecting ``/C:/...``) only existed on
+    Windows.
+    """
+    db = tmp_path / "agent.db"
+    with open_storage(f"sqlite:///{db.as_posix()}") as store:
+        store.create_run(Run(run_id="run_1", goal="g"))
+    assert db.exists(), "database was created somewhere other than the requested path"
+
+
 def test_the_absolute_url_form_writes_where_it_says(tmp_path: Path) -> None:
     db = tmp_path / "agent.db"
     with open_storage(f"sqlite://{db}") as store:

@@ -141,6 +141,14 @@ def probe_verdict(
     The verdict is True, False, None (probe ran but could not tell) or the
     string ``"error"`` (probe itself failed). ``detail`` carries whatever a
     human would want to see next to the outcome.
+
+    ``spec["command"]`` runs through the platform shell, ``cmd.exe /c`` on
+    Windows and ``/bin/sh -c`` elsewhere, so a probe string is silently
+    shell-family-specific: a registry written on one platform (redirections,
+    quoting, builtins) fails on the other, and the run then refuses to
+    resume, fail-closed, until the probe is fixed (#842). Prefer an
+    executable plus arguments that both shells resolve identically, or keep
+    one registry per platform.
     """
     try:
         completed = subprocess.run(  # noqa: S602 - operator-configured command
@@ -281,7 +289,13 @@ def _parse_authority_verdict(text: str) -> bool | None | Literal["unknown"]:
 def probe_authority_verdict(
     spec: Mapping[str, Any], payload: Mapping[str, Any]
 ) -> tuple[bool | None | Literal["error"], str]:
-    """Run one authority probe. Returns (verdict, detail)."""
+    """Run one authority probe. Returns (verdict, detail).
+
+    ``spec["command"]`` runs through the platform shell, so the same
+    shell-family caveat as :func:`probe_verdict` applies: a command string
+    written for one shell family fails on another and the authority stays
+    blocked, fail-closed (#842).
+    """
     try:
         completed = subprocess.run(  # noqa: S602 - operator-configured command
             spec["command"],

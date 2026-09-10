@@ -156,6 +156,35 @@ class MemoryLedgerBackend(LedgerBackend):
         self._store[run_id] = list(entries)
 
 
+#: Every character a Windows filename forbids, separators included. POSIX
+#: forbids none of the extras, so replacing them all on every platform costs
+#: nothing and keeps a caller-supplied run id usable as a filename on both
+#: families (issue #842: only "/" and "\" were replaced, so run ids carrying
+#: ":*?<>"|" produced unopenable ledger files on Windows).
+_UNSAFE_FILENAME_CHARS = '/\\:*?"<>|'
+
+#: Windows reserves these device names as filenames with any extension, so a
+#: sanitized id whose stem is one of them still cannot open there.
+_RESERVED_DEVICE_NAMES = frozenset(
+    {"AUX", "CON", "NUL", "PRN"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def _sanitize_run_id(run_id: str) -> str:
+    """Turn a caller-supplied run id into a safe filename component.
+
+    The result keeps every character that is legal on both platform families
+    and substitutes an underscore for the rest, so the same run id maps to
+    the same file everywhere.
+    """
+    safe = "".join("_" if char in _UNSAFE_FILENAME_CHARS else char for char in run_id)
+    if safe.split(".", 1)[0].upper() in _RESERVED_DEVICE_NAMES:
+        safe = f"_{safe}"
+    return safe
+
+
 class FileLedgerBackend(LedgerBackend):
     """One JSONL file per run. Each line is one entry record."""
 
@@ -163,8 +192,7 @@ class FileLedgerBackend(LedgerBackend):
         self._directory = directory
 
     def _path(self, run_id: str) -> str:
-        safe = run_id.replace("/", "_").replace("\\", "_")
-        return os.path.join(self._directory, f"ledger-{safe}.jsonl")
+        return os.path.join(self._directory, f"ledger-{_sanitize_run_id(run_id)}.jsonl")
 
     def _ensure_directory(self) -> None:
         os.makedirs(self._directory, exist_ok=True)

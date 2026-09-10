@@ -132,6 +132,40 @@ def test_file_backend_round_trips(tmp_path) -> None:  # type: ignore[no-untyped-
     assert reopened.verify("run_1")[0] is True
 
 
+def test_file_backend_sanitizes_windows_reserved_characters(tmp_path) -> None:
+    """A run id may carry characters Windows forbids in filenames (#842).
+
+    Only the separators were replaced, so a caller-supplied id like
+    ``run:1<2026>?`` produced a ledger file that could not be opened on
+    Windows at all. Every forbidden character must round-trip through a
+    name that opens on both platform families.
+    """
+    hostile = 'run:1<2026>?"*|/x\\y'
+    backend = FileLedgerBackend(str(tmp_path))
+    RecoveryLedger(backend).append_decision(hostile, _contract(0))
+
+    reopened = RecoveryLedger(backend)
+    assert len(reopened.entries(hostile)) == 1
+    assert reopened.verify(hostile)[0] is True
+
+
+def test_file_backend_sanitizes_windows_reserved_device_names(tmp_path) -> None:
+    """``CON`` and friends are reserved as filenames with any extension.
+
+    The ``ledger-`` prefix already shields the real filename, but the
+    sanitizer must not become a trap the day the prefix changes (#842).
+    """
+    from continuum.recovery.ledger import _sanitize_run_id
+
+    assert _sanitize_run_id("CON") == "_CON"
+    assert _sanitize_run_id("nul.backup") == "_nul.backup"
+    assert _sanitize_run_id("com1") == "_com1"
+    # Ordinary ids, including ones that merely contain the substring, pass.
+    assert _sanitize_run_id("run_1") == "run_1"
+    assert _sanitize_run_id("connection") == "connection"
+    assert _sanitize_run_id("a/b\\c:d") == "a_b_c_d"
+
+
 def test_pending_gate_survives_prior_approval(ledger: RecoveryLedger) -> None:
     # Regression for #176: an approval for an earlier decision must not clear
     # the gate of a later gate-required decision.

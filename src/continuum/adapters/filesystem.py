@@ -34,14 +34,29 @@ class FilesystemSandboxAdapter(GenericAgentAdapter):
         self.sandbox_dir.mkdir(parents=True, exist_ok=True)
 
     def run_shell(
-        self, run_id: str, command: str, *, dep_scope: str | None = None
+        self,
+        run_id: str,
+        command: str | list[str],
+        *,
+        dep_scope: str | None = None,
     ) -> AdapterResult:
-        """Run ``command`` inside the sandbox dir, recorded as an action."""
+        """Run ``command`` inside the sandbox dir, recorded as an action.
+
+        A string command runs through the platform shell, ``cmd.exe /c`` on
+        Windows and ``/bin/sh -c`` elsewhere, so its syntax is silently
+        shell-family-specific: redirections, quoting, and builtins written
+        for one family fail on the other (#842). Pass an argv list to run
+        without a shell, which is portable across platforms and free of
+        quoting pitfalls; the string form is kept for callers that want the
+        shell, with the caveat that such a command only works where the
+        shell family it was written for is the one running it.
+
+        """
 
         def _run() -> str:
             completed = subprocess.run(
                 command,
-                shell=True,
+                shell=isinstance(command, str),
                 cwd=str(self.sandbox_dir),
                 capture_output=True,
                 text=True,

@@ -30,3 +30,21 @@ def test_run_shell_passes_dep_scope(tmp_path) -> None:
     adapter.run_shell("run_1", "echo x", dep_scope="numpy")
     recorded = ActionLedger(storage, "run_1").all()
     assert recorded[0].dep_scope == "numpy"
+
+
+def test_run_shell_accepts_an_argv_list_without_a_shell(tmp_path) -> None:
+    """The argv form is shell-free, so it runs identically on every platform.
+
+    ``echo`` only happens to work under both shell families; a command like
+    ``python -c "print(1)"`` or any redirection is family-specific, which is
+    why the list form exists (#842).
+    """
+    import sys
+
+    adapter, storage = _adapter(tmp_path)
+    result = adapter.run_shell("run_1", [sys.executable, "-c", "print('argv ok')"])
+    assert result.status == "completed"
+    assert result.output.strip() == "argv ok"
+    recorded = ActionLedger(storage, "run_1").all()
+    assert recorded[0].action_type == "shell"
+    assert recorded[0].arguments["command"] == [sys.executable, "-c", "print('argv ok')"]

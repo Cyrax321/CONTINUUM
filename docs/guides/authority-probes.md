@@ -33,6 +33,12 @@ stdin: `authority_id`, `consumer_run_id`, `via_action_id`, `consumed_at`, and
 `sequence`. A probe that needs no context can ignore stdin entirely. For this
 walkthrough any command printing a verdict will do:
 
+> The command string runs through the platform shell (`cmd.exe /c` on Windows,
+> `/bin/sh -c` elsewhere), so its syntax is shell-family-specific: a registry
+> written on one platform fails on the other, and the authority then stays
+> blocked, fail-closed, until the probe is fixed. Prefer an executable plus
+> arguments both shells resolve identically, or keep one registry per platform.
+
 ```bash
 mkdir -p /tmp/probe-demo
 export DB=/tmp/probe-demo/g.db

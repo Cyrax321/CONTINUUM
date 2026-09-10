@@ -71,7 +71,10 @@ def _resolve_path(url_or_path: str | Path) -> str:
 
     ``sqlite:///`` is the conventional form: the third slash begins an absolute
     path. Stripping it blindly would turn ``/var/db`` into ``var/db`` and open a
-    file in the wrong place, so the leading slash is preserved.
+    file in the wrong place, so the leading slash is preserved. The exception is
+    a Windows drive letter: ``sqlite:///C:/db`` is the three-slash absolute form
+    of ``C:/db``, and the leftover slash would leave a path (``/C:/db``) that
+    sqlite3 rejects on Windows, so it is dropped (#842).
     """
     raw = str(url_or_path)
     if raw.startswith("sqlite://"):
@@ -79,6 +82,10 @@ def _resolve_path(url_or_path: str | Path) -> str:
         # sqlite://a.db -> a.db (relative). Stripping the third slash too would
         # silently turn an absolute path into a relative one.
         raw = raw[len("sqlite://") :]
+        if len(raw) >= 3 and raw[0] == "/" and raw[1].isalpha() and raw[2] == ":":
+            # A drive letter follows the third slash: that slash is the URL
+            # grammar, not the filesystem. sqlite:///C:/db -> C:/db.
+            raw = raw[1:]
     if raw in ("", "/"):
         return ":memory:"
     return raw
