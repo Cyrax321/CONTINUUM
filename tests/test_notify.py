@@ -8,6 +8,8 @@ import http.server
 import json
 import threading
 
+import pytest
+
 from continuum.recovery.notify import (
     SIGNATURE_HEADER,
     post_webhook,
@@ -121,3 +123,130 @@ def test_malformed_status_line_still_fails_open() -> None:
     finally:
         stop.set()
         listener.close()
+
+
+def test_load_webhooks_absent_is_empty(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from continuum.recovery.notify import load_webhooks
+
+    assert load_webhooks(tmp_path / "nope.json") == []
+
+
+def test_load_webhooks_validates(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import json as _json
+
+    from continuum.recovery.notify import WebhookConfigError, load_webhooks
+
+    good = tmp_path / "webhooks.json"
+    good.write_text(
+        _json.dumps(
+            {
+                "webhooks": [
+                    {"url": "https://hooks.example.com/x", "secret": "s"},
+                    {
+                        "url": "http://int/hook",
+                        "events": ["request_human", "liveness_breach"],
+                        "timeout": 2,
+                        "max_retries": 3,
+                    },
+                ]
+            }
+        )
+    )
+    endpoints = load_webhooks(good)
+    assert len(endpoints) == 2
+    assert endpoints[0].events == ("request_human",)
+    assert endpoints[0].wants("request_human") and not endpoints[0].wants("liveness_breach")
+    assert endpoints[1].timeout == 2 and endpoints[1].max_retries == 3
+
+    bad_shapes = [
+        {"webhooks": [{"url": "file:///etc/passwd"}]},
+        {"webhooks": [{"url": "https://x", "events": ["nope"]}]},
+        {"webhooks": [{"url": "https://x", "events": []}]},
+        {"webhooks": [{"url": "https://x", "timeout": True}]},
+        {"webhooks": [{"url": "https://x", "timeout": -1}]},
+        {"webhooks": [{"url": "https://x", "max_retries": True}]},
+        {"webhooks": [{"url": "https://x", "max_retries": 9}]},
+        {"webhooks": [{"url": 42}]},
+    ]
+    # A missing key behaves like a missing file: no endpoints, no error.
+    empty = tmp_path / "empty.json"
+    empty.write_text(_json.dumps({"nope": []}))
+    assert load_webhooks(empty) == []
+    for i, shape in enumerate(bad_shapes):
+        p = tmp_path / f"bad{i}.json"
+        p.write_text(_json.dumps(shape))
+        with pytest.raises(WebhookConfigError):
+            load_webhooks(p)
+
+
+def test_notify_endpoints_fans_out_by_subscription() -> None:
+    """Only subscribed endpoints receive the event; results keyed by url."""
+    from continuum.recovery.notify import WebhookEndpoint, notify_endpoints
+
+    captured: dict = {}
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", 0))
+            captured.setdefault("n", 0)
+            captured["n"] += 1
+            self.rfile.read(length)
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/hook"
+        endpoints = [
+            WebhookEndpoint(url=url, events=("request_human",)),
+            WebhookEndpoint(url="http://127.0.0.1:1/dead", events=("request_human",)),
+            WebhookEndpoint(url=url, events=("liveness_breach",)),
+        ]
+        results = notify_endpoints(endpoints, "request_human", {"run_id": "r1"})
+        assert results == {url: True, "http://127.0.0.1:1/dead": False}
+        assert captured["n"] == 1
+        assert notify_endpoints(endpoints, "requires_review", {"run_id": "r1"}) == {}
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_duplicate_urls_aggregate_conservatively() -> None:
+    """One success must not mask another entry's failure on the same url."""
+    import http.server
+    import threading
+
+    from continuum.recovery.notify import WebhookEndpoint, notify_endpoints
+
+    captured: dict = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            captured["n"] = captured.get("n", 0) + 1
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/hook"
+        endpoints = [
+            WebhookEndpoint(url=url, events=("request_human",)),
+            WebhookEndpoint(url=url, events=("request_human",)),
+        ]
+        assert notify_endpoints(endpoints, "request_human", {}) == {url: True}
+        assert captured["n"] == 2
+    finally:
+        server.shutdown()
+        server.server_close()
