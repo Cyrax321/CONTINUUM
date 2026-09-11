@@ -75,6 +75,7 @@ class ProjectionReport:
 
     @property
     def complete(self) -> bool:
+        """True when the fold understood every event type it consumed."""
         return not self.ignored_types
 
 
@@ -262,6 +263,7 @@ class _Accumulator:
     # -- handlers --------------------------------------------------------- #
 
     def run_started(self, event: Event) -> None:
+        """Fold a run start into the goal, progress, and creation time."""
         self.goal = Goal(
             description=_payload_str(event, "goal"),
             version=int(event.payload.get("goal_version", 1)),
@@ -276,6 +278,7 @@ class _Accumulator:
         self.created_at = event.timestamp
 
     def task_updated(self, event: Event) -> None:
+        """Fold a goal or progress update; raises ProjectionError before any start."""
         if self.goal is None:
             raise ProjectionError(
                 f"event {event.event_id}: TASK_UPDATED before the run was started"
@@ -348,6 +351,7 @@ class _Accumulator:
             self.pending_work = [w for w in self.pending_work if w.task_id != str(task_id)]
 
     def decision_created(self, event: Event) -> None:
+        """Fold a new decision, replacing any row with the same id."""
         decision = Decision(
             decision_id=_payload_str(event, "decision_id"),
             decision=_payload_str(event, "decision"),
@@ -360,6 +364,7 @@ class _Accumulator:
             self.decisions.append(decision)
 
     def decision_invalidated(self, event: Event) -> None:
+        """Mark the named decision invalid; raises ProjectionError for an unknown id."""
         decision_id = _payload_str(event, "decision_id")
         existing = next((d for d in self.decisions if d.decision_id == decision_id), None)
         if existing is None:
@@ -381,6 +386,7 @@ class _Accumulator:
         )
 
     def evidence_added(self, event: Event) -> None:
+        """Fold a new evidence item into the accumulator."""
         item = Evidence(
             evidence_id=_payload_str(event, "evidence_id"),
             summary=str(event.payload.get("summary", "")),
@@ -399,6 +405,7 @@ class _Accumulator:
             self.evidence.append(item)
 
     def finding_added(self, event: Event) -> None:
+        """Fold a new finding into the accumulator."""
         finding = Finding(
             finding_id=_payload_str(event, "finding_id"),
             claim=_payload_str(event, "claim"),
@@ -411,6 +418,7 @@ class _Accumulator:
             self.findings.append(finding)
 
     def finding_invalidated(self, event: Event) -> None:
+        """Mark the named finding invalid; raises ProjectionError for an unknown id."""
         finding_id = _payload_str(event, "finding_id")
         existing = next((f for f in self.findings if f.finding_id == finding_id), None)
         if existing is None:
@@ -423,6 +431,7 @@ class _Accumulator:
         )
 
     def work_added(self, event: Event) -> None:
+        """Fold a new pending-work item into the accumulator."""
         work = PendingWork(
             task_id=_payload_str(event, "task_id"),
             description=_payload_str(event, "description"),
@@ -434,6 +443,7 @@ class _Accumulator:
             self.pending_work.append(work)
 
     def dependency_declared(self, event: Event) -> None:
+        """Fold a declared external dependency into the accumulator."""
         dependency = ExternalDependency(
             resource=_payload_str(event, "resource"),
             kind=str(event.payload.get("kind", "resource")),
@@ -452,6 +462,7 @@ class _Accumulator:
             self.dependencies.append(dependency)
 
     def approval_requested(self, event: Event) -> None:
+        """Fold a new approval request into the accumulator."""
         approval = Approval(
             approval_id=_payload_str(event, "approval_id"),
             subject=_payload_str(event, "subject"),
@@ -461,6 +472,7 @@ class _Accumulator:
             self.approvals.append(approval)
 
     def approval_resolved(self, event: Event, status: ApprovalStatus) -> None:
+        """Fold an approval resolution, creating the row when unknown."""
         approval_id = _payload_str(event, "approval_id")
         existing = next((a for a in self.approvals if a.approval_id == approval_id), None)
         if existing is None:
@@ -492,6 +504,7 @@ class _Accumulator:
         _replace(self.approvals, "approval_id", approval_id, updated)
 
     def model_changed(self, event: Event) -> None:
+        """Fold a model change, keeping the previous model for the record."""
         previous = self.model
         self.model = ModelState(
             model=str(event.payload.get("model")) if event.payload.get("model") else None,
@@ -503,6 +516,7 @@ class _Accumulator:
         )
 
     def model_assumption_recorded(self, event: Event) -> None:
+        """Fold a model-specific assumption into the accumulator."""
         assumption = ModelSpecificState(
             item_id=_payload_str(event, "item_id"),
             description=_payload_str(event, "description"),
@@ -513,6 +527,7 @@ class _Accumulator:
         self.model = current.model_copy(update={"model_specific_state": assumptions})
 
     def constraint_pinned(self, event: Event) -> None:
+        """Fold a newly pinned governance constraint."""
         payload = ConstraintPinned.model_validate(event.payload)
         pin = ConstraintPin(
             constraint_id=payload.constraint_id,
@@ -524,6 +539,7 @@ class _Accumulator:
         self.pins[payload.constraint_id] = pin
 
     def constraint_retracted(self, event: Event) -> None:
+        """Fold a constraint retraction."""
         payload = ConstraintRetracted.model_validate(event.payload)
         constraint_id = payload.constraint_id
         if constraint_id in self.pins:
@@ -533,6 +549,7 @@ class _Accumulator:
                 self.unmatched_pin_retractions.append(constraint_id)
 
     def attempt_lesson(self, event: Event) -> None:
+        """Fold a recorded attempt lesson into the accumulator."""
         lesson = AttemptLesson.model_validate(event.payload)
         if any(existing.attempt_id == lesson.attempt_id for existing in self.attempt_lessons):
             return
@@ -540,6 +557,7 @@ class _Accumulator:
         self.attempt_lessons.sort(key=lambda existing: existing.created_at)
 
     def trajectory_report(self, event: Event) -> None:
+        """Fold a trajectory report into the accumulator."""
         report = TrajectoryReport.model_validate(event.payload)
         if any(existing.report_id == report.report_id for existing in self.trajectory_reports):
             return
@@ -549,6 +567,7 @@ class _Accumulator:
         self.trajectory_reports.sort(key=lambda existing: existing.window_end)
 
     def plan_upsert(self, event: Event) -> None:
+        """Fold a plan upsert, merging steps by id."""
         payload = event.payload
         plan_id = payload.get("plan_id")
         if not isinstance(plan_id, str) or not plan_id.strip():
@@ -609,6 +628,7 @@ class _Accumulator:
     # -- finish ----------------------------------------------------------- #
 
     def build(self) -> SemanticState:
+        """Assemble the accumulated rows into the projected state."""
         return self._build()
 
     def build_degraded(self, event: Event, reason: str) -> SemanticState:
