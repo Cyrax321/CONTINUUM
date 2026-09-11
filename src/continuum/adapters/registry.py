@@ -43,9 +43,11 @@ class AdapterRegistry:
         return factory()
 
     def names(self) -> list[str]:
+        """Sorted names of all registered adapters."""
         return sorted(self._factories)
 
     def all(self) -> Mapping[str, type]:
+        """Instantiate every registered adapter, keyed by name."""
         return {name: self.get(name) for name in self.names()}
 
 
