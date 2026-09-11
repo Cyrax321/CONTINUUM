@@ -1112,6 +1112,57 @@ def cmd_watch(args: argparse.Namespace, storage: Storage, out: Any, err: Any) ->
     return 0
 
 
+def cmd_notify_test(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Send a test notification through the webhook registry (issue #305).
+
+    Verifies operator wiring without manufacturing a real blockage: loads
+    ``.continuum/webhooks.json`` (or ``--registry``), delivers a test payload
+    to every endpoint subscribed to ``--event``, and reports per-url results.
+    Exit 0 only when every subscribed endpoint answers 2xx.
+    """
+    from continuum.recovery.notify import (
+        WEBHOOK_EVENTS,
+        WebhookConfigError,
+        load_webhooks,
+        notify_endpoints,
+    )
+
+    del storage
+    event = getattr(args, "event", None) or "request_human"
+    if event not in WEBHOOK_EVENTS:
+        print(
+            f"error: unknown event {event!r} (known: {sorted(WEBHOOK_EVENTS)})",
+            file=err,
+        )
+        return ExitCode.ERROR
+    registry = getattr(args, "registry", None)
+    try:
+        endpoints = load_webhooks(registry)
+    except WebhookConfigError as exc:
+        print(f"error: {exc}", file=err)
+        return ExitCode.ERROR
+    targets = [ep for ep in endpoints if ep.wants(event)]
+    if not targets:
+        _emit(
+            {"event": event, "results": {}},
+            f"no endpoints subscribe to {event!r}",
+            as_json=args.json,
+            stream=out,
+            palette=getattr(args, "_palette", None),
+        )
+        return ExitCode.OK
+    results = notify_endpoints(targets, event, {"event": event, "test": True})
+    lines = [f"  {'ok' if delivered else 'FAILED'}  {url}" for url, delivered in results.items()]
+    _emit(
+        {"event": event, "results": results},
+        "\n".join(lines),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK if all(results.values()) else ExitCode.ERROR
+
+
 def cmd_health(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Advisory prefix-trust health check (issue #401). Read-only."""
     # Health is advisory only: it never moves mode, never gates, never changes
@@ -3655,6 +3706,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     health = with_run(add("health", cmd_health, "Advisory prefix-trust health check. Read-only."))
     health.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    notify_test = add("notify-test", cmd_notify_test, "Send a test notification through webhooks.")
+    notify_test.add_argument("--event", default="request_human", help="event to test delivery for")
+    notify_test.add_argument("--registry", default=None, help="webhook registry path")
     # health is advisory only; it never gates, never moves mode, never changes exit code
     # (issue #401). It reports trust_score with per-dimension breakdown.
 
