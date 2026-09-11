@@ -103,7 +103,7 @@ class RepairStep(BaseModel):
         return f"{self.kind.value}:{self.target}"
 
     def render(self) -> str:
-        """Format the step as a single human-readable status line"""
+        """Render this step as a single human-readable status line, prefixed with [human] when human action is required, else [auto]."""
         mark = "[human]" if self.requires_human else "[auto] "
         detail = f" - {self.reason}" if self.reason else ""
         return f"{mark} {self.kind.value} {self.target}{detail}"
@@ -149,7 +149,7 @@ class RepairPlan(BaseModel):
         return tuple(s for s in self.steps if s.kind is kind)
 
     def render(self) -> str:
-        """The function return steps in serial order with description if present else no repairs required"""
+        """Render every step as a numbered list, or "No repairs required." when the plan is empty."""
         if not self.steps:
             return "No repairs required."
         return "\n".join(f"  {i}. {s.render()}" for i, s in enumerate(self.steps, 1))
