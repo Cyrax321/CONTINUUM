@@ -98,6 +98,23 @@ def test_precommit_pins_the_ruff_version_from_the_dev_extra() -> None:
     )
 
 
+def test_install_reference_pins_the_same_ruff() -> None:
+    """The dependency table in references/install.md is a fourth ruff pin.
+
+    It read ``ruff==0.16.3`` for two releases after the other three pins moved
+    to 0.16.5 (#840), because no test watched it, so a contributor following
+    the install reference installed a different ruff than CI enforced.
+    """
+    expected = _pinned_ruff_version()
+    text = (REPO_ROOT / "references" / "install.md").read_text(encoding="utf-8")
+    pins = re.findall(r"ruff==([0-9.]+)", text)
+    assert pins == [expected], (
+        f"references/install.md pins ruff=={pins}, but pyproject's dev extra "
+        f"pins ruff=={expected}. Bump all four pins in the same PR; the "
+        "lockstep note in CONTRIBUTING.md lists them."
+    )
+
+
 def test_dependabot_does_not_watch_the_pre_commit_ecosystem() -> None:
     """The pre-commit ecosystem is deliberately absent from dependabot (#689).
 

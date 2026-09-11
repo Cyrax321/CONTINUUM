@@ -27,7 +27,7 @@ behind a deny-by-default MCP server.
 
 - **Recovery as a sealed contract** - `RecoveryEngine.assess` reduces three signals to one `RecoveryMode` (max-severity, `RESUME < ... < ABORT`) and returns a hash-sealed `RecoveryContract` with `evidence` / `reason` / `next_allowed_action` / `human_steps` (`src/continuum/recovery/`).
 
-- **Deny-by-default surfaces** - MCP server (11 tools, read-only/mutating split, allowlist + token auth in `src/continuum/mcp/authz.py`), CLI with exit-code contract (`src/continuum/cli/main.py`), enforcing HTTP gateway (`src/continuum/gateway.py`), OTel bridge (`src/continuum/otel.py`), observation hooks + briefing (`src/continuum/hooks.py`, `src/continuum/clienthooks.py`).
+- **Deny-by-default surfaces** - MCP server (12 tools, read-only/mutating split, allowlist + token auth in `src/continuum/mcp/authz.py`), CLI with exit-code contract (`src/continuum/cli/main.py`), enforcing HTTP gateway (`src/continuum/gateway.py`), OTel bridge (`src/continuum/otel.py`), observation hooks + briefing (`src/continuum/hooks.py`, `src/continuum/clienthooks.py`).
 
 - **Adapters and thin hooks** - nine class-based adapters in `src/continuum/adapters/` plus thin hook surfaces `src/continuum/adapters/thin.py` (CrewAI, AutoGen, Pydantic AI) and `make_continuum_checkpointer` for LangGraph native persistence. See `references/adapters.md` and `docs/recipes/`.
 

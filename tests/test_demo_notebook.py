@@ -20,6 +20,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 import continuum
 
 NOTEBOOK = Path(__file__).parent.parent / "examples" / "demo.ipynb"
@@ -41,6 +43,7 @@ def test_notebook_stays_plain_python() -> None:
             assert not line.lstrip().startswith(("%", "!")), f"IPython escape in a cell: {line!r}"
 
 
+@pytest.mark.slow
 def test_notebook_runs_end_to_end(tmp_path: Path) -> None:
     script = tmp_path / "demo_cells.py"
     script.write_text("\n".join(_code_cells()) + "\n", encoding="utf-8")

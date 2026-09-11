@@ -56,6 +56,10 @@ cat .codex/hooks.json | python -m json.tool
 }
 ```
 
+Replace `/absolute/path/to/.venv/bin/continuum` with the resolved path:
+`which continuum` on macOS/Linux, `where.exe continuum` on Windows, where the
+executable lives under `.venv\Scripts\continuum.exe`.
+
 ```bash
 continuum --json resume | python -m json.tool | grep -q "pins"
 ```

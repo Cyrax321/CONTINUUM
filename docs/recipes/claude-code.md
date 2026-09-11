@@ -54,7 +54,10 @@ instead if you want the compaction boundary to report without writing:
 }
 ```
 
-Replace `/absolute/path/to/.venv/bin/continuum` with `which continuum`.
+Replace `/absolute/path/to/.venv/bin/continuum` with the resolved path:
+`which continuum` on macOS/Linux, `where.exe continuum` on Windows, where
+the executable lives under `.venv\Scripts\continuum.exe` rather than
+`.venv/bin/continuum`.
 
 For an explicit `--json resume` variant (pairs with #394):
 

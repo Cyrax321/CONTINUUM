@@ -276,6 +276,23 @@ continuum --db /tmp/embed-claude-demo.db --json resume hardkill-demo | python -m
 echo "exit code: $?"
 ```
 
+The same test on Windows (PowerShell), with the platform temporary directory
+and no heredoc: save the Python block above to a file, point its `db` variable
+at `$db`, and run it with `python` between the two `continuum` calls.
+
+```powershell
+# fresh DB for the demo
+$db = "$env:TEMP\embed-claude-demo.db"
+Remove-Item -ErrorAction SilentlyContinue "$db", "$db-wal", "$db-shm"
+continuum --db $db start hardkill-demo --goal "Demo task for embed test"
+
+# ... run the saved Python block here (same simulation) ...
+
+# fresh session resumes (new process, same DB, no prompt needed)
+continuum --db $db --json resume hardkill-demo | python -m json.tool
+"exit code: $LASTEXITCODE"
+```
+
 Expected contract (real output from this repo, ids vary per run):
 
 ```json
@@ -324,7 +341,7 @@ A newcomer with only this guide should have crash recovery inside ten minutes. S
 2. `continuum start my-task --goal "trial"` (1s)
 3. `continuum hooks install claude-code` (1s)
 4. Do any work (write a file, claim an action via adapter, checkpoint)
-5. `kill -9` the agent (or `os._exit(9)` in the example) (instant)
+5. `kill -9` the agent (or `os._exit(9)` in the example; `Stop-Process -Id <pid> -Force` on Windows) (instant)
 6. New shell: `continuum --json resume my-task` shows correct mode and next steps (under 1s)
 
 Gap list as of this doc (honest): LangChain/LangGraph/Codex adapters require their optional dependency (`pip install "continuum-agent[langchain]"` etc.) which adds install time but stays inside ten minutes on a warm cache. No gap found for generic adapter path.

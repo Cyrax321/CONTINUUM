@@ -16,7 +16,7 @@ This is an optional, additive layer. The system remains fully runnable locally w
 
 - Default install is `SQLiteStorage` in the project directory, no server required.
 - `uv run pytest` passes with no Postgres and no S3.
-- The cloud services are built as an extra, for example `uv pip install -e ".[cloud]"`, and are not imported at library import time.
+- The cloud services are built as optional installs and are not imported at library import time. The durable store rides the existing `[postgres]` extra; no `cloud` extra exists in `pyproject.toml` (#840).
 
 ## Deployment
 

@@ -131,6 +131,8 @@ class AuthPolicy:
 
     @property
     def disabled(self) -> bool:
+        """Whether authentication is disabled because no secret is configured."""
+
         # Only an absent secret disables authentication. An explicit empty
         # secret is a misconfiguration and must refuse, not open the door.
         return self.expected is None and not self.tokens
@@ -345,6 +347,8 @@ class AuthorizationPolicy:
 
     @property
     def denies_everything(self) -> bool:
+        """Whether the empty allow-list refuses every mutating caller."""
+
         return not self.allowed
 
     def permits(self, caller: str | None) -> bool:

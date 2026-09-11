@@ -138,7 +138,7 @@ continuum attest-verify <run_id> --attest <file>
 | 1 | pytest/ruff/format/mypy clean |
 | 2 | benchmark shows 0 duplicates; verify ok; crash examples print resumed state |
 | 3 | fresh session briefs unprompted; observations `[verified]`; gate denials teach then pass |
-| 4 | inspector lists eleven tools; mutating calls honour the allowlist |
+| 4 | inspector lists twelve tools; mutating calls honour the allowlist |
 | 5 | exactly-once holds across soft resume and hard crash for every adapter |
 | 6 | tool spans appear in `continuum events` with `via: otel` |
 | 7 | 403 -> claim -> forward -> settled, all visible in the event chain |

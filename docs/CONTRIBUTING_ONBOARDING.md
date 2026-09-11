@@ -32,6 +32,8 @@ Install once with `uv sync --extra dev` (or `pip install -e ".[dev]"`).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
   Skips are environmental (Postgres without `CONTINUUM_TEST_POSTGRES_DSN`, adapter tests without `langgraph` or `openai-agents`).
 - Run a single area: `uv run pytest tests/test_checkpoint_phase4.py -v`
+- Fast loop (skip slow integration tests): `uv run pytest -m "not slow"` or `pytest -q -m "not slow"`
+- Full suite (as CI runs it, slow tests included): `uv run pytest` or `pytest -q`
 - Lint: `uv run ruff check src/ tests/ examples/`
 - Format check: `uv run ruff format --check src/ tests/ examples/`
 - Auto fix lint and format: `uv run ruff check --fix src/ tests/ examples/` then `uv run ruff format src/ tests/ examples/`
