@@ -64,9 +64,11 @@ CONTINUUM 提出一个更窄但更难的问题：智能体能否从任务状态�
 | 通过 Docker 使用 CLI | `docker run --rm ghcr.io/cyrax321/continuum continuum --help` |
 | 无需克隆即可运行 CLI | `uvx --from git+https://github.com/Cyrax321/CONTINUUM.git continuum --help` |
 | Windows PowerShell（在克隆中） | `powershell -ExecutionPolicy Bypass -File .\try-it.ps1` 或 `powershell -ExecutionPolicy Bypass -File .\try-it.ps1 cli --help` |
+| 在笔记本中观看同样的恢复过程 | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Cyrax321/CONTINUUM/blob/main/examples/demo.ipynb) |
+| 同样的笔记本，在 Binder 上 | [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/Cyrax321/CONTINUUM/HEAD?labpath=examples%2Fdemo.ipynb) |
 | 浏览器中的完整开发环境 | [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Cyrax321/CONTINUUM?quickstart=1) |
 
-Docker 镜像由 CI 在每次推送到 `main` 和每个发布标签时发布到 GHCR（`.github/workflows/docker-publish.yml`）。Codespace 在 `.devcontainer/` 中定义。
+Docker 镜像由 CI 在每次推送到 `main` 和每个发布标签时发布到 GHCR（`.github/workflows/docker-publish.yml`）。Codespace 在 `.devcontainer/` 中定义。笔记本是 [examples/demo.ipynb](examples/demo.ipynb)：其首个单元格仅在导入失败时安装 CONTINUUM，因此同一个文件在 Colab、Binder 和克隆中都能运行。
 
 ```bash
 git clone https://github.com/Cyrax321/CONTINUUM.git
@@ -227,6 +229,22 @@ CONTINUUM 针对真实 LLM 智能体、真实协议边界和硬进程崩溃进�
 - **自愈**：硬杀的服务器在启动时通过单次重试清理孤立的 SQLite `-wal`/`-shm` 伴生文件来恢复。
 - **规模**：约 2,163 个测试被收集（约 2,030 通过，其余在缺少可选服务时跳过），覆盖 Python 3.11、3.12 和 3.13（单元、`hypothesis` 属性测试、并发、对抗）。CONTINUUM-Bench 运行五个崩溃场景加一个专门的参数漂移场景，对 CONTINUUM 测量到 0 重复工作和 0 重复副作用，而对朴素重放则为完全重复，另有一个 12 场景恢复正确性套件（`continuum.benchmark.phase6`）将持久执行调研中的崩溃点编码为可执行断言。
 - **对抗审计**：完整 MCP 面已在真实协议上被审计，发现并修复了三个缺陷。方法和复现步骤见 [test.md](test.md)。
+
+<!-- BENCH:START -->
+### 地平线规模基准（真实运行，无虚构数字）
+
+Generated: 2026-09-10T07:38:24.375062  Horizon scenarios: 5  Passed: 3  Failed: 2
+
+Accuracy: 0.6  Unnecessary escalation: 0.2  Repair precision: 0.8  Duplicate side effects: 0  Duplicate work: 0.0  Compression: 1.694
+
+| Scenario | Cycles | Years | Correct | Actual | Accuracy |
+| --- | --- | --- | --- | --- | --- |
+| horizon_steady_progress_year | 131 | 2.3 | resume | resume | 1.0 |
+| horizon_quarterly_drift_year | 131 | 2.3 | repair | request_human | 0.0 |
+| horizon_budget_exhaustion_year | 131 | 2.3 | request_human | request_human | 1.0 |
+| horizon_compaction_stress_year | 164 | 2.87 | resume | resume | 1.0 |
+| horizon_abort_condition_year | 131 | 2.3 | abort | request_human | 0.0 |
+<!-- BENCH:END -->
 
 ## MCP 集成
 
