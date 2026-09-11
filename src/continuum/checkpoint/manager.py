@@ -75,6 +75,7 @@ class RestoredRun:
 
     @property
     def from_checkpoint(self) -> bool:
+        """True when the restore started from a checkpoint rather than replay."""
         return self.checkpoint is not None
 
 
@@ -306,6 +307,7 @@ class CheckpointManager:
         )
 
     def history(self, run_id: str) -> Sequence[StateCheckpoint]:
+        """Every checkpoint for the run in creation order, via storage."""
         return self.storage.list_checkpoints(run_id)
 
     # -- recovery anchors ------------------------------------------------- #
