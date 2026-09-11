@@ -58,6 +58,29 @@ ownership model for the state itself.
   lease; without the lease the count can race. The spec requires the lease for
   any run where concurrent recovery is possible.
 
+## Tenant isolation
+
+- **Bound tenant configuration.** The reverse proxy gateway optionally binds to
+  a specific tenant identity via `load_gateway_tenant` (`src/continuum/gateway.py:129`),
+  configured through the `bound_tenant` or `tenant` field in the gateway JSON
+  configuration file passed to `continuum gateway --config <path>` or supplied
+  directly to `GatewayServer`.
+
+- **Key shape and scoping.** Tenant isolation applies to memory-store routes
+  matching the `is_memory_key` predicate (`mem:` prefix, defined in
+  `src/continuum/gate.py:67`). Memory keys follow the canonical template
+  `mem:{store_id}:{tenant}:{record_key}`, where the tenant segment is the third
+  colon-delimited segment (`parts[2]`).
+
+- **Gate-level denial.** When a bound tenant is configured, the gateway checks
+  the key tenant before evaluating ledger claims or storage records (`match_route`
+  in `src/continuum/gateway.py:224`). If the rendered memory key carries a
+  different tenant than `bound_tenant`, the gateway denies the request immediately
+  with `Decision(allow=False, reason="tenant mismatch: bound ... but key ... carries tenant ...")`.
+  Malformed memory keys with fewer than four segments fail closed (`malformed memory key`).
+  This fail-fast denial prevents cross-tenant access at the enforcement boundary
+  even if an action is unclaimed or foreign (`tests/test_memory_forensic.py:211`).
+
 ## What to build next
 
 - Add an integration test that spawns two `RecoveryLedger` instances with a
