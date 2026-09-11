@@ -403,6 +403,51 @@ after reconciling         -> REPAIR_AND_RESUME, next: revalidate_dependency:data
 === external system === issues created: 1
 ```
 
+### Liveness Watch (Issue #302)
+
+A run that stops emitting events may be resting, or it may be wedged. Silence is a first-class recovery signal: cadence contracts in `continuum.recovery.health` (re-exported by the `continuum.liveness` compatibility shim) declare how long each phase may go quiet, and `continuum watch` evaluates the log against them.
+
+```python
+from continuum.recovery.health import evaluate, load_cadence_contract
+
+result = evaluate(now, last_event_ts, contract=load_cadence_contract())
+result.breached  # True when silence exceeds the phase threshold
+```
+
+**Evaluation is a pure function.** `evaluate` takes an injected clock and performs no sleeps, so breach logic is unit-testable without time travel. A breach appends `LIVENESS_SILENCE_DETECTED`; recovery appends `LIVENESS_RECOVERED`. Both are ordinary hash-chained events, so a silence gap stays in the audit trail after the run recovers.
+
+**Breach is advisory, never a verdict by itself.** The watch path pages through the same webhook primitive as blocked-verdict notification, but assessment still flows through the engine: silence informs the decision, it does not replace validation, gate, or ledger evidence.
+
+The `watch` and `precompact` commands are the operator surfaces here: `watch` evaluates a run against its cadence contract, and `precompact` checkpoints at the context-compaction boundary (wired as a PreCompact hook by `hooks install`) so reasoning that was never recorded is not destroyed with the transcript.
+
+### Risk-Informed Recovery (Issue #303)
+
+External monitors observe failure risks the run cannot see in itself: latency anomalies, error-rate spikes, dependency advisories. They arrive as `RISK_OBSERVED` events with `Origin.EXTERNAL_MONITOR`, ingested through `.continuum/risk-policy.json`, which maps each risk name to a recovery mode (or `annotate` for watch-only).
+
+```python
+from continuum.recovery.risk import evaluate_risk, load_risk_policy
+
+policy = load_risk_policy()  # operators may only tighten, never loosen
+mode = evaluate_risk("loop", policy)  # "replan" ("annotate" risks return None)
+```
+
+**Operators may only make policy more conservative.** `load_risk_policy` refuses any override that downgrades a default, so a local edit cannot quietly disarm a signal. Risks that map to a real mode land in the contract's `triggering_risks` section, keeping the machine-readable verdict and the human-readable reason in one sealed place.
+
+### Authority Lifecycle (Issue #289)
+
+Some actions consume credentials: tokens spent, reservations claimed, one-time grants used. Replaying them after a crash would resurrect spent authority, so consumption is tracked and resume is blocked while a consumed authority is unsettled (`collect_consumed_authorities`, enforced in the engine).
+
+```python
+from continuum.reconcilers import probe_authority_verdict
+
+verdict = probe_authority_verdict(authority_id, recorded_payload)
+# True  -> append AUTHORITY_RECONCILED, clear the consumed mark
+# False -> stays blocked
+# unknown -> stays blocked, operator decides
+```
+
+**Probes run outside the run.** Authority checks execute as configured subprocesses fed the recorded consumption payload on stdin (`reconcilers.json`), so verification never depends on the agent being assessed. A definitive `valid=true` clears the mark; anything else, including probe failure, keeps the run blocked. Fail-closed where notification is fail-open, because the failure modes point opposite ways: a missed page is recoverable, a resurrected credential is not.
+
 ### Security
 
 - **Deterministic canonical hashing** - sorted keys, UTC-normalized timestamps, enum-by-value serialization, rejection of non-finite floats
