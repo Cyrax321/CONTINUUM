@@ -57,3 +57,11 @@ after it.
 The default `CheckpointPolicy` honors triggers (manual, interval, event,
 semantic, context-pressure, hybrid). Supply a custom `policy` to `CheckpointManager`
 to tune when checkpoints are taken.
+
+## Pre-compaction checkpoint
+
+Context compaction destroys unrecorded reasoning, so the boundary gets its
+own checkpoint. The `precompact` command checkpoints at the compaction
+boundary and is wired as a PreCompact hook by `hooks install`, resolving the
+current run at install time so one hook serves every run. See the
+`precompact` row in `docs/api/cli.md`.

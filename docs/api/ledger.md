@@ -121,3 +121,14 @@ The value returned by `claim`. `fresh` is `True` when the effect should still be
 performed; `False` when the ledger already has a recorded outcome and
 `action` carries it. `key` is the idempotency key to pass to `complete`, `fail`,
 or `reconcile`.
+
+## Authority consumption
+
+One-time authorities (credentials, approval tokens) are tracked so a replay
+never resurrects a spent grant. `record_authority_consumed` in
+`src/continuum/actions/authority.py` appends a hash-chained
+`AUTHORITY_CONSUMED` event that never deduplicates, and the gate refuses reuse
+of a consumed authority until a reconciler probe settles it with
+`AUTHORITY_RECONCILED` (`src/continuum/reconcilers.py`). The ledger's retry
+path checks the same events so a live retry under a reused key cannot slip
+past (`src/continuum/actions/ledger.py`).

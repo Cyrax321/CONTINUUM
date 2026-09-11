@@ -57,3 +57,16 @@ printing or handing to an operator.
 The underlying `ValidationOutcome`, the `RestoredRun`, any actions whose outcome
 is unknown, the repair `RepairPlan`, the `RecoveryContract`, and the textual
 reasons for the decision.
+
+## Liveness and risk signals
+
+Beyond validation, the engine weighs two live signals. A liveness advisory
+from `continuum.recovery.health` reports whether the run has gone quiet past
+its cadence contract (`LIVENESS_SILENCE_DETECTED` events in the log, evaluated
+by `continuum watch`), and
+`triggering_risks` carries any external risks mapped through
+`.continuum/risk-policy.json` (`src/continuum/recovery/risk.py`). Both are
+advisory: silence and risk inform the verdict without replacing validation,
+gate, or ledger evidence. See `src/continuum/recovery/engine.py` for how the
+signals combine, and the operator guides `docs/guides/liveness-watch.md` and
+`docs/guides/risk-policy.md` for the workflows.
