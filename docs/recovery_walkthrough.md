@@ -147,6 +147,8 @@ Next permitted action: revalidate_dependency:dataset
   clean parts of the state were left alone.
 - No lost rationale: the contract carries its own reason, evidence, and a
   single next allowed action, sealed by hash.
+- No silent blockage: a `request_human` verdict pages subscribed webhooks once
+  per distinct verdict (see docs/guides/webhook-notify.md).
 
 ## Reproduce
 
