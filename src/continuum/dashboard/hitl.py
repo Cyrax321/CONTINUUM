@@ -42,6 +42,12 @@ class HitlUnauthorized(Exception):
 
 
 def authorize_hitl(token_from_request: str | None) -> None:
+    """Verify the request token matches ``CONTINUUM_DASHBOARD_TOKEN``.
+
+    Fails closed: raises ``HitlUnauthorized`` if the environment variable is
+    unset or empty, or if ``token_from_request`` is missing or does not match
+    the expected token.
+    """
     import os
 
     expected = os.environ.get(DEFAULT_HITL_TOKEN_ENV)
@@ -52,6 +58,13 @@ def authorize_hitl(token_from_request: str | None) -> None:
 
 
 def confirm_run(storage: Storage, run_id: str) -> None:
+    """Record an operator review confirmation for a run.
+
+    Appends a ``REVIEW_CONFIRMED`` event with ``Origin.HUMAN`` provenance
+    covering goal and progress components, clearing self-certification gates
+    with audit parity to the CLI. Raises ``RunNotFound`` if ``run_id`` is
+    missing from storage.
+    """
     storage.get_run(run_id)
     storage.append_event(
         run_id,
@@ -62,6 +75,13 @@ def confirm_run(storage: Storage, run_id: str) -> None:
 
 
 def complete_run(storage: Storage, run_id: str, summary: str = "") -> None:
+    """Mark a run as completed by a human operator from the dashboard.
+
+    Appends a ``RUN_COMPLETED`` event with ``Origin.HUMAN`` provenance,
+    attaches an optional summary note, and transitions the run row to
+    ``RunStatus.COMPLETED``. Raises ``RunNotFound`` if ``run_id`` is missing
+    from storage.
+    """
     run = storage.get_run(run_id)
     note = {"closed_by": "dashboard"}
     if summary:
@@ -78,6 +98,13 @@ def reconcile_action(
     occurred: bool,
     external_id: str | None = None,
 ) -> None:
+    """Settle an uncertain side effect in the action ledger from operator evidence.
+
+    Dispatches through ``ActionLedger.reconcile``, updating the action to
+    ``COMPLETED`` (if ``occurred=True``) or ``FAILED`` (if ``occurred=False``)
+    and recording an ``ACTION_RECONCILED`` event with provenance. Raises
+    ``KeyError`` if ``ledger_key`` is not found in the ledger.
+    """
     ActionLedger(storage, run_id).reconcile(
         ledger_key,
         occurred=occurred,
