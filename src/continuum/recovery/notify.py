@@ -110,10 +110,12 @@ def notify_endpoints(
 ) -> dict[str, bool]:
     """Deliver ``payload`` to every endpoint subscribed to ``event``.
 
-    Returns ``{url: delivered}`` in registry order. Each endpoint gets up to
-    1 + max_retries attempts with no delay between them; every failure mode
-    fails open to False. Never raises: wrap defensively so a hostile registry
-    object cannot crash the caller either.
+    Returns ``{url: delivered}`` in registry order. Duplicate urls aggregate
+    with AND: a url reports delivered only when every entry sharing it
+    delivered, so one success can never mask another entry's failure.
+    Each endpoint gets up to 1 + max_retries attempts with no delay between
+    them; every failure mode fails open to False. Never raises: wrap
+    defensively so a hostile registry object cannot crash the caller either.
     """
     results: dict[str, bool] = {}
     try:
@@ -129,7 +131,7 @@ def notify_endpoints(
                     break
         except Exception:
             delivered = False
-        results[ep.url] = delivered
+        results[ep.url] = results.get(ep.url, True) and delivered
     return results
 
 
