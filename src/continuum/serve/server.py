@@ -95,18 +95,26 @@ class MalformedRunLog(RuntimeError):
 
 
 class SidecarError(Exception):
+    """Base error for sidecar dispatch failures; subclasses carry a wire code."""
+
     code = "error"
 
 
 class MethodNotFound(SidecarError):
+    """The requested sidecar method does not exist."""
+
     code = "method_not_found"
 
 
 class NotAuthorized(SidecarError):
+    """The call lacked the required shared secret."""
+
     code = "not_authorized"
 
 
 class BadParams(SidecarError):
+    """The request was read but its parameters are invalid."""
+
     code = "bad_params"
 
 
@@ -138,9 +146,11 @@ class SidecarAuth:
 
     @property
     def disabled(self) -> bool:
+        """True when no secret is configured, so authentication is off."""
         return self.expected is None or self.expected == ""
 
     def verify(self, token: str | None) -> None:
+        """Accept matching tokens; raise NotAuthorized otherwise, unless disabled."""
         if self.disabled:
             return
         if not token or token != self.expected:
@@ -299,6 +309,7 @@ class SidecarServer:
     # -- wire loop ---------------------------------------------------------- #
 
     def serve_stdio(self, instream: TextIO | None = None, outstream: TextIO | None = None) -> int:
+        """Serve newline-delimited JSON requests until EOF; returns the exit code."""
         instream = instream or sys.stdin
         outstream = outstream or sys.stdout
         for raw in instream:
@@ -333,6 +344,7 @@ class SidecarServer:
         return 0
 
     def close(self) -> None:
+        """Close the backing storage."""
         self.storage.close()
 
 
@@ -364,9 +376,12 @@ class SidecarHTTP:
         sidecar_ref = sidecar
 
         class Handler(http.server.BaseHTTPRequestHandler):
+            """HTTP/1.1 handler dispatching POSTs onto the sidecar."""
+
             protocol_version = "HTTP/1.1"
 
             def log_message(self, *args: Any) -> None:  # silence
+                """Suppress the default per-request stderr logging."""
                 pass
 
             def _json(self, code: int, payload: dict[str, Any]) -> None:
@@ -393,6 +408,7 @@ class SidecarHTTP:
                 drained = 0
 
                 def take(count: int) -> bytes:
+                    """Read up to count bytes while tracking the drain total."""
                     nonlocal drained
                     data = self.rfile.read(count)
                     drained += len(data)
@@ -516,6 +532,7 @@ class SidecarHTTP:
                 return self.rfile.read(length) if length else b"{}"
 
             def do_POST(self) -> None:  # noqa: N802
+                """Route one POST body through the sidecar dispatch."""
                 method = self.path.strip("/").split("?")[0]
                 raw = self._read_body()
                 if raw is None:
@@ -556,13 +573,16 @@ class SidecarHTTP:
         self._thread: threading.Thread | None = None
 
     def serve_forever(self) -> None:
+        """Block serving HTTP until shut down."""
         self.httpd.serve_forever()
 
     def start_background(self) -> None:
+        """Serve HTTP on a daemon thread."""
         self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self._thread.start()
 
     def shutdown(self) -> None:
+        """Shut the HTTP server down and close it."""
         self.httpd.shutdown()
         self.httpd.server_close()
 

@@ -189,9 +189,11 @@ class SettleReport:
 
     @property
     def settled(self) -> int:
+        """Total actions the reconciliation settled either way."""
         return len(self.settled_true) + len(self.settled_false)
 
     def as_dict(self) -> dict[str, Any]:
+        """Report the settlement outcome as plain data."""
         return {
             "settled_occurred": self.settled_true,
             "settled_not_occurred": self.settled_false,
@@ -336,6 +338,7 @@ class AuthoritySettleReport:
     settled: bool = False
 
     def as_dict(self) -> dict[str, Any]:
+        """Report the authority probe outcome as plain data."""
         return {
             "authority_id": self.authority_id,
             "valid": self.valid,
