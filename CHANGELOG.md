@@ -260,7 +260,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
-- **Dashboard HITL actions remain visible after compaction (#809).** The dashboard
+- **Repeated compaction works after a run has been archived (#648).**
+  Checkpoint anchoring now projects archived events together with the live tail,
+  so a long-lived run can be compacted again after new work without losing its
+  original `RUN_STARTED` state. Once a checkpoint exists it becomes the fold
+  base, so repeat projection replays only the live tail.
   now folds the full archived and live event history when listing uncertain
   actions, so an operator can still see and reconcile a claim whose action
   events moved into the archive.

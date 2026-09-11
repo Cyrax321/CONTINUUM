@@ -167,9 +167,14 @@ class CheckpointManager:
 
         Full history, not the live tail: after compaction RUN_STARTED and
         other foundation events live in the archive, and projecting the
-        tail alone concludes the run never started (issue #648).
+        tail alone concludes the run never started (issue #648). Before
+        the first checkpoint that means archived plus live events; once a
+        checkpoint exists, restore uses it as the fold base and replays
+        only the live tail.
         """
-        return project(run_id, self.storage.read_all_events(run_id))
+        if self.storage.latest_checkpoint(run_id) is None:
+            return project(run_id, self.storage.read_all_events(run_id))
+        return self.restore(run_id, replay=True).state
 
     def checkpoint(
         self,

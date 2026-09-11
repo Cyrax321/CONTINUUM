@@ -230,6 +230,30 @@ def test_compact_requires_an_existing_version(tmp_path: Path) -> None:
     assert "anchored" in err or "no stored version" in err
 
 
+def test_repeated_compaction_replays_only_the_live_tail(
+    db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A compacted run remains eligible without rescanning its archive."""
+    work(db, 1)
+    code, _, err = run("--db", db, "compact", "run_1", "--force")
+    assert code == ExitCode.OK, err
+
+    work(db, 2)
+    original = SQLiteStorage.read_archived_events
+
+    def reject_archive_read(self: SQLiteStorage, run_id: str):
+        raise AssertionError(f"project_current rescanned the archive for {run_id}")
+
+    monkeypatch.setattr(SQLiteStorage, "read_archived_events", reject_archive_read)
+    code, _, err = run("--db", db, "compact", "run_1", "--force")
+    assert code == ExitCode.OK, err
+
+    monkeypatch.setattr(SQLiteStorage, "read_archived_events", original)
+    with SQLiteStorage(db) as store:
+        assert len(store.read_archived_events("run_1")) > 0
+        assert store.verify_events("run_1").ok
+
+
 def test_bounded_size_after_compaction(db: str) -> None:
     """The acceptance core: compaction bounds live-log growth."""
     for i in range(40):
