@@ -145,6 +145,11 @@ class EventType(StrEnum):
     # memory governance (issue #304, #567): per-tenant tombstone for erasure
     MEMORY_TOMBSTONED = "MEMORY_TOMBSTONED"
 
+    # human notification (issue #305): dead letter for a failed webhook
+    # delivery. Audit only, never state; DETERMINISTIC because the failure
+    # is observed by local code, not asserted by an agent.
+    NOTIFY_FAILED = "NOTIFY_FAILED"
+
 
 class AppendOnlyViolation(RuntimeError):
     """Raised when an operation would rewrite history."""

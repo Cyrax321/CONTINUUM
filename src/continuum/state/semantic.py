@@ -745,6 +745,8 @@ _NON_PROJECTING = frozenset(
         EventType.LIVENESS_RECOVERED,
         # risk (issue #303): real-time risk signal, never state
         EventType.RISK_OBSERVED,
+        # human notification (issue #305): delivery dead letter, never state
+        EventType.NOTIFY_FAILED,
     }
 )
 

@@ -217,6 +217,29 @@ def test_notify_endpoints_fans_out_by_subscription() -> None:
         server.server_close()
 
 
+def test_delivery_failure_is_audit_only(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Dead letters record without touching projection or verify (#305)."""
+    from continuum.events import EventType
+    from continuum.models import Run
+    from continuum.recovery.notify import record_delivery_failure
+    from continuum.state.semantic import project
+    from continuum.storage import SQLiteStorage
+
+    db = str(tmp_path / "deadletter.db")
+    with SQLiteStorage(db) as store:
+        store.create_run_started(Run(run_id="run_1", goal="g"))
+        before = project("run_1", store.read_events("run_1"))
+        record_delivery_failure(store, "run_1", "http://dead/hook", "request_human", "refused")
+        events = store.read_events("run_1")
+        dead = [e for e in events if e.type is EventType.NOTIFY_FAILED]
+        assert len(dead) == 1
+        assert dead[0].payload["url"] == "http://dead/hook"
+        after = project("run_1", events)
+        assert after.progress == before.progress
+        assert after.goal == before.goal
+        assert store.verify_events("run_1").ok
+
+
 def test_duplicate_urls_aggregate_conservatively() -> None:
     """One success must not mask another entry's failure on the same url."""
     import http.server
