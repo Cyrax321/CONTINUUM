@@ -55,3 +55,8 @@ jobs:
       - name: Smoke-test the image
         run: |
           docker run --rm ${{ env.IMAGE }}:latest continuum --version
+          # The default CMD runs the crash-recovery demo; it is hermetic
+          # (the GitHub issue is a local log append) and finishes in about
+          # a minute. A nonzero exit or a missing verdict line fails the gate.
+          docker run --rm ${{ env.IMAGE }}:latest > /tmp/demo.log
+          grep -q "No work repeated. No side effect duplicated." /tmp/demo.log
