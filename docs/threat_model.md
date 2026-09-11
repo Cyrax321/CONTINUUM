@@ -31,6 +31,9 @@ This document scopes what CONTINUUM protects against, what it detects, and what 
 - **Body-size exhaustion on HTTP transports**  
   Denial of service through unbounded reads is fended off by strict body caps across all HTTP transports. The gateway, dashboard, and serve transports fail closed: requests declaring a `Content-Length` over the transport body cap (10 MB for `gateway.py`, 1 MB for `dashboard/app.py` and `serve/server.py`) are refused with `413 Payload Too Large` before the body is read into memory. To prevent broken pipes, transports drain-and-discard up to a shared 256 MB bound; when draining exceeds this limit, the server closes the connection immediately. See `src/continuum/gateway.py:67`, `src/continuum/dashboard/app.py:18`, and `src/continuum/serve/server.py:76`. Tested in `tests/test_gateway.py:275`, `tests/test_dashboard.py:157`, and `tests/test_serve_http.py:562`.
 
+- **HTTP request smuggling via ambiguous framing**
+  A request whose body boundary cannot be trusted (any `Transfer-Encoding`, including chunked, or multiple conflicting `Content-Length` headers) is refused with `400` and the connection is closed, so the bytes are never dispatched as a follow-up request. Chunked bodies are refused rather than decoded: a chunked body carries no length the server can verify, and reading it as empty is how a smuggled second request gets dispatched (#522, #533). Where the boundary is known, transports drain-and-answer within the shared bound instead of closing. See `src/continuum/gateway.py:341`, `src/continuum/dashboard/app.py:337`, and `src/continuum/serve/server.py:452`. Tested in `tests/test_gateway.py:311`, `tests/test_gateway.py:389`, `tests/test_dashboard.py:221`, and `tests/test_serve_http.py`.
+
 ## What CONTINUUM does NOT protect against
 
 - **Full disk access by a remote attacker**  
