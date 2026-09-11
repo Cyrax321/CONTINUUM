@@ -55,7 +55,7 @@ continuum --json <command>                    # machine-readable output
 | `dashboard` | Serve the dashboard (presentation over run data). |
 | `tui [--refresh <seconds>]` | Full-screen terminal dashboard: monitor and control runs, read-only until an action is confirmed (`q` quits). |
 | `export-evidence` | Export evidence as content-addressed JSON lines. Read-only. |
-| `forget` | Enumerate and tombstone memory records for a tenant. Mutates unless --dry-run. |
+| `forget` | Enumerate and tombstone memory records for a tenant. Mutates unless --dry-run. See [memory governance](../guides/memory_governance.md). |
 | `health` | Advisory prefix-trust health check. Read-only. |
 | `impact` | Show downstream impact of an evidence item. Read-only. |
 | `merge` | Merge into a run at an anchor. Mutates storage. |
@@ -64,7 +64,7 @@ continuum --json <command>                    # machine-readable output
 | `record-plan` | Record a structured plan upsert. Mutates storage. |
 | `restore` | Restore a run to an anchor checkpoint. Mutates storage. |
 | `rewind` | Rewind workspace and projection to a checkpoint. |
-| `watch` | Watch a run for liveness breach, optionally notify via webhook. |
+| `watch` | Watch a run for liveness breach, optionally notify via webhook. See [liveness watch](../guides/liveness-watch.md). |
 
 ## Examples
 
