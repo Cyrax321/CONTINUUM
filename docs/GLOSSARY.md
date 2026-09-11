@@ -32,7 +32,25 @@ Every term here is used in issues and in code. Definitions point to the implemen
 - **Adapter action**  
   `AdapterAction` (`src/continuum/adapters/actions.py:24`) is the uniform `name + params + dep_scope` operation that every adapter emits. `AdapterResult` carries the outcome. `run_action` is the facade over `AgentAdapter.intercept_action` where the ledger provides idempotency and the telemetry hook (`on_event`, issue 162) can observe each execution.
 
-- **Telemetry**  
+- **Telemetry**
   Optional observer callback `on_event` on `run_action` (`src/continuum/adapters/actions.py:53`). Disabled by default. Receives `(AdapterAction, AdapterResult)` for every execution, whether completed or failed. A raising observer is suppressed so observability cannot break the action it observes.
+
+- **Liveness**
+  Silence as a recovery signal. Cadence contracts in `src/continuum/recovery/health.py` declare how long each phase may go quiet; `continuum watch` evaluates the log against them, appending `LIVENESS_SILENCE_DETECTED` on breach and `LIVENESS_RECOVERED` on recovery (`src/continuum/events.py`). Breach is advisory: it informs the engine decision without replacing validation.
+
+- **Admissibility**
+  Whether a restore point is safe to resume from. `check_admissibility` in `src/continuum/state/validator.py` verifies the checkpoint against ledger history, and the engine refuses an inadmissible anchor (`src/continuum/recovery/engine.py:320`) instead of resuming into a commitment the log contradicts.
+
+- **Risk policy**
+  The `.continuum/risk-policy.json` mapping from external risk names to recovery modes, loaded by `load_risk_policy` in `src/continuum/recovery/risk.py`. Operators may only tighten defaults, never loosen them. Matching risks arrive as `RISK_OBSERVED` events and land in the contract's `triggering_risks` section.
+
+- **Authority probes**
+  External subprocess checks that settle whether a consumed authority is still valid. Configured in `reconcilers.json` and executed by `probe_authority_verdict` in `src/continuum/reconcilers.py:289`, fed the recorded consumption payload on stdin so verification never depends on the agent being assessed.
+
+- **EXTERNAL_MONITOR**
+  The `Origin` value (`src/continuum/models.py:227`) for facts observed by outside systems rather than asserted by the agent: risk witnesses, probe verdicts, liveness readings. Marks data the run consumes but no agent self-certified.
+
+- **AUTHORITY_RECONCILED**
+  The event (`src/continuum/events.py`) recording a probe's verdict on a consumed authority. A definitive valid verdict clears the consumed mark and unblocks resume; anything else keeps the run blocked. Every probe result is hash-chained, so the audit trail preserves each one.
 
 Reference from the master plan: these terms appear throughout `docs/CONTINUUM_MASTER_PLAN.md` and `docs/ARCHITECTURE_EVOLUTION.md`. The walkthrough in `docs/recovery_walkthrough.md` shows them interacting in one concrete failure.
