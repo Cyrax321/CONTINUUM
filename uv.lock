@@ -380,7 +380,7 @@ wheels = [
 
 [[package]]
 name = "continuum-agent"
-version = "0.1.0"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
@@ -1325,7 +1325,7 @@ wheels = [
 
 [[package]]
 name = "openai-agents"
-version = "0.22.0"
+version = "0.22.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "griffelib" },
@@ -1336,9 +1336,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1c/17/2a92451547a66d56bd5f10128aa64aa0fc282420421775c390902e7dfa42/openai_agents-0.22.0.tar.gz", hash = "sha256:6c3d7b9e34d3ca4bf763d4557d01ec844685290f0d80cb72e10a304029c0d7ee", size = 6390140, upload-time = "2026-08-19T13:45:22.482Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/59/49/d59cd4fdf1bc29ba6f060284f9ea07096b5f3ede4b4c95bbf506d5ebbd58/openai_agents-0.22.1.tar.gz", hash = "sha256:bf2fedeb2799bc40f069a8ef2648836cd88c42d4a762ce93edf8924240d741c1", size = 6519249, upload-time = "2026-09-08T09:22:18.601Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ca/88/220a5a9283fba72107db7cb549fd127a0e532dbcbc89dda82cd28b9765a1/openai_agents-0.22.0-py3-none-any.whl", hash = "sha256:985a74a8024123980c2d4dc329d19b2332a0f86919fa7b3f6b9c2abaae022680", size = 1117078, upload-time = "2026-08-19T13:45:19.876Z" },
+    { url = "https://files.pythonhosted.org/packages/d1/a1/2c6bf1e9d986d4cf2eb763cb7aa8022f949738cf419f8a39ca0bd9cbaa7b/openai_agents-0.22.1-py3-none-any.whl", hash = "sha256:41e09c74ac8a1de4735a16f687b544a9c4a611602bc83a83dccad0e28b955615", size = 1139895, upload-time = "2026-09-08T09:22:16.376Z" },
 ]
 
 [[package]]
