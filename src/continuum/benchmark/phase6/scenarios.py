@@ -51,6 +51,7 @@ def _new_store() -> SQLiteStorage:
 
 
 def env_multi(**versions: str) -> EnvironmentSnapshot:
+    """Build an environment snapshot from resource name to version pairs."""
     return capture(
         "run_1",
         StaticProvider(
@@ -102,6 +103,7 @@ def _contract(version: int = 0) -> RecoveryContract:
 
 
 def scenario_single_dependency_corruption(ctx: ScenarioContext) -> None:
+    """One stale dependency invalidates only its own subtree."""
     with environment_fixture(dependencies=("dataset", "other")) as fx:
         decision = fx.engine.assess(
             fx.run_id, current_environment=fx.capture(dataset="v2"), scope={"dataset"}
@@ -112,6 +114,7 @@ def scenario_single_dependency_corruption(ctx: ScenarioContext) -> None:
 
 
 def scenario_multi_dependency_corruption(ctx: ScenarioContext) -> None:
+    """Stale dependencies are each reported invalid."""
     with environment_fixture(dependencies=("dataset", "other")) as fx:
         decision = fx.engine.assess(
             fx.run_id, current_environment=fx.capture(dataset="v2", other="v2")
@@ -121,6 +124,7 @@ def scenario_multi_dependency_corruption(ctx: ScenarioContext) -> None:
 
 
 def scenario_external_edit_drift(ctx: ScenarioContext) -> None:
+    """An external edit after anchoring reports drift on reconcile."""
     store = _new_store()
     seed_two(store)
     decision = RecoveryEngine(store).assess(
@@ -134,6 +138,7 @@ def scenario_external_edit_drift(ctx: ScenarioContext) -> None:
 
 
 def scenario_ledger_tamper_detected(ctx: ScenarioContext) -> None:
+    """A tampered ledger entry fails verification at its index."""
     backend = MemoryLedgerBackend()
     ledger = RecoveryLedger(backend)
     ledger.append_decision("run_1", _contract(0))
@@ -146,6 +151,7 @@ def scenario_ledger_tamper_detected(ctx: ScenarioContext) -> None:
 
 
 def scenario_recovery_lease_exhaustion(ctx: ScenarioContext) -> None:
+    """Exhausted recovery attempts require a human."""
     ledger = RecoveryLedger(MemoryLedgerBackend())
     for _ in range(3):
         ledger.record_attempt("run_1")
@@ -176,17 +182,24 @@ def scenario_out_of_scope_side_effect(ctx: ScenarioContext) -> None:
 
 
 def scenario_adapter_failure_across_environments(ctx: ScenarioContext) -> None:
+    """An adapter failure during recovery surfaces instead of being swallowed."""
+
     class FailingAdapter(AgentAdapter):
+        """Test double whose every capability raises."""
+
         def __init__(self, storage: object, **kwargs: Any) -> None:  # noqa: D401
             self._storage = storage
 
         def capture_state(self, *a: Any, **k: Any) -> NoReturn:
+            """Raise instead of capturing state."""
             raise NotImplementedError
 
         def restore_state(self, *a: Any, **k: Any) -> NoReturn:
+            """Raise instead of restoring state."""
             raise NotImplementedError
 
         def intercept_action(self, *a: Any, **k: Any) -> NoReturn:
+            """Raise instead of intercepting an action."""
             raise NotImplementedError
 
         def resume(
@@ -197,6 +210,7 @@ def scenario_adapter_failure_across_environments(ctx: ScenarioContext) -> None:
             expected_model: Any = None,
             replay: bool = True,
         ) -> NoReturn:
+            """Raise instead of resuming the run."""
             raise RuntimeError("adapter failure across environment")
 
     register_adapter("fail_p6", lambda: FailingAdapter)
@@ -208,6 +222,7 @@ def scenario_adapter_failure_across_environments(ctx: ScenarioContext) -> None:
 
 
 def scenario_checkpoint_rollback_correctness(ctx: ScenarioContext) -> None:
+    """Restoring without replay returns the checkpointed version."""
     store = _new_store()
     seed_two(store)
     mgr = CheckpointManager(store)
@@ -221,6 +236,7 @@ def scenario_checkpoint_rollback_correctness(ctx: ScenarioContext) -> None:
 
 
 def scenario_concurrent_recovery_safety(ctx: ScenarioContext) -> None:
+    """A second holder cannot append while the lease is held."""
     coordinator = InMemoryLeaseCoordinator()
     assert coordinator.acquire("run_1", "holder-A")
     ledger = RecoveryLedger(MemoryLedgerBackend(), lock=coordinator, holder_id="holder-B")
@@ -235,6 +251,7 @@ def scenario_concurrent_recovery_safety(ctx: ScenarioContext) -> None:
 
 
 def scenario_large_state_recovery_latency(ctx: ScenarioContext) -> None:
+    """Assessing a hundred dependencies stays within the latency budget."""
     store = _new_store()
     n = 100
     for i in range(n):
@@ -266,6 +283,7 @@ def scenario_large_state_recovery_latency(ctx: ScenarioContext) -> None:
 
 
 def scenario_missing_dependency_graph_fallback(ctx: ScenarioContext) -> None:
+    """Assessment without a dependency graph still yields a decision."""
     store = _new_store()
     seed_two(store)
     decision = RecoveryEngine(store).assess("run_1", current_environment=env_multi(other="v3"))
@@ -275,6 +293,7 @@ def scenario_missing_dependency_graph_fallback(ctx: ScenarioContext) -> None:
 
 
 def scenario_human_verdict_honored(ctx: ScenarioContext) -> None:
+    """An approved human gate clears the pending gate."""
     ledger = RecoveryLedger(MemoryLedgerBackend())
     ledger.append_decision("run_1", _contract(0), gate="required")
     assert ledger.pending_gate("run_1") is not None
@@ -283,6 +302,7 @@ def scenario_human_verdict_honored(ctx: ScenarioContext) -> None:
 
 
 def scenario_transient_network_failure_on_install(ctx: ScenarioContext) -> None:
+    """A vanished dependency keeps the run unsafe to resume."""
     store = _new_store()
     store.append_event(
         "run_1", EventType.DEPENDENCY_DECLARED, {"resource": "libx", "version": "v1"}

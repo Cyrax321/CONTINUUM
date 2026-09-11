@@ -564,4 +564,3 @@ Deep reference material:
 - [references/e2e.md](references/e2e.md) - end to end autonomy test walkthrough
 - [references/testing.md](references/testing.md) - test suite layout and conventions
 - [references/related-work.md](references/related-work.md) - annotated related work and citation audit
-- [references/phase6-scenarios.md](references/phase6-scenarios.md) - phase 6 scenario builder docstrings and crash-point mapping (#808)
