@@ -747,6 +747,8 @@ _NON_PROJECTING = frozenset(
         EventType.RISK_OBSERVED,
         # human notification (issue #305): delivery dead letter, never state
         EventType.NOTIFY_FAILED,
+        # human notification (issue #305): delivery record for dedup, never state
+        EventType.NOTIFY_SENT,
     }
 )
 

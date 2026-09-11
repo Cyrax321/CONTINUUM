@@ -1318,6 +1318,19 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         palette=getattr(args, "_palette", None),
     )
 
+    # Human notification (issue #305): a blocked verdict pages subscribed
+    # endpoints once per distinct verdict. Best effort and silent: delivery
+    # must never change the verdict, the output, or the exit code.
+    if presented_mode == "request_human":
+        try:
+            from continuum.recovery.notify import notify_blocked
+
+            notify_blocked(
+                storage, run_id, presented_mode, decision.contract.model_dump(mode="json")
+            )
+        except Exception:
+            pass
+
     if effective_mode is not RecoveryMode.RESUME and not args.repair:
         print(
             "\nRun with --repair to record the repair plan, or resolve the items above first.",
