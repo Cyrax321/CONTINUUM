@@ -66,9 +66,11 @@ Caminhos sem configuração (sem clonar, sem instalar, sem publicar nada):
 | Usar a CLI via Docker | `docker run --rm ghcr.io/cyrax321/continuum continuum --help` |
 | Executar a CLI sem clonar | `uvx --from git+https://github.com/Cyrax321/CONTINUUM.git continuum --help` |
 | Windows PowerShell (de um clone) | `powershell -ExecutionPolicy Bypass -File .\try-it.ps1` ou `powershell -ExecutionPolicy Bypass -File .\try-it.ps1 cli --help` |
+| Ver a mesma recuperação em um caderno | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Cyrax321/CONTINUUM/blob/main/examples/demo.ipynb) |
+| O mesmo caderno, no Binder | [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/Cyrax321/CONTINUUM/HEAD?labpath=examples%2Fdemo.ipynb) |
 | Ambiente de desenvolvimento completo no navegador | [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Cyrax321/CONTINUUM?quickstart=1) |
 
-A imagem Docker é publicada no GHCR pelo CI a cada push para `main` e a cada tag de release (`.github/workflows/docker-publish.yml`). O Codespace é definido em `.devcontainer/`.
+A imagem Docker é publicada no GHCR pelo CI a cada push para `main` e a cada tag de release (`.github/workflows/docker-publish.yml`). O Codespace é definido em `.devcontainer/`. O caderno é [examples/demo.ipynb](examples/demo.ipynb): sua primeira célula instala o CONTINUUM somente quando a importação falha, de modo que o mesmo arquivo roda no Colab, no Binder e a partir de um clone.
 
 ```bash
 git clone https://github.com/Cyrax321/CONTINUUM.git

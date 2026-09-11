@@ -65,9 +65,11 @@ PyPI에 `continuum-agent` 0.1.0으로 게시됨. `pip install continuum-agent` �
 | Docker를 통해 CLI 사용 | `docker run --rm ghcr.io/cyrax321/continuum continuum --help` |
 | 클론 없이 CLI 실행 | `uvx --from git+https://github.com/Cyrax321/CONTINUUM.git continuum --help` |
 | Windows PowerShell (클론 내부) | `powershell -ExecutionPolicy Bypass -File .\try-it.ps1` 또는 `powershell -ExecutionPolicy Bypass -File .\try-it.ps1 cli --help` |
+| 노트북에서 동일한 복구 보기 | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Cyrax321/CONTINUUM/blob/main/examples/demo.ipynb) |
+| 동일한 노트북, Binder에서 | [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/Cyrax321/CONTINUUM/HEAD?labpath=examples%2Fdemo.ipynb) |
 | 브라우저에서 완전한 개발 환경 | [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Cyrax321/CONTINUUM?quickstart=1) |
 
-Docker 이미지는 CI가 `main`에 대한 각 push와 각 릴리스 태그마다 GHCR에 게시한다 (`.github/workflows/docker-publish.yml`). Codespace는 `.devcontainer/`에 정의되어 있다.
+Docker 이미지는 CI가 `main`에 대한 각 push와 각 릴리스 태그마다 GHCR에 게시한다 (`.github/workflows/docker-publish.yml`). Codespace는 `.devcontainer/`에 정의되어 있다. 노트북은 [examples/demo.ipynb](examples/demo.ipynb)이다. 첫 셀은 가져오기에 실패할 때만 CONTINUUM을 설치하므로, 하나의 파일이 Colab, Binder, 클론에서 모두 실행된다.
 
 ```bash
 git clone https://github.com/Cyrax321/CONTINUUM.git

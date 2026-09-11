@@ -65,9 +65,11 @@ PyPI に `continuum-agent` 0.1.0 として公開。`pip install continuum-agent`
 | Docker 経由で CLI を使う | `docker run --rm ghcr.io/cyrax321/continuum continuum --help` |
 | クローンせずに CLI を実行 | `uvx --from git+https://github.com/Cyrax321/CONTINUUM.git continuum --help` |
 | Windows PowerShell（クローン内） | `powershell -ExecutionPolicy Bypass -File .\try-it.ps1` または `powershell -ExecutionPolicy Bypass -File .\try-it.ps1 cli --help` |
+| ノートブックで同じリカバリを見る | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Cyrax321/CONTINUUM/blob/main/examples/demo.ipynb) |
+| 同じノートブックを Binder で | [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/Cyrax321/CONTINUUM/HEAD?labpath=examples%2Fdemo.ipynb) |
 | ブラウザで完全な開発環境 | [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Cyrax321/CONTINUUM?quickstart=1) |
 
-Docker イメージは CI によって `main` への各 push と各リリースタグで GHCR に公開される（`.github/workflows/docker-publish.yml`）。Codespace は `.devcontainer/` で定義される。
+Docker イメージは CI によって `main` への各 push と各リリースタグで GHCR に公開される（`.github/workflows/docker-publish.yml`）。Codespace は `.devcontainer/` で定義される。ノートブックは [examples/demo.ipynb](examples/demo.ipynb) です。最初のセルはインポート失敗時にのみ CONTINUUM をインストールするため、1つのファイルが Colab、Binder、クローンのいずれでも動作します。
 
 ```bash
 git clone https://github.com/Cyrax321/CONTINUUM.git
