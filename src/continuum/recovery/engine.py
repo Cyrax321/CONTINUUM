@@ -113,14 +113,17 @@ class RecoveryDecision:
 
     @property
     def safe(self) -> bool:
+        """True only when the mode permits resuming without repair."""
         return self.mode is RecoveryMode.RESUME
 
     @property
     def environment_diff(self) -> EnvironmentDiff:
+        """The environment drift the validation found."""
         return self.validation.environment_diff
 
     @property
     def next_allowed_action(self) -> str | None:
+        """The single action the contract currently permits, if any."""
         return self.contract.next_allowed_action
 
     def permits(self, action: str) -> bool:
@@ -130,6 +133,7 @@ class RecoveryDecision:
         return action == self.contract.next_allowed_action
 
     def render(self) -> str:
+        """Human-readable multi-line rendering of the decision and contract."""
         lines = [
             "CONTINUUM RECOVERY",
             "",
