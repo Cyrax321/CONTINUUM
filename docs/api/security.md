@@ -140,3 +140,32 @@ configured, `disabled` is `True` and `verify(token)` raises
 `continuum confirm <run_id>` on the host. When configured, `verify(token)`
 raises `NotAuthenticated` unless `token` matches the configured secret.
 
+
+## Budget authorization
+
+Retry budgets bound to an authorization identity keep one logical operation
+drawing from one bucket even when callers mint fresh keys. Three pieces:
+
+### `resolve_authorization_id(action_type, key=None, arguments=None, *, volatile=(), ledger=None)`
+
+Stable identity for budget binding, derived from a key or tokens
+(`src/continuum/actions/idempotency.py`). Precedence: an explicit stable key
+wins and ignores arguments; otherwise the id derives from distinctive resource
+tokens (short, weak, and stopword tokens are dropped); operations with neither
+return `None` and stay unbound, preserving today's behavior byte-identically.
+
+### `CONTINUUM_BUDGETS_PATH`
+
+Registry location for authorization budgets. Read from the
+`CONTINUUM_BUDGETS_PATH` environment variable, falling back to the default
+path when unset. A missing registry file means unbound, never an error.
+
+### The AUTHORIZATION table
+
+`continuum budget <run_id>` prints an `AUTHORIZATION` section after the
+per-action rows whenever authorization-bound budgets exist, with per-bucket
+`COUNT`, `MAX`, and `REMAINING` columns keyed by `action_type` and the
+authorization id prefix. Draw-down semantics are pinned by
+`tests/test_budget_drawdown.py`: distinct authorizations keep independent
+budgets, settlements draw down the same counter, and weak-token operations
+leave no budget entry.
