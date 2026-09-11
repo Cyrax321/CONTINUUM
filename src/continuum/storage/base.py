@@ -187,7 +187,9 @@ class Storage(ABC):
     # -- lifecycle -------------------------------------------------------- #
 
     @abstractmethod
-    def close(self) -> None: ...
+    def close(self) -> None:
+        """Release the backing store. Idempotent; safe to call twice."""
+        ...
 
     def __enter__(self) -> Storage:
         return self
@@ -225,7 +227,9 @@ class Storage(ABC):
             )
 
     @abstractmethod
-    def create_run(self, run: Run) -> Run: ...
+    def create_run(self, run: Run) -> Run:
+        """Persist a new run row. Raises when the id already exists."""
+        ...
 
     @abstractmethod
     def create_run_started(self, run: Run, *, source: Origin = Origin.DETERMINISTIC) -> Run:
@@ -239,13 +243,19 @@ class Storage(ABC):
         """
 
     @abstractmethod
-    def get_run(self, run_id: str) -> Run: ...
+    def get_run(self, run_id: str) -> Run:
+        """Return the run row. Raises RunNotFound for a run that was never created."""
+        ...
 
     @abstractmethod
-    def update_run(self, run: Run) -> Run: ...
+    def update_run(self, run: Run) -> Run:
+        """Persist run changes and refresh its timestamp. Raises RunNotFound for a missing row."""
+        ...
 
     @abstractmethod
-    def list_runs(self, *, limit: int | None = None) -> Sequence[Run]: ...
+    def list_runs(self, *, limit: int | None = None) -> Sequence[Run]:
+        """Most recently created runs first, at most ``limit`` when given."""
+        ...
 
     @abstractmethod
     def get_active_run(self) -> Run | None:
@@ -285,13 +295,19 @@ class Storage(ABC):
         *,
         after_sequence: int = 0,
         upto: int | None = None,
-    ) -> Sequence[Event]: ...
+    ) -> Sequence[Event]:
+        """Live (unarchived) events in sequence order, windowed by ``after_sequence``/``upto``."""
+        ...
 
     @abstractmethod
-    def last_sequence(self, run_id: str) -> int: ...
+    def last_sequence(self, run_id: str) -> int:
+        """Highest live sequence number; 0 when the run has no events yet."""
+        ...
 
     @abstractmethod
-    def verify_events(self, run_id: str) -> IntegrityReport: ...
+    def verify_events(self, run_id: str) -> IntegrityReport:
+        """Recompute the hash chain and report whether it is intact."""
+        ...
 
     # -- state versions --------------------------------------------------- #
 
@@ -300,27 +316,41 @@ class Storage(ABC):
         """Persist a state version. Returns the assigned version number."""
 
     @abstractmethod
-    def get_version(self, run_id: str, version: int) -> SemanticState: ...
+    def get_version(self, run_id: str, version: int) -> SemanticState:
+        """Return one persisted state version. Raises for an unknown version."""
+        ...
 
     @abstractmethod
-    def latest_version(self, run_id: str) -> SemanticState | None: ...
+    def latest_version(self, run_id: str) -> SemanticState | None:
+        """Newest persisted state, or None when nothing was stored yet."""
+        ...
 
     @abstractmethod
-    def list_versions(self, run_id: str) -> Sequence[int]: ...
+    def list_versions(self, run_id: str) -> Sequence[int]:
+        """Persisted state version numbers in ascending order."""
+        ...
 
     # -- checkpoints ------------------------------------------------------ #
 
     @abstractmethod
-    def put_checkpoint(self, checkpoint: StateCheckpoint) -> StateCheckpoint: ...
+    def put_checkpoint(self, checkpoint: StateCheckpoint) -> StateCheckpoint:
+        """Persist a checkpoint and return it."""
+        ...
 
     @abstractmethod
-    def get_checkpoint(self, checkpoint_id: str) -> StateCheckpoint: ...
+    def get_checkpoint(self, checkpoint_id: str) -> StateCheckpoint:
+        """Return one checkpoint. Raises for an unknown id."""
+        ...
 
     @abstractmethod
-    def latest_checkpoint(self, run_id: str) -> StateCheckpoint | None: ...
+    def latest_checkpoint(self, run_id: str) -> StateCheckpoint | None:
+        """Newest checkpoint for the run, or None when there is none."""
+        ...
 
     @abstractmethod
-    def list_checkpoints(self, run_id: str) -> Sequence[StateCheckpoint]: ...
+    def list_checkpoints(self, run_id: str) -> Sequence[StateCheckpoint]:
+        """Every checkpoint for the run in creation order."""
+        ...
 
     @abstractmethod
     def delete_checkpoint(self, checkpoint_id: str) -> None:

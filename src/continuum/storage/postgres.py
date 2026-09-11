@@ -176,9 +176,10 @@ def _require_psycopg() -> Any:
 
 
 class PostgresStorage(Storage):
+    """Multi-process durable storage backed by PostgreSQL."""
+
     supports_action_index = True
     supports_compaction = True
-    """Multi-process durable storage backed by PostgreSQL."""
 
     def __init__(self, url: str | Any, *, timeout: float = 30.0) -> None:
         psycopg = _require_psycopg()
@@ -255,6 +256,7 @@ class PostgresStorage(Storage):
         return self._lock
 
     def close(self) -> None:
+        """Close the connection. Later use raises from the driver."""
         with self._lock:
             self._connection.close()
 
@@ -267,6 +269,7 @@ class PostgresStorage(Storage):
     # -- runs ------------------------------------------------------------- #
 
     def create_run(self, run: Run) -> Run:
+        """Insert the run row. Raises ConcurrentWriteError when the id exists."""
         self.require_usable_run_id(run)
         with self._write():
             try:
@@ -323,6 +326,7 @@ class PostgresStorage(Storage):
         return run
 
     def get_run(self, run_id: str) -> Run:
+        """Return the run row. Raises RunNotFound for a missing id."""
         with self._read():
             row = self._connection.execute(
                 "SELECT * FROM runs WHERE run_id = %s", (run_id,)
@@ -332,6 +336,7 @@ class PostgresStorage(Storage):
         return self._row_to_run(row)
 
     def update_run(self, run: Run) -> Run:
+        """Persist run changes with a refreshed timestamp. Raises RunNotFound when no row matches."""
         updated = run.touch()
         with self._write():
             cursor = self._connection.execute(
@@ -350,6 +355,7 @@ class PostgresStorage(Storage):
         return updated
 
     def list_runs(self, *, limit: int | None = None) -> Sequence[Run]:
+        """Newest runs first by creation time, at most ``limit`` when given."""
         query = "SELECT * FROM runs ORDER BY created_at DESC, run_id DESC"
         params: tuple[Any, ...] = ()
         if limit is not None:
@@ -360,6 +366,7 @@ class PostgresStorage(Storage):
         return [self._row_to_run(row) for row in rows]
 
     def get_active_run(self) -> Run | None:
+        """Most recently updated non-terminal run, or None when there is none."""
         terminal = (
             RunStatus.COMPLETED.value,
             RunStatus.CRASHED.value,
@@ -400,6 +407,7 @@ class PostgresStorage(Storage):
         expected_sequence: int | None = None,
         source: Origin = Origin.DETERMINISTIC,
     ) -> Event:
+        """Append one chained event in a write transaction and return it."""
         with self._write():
             event = self._append_chained(
                 run_id,
@@ -471,6 +479,7 @@ class PostgresStorage(Storage):
         return event
 
     def append_sealed(self, event: Event) -> Event:
+        """Store a pre-sealed event as-is, preserving its chain."""
         if event.type in CAUSED_BY_TYPES:
             caused_by = event.payload.get("caused_by") if isinstance(event.payload, dict) else None
             if caused_by is not None:
@@ -633,6 +642,7 @@ class PostgresStorage(Storage):
         return {"archived": max(archived, 0)}
 
     def read_archived_events(self, run_id: str) -> Sequence[Event]:
+        """Compacted events from the archive, oldest first."""
         with self._read():
             rows = self._connection.execute(
                 "SELECT * FROM events_archive WHERE run_id = %s ORDER BY sequence ASC", (run_id,)
@@ -736,6 +746,7 @@ class PostgresStorage(Storage):
         after_sequence: int = 0,
         upto: int | None = None,
     ) -> Sequence[Event]:
+        """Live events in sequence order, windowed by ``after_sequence``/``upto``."""
         query = "SELECT * FROM events WHERE run_id = %s AND sequence > %s"
         params: list[Any] = [run_id, after_sequence]
         if upto is not None:
@@ -747,6 +758,7 @@ class PostgresStorage(Storage):
         return [self._row_to_event(row) for row in rows]
 
     def last_sequence(self, run_id: str) -> int:
+        """Highest live sequence number; 0 when the run has no events yet."""
         with self._read():
             row = self._connection.execute(
                 "SELECT MAX(sequence) AS seq FROM events WHERE run_id = %s", (run_id,)
@@ -969,6 +981,7 @@ class PostgresStorage(Storage):
     # -- state versions --------------------------------------------------- #
 
     def put_version(self, state: SemanticState, *, reason: str = "", force: bool = False) -> int:
+        """Persist a state version, reusing the head when the fingerprint is unchanged."""
         fingerprint = state_fingerprint(state)
         with self._write():
             self._require_run(self._connection, state.run_id)
@@ -999,6 +1012,7 @@ class PostgresStorage(Storage):
         return version
 
     def get_version(self, run_id: str, version: int) -> SemanticState:
+        """Return one state version. Raises CheckpointNotFound for an unknown version."""
         with self._read():
             row = self._connection.execute(
                 "SELECT state, fingerprint FROM versions WHERE run_id = %s AND version = %s",
@@ -1009,6 +1023,7 @@ class PostgresStorage(Storage):
         return self._row_to_state(row, run_id, version)
 
     def latest_version(self, run_id: str) -> SemanticState | None:
+        """Newest state version, or None when nothing was stored yet."""
         with self._read():
             row = self._connection.execute(
                 "SELECT state, fingerprint, version FROM versions WHERE run_id = %s "
@@ -1034,6 +1049,7 @@ class PostgresStorage(Storage):
         return state
 
     def list_versions(self, run_id: str) -> Sequence[int]:
+        """Stored state version numbers in ascending order."""
         with self._read():
             rows = self._connection.execute(
                 "SELECT version FROM versions WHERE run_id = %s ORDER BY version ASC", (run_id,)
@@ -1043,6 +1059,7 @@ class PostgresStorage(Storage):
     # -- checkpoints ------------------------------------------------------ #
 
     def put_checkpoint(self, checkpoint: StateCheckpoint) -> StateCheckpoint:
+        """Persist a checkpoint. Raises ConcurrentWriteError when the id exists."""
         sealed = checkpoint if checkpoint.verify() else checkpoint.sealed()
         with self._write():
             self._require_run(self._connection, sealed.run_id)
@@ -1067,6 +1084,7 @@ class PostgresStorage(Storage):
         return sealed
 
     def get_checkpoint(self, checkpoint_id: str) -> StateCheckpoint:
+        """Return one checkpoint. Raises CheckpointNotFound for an unknown id."""
         with self._read():
             row = self._connection.execute(
                 "SELECT body FROM checkpoints WHERE checkpoint_id = %s", (checkpoint_id,)
@@ -1076,6 +1094,7 @@ class PostgresStorage(Storage):
         return self._row_to_checkpoint(row)
 
     def latest_checkpoint(self, run_id: str) -> StateCheckpoint | None:
+        """Newest checkpoint for the run, or None when there is none."""
         with self._read():
             row = self._connection.execute(
                 "SELECT body FROM checkpoints WHERE run_id = %s "
@@ -1085,6 +1104,7 @@ class PostgresStorage(Storage):
         return self._row_to_checkpoint(row) if row else None
 
     def list_checkpoints(self, run_id: str) -> Sequence[StateCheckpoint]:
+        """Every checkpoint for the run in version order."""
         with self._read():
             rows = self._connection.execute(
                 "SELECT body FROM checkpoints WHERE run_id = %s ORDER BY version ASC", (run_id,)
@@ -1092,6 +1112,7 @@ class PostgresStorage(Storage):
         return [self._row_to_checkpoint(row) for row in rows]
 
     def delete_checkpoint(self, checkpoint_id: str) -> None:
+        """Remove a checkpoint by id. Callers must not delete one a decision still depends on."""
         with self._write():
             self._connection.execute(
                 "DELETE FROM checkpoints WHERE checkpoint_id = %s", (checkpoint_id,)
