@@ -70,7 +70,7 @@ def test_unknown_attribute_raises_attribute_error() -> None:
     import continuum.adapters
 
     with pytest.raises(AttributeError, match="definitely_not_an_adapter"):
-        continuum.adapters.definitely_not_an_adapter  # noqa:  B018
+        continuum.adapters.definitely_not_an_adapter  # noqa: B018
 
 
 def test_repeated_access_is_cached_in_the_module_dict() -> None:

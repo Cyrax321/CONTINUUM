@@ -235,4 +235,4 @@ def test_mcp_resume_includes_human_steps(db: str, tmp_path: Path) -> None:
     assert isinstance(payload.get("human_steps"), list)
 
 
-import os  # noqa:  E402
+import os  # noqa: E402

@@ -179,13 +179,13 @@ def test_complete_validates_invalid_consumed_inputs() -> None:
     store = _new_store_with_run("run_val")
     ledger = ActionLedger(store, "run_val")
     outcome = ledger.claim("a.do", {}, key="k-val")
-    with pytest.raises(Exception):  # noqa:  B017
+    with pytest.raises(Exception):  # noqa: B017
         ledger.complete(
             outcome.key,
             consumed_inputs={"checkpoint_seq": -5, "event_positions": [], "action_ids": []},
         )
     # Also via action_ids too long
-    with pytest.raises(Exception):  # noqa:  B017
+    with pytest.raises(Exception):  # noqa: B017
         ledger.complete(
             outcome.key,
             consumed_inputs={"checkpoint_seq": 0, "event_positions": [], "action_ids": [""]},

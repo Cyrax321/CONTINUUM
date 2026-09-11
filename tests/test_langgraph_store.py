@@ -17,10 +17,10 @@ import pytest
 
 pytest.importorskip("langgraph.checkpoint.base")
 
-from langgraph.graph import StateGraph
-from langgraph.graph.message import add_messages
+from langgraph.graph import StateGraph  # noqa: E402
+from langgraph.graph.message import add_messages  # noqa: E402
 
-from continuum.adapters.langgraph_store import (
+from continuum.adapters.langgraph_store import (  # noqa: E402
     make_continuum_checkpointer,
 )
 from continuum.events import EventType

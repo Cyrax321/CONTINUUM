@@ -26,7 +26,7 @@ from continuum.storage.base import Storage
 warnings.filterwarnings("ignore")
 
 langgraph = pytest.importorskip("langgraph")
-from langgraph.graph import END, START, StateGraph  # noqa:  E402
+from langgraph.graph import END, START, StateGraph  # noqa: E402
 
 
 @pytest.fixture

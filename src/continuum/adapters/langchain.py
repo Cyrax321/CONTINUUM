@@ -62,7 +62,7 @@ __all__ = [
 ]
 
 try:
-    import langchain_core  # noqa:  F401
+    import langchain_core  # noqa: F401
 
     langchain_available = True
 except ImportError:

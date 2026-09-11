@@ -26,7 +26,7 @@ from continuum.storage.base import Storage
 warnings.filterwarnings("ignore")
 
 langchain_core = pytest.importorskip("langchain_core")
-from langchain_core.runnables import RunnableLambda  # noqa:  E402
+from langchain_core.runnables import RunnableLambda  # noqa: E402
 
 
 @pytest.fixture

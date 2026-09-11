@@ -71,8 +71,8 @@ __all__ = [
 ]
 
 try:
-    from agents import RunContextWrapper, RunHooks, function_tool  # noqa:  F401
-    from agents.tool_context import ToolContext  # noqa:  F401
+    from agents import RunContextWrapper, RunHooks, function_tool  # noqa: F401
+    from agents.tool_context import ToolContext  # noqa: F401
 
     openai_agents_available = True
 except ImportError:

@@ -25,7 +25,7 @@ class KubernetesAdapter(GenericAgentAdapter):
         if shutil.which("kubectl") is None:
             return False
         try:
-            import kubernetes  # noqa:  F401
+            import kubernetes  # noqa: F401
 
             return True
         except ImportError:

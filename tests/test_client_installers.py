@@ -26,7 +26,7 @@ def run(*argv: str) -> tuple[int, str, str]:
     return code, out.getvalue(), err.getvalue()
 
 
-import io  # noqa:  E402
+import io  # noqa: E402
 
 
 @pytest.mark.parametrize("client", ("claude-code", "gemini", "codex"))

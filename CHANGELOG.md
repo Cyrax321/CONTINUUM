@@ -9,11 +9,12 @@ All notable changes to this project are documented here. The format follows
 ### Fixed
 
 - **Cleared the `noqa` backlog flagged by RUF100 (#951).** Removed 42 unused
-  `# noqa` directives (regras não ativas no select do repo) de `src/`, `tests/`
-  e `examples/`, deixando intactos os ~26 que ainda suprimem violações reais
-  (`F401`/`E402`/`B017`/`B018`) — availability probes e imports intencionais em
-  examples/tests. `ruff check`, `ruff format --check`, `mypy src/continuum` e o
-  pytest suite continuam verdes.
+  `# noqa` directives (rules not enabled in the repo's ruff `select`) from
+  `src/`, `tests/`, and `examples/`, while keeping the ~26 that still suppress
+  real, active violations (`F401`/`E402`/`B017`/`B018`) — optional-dependency
+  availability probes and intentional mid-module imports in examples/tests.
+  `ruff check`, `ruff format --check`, `mypy src/continuum`, and the pytest
+  suite remain green.
 
 ### Added
 
