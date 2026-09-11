@@ -404,3 +404,38 @@ def test_notify_test_command_reports_per_url(tmp_path, monkeypatch) -> None:  # 
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_duplicate_urls_aggregate_conservatively() -> None:
+    """One success must not mask another entry's failure on the same url."""
+    import http.server
+    import threading
+
+    from continuum.recovery.notify import WebhookEndpoint, notify_endpoints
+
+    captured: dict = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            captured["n"] = captured.get("n", 0) + 1
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/hook"
+        endpoints = [
+            WebhookEndpoint(url=url, events=("request_human",)),
+            WebhookEndpoint(url=url, events=("request_human",)),
+        ]
+        assert notify_endpoints(endpoints, "request_human", {}) == {url: True}
+        assert captured["n"] == 2
+    finally:
+        server.shutdown()
+        server.server_close()
