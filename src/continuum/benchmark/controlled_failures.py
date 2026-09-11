@@ -14,6 +14,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class ControlledScenario:
+    """Describe one deterministic failure scenario and its expected recovery."""
+
     scenario: str
     checkpoint_version: str
     environment_version: str
@@ -103,6 +105,8 @@ SCENARIOS: tuple[ControlledScenario, ...] = (
 
 
 def by_name(name: str) -> ControlledScenario:
+    """Look up a controlled failure scenario by name."""
+
     for scenario in SCENARIOS:
         if scenario.scenario == name:
             return scenario
