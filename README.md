@@ -192,7 +192,7 @@ Full walkthrough with code is in `docs/recovery_walkthrough.md` (`examples/recov
 | Environment revalidation | Every checkpoint component verified against the current world before resume |
 | Provenance-aware state | Agent-reported progress is marked `REQUIRES_REVIEW`, never self-certifying |
 | Recovery engine | Seven recovery modes with a deterministic, sealed next-action contract |
-| Deny-by-default MCP server | Eleven tools, read-only/mutating split, caller allowlist |
+| Deny-by-default MCP server | Twelve tools, read-only/mutating split, caller allowlist |
 | Framework adapters | Generic Python, OpenAI Agents SDK, LangGraph, and LangChain integrations |
 | Secure planning loop | Two-signal observation verification escalates high-risk branches to REQUIRES_REVIEW |
 | Periodic revalidation | Environment re-checked on a schedule, catching mid-run drift within one cycle |
@@ -262,7 +262,7 @@ uv pip install -e ".[mcp]"
 CONTINUUM_MCP_MUTATING_CLIENTS=your-client-name continuum-mcp
 ```
 
-Eleven tools over stdio. Three are read-only (`continuum_validate`, `continuum_resume`, `continuum_list_actions`); eight mutate. Side effects are two-phase (claim, perform, complete), and mutating tools deny by default behind an allowlist. Agent-reported state is recorded with `Origin.EXTERNAL_AGENT` provenance and marked `REQUIRES_REVIEW`.
+Twelve tools over stdio. Three are read-only (`continuum_validate`, `continuum_resume`, `continuum_list_actions`); nine mutate. Side effects are two-phase (claim, perform, complete), and mutating tools deny by default behind an allowlist. Agent-reported state is recorded with `Origin.EXTERNAL_AGENT` provenance and marked `REQUIRES_REVIEW`.
 
 Verification details, including crash recovery at startup and the end to end Claude Code test, are in [references/mcp.md](references/mcp.md). If a registered server reports `CONNECTION_CLOSED`, the cause is almost always `PATH` resolution rather than the server itself: [docs/api/mcp.md](docs/api/mcp.md#troubleshooting) has the diagnosis and two remedies.
 
@@ -350,7 +350,7 @@ Any harness plugs into the same hash chained log. The same run can be written by
 | Seam | How to connect | What it gives you |
 |:--|:--|:--|
 | 1 In-process | `GenericAgentAdapter.intercept_action(...)` and `wrap_tool(key_fn=...)` on LangChain, LangGraph, OpenAI Agents SDK | Python frameworks, trusted writes |
-| 2 MCP server | `continuum-mcp` 12 tools over stdio (`continuum_record_progress`, `continuum_intercept_action`, `continuum_complete_action`, etc.) | Any MCP capable client, 3 read only + 8 mutating, allowlist `CONTINUUM_MCP_MUTATING_CLIENTS` |
+| 2 MCP server | `continuum-mcp` 12 tools over stdio (`continuum_record_progress`, `continuum_intercept_action`, `continuum_complete_action`, etc.) | Any MCP capable client, 3 read only + 9 mutating, allowlist `CONTINUUM_MCP_MUTATING_CLIENTS` |
 | 3 CLI lifecycle hooks | `continuum hooks install claude-code --with-gate` also `gemini` and `codex` | Coding CLIs: `SessionStart briefing`, `PostToolUse observe`, `PreToolUse gate`; no CLAUDE.md needed |
 | 4 Enforcing HTTP gateway | `continuum gateway --port 8765` with `.continuum/gateway.json` | Any language, any outbound HTTP must have a claim, gateway settles from real status code |
 | 5 OpenTelemetry bridge | `make_span_processor(storage)` | Any traced app, spans become `TOOL_COMPLETED` evidence |
@@ -479,7 +479,7 @@ All wiring is host-side; the model's cooperation is optional:
 continuum hooks install claude-code --with-gate   # coding CLIs: evidence, briefing, gate
 continuum gateway --port 8765                     # enforcing HTTP proxy for everything else
 provider.add_span_processor(continuum.otel.make_span_processor(storage))  # OTel to evidence
-continuum-mcp                                     # anything MCP-capable: the eleven-tool server
+continuum-mcp                                     # anything MCP-capable: the twelve-tool server
 continuum briefing                                # session-start context injection
 continuum budget <run_id>                         # retry-budget usage report
 continuum tree <parent_run_id>                    # multi-agent hierarchy view
