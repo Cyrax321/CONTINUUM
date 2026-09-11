@@ -156,7 +156,7 @@ class LLMExtractor:
         try:
             proposal = self._llm(context, state)
             return self._merge(state, proposal)
-        except Exception as exc:  # noqa: BLE001 - enrichment must never break recovery
+        except Exception as exc:
             self.last_error = exc
             return state
 

@@ -187,7 +187,7 @@ def scenario_adapter_failure_across_environments(ctx: ScenarioContext) -> None:
     class FailingAdapter(AgentAdapter):
         """Test double whose every capability raises."""
 
-        def __init__(self, storage: object, **kwargs: Any) -> None:  # noqa: D401
+        def __init__(self, storage: object, **kwargs: Any) -> None:
             self._storage = storage
 
         def capture_state(self, *a: Any, **k: Any) -> NoReturn:

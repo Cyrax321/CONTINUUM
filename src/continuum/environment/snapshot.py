@@ -202,7 +202,7 @@ class CallableProvider(EnvironmentProvider):
         for key, probe in self._probes.items():
             try:
                 value = probe()
-            except Exception as exc:  # noqa: BLE001 - a failed probe is a finding
+            except Exception as exc:
                 captured[key] = EnvResource(
                     name=key,
                     kind=self._kind,

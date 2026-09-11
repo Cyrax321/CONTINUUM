@@ -151,7 +151,7 @@ def probe_verdict(
     one registry per platform.
     """
     try:
-        completed = subprocess.run(  # noqa: S602 - operator-configured command
+        completed = subprocess.run(
             spec["command"],
             input=json.dumps(action.model_dump(mode="json")),
             capture_output=True,
@@ -299,7 +299,7 @@ def probe_authority_verdict(
     blocked, fail-closed (#842).
     """
     try:
-        completed = subprocess.run(  # noqa: S602 - operator-configured command
+        completed = subprocess.run(
             spec["command"],
             input=json.dumps(dict(payload)),
             capture_output=True,

@@ -157,7 +157,7 @@ class TestLangGraphCrashResumeParity:
 class TestOpenAICrashResumeParity:
     def test_openai_crash_mid_action_blocks_resume_and_dedupes(self, store: SQLiteStorage) -> None:
         try:
-            import agents  # noqa: F401
+            import agents  # noqa:  F401
         except ImportError:
             pytest.skip("openai-agents not installed")
 
@@ -200,7 +200,7 @@ class TestOpenAICrashResumeParity:
 
     def test_openai_os_exit_style_crash_blocks_resume(self, store: SQLiteStorage) -> None:
         try:
-            import agents  # noqa: F401
+            import agents  # noqa:  F401
         except ImportError:
             pytest.skip("openai-agents not installed")
 

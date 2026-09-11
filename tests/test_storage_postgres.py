@@ -24,7 +24,7 @@ DSN = os.environ.get("CONTINUUM_TEST_POSTGRES_DSN")
 
 def _psycopg_available() -> bool:
     try:
-        import psycopg  # type: ignore[import-not-found]  # noqa: F401
+        import psycopg  # type: ignore[import-not-found]  # noqa:  F401
     except ImportError:
         return False
     return True

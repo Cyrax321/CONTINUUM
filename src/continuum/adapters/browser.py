@@ -20,7 +20,7 @@ class BrowserAdapter(GenericAgentAdapter):
     @staticmethod
     def available() -> bool:
         try:
-            import playwright  # noqa: F401
+            import playwright  # noqa:  F401
 
             return True
         except ImportError:

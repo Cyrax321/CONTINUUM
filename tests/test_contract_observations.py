@@ -229,7 +229,7 @@ def test_resume_payload_carries_the_rows_through_json(
     assert payload["contract"]["post_checkpoint_observations"][0]["status"] == "verified"
 
 
-from continuum.cli.exitcodes import ExitCode  # noqa: E402
+from continuum.cli.exitcodes import ExitCode  # noqa:  E402
 
 ExitCodes_OK_UNSAFE = {
     ExitCode.OK,

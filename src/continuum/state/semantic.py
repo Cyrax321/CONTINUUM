@@ -885,7 +885,7 @@ def first_unprojectable_event(
     for event in sorted(events, key=lambda e: e.sequence):
         try:
             state, _ = project_incremental(run_id, [event], base=state)
-        except Exception as exc:  # noqa: BLE001 - see docstring
+        except Exception as exc:
             return event.sequence, str(event.type), _condense(str(exc))
     return None
 

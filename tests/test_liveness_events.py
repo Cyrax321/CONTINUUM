@@ -134,7 +134,7 @@ def test_watch_webhook_delivers_on_breach(tmp_path: Path) -> None:
     received: list[bytes] = []
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
             received.append(body)
@@ -142,7 +142,7 @@ def test_watch_webhook_delivers_on_breach(tmp_path: Path) -> None:
             self.end_headers()
             self.wfile.write(b"ok")
 
-        def log_message(self, format, *args):  # noqa: A002
+        def log_message(self, format, *args):
             return
 
     server = http.server.HTTPServer(("127.0.0.1", 0), Handler)

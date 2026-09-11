@@ -94,7 +94,7 @@ class ProbeReconciler(Reconciler):
         """
         try:
             return self._probe(action)
-        except Exception as exc:  # noqa: BLE001 - an unreachable probe is not evidence
+        except Exception as exc:
             self.last_error = exc
             return None
 

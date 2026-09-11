@@ -17,20 +17,20 @@ import pytest
 
 pytest.importorskip("langgraph.checkpoint.base")
 
-from langgraph.graph import StateGraph  # noqa: E402
+from langgraph.graph import StateGraph
 
-from continuum.actions import ActionLedger  # noqa: E402
-from continuum.cli import ExitCode, main  # noqa: E402
-from continuum.events import EventType  # noqa: E402
-from continuum.models import ActionStatus, Run  # noqa: E402
-from continuum.replayguard import (  # noqa: E402
+from continuum.actions import ActionLedger
+from continuum.cli import ExitCode, main
+from continuum.events import EventType
+from continuum.models import ActionStatus, Run
+from continuum.replayguard import (
     GuardKind,
     ReplayBlocked,
     evaluate,
     langgraph_protected_node,
     protected_call,
 )
-from continuum.storage import SQLiteStorage  # noqa: E402
+from continuum.storage import SQLiteStorage
 
 
 @pytest.fixture

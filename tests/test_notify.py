@@ -32,7 +32,7 @@ def test_verify_accepts_and_rejects() -> None:
 
 def _receiver(captured: dict, status: int = 200):
     class Handler(http.server.BaseHTTPRequestHandler):
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", 0))
             captured["body"] = self.rfile.read(length)
             captured["signature"] = self.headers.get(SIGNATURE_HEADER)

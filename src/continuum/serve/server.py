@@ -331,7 +331,7 @@ class SidecarServer:
                 result = self.dispatch(str(req.get("method")), dict(req.get("params") or {}))
             except SidecarError as exc:
                 _write(outstream, {"id": rid, "error": {"type": exc.code, "message": str(exc)}})
-            except Exception as exc:  # noqa: BLE001 - report, never crash the loop
+            except Exception as exc:
                 _write(
                     outstream,
                     {

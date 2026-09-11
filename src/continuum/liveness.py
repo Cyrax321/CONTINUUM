@@ -5,7 +5,7 @@ re-exports the public symbols so existing imports from ``continuum.liveness``
 continue to work.
 """
 
-from continuum.recovery.health import (  # noqa: F401
+from continuum.recovery.health import (
     DEFAULT_LIVENESS_PATH,
     DEFAULT_MAX_SILENCE_SECONDS,
     DEFAULT_PHASE_SCOPES,

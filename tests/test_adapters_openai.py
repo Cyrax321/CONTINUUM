@@ -439,7 +439,7 @@ class TestWithRealOpenAIAgents:
 
         def fake_function_tool(
             name_override: str | None = None, description_override: str | None = None
-        ):  # noqa: ANN001
+        ):
             def deco(fn: Any) -> Any:
                 def wrapper(ctx: Any, endpoint: Any = None, **kw: Any) -> Any:
                     return fn(ctx, endpoint=endpoint, **kw)
@@ -460,7 +460,7 @@ class TestWithRealOpenAIAgents:
             action_type: str,
             action_fn: Any,
             *,
-            arguments: Any = None,  # noqa: ANN001
+            arguments: Any = None,
             volatile: Any = (),
             scoped_to_run: bool = True,
             key: str | None = None,
@@ -492,7 +492,7 @@ class TestWithRealOpenAIAgents:
 
         def fake_function_tool(
             name_override: str | None = None, description_override: str | None = None
-        ):  # noqa: ANN001
+        ):
             def deco(fn: Any) -> Any:
                 def wrapper(ctx: Any, endpoint: Any = None, **kw: Any) -> Any:
                     return fn(ctx, endpoint=endpoint, **kw)
@@ -513,7 +513,7 @@ class TestWithRealOpenAIAgents:
             action_type: str,
             action_fn: Any,
             *,
-            arguments: Any = None,  # noqa: ANN001
+            arguments: Any = None,
             volatile: Any = (),
             scoped_to_run: bool = True,
             key: str | None = None,

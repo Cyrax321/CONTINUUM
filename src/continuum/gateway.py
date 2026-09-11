@@ -547,23 +547,23 @@ class GatewayServer:
                     if close_storage:
                         close_storage()
 
-            def do_POST(self) -> None:  # noqa: N802
+            def do_POST(self) -> None:
                 """Route a POST through the claim check."""
                 self._handle("POST")
 
-            def do_PUT(self) -> None:  # noqa: N802
+            def do_PUT(self) -> None:
                 """Route a PUT through the claim check."""
                 self._handle("PUT")
 
-            def do_PATCH(self) -> None:  # noqa: N802
+            def do_PATCH(self) -> None:
                 """Route a PATCH through the claim check."""
                 self._handle("PATCH")
 
-            def do_DELETE(self) -> None:  # noqa: N802
+            def do_DELETE(self) -> None:
                 """Route a DELETE through the claim check."""
                 self._handle("DELETE")
 
-            def do_GET(self) -> None:  # noqa: N802
+            def do_GET(self) -> None:
                 """Route a GET through the claim check, if a route registers it."""
                 self._handle("GET")
 

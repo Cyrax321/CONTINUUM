@@ -48,7 +48,7 @@ def run_scenario(name: str, fn: ScenarioFn) -> ScenarioResult:
     try:
         fn(ctx)
         outcome = RecoveryOutcome.FAIL if ctx._failed else RecoveryOutcome.PASS
-    except Exception as exc:  # noqa: BLE001 - the harness must record, not crash
+    except Exception as exc:
         outcome = RecoveryOutcome.FAIL
         ctx.notes.append(f"exception: {type(exc).__name__}: {exc}")
     elapsed_ms = round((time.perf_counter() - start) * 1000, 3)

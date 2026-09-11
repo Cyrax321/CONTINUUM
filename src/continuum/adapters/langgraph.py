@@ -64,7 +64,7 @@ __all__ = [
 ]
 
 try:
-    from langgraph.graph.state import StateGraph  # noqa: F401
+    from langgraph.graph.state import StateGraph  # noqa:  F401
 
     langgraph_available = True
 except ImportError:

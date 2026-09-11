@@ -179,7 +179,7 @@ def test_bare_name_ignores_child_path_on_windows(
     child_env["PATH"] = os.pathsep.join([str(script_dir), *kept])
     child_env["CONTINUUM_DB"] = str(tmp_path / "bare.db")
     with pytest.raises(FileNotFoundError):
-        proc = subprocess.Popen(  # noqa: SIM115 - raised before the handle exists
+        proc = subprocess.Popen(
             ["continuum-mcp"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,

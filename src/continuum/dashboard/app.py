@@ -290,7 +290,7 @@ def make_dashboard_server(
     )
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        def log_message(self, format: str, *args: Any) -> None:
             """Drop the stdlib access log: the event log is the record of truth."""
             return
 
@@ -310,7 +310,7 @@ def make_dashboard_server(
             self.end_headers()
             self.wfile.write(body)
 
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:
             """Serve the run index, or one run's detail page under ``/runs/<id>``."""
             if self.path.startswith("/runs/"):
                 run_id = self.path.split("/runs/")[1].split("?")[0].split("/")[0]
@@ -324,7 +324,7 @@ def make_dashboard_server(
                 return
             self._html(render_dashboard_html(storage))
 
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:
             """Apply one human-in-the-loop action: confirm, reconcile, or complete.
 
             The body is form-encoded and capped at ``MAX_DASHBOARD_BODY``; an

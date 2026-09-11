@@ -22,7 +22,7 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from continuum import (  # noqa: E402
+from continuum import (  # noqa:  E402
     CheckpointManager,
     RecoveryEngine,
     SemanticPolicy,
@@ -32,9 +32,9 @@ from continuum import (  # noqa: E402
     build_recovery_context,
     capture_environment,
 )
-from continuum.checkpoint.context import estimate_tokens  # noqa: E402
-from continuum.environment import StaticProvider  # noqa: E402
-from continuum.models import (  # noqa: E402
+from continuum.checkpoint.context import estimate_tokens  # noqa:  E402
+from continuum.environment import StaticProvider  # noqa:  E402
+from continuum.models import (  # noqa:  E402
     Decision,
     Evidence,
     ExternalDependency,

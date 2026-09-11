@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cleared the `noqa` backlog flagged by RUF100 (#951).** Removed 42 unused
+  `# noqa` directives (regras não ativas no select do repo) de `src/`, `tests/`
+  e `examples/`, deixando intactos os ~26 que ainda suprimem violações reais
+  (`F401`/`E402`/`B017`/`B018`) — availability probes e imports intencionais em
+  examples/tests. `ruff check`, `ruff format --check`, `mypy src/continuum` e o
+  pytest suite continuam verdes.
+
 ### Added
 
 - **The installed `continuum-mcp` entry point is exercised over real stdio (#834).**

@@ -149,7 +149,7 @@ def run_serve(
         server.close()
 
 
-def cmd_serve(args: Any, storage: Any, out: TextIO, err: TextIO) -> int:  # noqa: ANN401
+def cmd_serve(args: Any, storage: Any, out: TextIO, err: TextIO) -> int:
     """CLI entry point for ``continuum serve``."""
     from continuum.storage import Storage
 
