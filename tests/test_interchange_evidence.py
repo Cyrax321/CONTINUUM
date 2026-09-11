@@ -217,7 +217,7 @@ def test_zero_new_dependencies() -> None:
     import ast
     from pathlib import Path
 
-    path = Path("src/continuum/interchange/evidence.py")
+    path = Path(__file__).resolve().parents[1] / "src/continuum/interchange/evidence.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
     imports: list[str] = []
     for node in ast.walk(tree):

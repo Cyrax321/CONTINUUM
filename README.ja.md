@@ -93,7 +93,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI エントリーポイント
 continuum-mcp --help             # MCP サーバーエントリーポイント（[mcp] または [dev] が必要）
-pytest -q                        # 約 1,380 件が収集される（正確な数とスキップ数は環境により異なる）
+pytest -q                        # 最小環境で約 2,163 件収集、約 2,030 件通過、約 23 件スキップ（正確な数は異なる）
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI が強制する三つのゲート
 ```
@@ -226,7 +226,7 @@ CONTINUUM はモックの単体テストだけでなく、実際の LLM エー�
 - **サードパーティクライアント**：Gemini CLI と Kilo Code が stdio JSON-RPC でライブ SQLite ストアに対して接続し、マルチエージェント共存と認可の分離を検証。
 - **プロトコル準拠**：`@modelcontextprotocol/inspector --cli` でプロセス死を跨いで端から端まで駆動。変更ツールはデフォルトで `CONTINUUM_MCP_MUTATING_CLIENTS` の背後で拒否され、外部クレームは `REQUIRES_REVIEW`（`safe: false`）に降格する。
 - **自己修復**：ハードキルされたサーバーは起動時に一度だけのリトライで孤立した SQLite `-wal`/`-shm` サイドカーをクリーンアップして回復する。
-- **スケール**：約 1,380 件のテストが収集され（約 1,360 が通過、残りはオプションサービスなしでスキップ）、Python 3.11、3.12、3.13 で実行（unit、`hypothesis` によるプロパティベース、並行性、敵対的）。CONTINUUM-Bench は五つのクラッシュシナリオに加え専用の argument-drift シナリオを実行し、CONTINUUM について 0 の重複作業と 0 の重複副作用を、単純な再生については完全な重複を測定する。さらに 12 シナリオのリカバリ正確性スイート（`continuum.benchmark.phase6`）が耐久実行サーベイのクラッシュポイントを実行可能なアサーションとして符号化する。
+- **スケール**：約 2,163 件のテストが収集され（約 2,030 が通過、残りはオプションサービスなしでスキップ）、Python 3.11、3.12、3.13 で実行（unit、`hypothesis` によるプロパティベース、並行性、敵対的）。CONTINUUM-Bench は五つのクラッシュシナリオに加え専用の argument-drift シナリオを実行し、CONTINUUM について 0 の重複作業と 0 の重複副作用を、単純な再生については完全な重複を測定する。さらに 12 シナリオのリカバリ正確性スイート（`continuum.benchmark.phase6`）が耐久実行サーベイのクラッシュポイントを実行可能なアサーションとして符号化する。
 - **敵対的監査**：完全な MCP 面がライブプロトコル上で監査され、三つの欠陥が見つかり修正された。手法と再現手順は [test.md](test.md) にある。
 
 ## MCP 統合
@@ -392,7 +392,7 @@ RESUME < REPAIR_AND_RESUME < REPLAN < WAIT < REQUEST_HUMAN < ROLLBACK < ABORT
 
 ### モジュールマップ、一つのライブラリ、多くの面
 
-CONTINUUM は一つのライブラリ（`src/continuum`、104 モジュール）に加え大規模なテストスイート（98 テストファイル、約 1,380 テスト）である。すべてのモジュールは一つのハッシュチェーンイベントログに追記し再生する。
+CONTINUUM は一つのライブラリ（`src/continuum`、124 モジュール）に加え大規模なテストスイート（161 テストファイル、約 2,163 テスト）である。すべてのモジュールは一つのハッシュチェーンイベントログに追記し再生する。
 
 | モジュール | 役割 |
 |:--|:--|

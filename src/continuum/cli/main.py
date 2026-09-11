@@ -3604,7 +3604,12 @@ def build_parser() -> argparse.ArgumentParser:
         prog="continuum",
         description="Semantic recovery layer for long-running AI agents.",
     )
-    parser.add_argument("--version", action="version", version=f"continuum {__version__}")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"continuum {__version__}",
+        help="print the version and exit.",
+    )
     parser.add_argument(
         "--db", default=_DEFAULT_DB, help=f"storage URL or path (default: {_DEFAULT_DB})."
     )
@@ -3650,7 +3655,9 @@ def build_parser() -> argparse.ArgumentParser:
         return p
 
     add("init", cmd_init, "Create storage.")
-    add("runs", cmd_runs, "List runs.").add_argument("--limit", type=int, default=20)
+    add("runs", cmd_runs, "List runs.").add_argument(
+        "--limit", type=int, default=20, help="show at most N runs (default: 20)."
+    )
 
     start = with_run(add("start", cmd_start, "Create a run with a goal. Mutates storage."))
     start.add_argument("--goal", required=True, help="what the run is trying to achieve.")
@@ -3702,23 +3709,32 @@ def build_parser() -> argparse.ArgumentParser:
     impact.add_argument("--offset", type=int, default=0, help="skip the first M downstream nodes")
 
     events = with_run(add("events", cmd_events, "List recorded events."))
-    events.add_argument("--after", type=int, default=0)
-    events.add_argument("--upto", type=int, default=None)
+    events.add_argument("--after", type=int, default=0, help="list events with sequence > N.")
+    events.add_argument("--upto", type=int, default=None, help="list events with sequence <= N.")
 
     diff = with_run(add("diff", cmd_diff, "Compare two state versions."))
-    diff.add_argument("from_version", type=int)
-    diff.add_argument("to_version", type=int)
+    diff.add_argument("from_version", type=int, help="state version to compare from.")
+    diff.add_argument("to_version", type=int, help="state version to compare to.")
 
     validate = with_env(with_run(add("validate", cmd_validate, "Validate state. Read-only.")))
     validate.add_argument("--model", help="model that will run the resumed agent.")
-    validate.add_argument("--tolerate-unknown", action="store_true")
+    validate.add_argument(
+        "--tolerate-unknown",
+        action="store_true",
+        help="treat unknown environment resources as satisfying the contract.",
+    )
     validate.add_argument(
         "--dashboard", action="store_true", help="render the Phase 14 recovery dashboard."
     )
 
     health = with_run(add("health", cmd_health, "Advisory prefix-trust health check. Read-only."))
     # Subparser default SUPPRESS: accepts trailing --json without shadowing the global flag (#677).
-    health.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    health.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="emit machine-readable JSON (same as the global flag).",
+    )
     # health is advisory only; it never gates, never moves mode, never changes exit code
     # (issue #401). It reports trust_score with per-dimension breakdown.
 
@@ -3730,7 +3746,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="the run to resume; omit to resume the most recently active run.",
     )
     resume.add_argument("--model", help="model that will run the resumed agent.")
-    resume.add_argument("--tolerate-unknown", action="store_true")
+    resume.add_argument(
+        "--tolerate-unknown",
+        action="store_true",
+        help="treat unknown environment resources as satisfying the contract.",
+    )
     resume.add_argument("--repair", action="store_true", help="record the repair plan.")
     resume.add_argument(
         "--pinning",
@@ -3742,7 +3762,11 @@ def build_parser() -> argparse.ArgumentParser:
         with_run(add("confirm", cmd_confirm, "Confirm self-reported state so the run may resume."))
     )
     confirm.add_argument("--model", help="model that will run the resumed agent.")
-    confirm.add_argument("--tolerate-unknown", action="store_true")
+    confirm.add_argument(
+        "--tolerate-unknown",
+        action="store_true",
+        help="treat unknown environment resources as satisfying the contract.",
+    )
     confirm.add_argument(
         "--scope",
         nargs="+",
@@ -3823,8 +3847,12 @@ def build_parser() -> argparse.ArgumentParser:
     compact.add_argument("--force", action="store_true", help="apply without confirmation.")
 
     checkpoint = with_env(with_run(add("checkpoint", cmd_checkpoint, "Force a checkpoint.")))
-    checkpoint.add_argument("--trigger", default="manual")
-    checkpoint.add_argument("--reason", default="")
+    checkpoint.add_argument(
+        "--trigger", default="manual", help="trigger to record (default: manual)."
+    )
+    checkpoint.add_argument(
+        "--reason", default="", help="free-text reason to record on the checkpoint."
+    )
 
     rewind = with_run(add("rewind", cmd_rewind, "Rewind workspace and projection to a checkpoint."))
     rewind.add_argument(
@@ -3875,8 +3903,12 @@ def build_parser() -> argparse.ArgumentParser:
         cmd_gateway,
         "Run the enforcing HTTP proxy for registered upstreams. Mutates storage.",
     )
-    gateway_cmd.add_argument("--port", type=int, default=8765)
-    gateway_cmd.add_argument("--run-id", default=None)
+    gateway_cmd.add_argument(
+        "--port", type=int, default=8765, help="port to listen on (default: 8765)."
+    )
+    gateway_cmd.add_argument(
+        "--run-id", default=None, help="run the gateway enforces (default: all registered runs)."
+    )
     gateway_cmd.add_argument(
         "--config",
         default=None,
@@ -4034,7 +4066,7 @@ def build_parser() -> argparse.ArgumentParser:
     with_env(with_run(add("show-contract", cmd_contract, "Print the recovery contract.")))
 
     replay = with_run(add("replay", cmd_replay, "Re-derive state from events."))
-    replay.add_argument("--upto", type=int, default=None)
+    replay.add_argument("--upto", type=int, default=None, help="replay events with sequence <= N.")
 
     with_run(
         add(
@@ -4143,7 +4175,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="webhook URL for --on-breach webhook",
     )
     # Subparser default SUPPRESS: accepts trailing --json without shadowing the global flag (#677).
-    watch.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    watch.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="emit machine-readable JSON (same as the global flag).",
+    )
 
     return parser
 

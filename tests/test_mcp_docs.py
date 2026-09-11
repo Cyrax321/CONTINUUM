@@ -37,6 +37,27 @@ AUDIT_TOOL = re.compile(r"^\| `(continuum_\w+)` \|", re.MULTILINE)
 #: The character house style bans, by code point so this file carries none.
 EM_DASH = chr(0x2014)
 
+#: Files whose shell commands document how to install the package, so the
+#: extras are spelled and quoted the same way in each of them.
+ROOT = Path(__file__).resolve().parents[1]
+INSTALL_DOCS = [
+    ROOT / "docs" / "api" / "README.md",
+    ROOT / "docs" / "api" / "mcp.md",
+    ROOT / "README.md",
+    ROOT / "references" / "install.md",
+    ROOT / "references" / "adapters.md",
+    ROOT / "references" / "quickstart.md",
+]
+
+#: An install command and its first non-flag argument: the target an extra
+#: appears in, if one appears at all.
+INSTALL_COMMAND = re.compile(r"(?:pip|uv pip) install\s+(?:-\S+\s+)*(\S+)")
+
+
+def _extras_targets(text: str) -> list[str]:
+    """Every install target in ``text`` that carries an extras bracket."""
+    return [target for target in INSTALL_COMMAND.findall(text) if "[" in target]
+
 
 @pytest.fixture
 def store() -> Iterator[SQLiteStorage]:
@@ -164,3 +185,32 @@ async def test_documented_tool_counts_match_the_server(server: Any) -> None:
             assert int(match.group(1)) == mutating, (
                 f"{path} claims {match.group(0)!r} but {mutating} tools mutate"
             )
+
+
+def test_documented_extras_name_the_real_package() -> None:
+    """No install command teaches ``continuum[...]``, the wrong package.
+
+    A real PyPI package exists under the bare name ``continuum``, so a doc
+    that sends the operator to it installs something unrelated instead of the
+    extra (issue #836, the bug the remediation message shipped with until
+    #719). Removing every legitimate ``continuum-agent[`` first leaves only
+    the wrong spellings behind.
+    """
+    for path in INSTALL_DOCS:
+        text = path.read_text(encoding="utf-8")
+        assert "continuum[" not in text.replace("continuum-agent[", ""), (
+            f"{path} teaches an install of the wrong package"
+        )
+
+
+def test_documented_extras_are_quoted() -> None:
+    """Every extras-bearing install target is quoted.
+
+    Unquoted brackets are a glob in zsh, where ``pip install continuum-agent[
+    mcp]`` either fails or silently expands to the files that happen to match
+    (issue #836). Quoting is the documented house form in every context, so
+    the guard scans the target of every install command that carries one.
+    """
+    for path in INSTALL_DOCS:
+        for target in _extras_targets(path.read_text(encoding="utf-8")):
+            assert target.startswith('"'), f"{path}: unquoted extras in {target}"

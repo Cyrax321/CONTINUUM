@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -15,17 +16,13 @@ from continuum.storage import SQLiteStorage
 
 def _run_cli(args: list[str], db: str) -> tuple[int, str, str]:
     """Run CLI main with given args, capturing output."""
-    import os
-
     # Ensure we import from the worktree's src, not installed package
     env = os.environ.copy()
     # Use the current worktree's src if available, else fallback
     # The test file lives in the worktree, so its parent is the worktree root
     worktree_root = Path(__file__).resolve().parents[1]
     src_path = str(worktree_root / "src")
-    env["PYTHONPATH"] = src_path + (
-        ":" + env.get("PYTHONPATH", "") if env.get("PYTHONPATH") else ""
-    )
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [src_path, env.get("PYTHONPATH")]))
     cmd = [sys.executable, "-m", "continuum.cli", "--db", db, *args]
     result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     return result.returncode, result.stdout, result.stderr

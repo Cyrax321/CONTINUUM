@@ -76,10 +76,13 @@ Frozen = ConfigDict(frozen=True, extra="forbid")
 
 
 def utcnow() -> datetime:
+    """Return current UTC timestamp with timezone information."""
     return datetime.now(UTC)
 
 
 class RunStatus(StrEnum):
+    """Execution status of an agent run lifecycle."""
+
     PLANNED = "planned"
     STARTED = "started"
     RUNNING = "running"
@@ -92,6 +95,8 @@ class RunStatus(StrEnum):
 
 
 class StateStatus(StrEnum):
+    """Validity status of semantic state entities."""
+
     VALID = "valid"
     STALE = "stale"
     CONFLICTED = "conflicted"
@@ -102,6 +107,8 @@ class StateStatus(StrEnum):
 
 
 class ActionStatus(StrEnum):
+    """Lifecycle and execution status of a recorded action."""
+
     PLANNED = "planned"
     STARTED = "started"
     COMPLETED = "completed"
@@ -113,6 +120,8 @@ class ActionStatus(StrEnum):
 
 
 class RecoveryMode(StrEnum):
+    """Strategy for recovering an agent execution run."""
+
     RESUME = "resume"
     REPAIR_AND_RESUME = "repair_and_resume"
     ROLLBACK = "rollback"
@@ -123,6 +132,8 @@ class RecoveryMode(StrEnum):
 
 
 class RecoverySafety(StrEnum):
+    """Assessment of whether and how safely a run can be resumed."""
+
     SAFE_TO_RESUME = "safe_to_resume"
     REQUIRES_REPAIR = "requires_repair"
     REQUIRES_REVALIDATION = "requires_revalidation"
@@ -132,6 +143,8 @@ class RecoverySafety(StrEnum):
 
 
 class Component(StrEnum):
+    """Semantic state component types tracked by CONTINUUM."""
+
     GOAL = "goal"
     PROGRESS = "progress"
     PLAN = "plan"
@@ -148,6 +161,8 @@ class Component(StrEnum):
 
 
 class DiffKind(StrEnum):
+    """Classification of a change between two state snapshots."""
+
     ADDED = "added"
     REMOVED = "removed"
     CHANGED = "changed"
@@ -155,6 +170,8 @@ class DiffKind(StrEnum):
 
 
 class ApprovalStatus(StrEnum):
+    """Current state of a requested human approval."""
+
     PENDING = "pending"
     GRANTED = "granted"
     REVOKED = "revoked"
@@ -163,6 +180,8 @@ class ApprovalStatus(StrEnum):
 
 
 class PlanStepStatus(StrEnum):
+    """Progress status of an individual execution plan step."""
+
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     BLOCKED = "blocked"
@@ -240,6 +259,8 @@ class Provenance(BaseModel):
 
 
 class Goal(BaseModel):
+    """High-level objective and constraints governing an agent run."""
+
     model_config = Frozen
 
     description: str
@@ -256,6 +277,8 @@ class Goal(BaseModel):
 
 
 class PlanStep(BaseModel):
+    """A discrete execution step within an agent plan."""
+
     model_config = Frozen
 
     step_id: str = Field(default_factory=lambda: make_id("step"))
@@ -267,6 +290,8 @@ class PlanStep(BaseModel):
 
 
 class Progress(BaseModel):
+    """Quantitative metrics tracking completion of tasks within a run."""
+
     model_config = Frozen
 
     total: int | None = None
@@ -341,6 +366,8 @@ class DecisionPayload(BaseModel):
 
 
 class Evidence(BaseModel):
+    """Verifiable artifact or source data supporting findings and decisions."""
+
     model_config = Frozen
 
     evidence_id: str = Field(default_factory=lambda: make_id("evidence"))
@@ -353,6 +380,8 @@ class Evidence(BaseModel):
 
 
 class Finding(BaseModel):
+    """An assertion or discovered fact backed by cited evidence."""
+
     model_config = Frozen
 
     finding_id: str = Field(default_factory=lambda: make_id("finding"))
@@ -372,6 +401,8 @@ class Finding(BaseModel):
 
 
 class PendingWork(BaseModel):
+    """An outstanding task queued for execution with optional prerequisites."""
+
     model_config = Frozen
 
     task_id: str = Field(default_factory=lambda: make_id("task"))
@@ -397,6 +428,8 @@ class Approval(BaseModel):
 
 
 class ExternalDependency(BaseModel):
+    """An external system, API, or resource dependency required by a run."""
+
     model_config = Frozen
 
     resource: str
@@ -694,6 +727,8 @@ class ModelSpecificState(BaseModel):
 
 
 class ModelState(BaseModel):
+    """Model configuration, provider identity, and model-specific assumptions."""
+
     model_config = ConfigDict(frozen=True, extra="forbid", protected_namespaces=())
 
     model: str | None = None
@@ -779,27 +814,35 @@ class SemanticState(BaseModel):
     # -- lookups used by validation and recovery -------------------------- #
 
     def decision(self, decision_id: str) -> Decision | None:
+        """Look up a decision by its unique identifier, or return None."""
         return next((d for d in self.decisions if d.decision_id == decision_id), None)
 
     def finding(self, finding_id: str) -> Finding | None:
+        """Look up a finding by its unique identifier, or return None."""
         return next((f for f in self.findings if f.finding_id == finding_id), None)
 
     def dependency(self, resource: str) -> ExternalDependency | None:
+        """Look up an external dependency by its resource name, or return None."""
         return next((d for d in self.external_dependencies if d.resource == resource), None)
 
     def pin(self, constraint_id: str) -> ConstraintPin | None:
+        """Look up an active constraint pin by its identifier, or return None."""
         return self.pins.get(constraint_id)
 
     def active_pins(self) -> tuple[ConstraintPin, ...]:
+        """Return all currently active constraint pins as a tuple."""
         return tuple(self.pins.values())
 
     def evidence_ids(self) -> frozenset[str]:
+        """Return the set of all evidence identifiers present in this state."""
         return frozenset(e.evidence_id for e in self.evidence)
 
     def valid_decisions(self) -> tuple[Decision, ...]:
+        """Return all decisions with valid status as a tuple."""
         return tuple(d for d in self.decisions if d.status is StateStatus.VALID)
 
     def open_work(self) -> tuple[PendingWork, ...]:
+        """Return all pending work items whose status is not invalid."""
         return tuple(w for w in self.pending_work if w.status is not StateStatus.INVALID)
 
     def dangling_evidence(self) -> frozenset[str]:
@@ -1015,6 +1058,8 @@ class UnknownSideEffect(RuntimeError):
 
 
 class EnvResource(BaseModel):
+    """Captured state of an external environment resource or tool."""
+
     model_config = Frozen
 
     name: str
@@ -1025,6 +1070,8 @@ class EnvResource(BaseModel):
 
 
 class EnvironmentSnapshot(BaseModel):
+    """Collection of environment resource states captured at a point in time."""
+
     model_config = Frozen
 
     env_id: str = Field(default_factory=lambda: make_id("env"))
@@ -1040,6 +1087,8 @@ class EnvironmentSnapshot(BaseModel):
 
 
 class ComponentValidationEntry(BaseModel):
+    """Validation assessment for an individual state component."""
+
     model_config = Frozen
 
     component: Component
@@ -1049,6 +1098,8 @@ class ComponentValidationEntry(BaseModel):
 
 
 class StateValidationResult(BaseModel):
+    """Overall validation outcome evaluating if a state checkpoint is safe to resume."""
+
     model_config = Frozen
 
     run_id: str
@@ -1115,6 +1166,7 @@ class Run(BaseModel):
     metadata: Mapping[str, Any] = Field(default_factory=dict)
 
     def touch(self, **overrides: Any) -> Run:
+        """Return an updated copy of the run with updated_at set to now."""
         return self.model_copy(update={"updated_at": utcnow(), **overrides})
 
 
@@ -1134,6 +1186,8 @@ PROJECTION_BOOKKEEPING: set[str] = {
 
 
 class StateCheckpoint(BaseModel):
+    """Durable, self-verifying snapshot of semantic state and environment."""
+
     model_config = Frozen
 
     checkpoint_id: str = Field(default_factory=lambda: make_id("checkpoint"))
@@ -1171,6 +1225,7 @@ class StateCheckpoint(BaseModel):
         return self.model_dump_json(exclude={"state": PROJECTION_BOOKKEEPING})
 
     def digest(self) -> str:
+        """Compute the stable cryptographic digest of the checkpoint content."""
         return stable_hash(self.content())
 
     def sealed(self) -> StateCheckpoint:
@@ -1183,10 +1238,13 @@ class StateCheckpoint(BaseModel):
         return self.model_copy(update={"integrity_hash": self.digest()})
 
     def verify(self) -> bool:
+        """Verify that the stored integrity hash matches the computed content digest."""
         return self.integrity_hash is not None and self.integrity_hash == self.digest()
 
 
 class DiffEntry(BaseModel):
+    """Individual component modification between two semantic states."""
+
     model_config = Frozen
 
     kind: DiffKind
@@ -1198,6 +1256,8 @@ class DiffEntry(BaseModel):
 
 
 class StateDiff(BaseModel):
+    """Collection of diff entries comparing two versions of semantic state."""
+
     model_config = Frozen
 
     run_id: str

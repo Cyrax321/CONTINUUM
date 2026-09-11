@@ -283,6 +283,7 @@ def _single_writer(
 
     @wraps(method)
     def wrapper(self: ActionLedger, /, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        """Acquire the ledger lease lock before invoking the mutating method."""
         with self._locked():
             return method(self, *args, **kwargs)
 
@@ -303,14 +304,17 @@ class ActionOutcome:
 
     @property
     def already_completed(self) -> bool:
+        """True when the claim hit an existing already-completed action."""
         return not self.fresh and self.action.status is ActionStatus.COMPLETED
 
     @property
     def result(self) -> Mapping[str, Any] | None:
+        """The recorded result dictionary from the underlying action, if any."""
         return self.action.result
 
     @property
     def external_id(self) -> str | None:
+        """The external system identifier associated with the action, if known."""
         return self.action.external_id
 
 
@@ -574,6 +578,7 @@ class ActionLedger:
         return found
 
     def get(self, key: str) -> Action | None:
+        """Return the current action state for ``key``, or ``None`` if unclaimed."""
         return self._replay().get(key)
 
     def resolve_key(self, identifier: str) -> str | None:
@@ -712,6 +717,7 @@ class ActionLedger:
         return None
 
     def all(self) -> Sequence[Action]:
+        """Return all action records currently in the folded ledger."""
         return list(self._replay().values())
 
     def pending(self) -> Sequence[Action]:

@@ -246,6 +246,12 @@ class Event(BaseModel):
 
 
 class IntegrityViolation(BaseModel):
+    """Description of a single integrity failure discovered during chain audit.
+
+    Records the failure classification, run identifier, and optional event
+    metadata (sequence number and event ID) along with explanatory detail.
+    """
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: str
@@ -351,20 +357,29 @@ class EventLog:
     # -- reading ---------------------------------------------------------- #
 
     def runs(self) -> tuple[str, ...]:
+        """Return all distinct run identifiers present in the log."""
         return tuple(self._by_run)
 
     def events(self, run_id: str, *, after_sequence: int = 0) -> tuple[Event, ...]:
+        """Return recorded events for a run in sequence order.
+
+        Optionally filters for events whose sequence number is strictly greater
+        than ``after_sequence``.
+        """
         chain = self._by_run.get(run_id, ())
         return tuple(e for e in chain if e.sequence > after_sequence)
 
     def by_type(self, run_id: str, type: EventType) -> tuple[Event, ...]:
+        """Return all events for a run matching the specified event type."""
         return tuple(e for e in self._by_run.get(run_id, ()) if e.type is type)
 
     def head(self, run_id: str) -> Event | None:
+        """Return the most recent event appended for a run, or None if empty."""
         chain = self._by_run.get(run_id)
         return chain[-1] if chain else None
 
     def last_sequence(self, run_id: str) -> int:
+        """Return the highest sequence number recorded for a run, or 0 if empty."""
         return len(self._by_run.get(run_id, ()))
 
     def __iter__(self) -> Iterator[Event]:
@@ -397,6 +412,7 @@ class EventLog:
         truncated = False
 
         def record(kind: str, rid: str, event: Event, detail: str) -> None:
+            """Record an integrity violation if under the maximum violation limit."""
             nonlocal truncated
             if len(violations) >= max_violations:
                 truncated = True

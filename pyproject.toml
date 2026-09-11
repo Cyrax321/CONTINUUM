@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "continuum-agent"
-version = "0.1.0"
+version = "0.1.2"
 description = "Verifiable semantic recovery layer for long-running AI agents."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -164,7 +164,7 @@ from continuum.storage import (
     open_storage,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.1.2"
 
 # Framework-adapter names resolve lazily (PEP 562, issue #214): importing the
 # package must not pay for openai/langgraph/langchain, because every entry

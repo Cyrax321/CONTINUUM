@@ -76,6 +76,7 @@ class Palette:
 
     @classmethod
     def for_stream(cls, stream: Any, *, force: bool | None = None) -> Palette:
+        """Construct a palette enabled or suppressed for ``stream``."""
         return cls(should_colour(stream, force=force))
 
     def _wrap(self, text: str, code: str) -> str:
@@ -84,30 +85,39 @@ class Palette:
         return f"{code}{text}{_RESET}"
 
     def red(self, text: str) -> str:
+        """Wrap text in red ANSI escape codes when colour is enabled."""
         return self._wrap(text, _CODES["red"])
 
     def green(self, text: str) -> str:
+        """Wrap text in green ANSI escape codes when colour is enabled."""
         return self._wrap(text, _CODES["green"])
 
     def yellow(self, text: str) -> str:
+        """Wrap text in yellow ANSI escape codes when colour is enabled."""
         return self._wrap(text, _CODES["yellow"])
 
     def blue(self, text: str) -> str:
+        """Wrap text in blue ANSI escape codes when colour is enabled."""
         return self._wrap(text, _CODES["blue"])
 
     def cyan(self, text: str) -> str:
+        """Wrap text in cyan ANSI escape codes when colour is enabled."""
         return self._wrap(text, _CODES["cyan"])
 
     def grey(self, text: str) -> str:
+        """Wrap text in grey ANSI escape codes when colour is enabled."""
         return self._wrap(text, _CODES["grey"])
 
     def bold(self, text: str) -> str:
+        """Wrap text in bold ANSI escape codes when colour is enabled."""
         return self._wrap(text, _CODES["bold"])
 
     def dim(self, text: str) -> str:
+        """Wrap text in dim ANSI escape codes when colour is enabled."""
         return self._wrap(text, _CODES["dim"])
 
     def heading(self, text: str) -> str:
+        """Wrap text in bold cyan ANSI escape codes for section headings."""
         return self._wrap(text, _CODES["bold"] + _CODES["cyan"])
 
     # -- domain-aware helpers -------------------------------------------- #

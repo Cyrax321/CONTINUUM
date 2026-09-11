@@ -38,11 +38,14 @@ may resume. The integration points, in order of most to least common, are:
 ## Install
 
 ```bash
-pip install continuum-agent          # core, no optional dependencies
-pip install continuum-agent[attest]  # adds cryptographic attestation
-pip install continuum-agent[mcp]     # adds the MCP server
-pip install continuum-agent[langgraph]  # adds the LangGraph adapter
-pip install continuum-agent[openai]  # adds the OpenAI Agents SDK adapter
+pip install continuum-agent              # core, no optional dependencies
+pip install "continuum-agent[attest]"    # adds cryptographic attestation
+pip install "continuum-agent[mcp]"       # adds the MCP server
+pip install "continuum-agent[langgraph]" # adds the LangGraph adapter
+pip install "continuum-agent[openai]"    # adds the OpenAI Agents SDK adapter
 ```
+
+The extras are quoted because unquoted brackets are a glob in zsh, where the
+command either fails or silently expands to something else.
 
 All imports below assume `import continuum` and the relevant submodule.

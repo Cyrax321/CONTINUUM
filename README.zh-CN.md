@@ -92,7 +92,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI 入口
 continuum-mcp --help             # MCP 服务器入口（需要 [mcp] 或 [dev]）
-pytest -q                        # 约 1,380 个用例被收集（具体数量和跳过数因环境而异）
+pytest -q                        # 最小环境中约 2,163 个收集，约 2,030 个通过，约 23 个跳过（具体数量因环境而异）
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI 强制的三扇门禁
 ```
@@ -225,7 +225,7 @@ CONTINUUM 针对真实 LLM 智能体、真实协议边界和硬进程崩溃进�
 - **第三方客户端**：Gemini CLI 和 Kilo Code 通过 stdio JSON-RPC 对接真实 SQLite 存储，验证多智能体共存和鉴权隔离。
 - **协议合规**：使用 `@modelcontextprotocol/inspector --cli` 在进程死亡间端到端驱动，变更工具默认拒绝并位于 `CONTINUUM_MCP_MUTATING_CLIENTS` 后，外部声明降级为 `REQUIRES_REVIEW`（`safe: false`）。
 - **自愈**：硬杀的服务器在启动时通过单次重试清理孤立的 SQLite `-wal`/`-shm` 伴生文件来恢复。
-- **规模**：约 1,380 个测试被收集（约 1,360 通过，其余在缺少可选服务时跳过），覆盖 Python 3.11、3.12 和 3.13（单元、`hypothesis` 属性测试、并发、对抗）。CONTINUUM-Bench 运行五个崩溃场景加一个专门的参数漂移场景，对 CONTINUUM 测量到 0 重复工作和 0 重复副作用，而对朴素重放则为完全重复，另有一个 12 场景恢复正确性套件（`continuum.benchmark.phase6`）将持久执行调研中的崩溃点编码为可执行断言。
+- **规模**：约 2,163 个测试被收集（约 2,030 通过，其余在缺少可选服务时跳过），覆盖 Python 3.11、3.12 和 3.13（单元、`hypothesis` 属性测试、并发、对抗）。CONTINUUM-Bench 运行五个崩溃场景加一个专门的参数漂移场景，对 CONTINUUM 测量到 0 重复工作和 0 重复副作用，而对朴素重放则为完全重复，另有一个 12 场景恢复正确性套件（`continuum.benchmark.phase6`）将持久执行调研中的崩溃点编码为可执行断言。
 - **对抗审计**：完整 MCP 面已在真实协议上被审计，发现并修复了三个缺陷。方法和复现步骤见 [test.md](test.md)。
 
 ## MCP 集成
@@ -391,7 +391,7 @@ Schema v6。SQLite 为主，Postgres 经 CI 验证。单一日志，多重投影
 
 ### 模块映射，一库多面
 
-CONTINUUM 是一个库（`src/continuum`，104 个模块）加上大型测试套件（98 个测试文件，约 1,380 个测试）。所有模块追加并重放同一个哈希链事件日志：
+CONTINUUM 是一个库（`src/continuum`，124 个模块）加上大型测试套件（161 个测试文件，约 2,163 个测试）。所有模块追加并重放同一个哈希链事件日志：
 
 | 模块 | 职责 |
 |:--|:--|

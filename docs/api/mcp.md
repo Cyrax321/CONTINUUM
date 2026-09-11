@@ -13,6 +13,37 @@ continuum-mcp --transport sse
 continuum-mcp --transport streamable-http
 ```
 
+## Installation
+
+The `continuum-mcp` console script ships with the base package, but the SDK it
+serves with is the optional `[mcp]` extra. An install without the extra is a
+supported state, not a broken one: the entry point reports the missing extra
+with the command to run on stderr and exits 1 instead of raising a traceback
+the client can only report as `CONNECTION_CLOSED`.
+
+```bash
+pip install "continuum-agent[mcp]"   # from PyPI
+
+# GitHub or fork installs must use the PEP 508 direct-reference form, quoted:
+pip install "continuum-agent[mcp] @ git+https://github.com/<you>/CONTINUUM.git"
+
+# A bare VCS URL cannot carry an extra, so it installs the core only and the
+# entry point will report the missing SDK on first run:
+pip install git+https://github.com/Cyrax321/CONTINUUM.git
+```
+
+Quote the extra in every form. Unquoted `[mcp]` is a glob in zsh, where the
+command either fails or silently expands; the same rule covers the editable
+form, `pip install -e ".[mcp]"`.
+
+The split is deliberate. The core library and CLI must import with only
+`pydantic` (stated in `pyproject.toml` and the module docstrings), and
+packaging has no mechanism to condition an entry point on an extra, so the
+choice is between an unconditional entry point with a clear missing-dependency
+error and moving the SDK into core dependencies. The second was rejected
+because it violates that architecture; the first is the contract documented
+here and exercised by the missing-SDK tests in `tests/test_mcp_server.py`.
+
 ## Registration
 
 Claude Code discovers the server from the project's `.mcp.json`, which declares

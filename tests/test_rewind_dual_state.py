@@ -241,7 +241,8 @@ os._exit(0)
 
 
 def test_docs_updated() -> None:
-    arch = Path("references/architecture.md").read_text(encoding="utf-8")
-    cli = Path("references/cli.md").read_text(encoding="utf-8")
+    root = Path(__file__).resolve().parents[1]
+    arch = (root / "references/architecture.md").read_text(encoding="utf-8")
+    cli = (root / "references/cli.md").read_text(encoding="utf-8")
     assert "rewind" in arch.lower()
     assert "rewind" in cli.lower()

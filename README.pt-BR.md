@@ -94,7 +94,7 @@ Verifique:
 ```bash
 continuum --help                 # ponto de entrada CLI
 continuum-mcp --help             # ponto de entrada do servidor MCP (precisa de [mcp] ou [dev])
-pytest -q                        # ~1,380 testes coletados (o número exato e os pulos variam por ambiente)
+pytest -q                        # ~2,163 coletados, ~2,030 passando, ~23 pulados em um ambiente mínimo (as contagens exatas variam)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # os três portões que o CI exige
 ```
@@ -227,7 +227,7 @@ O CONTINUUM é verificado contra agentes LLM reais, limites de protocolo ao vivo
 - **Clientes de terceiros**: Gemini CLI e Kilo Code conectados via stdio JSON-RPC contra o armazenamento SQLite ao vivo, validando coexistência multiagente e isolamento de autorização.
 - **Conformidade de protocolo**: conduzido de ponta a ponta com `@modelcontextprotocol/inspector --cli` através de mortes de processo, ferramentas mutantes negam por padrão atrás de `CONTINUUM_MCP_MUTATING_CLIENTS`, reivindicações externas degradam para `REQUIRES_REVIEW` (`safe: false`).
 - **Auto reparo**: servidores mortos de forma brusca se recuperam de sidecars órfãos `-wal`/`-shm` do SQLite por meio de limpeza de uma única tentativa ao iniciar.
-- **Escala**: cerca de 1,380 testes coletados (~1,360 passando, o resto pula sem serviços opcionais) em Python 3.11, 3.12 e 3.13 (unitários, baseados em propriedades com `hypothesis`, concorrência, adversariais). O CONTINUUM-Bench executa cinco cenários de queda mais um cenário dedicado de deriva de argumentos, medindo 0 trabalho duplicado e 0 efeitos colaterais duplicados para o CONTINUUM frente à duplicação total para a reprodução ingênua, mais uma suíte separada de 12 cenários de correção de recuperação (`continuum.benchmark.phase6`) que codifica os pontos de queda do estudo de execução durável como asserções executáveis.
+- **Escala**: cerca de 2,163 testes coletados (~2,030 passando, o resto pula sem serviços opcionais) em Python 3.11, 3.12 e 3.13 (unitários, baseados em propriedades com `hypothesis`, concorrência, adversariais). O CONTINUUM-Bench executa cinco cenários de queda mais um cenário dedicado de deriva de argumentos, medindo 0 trabalho duplicado e 0 efeitos colaterais duplicados para o CONTINUUM frente à duplicação total para a reprodução ingênua, mais uma suíte separada de 12 cenários de correção de recuperação (`continuum.benchmark.phase6`) que codifica os pontos de queda do estudo de execução durável como asserções executáveis.
 - **Auditoria adversarial**: a superfície MCP completa foi auditada sobre o protocolo ao vivo, três defeitos foram encontrados e corrigidos. Método e passos de reprodução em [test.md](test.md).
 
 ## Integração MCP
@@ -393,7 +393,7 @@ Esquema v6. SQLite é primário, Postgres verificado por CI. Um log, muitas proj
 
 ### Mapa de módulos, uma biblioteca, muitas superfícies
 
-O CONTINUUM é uma biblioteca (`src/continuum`, 104 módulos) mais uma suíte de testes grande (98 arquivos de teste, ~1,380 testes). Todos os módulos acrescentam e reproduzem um log de eventos encadeado:
+O CONTINUUM é uma biblioteca (`src/continuum`, 124 módulos) mais uma suíte de testes grande (161 arquivos de teste, ~2,163 testes). Todos os módulos acrescentam e reproduzem um log de eventos encadeado:
 
 | Módulo | Papel |
 |:--|:--|

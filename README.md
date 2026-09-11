@@ -235,6 +235,24 @@ CONTINUUM is verified against real LLM agents, live protocol boundaries, and har
 - **Scale**: roughly 2,163 tests collected (~2,030 passing; the rest skip without optional services) on Python 3.11, 3.12, and 3.13 (unit, `hypothesis` property-based, concurrency, adversarial). CONTINUUM-Bench runs five crash scenarios plus a dedicated argument-drift scenario, measuring 0 duplicate work and 0 duplicate side effects for CONTINUUM against full duplication for naive replay; a separate 12-scenario recovery-correctness suite (`continuum.benchmark.phase6`) encodes the crash points from the durable-execution survey as executable assertions.
 - **Adversarial audit**: the full MCP surface was audited over the live protocol; three defects were found and fixed. Method and reproduction steps in [test.md](test.md).
 
+<!-- BENCH:START -->
+### Horizon-scale benchmark (real runs, no invented numbers)
+
+Generated: 2026-09-10T23:17:54.069493  Horizon scenarios: 5  Passed: 3  Failed: 2
+
+Accuracy: 0.6  Unnecessary escalation: 0.2  Repair precision: 0.8  Duplicate side effects: 0  Duplicate work: 0.0  Compression: 0.139
+
+| Scenario | Cycles | Years | Correct | Actual | Accuracy |
+| --- | --- | --- | --- | --- | --- |
+| horizon_steady_progress_year | 141 | 2.3 | resume | resume | 1.0 |
+| horizon_quarterly_drift_year | 141 | 2.3 | repair | request_human | 0.0 |
+| horizon_budget_exhaustion_year | 141 | 2.3 | request_human | request_human | 1.0 |
+| horizon_compaction_stress_year | 177 | 2.87 | resume | resume | 1.0 |
+| horizon_abort_condition_year | 141 | 2.3 | abort | request_human | 0.0 |
+
+Fault-injection: 7 scenarios, detection 0, unsafe 0
+<!-- BENCH:END -->
+
 ## MCP Integration
 
 CONTINUUM ships an MCP server so an agent can record progress, checkpoint, and route external side effects through the ledger without embedding the library:

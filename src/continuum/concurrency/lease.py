@@ -103,6 +103,13 @@ class InMemoryLeaseCoordinator(LeaseCoordinator):
         return self._clock() + (ttl or self._default_ttl)
 
     def acquire(self, run_id: str, holder_id: str, ttl: timedelta | None = None) -> bool:
+        """Acquire the run lease if it is unheld or expired.
+
+        Returns ``True`` if the lease was granted to ``holder_id``, or ``False``
+        if another holder currently retains a live lease. An omitted ``ttl`` falls
+        back to the coordinator's default TTL. The expiry deadline is calculated
+        from the injectable clock. Thread-safe via internal reentrant lock.
+        """
         with self._lock:
             existing = self._leases.get(run_id)
             if existing is not None and existing[1] > self._clock():
@@ -111,6 +118,13 @@ class InMemoryLeaseCoordinator(LeaseCoordinator):
             return True
 
     def renew(self, run_id: str, holder_id: str, ttl: timedelta | None = None) -> bool:
+        """Extend the lifetime of an active lease held by ``holder_id``.
+
+        Returns ``True`` if the lease was successfully extended, or ``False`` if
+        the lease does not exist, is held by a different agent, or has already
+        passed its expiry deadline. When successful, advances expiration to
+        ``clock() + (ttl or default_ttl)``.
+        """
         with self._lock:
             existing = self._leases.get(run_id)
             if existing is None or existing[0] != holder_id or existing[1] <= self._clock():
@@ -119,12 +133,22 @@ class InMemoryLeaseCoordinator(LeaseCoordinator):
             return True
 
     def release(self, run_id: str, holder_id: str) -> None:
+        """Release the lease on ``run_id`` if owned by ``holder_id``.
+
+        A no-op if the lease is already free, expired, or currently held by
+        another agent, preventing accidental eviction across competing holders.
+        """
         with self._lock:
             existing = self._leases.get(run_id)
             if existing is not None and existing[0] == holder_id:
                 del self._leases[run_id]
 
     def holder(self, run_id: str) -> str | None:
+        """Return the current active holder of ``run_id``, or ``None``.
+
+        Evaluates the stored expiry timestamp against the current clock time;
+        an expired lease is considered unheld and returns ``None``.
+        """
         with self._lock:
             existing = self._leases.get(run_id)
             if existing is None or existing[1] <= self._clock():
@@ -178,6 +202,14 @@ class SQLiteLeaseCoordinator(LeaseCoordinator):
         return _to_epoch(self._clock())
 
     def acquire(self, run_id: str, holder_id: str, ttl: timedelta | None = None) -> bool:
+        """Atomically take the lease in SQLite if free or expired.
+
+        Executes an atomic insert-on-conflict update conditioned on the existing
+        lease being expired (``expires_at <= now``). Returns ``True`` if
+        ``holder_id`` acquired or took over the lease, or ``False`` if a
+        competing process holds a live lease. An omitted ``ttl`` falls back to the
+        default TTL.
+        """
         ttl = ttl or self._default_ttl
         expires = self._now_epoch() + ttl.total_seconds()
         with self._lock:
@@ -200,6 +232,13 @@ class SQLiteLeaseCoordinator(LeaseCoordinator):
         return cast(str, row["holder_id"])
 
     def renew(self, run_id: str, holder_id: str, ttl: timedelta | None = None) -> bool:
+        """Extend an unexpired lease in SQLite for ``holder_id``.
+
+        Executes a conditional update requiring matching ``holder_id`` and
+        ``expires_at > now``. Returns ``True`` if the row was updated, or
+        ``False`` if the lease was missing, expired, or claimed by another holder.
+        Advances expiry to ``now + (ttl or default_ttl)``.
+        """
         ttl = ttl or self._default_ttl
         expires = self._now_epoch() + ttl.total_seconds()
         with self._lock:
@@ -211,6 +250,12 @@ class SQLiteLeaseCoordinator(LeaseCoordinator):
             return cursor.rowcount > 0
 
     def release(self, run_id: str, holder_id: str) -> None:
+        """Delete the lease row in SQLite if owned by ``holder_id``.
+
+        Safe no-op if the lease is already deleted, expired, or registered to a
+        different holder, ensuring competing processes cannot clear each
+        other's claims.
+        """
         with self._lock:
             self._connection.execute(
                 "DELETE FROM leases WHERE run_id = ? AND holder_id = ?",
@@ -218,6 +263,12 @@ class SQLiteLeaseCoordinator(LeaseCoordinator):
             )
 
     def holder(self, run_id: str) -> str | None:
+        """Query the current active holder for ``run_id`` from SQLite.
+
+        Reads the lease row and checks the numeric Unix epoch timestamp against
+        the current clock. Returns the holder identifier if active, or ``None``
+        if no row exists or the lease has expired.
+        """
         with self._lock:
             row = self._connection.execute(
                 "SELECT holder_id, expires_at FROM leases WHERE run_id = ?", (run_id,)
@@ -225,6 +276,11 @@ class SQLiteLeaseCoordinator(LeaseCoordinator):
             return self._holder_from(row)
 
     def close(self) -> None:
+        """Close the underlying SQLite database connection.
+
+        Releases the open database handle. Subsequent operations on this
+        coordinator instance will raise :class:`sqlite3.ProgrammingError`.
+        """
         with self._lock:
             self._connection.close()
 

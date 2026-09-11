@@ -101,8 +101,12 @@ def test_table_regenerates_from_runner_no_invented_numbers(tmp_path: Path) -> No
     lines1 = [line for line in md1.splitlines() if not line.startswith("Generated:")]
     lines2 = [line for line in md2.splitlines() if not line.startswith("Generated:")]
     assert lines1 == lines2
-    # Also test README regeneration
-    readme = Path("README.md")
+    # Also test README regeneration. Anchor to the repo root: a relative
+    # README.md only resolves when pytest runs from the root, and the
+    # regeneration subprocess needs the anchored script path and cwd alike
+    # (issue #837).
+    root = Path(__file__).resolve().parents[1]
+    readme = root / "README.md"
     if readme.exists():
         original = readme.read_text(encoding="utf-8")
         # Simulate deleting the bench section
@@ -111,15 +115,22 @@ def test_table_regenerates_from_runner_no_invented_numbers(tmp_path: Path) -> No
             import subprocess
             import sys
 
-            result = subprocess.run(
-                [sys.executable, "benchmarks/run.py"], capture_output=True, text=True, timeout=60
-            )
-            assert result.returncode == 0
-            regenerated = readme.read_text(encoding="utf-8")
-            assert "<!-- BENCH:START -->" in regenerated
-            assert "<!-- BENCH:END -->" in regenerated
-            # Restore original to avoid dirtying working tree in test
-            readme.write_text(original, encoding="utf-8")
+            try:
+                result = subprocess.run(
+                    [sys.executable, str(root / "benchmarks/run.py")],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    cwd=root,
+                )
+                assert result.returncode == 0, result.stderr
+                regenerated = readme.read_text(encoding="utf-8")
+                assert "<!-- BENCH:START -->" in regenerated
+                assert "<!-- BENCH:END -->" in regenerated
+            finally:
+                # Restore the tracked file even when an assertion above fails,
+                # so a red test never leaves the working tree dirty.
+                readme.write_text(original, encoding="utf-8")
 
 
 def test_shared_emitter_schema_with_fault_injection() -> None:
