@@ -1,10 +1,10 @@
 # Reduce Per Session Token Floor
 
-Every session pays for the system prompt plus the schemas of all eleven MCP tools, regardless of how little work is done. For a short resume check this dominates cost.
+Every session pays for the system prompt plus the schemas of all twelve MCP tools, regardless of how little work is done. For a short resume check this dominates cost.
 
 ## Current cost
 
-The MCP server exposes eleven tools via `tools/list`. Each schema is sent as part of the model context. The system prompt in `CLAUDE.md` plus eleven schemas is the floor before any user message.
+The MCP server exposes twelve tools via `tools/list`. Each schema is sent as part of the model context. The system prompt in `CLAUDE.md` plus twelve schemas is the floor before any user message.
 
 ## Proposal
 

@@ -46,7 +46,7 @@ Optional installs. An agent may also call the SDK or MCP server directly.
 
 ## 4. MCP server (stdio, deny by default) `src/continuum/mcp/`
 
-Server name: `continuum` (`server.py`). Eleven tools, all names prefixed,
+Server name: `continuum-mcp` (`server.py`). Twelve tools, all names prefixed,
 recounted from the tool registrations on 2026-08-24.
 
 | Tool (exact name) | Kind | Source |
@@ -324,7 +324,7 @@ Vertical, tiered. Group boxes by the tiers in section 1.
   - Row 2: State Engine, Checkpoint Manager, Environment
   - Row 3: Validator, Recovery Engine, Security
   - Pill at top-right of the SDK container:
-    "MCP server: deny by default, 11 tools (3 read-only, 8 mutating)".
+    "MCP server: deny by default, 12 tools (3 read-only, 9 mutating)".
 - Fourth tier: two boxes side by side: "Durable Storage (SQLite, WAL)" and
   "External Systems (GitHub, email, APIs)".
 - Bottom tier: one centered box "Resume (bounded recovery context)".

@@ -18,9 +18,12 @@ import pytest
 from continuum.actions import ActionLedger
 from continuum.events import EventType
 from continuum.gateway import (
+    Decision,
     GatewayConfigError,
     GatewayServer,
+    Route,
     load_gateway_config,
+    render_key,
 )
 from continuum.models import ActionStatus, Run
 from continuum.storage import SQLiteStorage
@@ -88,6 +91,15 @@ def claim(db: str, key: str) -> str:
     with SQLiteStorage(db) as store:
         outcome = ActionLedger(store, "run_1").claim("send_invoice", {}, key=key)
     return outcome.key
+
+
+def test_public_gateway_names_are_exported() -> None:
+    namespace: dict[str, object] = {}
+    exec("from continuum.gateway import *", namespace)
+
+    assert namespace["Route"] is Route
+    assert namespace["Decision"] is Decision
+    assert namespace["render_key"] is render_key
 
 
 def test_config_loading_and_validation(tmp_path: Path) -> None:

@@ -148,16 +148,18 @@ To run it manually against all files:
 pre-commit run --all-files
 ```
 
-The ruff version lives in three places that must move together in one PR.
+The ruff version lives in four places that must move together in one PR.
 `tests/test_precommit_config.py` fails any PR where they drift, which is how a
 dependabot `pip` bump surfaces (as a red test, not a version skew, so read a
 failure there as drift before anything else):
 
 1. the `ruff==` pin in the `dev` extra of `pyproject.toml`,
-2. `rev:` in `.pre-commit-config.yaml`, and
+2. `rev:` in `.pre-commit-config.yaml`,
 3. the `rev:` quoted in the yaml block above. This file is itself one of the
    pins, which is easy to miss because you are editing prose, not
    configuration.
+4. the `ruff==` row in the dependency table in `references/install.md` (#840:
+   this one drifted two releases before anything watched it).
 
 A hook running a different ruff than CI is how a locally formatted file still
 fails `ruff format --check` on the PR.

@@ -59,7 +59,7 @@ CONTINUUM asks a narrower, harder question: can an agent resume from a compact s
 
 Published to PyPI as `continuum-agent` 0.1.0: `pip install continuum-agent` (`pip install continuum-agent==0.1.0` to pin). Release tags additionally ship built wheels attached to [GitHub Releases](https://github.com/Cyrax321/CONTINUUM/releases).
 
-Zero-setup paths (no clone, no install, nothing published anywhere):
+Paths that need no clone and no local install:
 
 | Path | How |
 |:--|:--|
@@ -262,6 +262,15 @@ uv pip install -e ".[mcp]"
 CONTINUUM_MCP_MUTATING_CLIENTS=your-client-name continuum-mcp
 ```
 
+On Windows, the env-prefix form has no PowerShell equivalent, so set the
+variable first:
+
+```powershell
+uv pip install -e ".[mcp]"
+$env:CONTINUUM_MCP_MUTATING_CLIENTS = "your-client-name"
+continuum-mcp
+```
+
 Twelve tools over stdio. Three are read-only (`continuum_validate`, `continuum_resume`, `continuum_list_actions`); nine mutate. Side effects are two-phase (claim, perform, complete), and mutating tools deny by default behind an allowlist. Agent-reported state is recorded with `Origin.EXTERNAL_AGENT` provenance and marked `REQUIRES_REVIEW`.
 
 Verification details, including crash recovery at startup and the end to end Claude Code test, are in [references/mcp.md](references/mcp.md). If a registered server reports `CONNECTION_CLOSED`, the cause is almost always `PATH` resolution rather than the server itself: [docs/api/mcp.md](docs/api/mcp.md#troubleshooting) has the diagnosis and two remedies.
@@ -350,7 +359,7 @@ Any harness plugs into the same hash chained log. The same run can be written by
 | Seam | How to connect | What it gives you |
 |:--|:--|:--|
 | 1 In-process | `GenericAgentAdapter.intercept_action(...)` and `wrap_tool(key_fn=...)` on LangChain, LangGraph, OpenAI Agents SDK | Python frameworks, trusted writes |
-| 2 MCP server | `continuum-mcp` 12 tools over stdio (`continuum_record_progress`, `continuum_intercept_action`, `continuum_complete_action`, etc.) | Any MCP capable client, 3 read only + 9 mutating, allowlist `CONTINUUM_MCP_MUTATING_CLIENTS` |
+| 2 MCP server | `continuum-mcp` 12 tools over stdio (`continuum_record_progress`, `continuum_intercept_action`, `continuum_complete_action`, etc.) | Any MCP capable client, 3 read-only + 9 mutating, allowlist `CONTINUUM_MCP_MUTATING_CLIENTS` |
 | 3 CLI lifecycle hooks | `continuum hooks install claude-code --with-gate` also `gemini` and `codex` | Coding CLIs: `SessionStart briefing`, `PostToolUse observe`, `PreToolUse gate`; no CLAUDE.md needed |
 | 4 Enforcing HTTP gateway | `continuum gateway --port 8765` with `.continuum/gateway.json` | Any language, any outbound HTTP must have a claim, gateway settles from real status code |
 | 5 OpenTelemetry bridge | `make_span_processor(storage)` | Any traced app, spans become `TOOL_COMPLETED` evidence |

@@ -1,6 +1,7 @@
 ## Quick Start
 
-> Not published to PyPI yet. Install from a clone:
+> Published to PyPI as `continuum-agent` (`pip install continuum-agent`), or
+> install from a clone:
 >
 > ```bash
 > uv venv
@@ -9,8 +10,8 @@
 > ```
 >
 > Two entrypoints are installed: `continuum` (the CLI) and `continuum-mcp`
-> (the MCP server). The core library and CLI use only the standard library -
-> the `mcp` extra is required solely for the server.
+> (the MCP server). The core library depends only on `pydantic`; the `mcp`
+> extra is required solely for the server.
 
 What runs today (Phases 1–11): record events, project state, checkpoint, survive a crash, validate against the current environment, never duplicate an external side effect, decide how it is safe to resume, expose a stdio MCP server, and plug into agent frameworks.
 
