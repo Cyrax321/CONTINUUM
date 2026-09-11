@@ -68,3 +68,20 @@ def test_hooks_section_names_every_client_profile() -> None:
             elif value not in section:
                 missing.append(f"{profile}.{key}={value}")
     assert not missing, f"hooks section omits CLIENT_PROFILES entries: {missing}"
+
+
+def test_readme_module_map_command_count_matches_parser() -> None:
+    """The README module map `cli/` row must state the live command count (#754).
+
+    The row read 38 while the parser built 44. The figure rots with every
+    new subcommand, so the guard compares the documented number against the
+    parser instead of pinning a literal.
+    """
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    match = re.search(r"^\|\s*`cli/`\s*\|\s*(\d+) argparse commands", readme, re.MULTILINE)
+    assert match, "README module map has no `cli/` argparse-commands count to guard"
+    documented = int(match.group(1))
+    live = len(build_parser()._subparsers._group_actions[0].choices)
+    assert documented == live, (
+        f"README module map says {documented} argparse commands but the parser builds {live}"
+    )
