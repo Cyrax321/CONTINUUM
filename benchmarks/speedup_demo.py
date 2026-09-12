@@ -8,6 +8,8 @@ world re measurement with Claude Code will show the larger token cost delta.
 
 from __future__ import annotations
 
+import argparse
+
 import time
 
 from continuum.checkpoint import CheckpointManager
@@ -56,7 +58,15 @@ def run_async_single() -> float:
     return elapsed
 
 
+def build_parser() -> argparse.ArgumentParser:
+    return argparse.ArgumentParser(
+        description="Compare per-section sync checkpoints vs a single async checkpoint.",
+        epilog="With no arguments, runs the timing demo and prints the summary.",
+    )
+
+
 def main() -> None:
+    build_parser().parse_args()
     per_section = run_per_section_sync()
     async_single = run_async_single()
     print(f"per section sync (5 checkpoints): {per_section * 1000:.1f} ms")
