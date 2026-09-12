@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import os
-
 import json
+import os
 
 from continuum.analysis.trajectory_report import (
     build_trajectory_report,
