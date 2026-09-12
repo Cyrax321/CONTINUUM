@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **MCP and sidecar ledger writes now carry `EXTERNAL_AGENT` (#653).**
+  `ContinuumMCP.ledger` and `SidecarServer._ledger` construct their
+  `ActionLedger` with `source=AGENT_SOURCE`, matching the `EXTERNAL_AGENT`
+  stamp both servers already put on their direct appends and widening the
+  #612 thin-adapter fix to the remote-agent surfaces. Agent-asserted effects
+  reported over MCP or the sidecar no longer self-certify as trusted local
+  work: recovery verdicts for affected runs lean toward human review.
+  `tests/test_mcp_sidecar_provenance.py` pins the new derivation; both tests
+  fail on the old default. The bare `ActionLedger` default stays
+  `DETERMINISTIC`, so local writers are unchanged.
+
 - **Cleared the `noqa` backlog flagged by RUF100 (#951).** Removed 42 unused
   `# noqa` directives (rules not enabled in the repo's ruff `select`) from
   `src/`, `tests/`, and `examples/`, while keeping the ~26 that still suppress

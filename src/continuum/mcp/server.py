@@ -513,7 +513,7 @@ class ContinuumMCP:
         return run
 
     def ledger(self, run_id: str) -> ActionLedger:
-        return ActionLedger(self.storage, run_id)
+        return ActionLedger(self.storage, run_id, source=AGENT_SOURCE)
 
 
 def build_server(

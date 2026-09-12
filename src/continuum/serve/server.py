@@ -280,7 +280,7 @@ class SidecarServer:
         return run
 
     def _ledger(self, run_id: str) -> ActionLedger:
-        return ActionLedger(self.storage, run_id)
+        return ActionLedger(self.storage, run_id, source=AGENT_SOURCE)
 
     def dispatch(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Authenticate, then route to the handler for ``method``.
