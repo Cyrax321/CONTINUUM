@@ -14,10 +14,12 @@ _SNAPSHOT_DIR = Path(".continuum/file-snapshots")
 
 
 def snapshot_path(sha256: str) -> Path:
+    """Return the content-addressed snapshot path for a SHA-256 digest."""
     return _SNAPSHOT_DIR / sha256
 
 
 def snapshot_file(path: str | Path, *, sha256: str | None = None) -> Path | None:
+    """Snapshot a file, or return ``None`` when it is missing, oversized, or unreadable."""
     src = Path(path)
     try:
         stat = src.stat()
@@ -56,6 +58,7 @@ def snapshot_file(path: str | Path, *, sha256: str | None = None) -> Path | None
 
 
 def restore_file(path: str | Path, sha256: str) -> bool:
+    """Restore a snapshot atomically, returning ``False`` when restoration fails."""
     src = snapshot_path(sha256)
     if not src.exists():
         return False
@@ -71,6 +74,7 @@ def restore_file(path: str | Path, sha256: str) -> bool:
 
 
 def file_digest(path: str | Path) -> str | None:
+    """Return a file's SHA-256 digest, or ``None`` when it cannot be read."""
     try:
         digest = hashlib.sha256()
         with Path(path).open("rb") as f:
