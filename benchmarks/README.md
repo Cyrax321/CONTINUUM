@@ -58,3 +58,7 @@ PYTHONPATH=src python benchmarks/run.py
 
 The full run takes minutes. The horizon suite's numbers feed the bench
 table in the top-level README (marked `BENCH:START`/`BENCH:END` there).
+Pass `--publish` to also refresh the latest-results block in
+`references/bench.md`; plain runs leave that file alone. The nightly publish
+CI (`.github/workflows/bench-nightly.yml`) runs with `--publish` and commits
+both files when the numbers move.

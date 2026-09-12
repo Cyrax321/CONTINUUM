@@ -97,3 +97,21 @@ everything (wasteful but ends correct). Naive checkpoint is efficient but blind.
 Full-replay waste also scales with crash timing: `early_crash` replays the least
 and `partial_completion` the most, while continuum stays at zero duplicate work
 in every scenario.
+
+<!-- BENCH:START -->
+### Latest nightly results (real runs, no invented numbers)
+
+Generated: 2026-09-12T16:26:03.939958  Horizon scenarios: 5  Passed: 3  Failed: 2
+
+Accuracy: 0.6  Unnecessary escalation: 0.2  Repair precision: 0.8  Duplicate side effects: 0  Duplicate work: 0.0  Compression: 0.139
+
+| Scenario | Cycles | Years | Correct | Actual | Accuracy |
+| --- | --- | --- | --- | --- | --- |
+| horizon_steady_progress_year | 141 | 2.3 | resume | resume | 1.0 |
+| horizon_quarterly_drift_year | 141 | 2.3 | repair | request_human | 0.0 |
+| horizon_budget_exhaustion_year | 141 | 2.3 | request_human | request_human | 1.0 |
+| horizon_compaction_stress_year | 177 | 2.87 | resume | resume | 1.0 |
+| horizon_abort_condition_year | 141 | 2.3 | abort | request_human | 0.0 |
+
+Fault-injection: 7 scenarios, detection 0, unsafe 0
+<!-- BENCH:END -->

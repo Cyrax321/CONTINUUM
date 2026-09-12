@@ -1,7 +1,7 @@
 """Run the Phase 6 recovery-correctness scenario suite and emit a report.
 
 Usage:
-    uv run python benchmarks/run.py [--list]
+    uv run python benchmarks/run.py [--list] [--publish]
 
 Writes ``benchmarks/out/report.json`` and ``benchmarks/out/report.md``. The run
 is reproducible: scenarios build their own in-memory state, so the output can be
@@ -40,24 +40,11 @@ from continuum.benchmark import run_benchmark as run_continuum_benchmark
 from continuum.benchmark.phase6 import run_benchmark, scenarios, write_report
 
 
-def _regenerate_readme_bench(horizon_report: Any, fault_report: Any | None = None) -> None:
-    """Regenerate README bench section from real runner numbers (no invented numbers).
-
-    Looks for markers <!-- BENCH:START --> and <!-- BENCH:END --> in README.md
-    and replaces the content between them with a table derived from the
-    horizon and fault-injection reports. If markers are missing, skips update
-    to avoid duplicate table appends (issue #776).
-    """
-    readme = Path(__file__).resolve().parent.parent / "README.md"
-    if not readme.exists():
-        return
-    text = readme.read_text(encoding="utf-8")
+def _bench_table_lines(horizon_report: Any, fault_report: Any | None = None) -> list[str]:
+    """Build the bench table body from real runner numbers (no invented numbers)."""
     # Build table from real numbers
     h_summary = horizon_report.summary()
     lines: list[str] = []
-    lines.append("<!-- BENCH:START -->")
-    lines.append("### Horizon-scale benchmark (real runs, no invented numbers)")
-    lines.append("")
     lines.append(
         f"Generated: {horizon_report.generated_at.isoformat()}  "
         f"Horizon scenarios: {h_summary.get('total', 0)}  "
@@ -120,16 +107,54 @@ def _regenerate_readme_bench(horizon_report: Any, fault_report: Any | None = Non
         lines.append(
             f"Fault-injection: {f_summary.get('total', 0)} scenarios, detection {f_summary.get('detection_rate', 0)}, unsafe {f_summary.get('unsafe_resume_rate', 0)}"
         )
-    lines.append("<!-- BENCH:END -->")
+    return lines
+
+
+def _swap_bench_section(path: Path, heading: str, body: list[str]) -> bool:
+    """Swap the marked bench block in path, appending it when markers are absent."""
+    lines = ["<!-- BENCH:START -->", heading, "", *body, "<!-- BENCH:END -->"]
     table = "\n".join(lines)
+    text = path.read_text(encoding="utf-8")
     if "<!-- BENCH:START -->" in text and "<!-- BENCH:END -->" in text:
         import re
 
         new_text = re.sub(r"<!-- BENCH:START -->.*<!-- BENCH:END -->", table, text, flags=re.DOTALL)
-        readme.write_text(new_text, encoding="utf-8")
-    else:
+        path.write_text(new_text, encoding="utf-8")
+        return True
+    path.write_text(text.rstrip("\n") + "\n\n" + table + "\n", encoding="utf-8")
+    return True
+
+
+def _regenerate_readme_bench(horizon_report: Any, fault_report: Any | None = None) -> None:
+    """Regenerate README bench section from real runner numbers (no invented numbers).
+
+    Looks for markers <!-- BENCH:START --> and <!-- BENCH:END --> in README.md
+    and replaces the content between them with a table derived from the
+    horizon and fault-injection reports. If markers are missing, skips update
+    to avoid duplicate table appends (issue #776).
+    """
+    readme = Path(__file__).resolve().parent.parent / "README.md"
+    if not readme.exists():
+        return
+    text = readme.read_text(encoding="utf-8")
+    if "<!-- BENCH:START -->" not in text or "<!-- BENCH:END -->" not in text:
         # Require markers in README.md instead of appending duplicate sections (issue #776)
         return
+    body = _bench_table_lines(horizon_report, fault_report)
+    _swap_bench_section(
+        readme, "### Horizon-scale benchmark (real runs, no invented numbers)", body
+    )
+
+
+def _regenerate_bench_md(horizon_report: Any, fault_report: Any | None = None) -> None:
+    """Refresh the latest-results block in references/bench.md (nightly publish)."""
+    bench_md = Path(__file__).resolve().parent.parent / "references" / "bench.md"
+    if not bench_md.exists():
+        return
+    body = _bench_table_lines(horizon_report, fault_report)
+    _swap_bench_section(
+        bench_md, "### Latest nightly results (real runs, no invented numbers)", body
+    )
 
 
 def _append_continuum_bench(out_dir: str | Path) -> None:
@@ -230,6 +255,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the suites this runner executes and where each report lands, then exit.",
     )
+    parser.add_argument(
+        "--publish",
+        action="store_true",
+        help=(
+            "also refresh the latest-results block in references/bench.md "
+            "(used by the nightly publish CI; local runs leave it alone)."
+        ),
+    )
     return parser
 
 
@@ -291,6 +324,10 @@ def main() -> None:
         _regenerate_readme_bench(
             horizon_report, fault_report if "fault_report" in locals() else None
         )
+        if args.publish:
+            _regenerate_bench_md(
+                horizon_report, fault_report if "fault_report" in locals() else None
+            )
     except Exception as exc:  # noqa: BLE001 - don't let horizon break phase6
         print(f"horizon benchmark failed: {exc}")
         import traceback

@@ -18,6 +18,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Nightly bench publish CI (#570).** New `.github/workflows/bench-nightly.yml`
+  runs the full benchmark suite on a nightly schedule (plus manual dispatch)
+  and commits the refreshed tables when the numbers move. `benchmarks/run.py`
+  grew a `--publish` flag that also refreshes a new latest-results block in
+  `references/bench.md`; plain runs behave exactly as before, so local trees
+  stay clean. Both tables regenerate idempotently between `BENCH` markers
+  from real runner numbers only.
+
 - **The installed `continuum-mcp` entry point is exercised over real stdio (#834).**
   `tests/test_mcp_entrypoint.py` spawns the console script a host actually
   spawns (by absolute path, through pipes, no shell) and drives

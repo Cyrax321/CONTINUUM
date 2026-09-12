@@ -138,6 +138,34 @@ def test_table_regenerates_from_runner_no_invented_numbers(tmp_path: Path) -> No
                 readme.write_text(original, encoding="utf-8")
 
 
+def test_publish_flag_refreshes_bench_md() -> None:
+    # --publish refreshes the latest-results block in references/bench.md
+    # without touching the default-run behavior above. Same anchoring and
+    # restore discipline as the README test (issue #837).
+    root = Path(__file__).resolve().parents[1]
+    bench_md = root / "references" / "bench.md"
+    if bench_md.exists():
+        original = bench_md.read_text(encoding="utf-8")
+        import subprocess
+        import sys
+
+        try:
+            result = subprocess.run(
+                [sys.executable, str(root / "benchmarks/run.py"), "--publish"],
+                capture_output=True,
+                text=True,
+                timeout=600,
+                cwd=root,
+            )
+            assert result.returncode == 0, result.stderr
+            regenerated = bench_md.read_text(encoding="utf-8")
+            assert "<!-- BENCH:START -->" in regenerated
+            assert "<!-- BENCH:END -->" in regenerated
+            assert regenerated.count("<!-- BENCH:START -->") == 1
+        finally:
+            bench_md.write_text(original, encoding="utf-8")
+
+
 @pytest.mark.slow
 def test_shared_emitter_schema_with_fault_injection() -> None:
     # Both suites share the same BenchmarkReport envelope

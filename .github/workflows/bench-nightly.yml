@@ -1,0 +1,40 @@
+name: Nightly bench publish
+
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: bench-nightly
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Run benchmarks and publish the table
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run the full benchmark suite and refresh published tables
+        run: python benchmarks/run.py --publish
+
+      - name: Commit refreshed tables
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md references/bench.md
+          git diff --cached --quiet || git commit -m "bench: nightly refresh of published tables"
+          git push
