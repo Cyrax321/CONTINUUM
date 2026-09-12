@@ -74,6 +74,7 @@ class GenericAgentAdapter(AgentAdapter):
         environment: EnvironmentSnapshot | None = None,
         reason: str = "",
     ) -> StateCheckpoint:
+        """Capture semantic state and optionally pin its environment."""
         # A snapshot alone cannot invalidate a checkpoint: the validator decides
         # staleness per declared dependency and returns early when a state has
         # none, so a checkpoint carrying only a snapshot would report
@@ -139,6 +140,7 @@ class GenericAgentAdapter(AgentAdapter):
         *,
         replay: bool = True,
     ) -> SemanticState:
+        """Restore the latest checkpointed semantic state for a run."""
         restored = self.manager.restore(run_id, replay=replay)
         return restored.state
 
@@ -253,6 +255,7 @@ class GenericAgentAdapter(AgentAdapter):
         expected_model: str | None = None,
         replay: bool = True,
     ) -> RecoveryDecision:
+        """Assess whether a run may safely resume under current conditions."""
         return self.engine.assess(
             run_id,
             current_environment=current_environment,

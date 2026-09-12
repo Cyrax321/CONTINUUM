@@ -66,6 +66,7 @@ class EvidencePrimitive(BaseModel):
     signature_inputs: dict[str, Any]
 
     def content(self) -> dict[str, Any]:
+        """Return the canonical fields represented by this primitive."""
         return {
             "kind": self.kind,
             "run_id": self.run_id,
@@ -78,16 +79,21 @@ class EvidencePrimitive(BaseModel):
         }
 
     def digest(self) -> str:
+        """Return the stable hash of this primitive's canonical content."""
         return stable_hash(self.content())
 
 
 class Transition(EvidencePrimitive):
+    """Represent an event-backed state transition."""
+
     kind: Literal["transition"] = "transition"
     event_id: str
     event_type: str
 
 
 class Observation(EvidencePrimitive):
+    """Represent an environment or tool observation."""
+
     kind: Literal["observation"] = "observation"
     event_id: str
     event_type: str
@@ -95,6 +101,8 @@ class Observation(EvidencePrimitive):
 
 
 class Relation(EvidencePrimitive):
+    """Represent a dependency or derivation relation between items."""
+
     kind: Literal["relation"] = "relation"
     event_id: str
     event_type: str
@@ -103,6 +111,8 @@ class Relation(EvidencePrimitive):
 
 
 class Checkpoint(EvidencePrimitive):
+    """Represent a persisted semantic-state checkpoint."""
+
     kind: Literal["checkpoint"] = "checkpoint"
     checkpoint_id: str
     version: int

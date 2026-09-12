@@ -36,6 +36,7 @@ class ImpactedSet:
 
     @property
     def empty(self) -> bool:
+        """Return whether no evidence, finding, or decision is impacted."""
         return not (self.evidence or self.findings or self.decisions)
 
     @property

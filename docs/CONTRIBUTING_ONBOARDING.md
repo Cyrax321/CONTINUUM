@@ -28,7 +28,7 @@ Install once with `uv sync --extra dev` (or `pip install -e ".[dev]"`).
 
 - Recommended: install the [pre-commit hooks](../CONTRIBUTING.md#pre-commit-hooks-optional-but-recommended) before committing.
 - Run all tests: `uv run pytest` or `pytest -q`. Expect `~2,030 passed, ~23 skipped`
-  on main at this writing (`~2,163` collected).
+  on main at this writing (`~2,195` collected).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
   Skips are environmental (Postgres without `CONTINUUM_TEST_POSTGRES_DSN`, adapter tests without `langgraph` or `openai-agents`).
 - Run a single area: `uv run pytest tests/test_checkpoint_phase4.py -v`
