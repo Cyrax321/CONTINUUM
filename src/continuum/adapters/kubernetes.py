@@ -22,6 +22,7 @@ class KubernetesAdapter(GenericAgentAdapter):
 
     @staticmethod
     def available() -> bool:
+        """Return whether kubectl and the kubernetes client are available."""
         if shutil.which("kubectl") is None:
             return False
         try:
@@ -44,6 +45,7 @@ class KubernetesAdapter(GenericAgentAdapter):
     def run_job(
         self, run_id: str, image: str, command: str, *, dep_scope: str | None = None
     ) -> AdapterResult:
+        """Invoke ``kubectl run`` with an image and command and return its recorded result."""
         if not self.available():
             raise RuntimeError("kubectl or the kubernetes client is not available")
 

@@ -23,6 +23,7 @@ class ContainerAdapter(GenericAgentAdapter):
 
     @staticmethod
     def available() -> bool:
+        """Return whether the docker CLI is available on PATH."""
         return shutil.which("docker") is not None
 
     def __init__(
@@ -38,6 +39,7 @@ class ContainerAdapter(GenericAgentAdapter):
     def run_in_container(
         self, run_id: str, command: str, *, dep_scope: str | None = None
     ) -> AdapterResult:
+        """Run a shell command in the configured image and return its recorded result."""
         if not self.available():
             raise RuntimeError("docker is not available on PATH")
 

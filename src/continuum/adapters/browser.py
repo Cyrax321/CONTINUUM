@@ -19,6 +19,7 @@ class BrowserAdapter(GenericAgentAdapter):
 
     @staticmethod
     def available() -> bool:
+        """Return whether the playwright package is installed."""
         try:
             import playwright  # noqa: F401
 
@@ -30,6 +31,7 @@ class BrowserAdapter(GenericAgentAdapter):
         super().__init__(storage, engine=engine)
 
     def navigate(self, run_id: str, url: str, *, dep_scope: str | None = None) -> AdapterResult:
+        """Navigate to a URL and return the recorded page-content result."""
         if not self.available():
             raise RuntimeError("playwright is not installed")
 
