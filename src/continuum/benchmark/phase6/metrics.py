@@ -19,6 +19,8 @@ from pydantic import BaseModel, Field
 
 
 class RecoveryOutcome(StrEnum):
+    """Possible correctness outcomes for a recovery scenario."""
+
     PASS = "pass"
     FAIL = "fail"
     ESCALATED = "escalated"
@@ -44,6 +46,7 @@ class BenchmarkReport(BaseModel):
     results: list[ScenarioResult] = Field(default_factory=list)
 
     def summary(self) -> dict[str, Any]:
+        """Return total, pass/fail, and per-outcome counts for the report."""
         passed = sum(1 for r in self.results if r.passed)
         by_outcome: dict[str, int] = {}
         for r in self.results:
