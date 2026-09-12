@@ -38,11 +38,13 @@ class ScenarioContext:
     _failed: bool = False
 
     def fail(self, message: str) -> None:
+        """Mark the scenario failed and record the reason."""
         self.notes.append(f"FAIL: {message}")
         self._failed = True
 
 
 def run_scenario(name: str, fn: ScenarioFn) -> ScenarioResult:
+    """Run one scenario and return its timed result without propagating failures."""
     ctx = ScenarioContext()
     start = time.perf_counter()
     try:
@@ -64,6 +66,7 @@ def run_scenario(name: str, fn: ScenarioFn) -> ScenarioResult:
 
 
 def run_benchmark(scenarios: list[tuple[str, ScenarioFn]]) -> BenchmarkReport:
+    """Run named scenarios and return their aggregate benchmark report."""
     return BenchmarkReport(
         generated_at=datetime.now(),
         results=[run_scenario(name, fn) for name, fn in scenarios],
