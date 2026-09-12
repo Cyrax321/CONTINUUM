@@ -1,7 +1,8 @@
-import os
 """Sleep-time trajectory reports (issue #393)."""
 
 from __future__ import annotations
+
+import os
 
 import json
 
