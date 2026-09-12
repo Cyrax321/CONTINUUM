@@ -12,6 +12,8 @@ cost?\" question has real numbers, not estimates.
 
 from __future__ import annotations
 
+import argparse
+
 import time
 from pathlib import Path
 
@@ -120,7 +122,15 @@ def bench_gateway_tenant_deny(iterations: int = 5000) -> dict[str, float]:
             }
 
 
-if __name__ == "__main__":
+def build_parser() -> argparse.ArgumentParser:
+    return argparse.ArgumentParser(
+        description="Benchmark memory-governance control-plane operations.",
+        epilog="With no arguments, runs the measurements and prints the summary.",
+    )
+
+
+def main() -> None:
+    build_parser().parse_args()
     import tempfile
 
     print("memory governance bench")
@@ -128,3 +138,7 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as td:
         print(bench_forensic_join(Path(td), runs=10, records_per_run=20))
     print(bench_gateway_tenant_deny(2000))
+
+
+if __name__ == "__main__":
+    main()
