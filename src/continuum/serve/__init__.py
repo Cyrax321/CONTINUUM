@@ -56,7 +56,11 @@ class SidecarClient:
         self._next_id = 0
 
     def request(self, method: str, **params: Any) -> dict[str, Any]:
-        """Send one sidecar request and return its result."""
+        """Send one JSON-RPC call and return its result.
+
+        Raises:
+            SidecarClientError: If the connection closes or the sidecar returns an error.
+        """
         rid = self._next_id
         self._next_id += 1
         self._out.write(json.dumps({"id": rid, "method": method, "params": params}) + "\n")
