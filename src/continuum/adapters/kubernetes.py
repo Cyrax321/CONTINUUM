@@ -45,7 +45,7 @@ class KubernetesAdapter(GenericAgentAdapter):
     def run_job(
         self, run_id: str, image: str, command: str, *, dep_scope: str | None = None
     ) -> AdapterResult:
-        """Run a one-shot Kubernetes job and return its recorded result."""
+        """Invoke ``kubectl run`` with an image and command and return its recorded result."""
         if not self.available():
             raise RuntimeError("kubectl or the kubernetes client is not available")
 
