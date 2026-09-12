@@ -66,6 +66,7 @@ class EvidencePrimitive(BaseModel):
     signature_inputs: dict[str, Any]
 
     def content(self) -> dict[str, Any]:
+        """Return the primitive content used to compute its digest."""
         return {
             "kind": self.kind,
             "run_id": self.run_id,
@@ -78,16 +79,21 @@ class EvidencePrimitive(BaseModel):
         }
 
     def digest(self) -> str:
+        """Compute the stable hash of this primitive's content."""
         return stable_hash(self.content())
 
 
 class Transition(EvidencePrimitive):
+    """An event-appended state movement in a run."""
+
     kind: Literal["transition"] = "transition"
     event_id: str
     event_type: str
 
 
 class Observation(EvidencePrimitive):
+    """An environment validation or diff observed during a run."""
+
     kind: Literal["observation"] = "observation"
     event_id: str
     event_type: str
@@ -95,6 +101,8 @@ class Observation(EvidencePrimitive):
 
 
 class Relation(EvidencePrimitive):
+    """A dependency edge between run components."""
+
     kind: Literal["relation"] = "relation"
     event_id: str
     event_type: str
@@ -103,6 +111,8 @@ class Relation(EvidencePrimitive):
 
 
 class Checkpoint(EvidencePrimitive):
+    """A checkpoint record exported from a run."""
+
     kind: Literal["checkpoint"] = "checkpoint"
     checkpoint_id: str
     version: int
