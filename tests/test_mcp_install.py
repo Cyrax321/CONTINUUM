@@ -185,6 +185,13 @@ def test_probe_surfaces_the_servers_own_stderr() -> None:
             ]
         )
     assert "continuum-agent[mcp]" in str(excinfo.value)
+    # The stderr tail augments the message, it must not replace the cause: the
+    # original ProbeError (a server that exited before completing the
+    # handshake) is still chained, so debugging the probe does not lose why it
+    # failed. Which branch raised depends on whether the child died before or
+    # after the write; both messages say the same thing.
+    assert isinstance(excinfo.value.__cause__, ProbeError)
+    assert "the MCP server exited before" in str(excinfo.value.__cause__)
 
 
 def test_probe_rejects_non_json_stdout() -> None:
@@ -194,6 +201,43 @@ def test_probe_rejects_non_json_stdout() -> None:
 
     with pytest.raises(ProbeError):
         probe_server([sys.executable, "-c", "print('hello from a chatty server')"])
+
+
+def test_probe_converts_a_closed_pipe_into_a_diagnosis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server that exits before reading stdin — the #697 shape — closes the
+    pipe under the initialize write. That state must surface as the probe's own
+    diagnosis, not a BrokenPipeError traceback through the installer. The pipe
+    error is forced rather than raced: whether a real instant-exit child dies
+    before or after the write is timing, and both ends must land in ProbeError,
+    but only this branch can be pinned deterministically."""
+    from continuum.mcp import install as install_module
+    from continuum.mcp.install import ProbeError
+
+    class _ClosedPipe:
+        def write(self, _: str) -> int:
+            raise BrokenPipeError("the pipe is closed")
+
+        def flush(self) -> None:
+            raise AssertionError("write should have raised first")
+
+        def close(self) -> None:
+            pass
+
+    class _DeadServer:
+        stdin = _ClosedPipe()
+        stderr: list[str] = []
+
+        def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
+            return 1
+
+        def kill(self) -> None:
+            pass
+
+    monkeypatch.setattr(install_module.subprocess, "Popen", lambda *a, **k: _DeadServer())
+    with pytest.raises(ProbeError, match="exited before accepting"):
+        probe_server(["a-command-that-never-reads-stdin"])
 
 
 def test_probe_rejects_a_foreign_server() -> None:

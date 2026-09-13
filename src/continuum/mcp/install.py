@@ -155,22 +155,32 @@ def probe_server(command: Sequence[str], *, timeout: float = 20.0) -> dict[str, 
 
         try:
             assert proc.stdin is not None
-            proc.stdin.write(
-                json.dumps(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "initialize",
-                        "params": {
-                            "protocolVersion": "2024-11-05",
-                            "capabilities": {},
-                            "clientInfo": {"name": "continuum-mcp-install", "version": "0"},
-                        },
-                    }
+            try:
+                proc.stdin.write(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "initialize",
+                            "params": {
+                                "protocolVersion": "2024-11-05",
+                                "capabilities": {},
+                                "clientInfo": {
+                                    "name": "continuum-mcp-install",
+                                    "version": "0",
+                                },
+                            },
+                        }
+                    )
+                    + "\n"
                 )
-                + "\n"
-            )
-            proc.stdin.flush()
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError) as exc:
+                # A server that exits before reading stdin (#697's shape) closes
+                # the pipe under this write: a probe failure, not a traceback.
+                raise ProbeError(
+                    "the MCP server exited before accepting the handshake request"
+                ) from exc
             line = _readline_with_timeout(proc, timeout)
             reply: dict[str, Any] = json.loads(line)
             server: dict[str, Any] = reply.get("result", {}).get("serverInfo", {})
@@ -202,7 +212,10 @@ def probe_server(command: Sequence[str], *, timeout: float = 20.0) -> dict[str, 
             stderr_thread.join(1.0)
         tail = "\n".join(errors[-5:]).strip()
         if tail:
-            raise ProbeError(f"{exc}\nThe server reported:\n{tail}") from None
+            # `from exc` (not `from None`): the augmented message replaces the
+            # text, but the original failure's traceback is the cause that
+            # explains *why* the handshake failed.
+            raise ProbeError(f"{exc}\nThe server reported:\n{tail}") from exc
         raise
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
