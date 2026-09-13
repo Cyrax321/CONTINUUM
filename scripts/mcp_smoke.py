@@ -412,3 +412,4 @@ def main() -> int:
 if __name__ == "__main__":
     raise SystemExit(main())
 # Smoke test realism notes
+# CRLF wire bug: server must emit LF, client must preserve CRLF (#839)
