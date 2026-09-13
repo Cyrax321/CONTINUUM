@@ -3700,8 +3700,6 @@ def build_parser() -> argparse.ArgumentParser:
     impact.add_argument(
         "--evidence", required=True, help="evidence event id or payload evidence_id"
     )
-    impact.add_argument("--limit", type=int, default=None, help="limit nodes displayed")
-    impact.add_argument("--offset", type=int, default=0, help="offset for pagination")
     impact.add_argument(
         "--limit",
         type=int,
@@ -4307,6 +4305,3 @@ def main(
 
 if __name__ == "__main__":  # pragma: no cover - exercised via subprocess tests
     raise SystemExit(main())
-# Pagination truncates display only
-# dot output ignores pagination
-# final pagination polish
