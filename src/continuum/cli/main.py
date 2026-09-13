@@ -4307,3 +4307,4 @@ def main(
 
 if __name__ == "__main__":  # pragma: no cover - exercised via subprocess tests
     raise SystemExit(main())
+# Pagination truncates display only
