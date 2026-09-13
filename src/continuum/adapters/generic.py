@@ -259,13 +259,3 @@ class GenericAgentAdapter(AgentAdapter):
             expected_model=expected_model,
             replay=replay,
         )
-
-
-# bootstrap central 1
-# bootstrap central 2
-# bootstrap central 3
-# bootstrap central 4
-# bootstrap central 5
-# bootstrap central 6
-# bootstrap central 7
-# bootstrap central 8
