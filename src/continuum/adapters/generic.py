@@ -74,6 +74,23 @@ class GenericAgentAdapter(AgentAdapter):
         environment: EnvironmentSnapshot | None = None,
         reason: str = "",
     ) -> StateCheckpoint:
+        """Checkpoint the run's semantic state, optionally pinning the world.
+
+        Writes a :class:`StateCheckpoint` through the CheckpointManager and
+        returns it. Two behaviours a caller must know:
+
+        * When ``environment`` is given, its resources are first recorded as
+          ``DEPENDENCY_DECLARED`` events. A snapshot alone cannot invalidate
+          a checkpoint - declaring the pinned environment as dependencies is
+          what gives later drift something to invalidate (issue #25).
+        * In auto mode (``auto_file``/``auto_total`` set at construction),
+          the file is ground truth for progress: derived events are appended
+          and the state re-projected *before* the checkpoint, so the
+          checkpoint captures them.
+
+        Raises whatever ``project`` raises on an unparsable log when auto
+        mode is on; a failed capture writes nothing.
+        """
         # A snapshot alone cannot invalidate a checkpoint: the validator decides
         # staleness per declared dependency and returns early when a state has
         # none, so a checkpoint carrying only a snapshot would report
@@ -139,6 +156,14 @@ class GenericAgentAdapter(AgentAdapter):
         *,
         replay: bool = True,
     ) -> SemanticState:
+        """Restore the run's newest checkpointed semantic state.
+
+        With ``replay=True`` (default) any events appended after that
+        checkpoint are folded on top of it, so the returned state reflects
+        everything the log recorded, not just the checkpoint; ``replay=False``
+        returns the checkpointed state as sealed. Raises from the
+        CheckpointManager when the run or its checkpoint is missing.
+        """
         restored = self.manager.restore(run_id, replay=replay)
         return restored.state
 
@@ -253,6 +278,17 @@ class GenericAgentAdapter(AgentAdapter):
         expected_model: str | None = None,
         replay: bool = True,
     ) -> RecoveryDecision:
+        """Assess how the run may resume; return the engine's full verdict.
+
+        A thin, honest delegate to :meth:`RecoveryEngine.assess`: it never
+        performs repair or mutation itself, only reports the mode (and
+        ``decision.safe`` tells the caller whether resume needs no repair).
+        ``current_environment`` supplies the world as it is now - without it,
+        drift the engine cannot see is not checked. ``expected_model`` names
+        the model about to resume: when it differs from the one that authored
+        the state, the model-specific assumptions carried in the state must
+        be revalidated instead of silently reused.
+        """
         return self.engine.assess(
             run_id,
             current_environment=current_environment,
