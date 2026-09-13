@@ -66,6 +66,13 @@ class EvidencePrimitive(BaseModel):
     signature_inputs: dict[str, Any]
 
     def content(self) -> dict[str, Any]:
+        """The hash-covered portion of the primitive, its own hash excluded.
+
+        Every field a receiver needs to recompute the chain: kind, run,
+        sequence, prev_hash link, origin, timestamp, payload and signature
+        inputs. ``digest`` hashes exactly this mapping, so a receiver that
+        rebuilds it and re-hashes gets the same answer the exporter sealed.
+        """
         return {
             "kind": self.kind,
             "run_id": self.run_id,
@@ -78,16 +85,41 @@ class EvidencePrimitive(BaseModel):
         }
 
     def digest(self) -> str:
+        """Recompute the primitive's content hash from its current fields.
+
+        The verification primitive: matches the exported ``content_hash``
+        for an untampered record and differs for any edited field, because
+        ``stable_hash`` covers exactly ``content()``. A receiver recomputes
+        this after loading JSON lines to detect tampering, the same way
+        ``verify()`` walks the event chain.
+        """
         return stable_hash(self.content())
 
 
 class Transition(EvidencePrimitive):
+    """An event-appended state movement - the default classification.
+
+    Every event that is neither an observation, a relation nor a
+    checkpoint: progress records, run lifecycle, recovery decisions. The
+    catch-all of the four kinds, so "transition" means "the log moved";
+    it implies nothing about dependencies or the environment.
+    """
+
     kind: Literal["transition"] = "transition"
     event_id: str
     event_type: str
 
 
 class Observation(EvidencePrimitive):
+    """An environment validation, diff, or tool/reasoning observation.
+
+    What the system noticed about the world rather than what it decided:
+    ``STATE_VALIDATED``, ``ENVIRONMENT_CHANGED``, perception, tool
+    completions/failures and agent reasoning summaries. Carries
+    ``observed_at`` (the event timestamp) because "when was this seen"
+    is the question an observation answers.
+    """
+
     kind: Literal["observation"] = "observation"
     event_id: str
     event_type: str
@@ -95,6 +127,16 @@ class Observation(EvidencePrimitive):
 
 
 class Relation(EvidencePrimitive):
+    """A dependency edge between components of the run.
+
+    The graph structure a receiver needs to reason about impact:
+    dependencies declared, findings and decisions added or invalidated,
+    evidence and work added, constraint pins. ``source_id``/``target_id``
+    extract the edge endpoints from the event payload (resource ->
+    evidence, decision -> evidence, finding -> evidence), None when the
+    event carries no extractable edge.
+    """
+
     kind: Literal["relation"] = "relation"
     event_id: str
     event_type: str
@@ -103,6 +145,16 @@ class Relation(EvidencePrimitive):
 
 
 class Checkpoint(EvidencePrimitive):
+    """A state checkpoint record, with its storage-layer integrity hash.
+
+    Carries ``checkpoint_id``, the state ``version`` it sealed, the
+    ``trigger`` that wrote it, and the checkpoint's ``integrity_hash`` -
+    the same hash the storage layer computes, so a receiver compares
+    directly against ``verify()`` output rather than re-deriving it.
+    Emitted once per checkpoint; event-backed ones and storage records
+    are deduplicated, never exported twice.
+    """
+
     kind: Literal["checkpoint"] = "checkpoint"
     checkpoint_id: str
     version: int
