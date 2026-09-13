@@ -1096,3 +1096,4 @@ def validate_state(
         scope=scope,
         events=events,
     )
+# validation rule wiring 1
