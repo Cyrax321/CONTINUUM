@@ -19,6 +19,18 @@ from pydantic import BaseModel, Field
 
 
 class RecoveryOutcome(StrEnum):
+    """What a scenario observed of the recovery system's behaviour.
+
+    ``PASS`` and ``FAIL`` are the harness-assigned verdicts (normal return
+    vs ``ctx.fail``/exception); only those two are ever assigned today.
+    ``ESCALATED`` and ``DEGRADED`` are reserved for scenarios that assert a
+    *correct-but-not-clean* result - recovery that correctly demanded a
+    human, or correctly resumed with a visibly reduced guarantee - which
+    ``PASS``/``FAIL`` cannot express; no current scenario reports them.
+    ``passed`` tracks the harness verdict, so a future scenario reporting
+    ``ESCALATED`` decides for itself whether its invariant held.
+    """
+
     PASS = "pass"
     FAIL = "fail"
     ESCALATED = "escalated"
@@ -44,6 +56,14 @@ class BenchmarkReport(BaseModel):
     results: list[ScenarioResult] = Field(default_factory=list)
 
     def summary(self) -> dict[str, Any]:
+        """Count totals and per-outcome tallies over the report's results.
+
+        Returns ``total``, ``passed`` (count of ``passed=True`` results),
+        ``failed`` (the remainder - anything not passed, including
+        escalated/degraded scenarios whose own invariant failed) and
+        ``by_outcome``, the raw tally keyed by outcome value. The shape is
+        what ``write_report`` renders and what a CI threshold reads.
+        """
         passed = sum(1 for r in self.results if r.passed)
         by_outcome: dict[str, int] = {}
         for r in self.results:

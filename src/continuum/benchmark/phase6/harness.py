@@ -38,11 +38,30 @@ class ScenarioContext:
     _failed: bool = False
 
     def fail(self, message: str) -> None:
+        """Mark the scenario failed with ``message``; execution continues.
+
+        The non-raising failure channel: appends a ``FAIL:`` note and flags
+        the context, so a scenario can assert several independent invariants
+        in one run and report every violation instead of dying on the first.
+        The harness converts the flag into a ``FAIL`` result after the
+        scenario returns; a raised exception marks failure too, but stops
+        the scenario at the raise.
+        """
         self.notes.append(f"FAIL: {message}")
         self._failed = True
 
 
 def run_scenario(name: str, fn: ScenarioFn) -> ScenarioResult:
+    """Run one scenario to a result, never raising past the caller.
+
+    Hands ``fn`` a fresh :class:`ScenarioContext` and times the run.
+    Failure is whichever signal fires first: a raised exception (captured
+    as a note, converted to ``FAIL``) or ``ctx.fail`` leaving the context
+    flagged. A normal return with no flag is a ``PASS``. The result always
+    carries the scenario's notes, ``attempts``, free-form metrics and
+    elapsed milliseconds, so one broken scenario yields data, not an
+    aborted suite.
+    """
     ctx = ScenarioContext()
     start = time.perf_counter()
     try:
@@ -64,6 +83,15 @@ def run_scenario(name: str, fn: ScenarioFn) -> ScenarioResult:
 
 
 def run_benchmark(scenarios: list[tuple[str, ScenarioFn]]) -> BenchmarkReport:
+    """Run every scenario in order and return the aggregate report.
+
+    Each ``(name, scenario)`` pair becomes one :class:`ScenarioResult`
+    via :func:`run_scenario`, so a failing scenario never aborts the rest
+    - the point of a correctness suite is the full picture, including
+    which scenarios still pass after a change. The report's
+    ``generated_at`` is wall-clock, so reports are comparable but not
+    byte-reproducible; compare ``summary()`` figures, not timestamps.
+    """
     return BenchmarkReport(
         generated_at=datetime.now(),
         results=[run_scenario(name, fn) for name, fn in scenarios],
