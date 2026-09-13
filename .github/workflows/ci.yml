@@ -149,8 +149,9 @@ jobs:
       - name: Smoke-test the wheel in a clean venv
         run: |
           python -m venv "$RUNNER_TEMP/wheel-check"
-          "$RUNNER_TEMP/wheel-check/bin/pip" install --quiet dist/*.whl
+          "$RUNNER_TEMP/wheel-check/bin/pip" install --quiet "dist/*.whl[mcp]"
           "$RUNNER_TEMP/wheel-check/bin/continuum" --version
+          "$RUNNER_TEMP/wheel-check/bin/continuum-mcp" --help
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
