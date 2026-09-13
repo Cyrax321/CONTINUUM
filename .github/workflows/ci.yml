@@ -162,23 +162,24 @@ jobs:
           path: dist/
 
   install-matrix:
-    name: Install (non-editable, ${{ matrix.os }})
+    name: Install (non-editable, ${{ matrix.os }}, py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     needs: build-wheel
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v7
         with:
           name: dist-main
           path: dist/
-      - name: Set up Python 3.12
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install wheel non-editable with mcp extra
         shell: bash
