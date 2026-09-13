@@ -41,6 +41,10 @@ Install once with `uv sync --extra dev` (or `pip install -e ".[dev]"`).
 
 CI runs the same three jobs on Python 3.11, 3.12, and 3.13 and on lint and type check. A change must pass all four required status checks.
 
+## Reviewer bots
+
+To get an automated maintainer review, assign `anya-research` as a reviewer or comment `/anya review` on the PR. Anya reads the diff end to end, files a formal approve or request-changes review with exact file and line findings plus suggestion blocks, and enables auto-merge on approval when the PR touches docs only. She never uses em dashes. `yuki-fuyutsuki` takes the same `/yuki review` requests.
+
 ## Issue labels and where to pick work
 
 Phase issues use labels like `phase-1`, `phase-2`, `phase-3`, `phase-4`, `phase-5`, `phase-6`, and `benchmark`. Filter with `gh issue list --label phase-2` or via the web label view. Small isolated fixes live under `good first issue` and the open contributor issues listed in `docs/CONTINUUM_MASTER_PLAN.md` section 5.1. Before opening a new issue or PR, check `.github/ISSUE_TEMPLATE/` and `.github/PULL_REQUEST_TEMPLATE.md` for the actual templates and follow them exactly.
