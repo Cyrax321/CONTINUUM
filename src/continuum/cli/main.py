@@ -2858,7 +2858,7 @@ def cmd_mcp_doctor(args: argparse.Namespace, storage: Storage, out: Any, err: An
         if check.get("fix"):
             lines.append(f"        fix: {check['fix']}")
     if not report["ok"]:
-        lines.append("the MCP server is not healthy as this machine can reach it")
+        lines.append("the MCP server is not healthy as far as this machine can reach it")
     _emit(
         report,
         "\n".join(lines),

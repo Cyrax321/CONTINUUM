@@ -58,23 +58,39 @@ def _check(name: str, status: str, detail: str, fix: str | None = None) -> dict[
     return {"name": name, "status": status, "detail": detail, "fix": fix}
 
 
-def _sdk_check() -> dict[str, Any]:
+def _sdk_check(timeout: float = 20.0) -> dict[str, Any]:
     """Is the ``mcp`` SDK importable by a fresh interpreter? (#697's failure class.)
 
     In a subprocess because an in-process import proves nothing: this process
     may have the SDK on ``sys.path`` through a path a spawned server would not
     share. The check prints the version on success, so the report can name the
     exact SDK the server would run.
+
+    Bounded in time because the doctor is scripted (``mcp doctor &&
+    <reconnect>``): an interpreter that hangs at startup — a broken
+    ``sitecustomize``, a stalled import — would hang the server too, and is a
+    finding, not a reason to block forever.
     """
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import mcp; from importlib.metadata import version; print(version('mcp'))",
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import mcp; from importlib.metadata import version; print(version('mcp'))",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return _check(
+            "mcp sdk",
+            "fail",
+            f"the fresh-interpreter probe did not answer within {timeout:.0f}s — an "
+            "interpreter that hangs at startup would hang the server too",
+            "investigate why a fresh `python -c 'import mcp'` hangs (a broken "
+            "sitecustomize or a stalled import can do this)",
+        )
     if probe.returncode == 0:
         return _check(
             "mcp sdk",
@@ -89,23 +105,28 @@ def _sdk_check() -> dict[str, Any]:
     )
 
 
-def _which_in_fresh_process() -> str | None:
+def _which_in_fresh_process(timeout: float = 20.0) -> str | None:
     """``shutil.which('continuum-mcp')`` as a newly spawned process sees it.
 
     The doctor process may have been started from a shell that activated a venv
     after launch, or under a test harness that rewired the environment; a
     freshly spawned interpreter inherits only the environment, which is the
     thing a host's spawn actually consults.
+
+    Raises :class:`subprocess.TimeoutExpired` rather than returning ``None`` on
+    a hung probe: "could not determine" and "not on PATH" are different
+    diagnoses, and the caller must not report the first as the second.
     """
     probe = subprocess.run(
         [sys.executable, "-c", "import shutil; print(shutil.which('continuum-mcp') or '')"],
         capture_output=True,
         text=True,
+        timeout=timeout,
     )
     return probe.stdout.strip() or None
 
 
-def _entry_point_checks(resolved: Sequence[str]) -> list[dict[str, Any]]:
+def _entry_point_checks(resolved: Sequence[str], timeout: float = 20.0) -> list[dict[str, Any]]:
     """Where the executable is, and what ``mcp install`` would register.
 
     The interesting state is the gap: the executable exists beside the running
@@ -115,7 +136,30 @@ def _entry_point_checks(resolved: Sequence[str]) -> list[dict[str, Any]]:
     activated the venv, the host did not (#699).
     """
     checks: list[dict[str, Any]] = []
-    on_path = _which_in_fresh_process()
+    try:
+        on_path = _which_in_fresh_process(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Unknown, not absent — "not on PATH" would be a diagnosis the probe
+        # did not make. A warning, because the handshake below still tests the
+        # server itself and is the authoritative health signal.
+        checks.append(
+            _check(
+                "entry point",
+                "warn",
+                f"could not determine PATH resolution: the fresh-process probe did "
+                f"not answer within {timeout:.0f}s",
+                "investigate why a fresh interpreter hangs at startup (a broken "
+                "sitecustomize can do this)",
+            )
+        )
+        checks.append(
+            _check(
+                "resolution",
+                "info",
+                "command `mcp install` would register: " + " ".join(resolved),
+            )
+        )
+        return checks
     if on_path:
         checks.append(_check("entry point", "ok", f"{on_path} (resolvable by a fresh process)"))
     elif len(resolved) == 1:
@@ -209,24 +253,34 @@ def _handshake(command: Sequence[str], *, timeout: float = 20.0) -> dict[str, An
         stderr_thread.start()
         try:
             assert proc.stdin is not None
-            proc.stdin.write(
-                (
-                    json.dumps(
-                        {
-                            "jsonrpc": "2.0",
-                            "id": 1,
-                            "method": "initialize",
-                            "params": {
-                                "protocolVersion": "2024-11-05",
-                                "capabilities": {},
-                                "clientInfo": {"name": "continuum-mcp-doctor", "version": "0"},
-                            },
-                        }
-                    )
-                    + "\n"
-                ).encode("utf-8")
-            )
-            proc.stdin.flush()
+            try:
+                proc.stdin.write(
+                    (
+                        json.dumps(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "method": "initialize",
+                                "params": {
+                                    "protocolVersion": "2024-11-05",
+                                    "capabilities": {},
+                                    "clientInfo": {
+                                        "name": "continuum-mcp-doctor",
+                                        "version": "0",
+                                    },
+                                },
+                            }
+                        )
+                        + "\n"
+                    ).encode("utf-8")
+                )
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError) as exc:
+                # A server that exits before reading stdin closes the pipe
+                # under this write: a diagnosis, not a traceback.
+                raise ProbeError(
+                    "the server exited before accepting the handshake request"
+                ) from exc
             raw = _readline_with_timeout(proc, timeout)
             reply: dict[str, Any] = json.loads(raw.decode("utf-8"))
             server: dict[str, Any] = reply.get("result", {}).get("serverInfo", {})
@@ -236,9 +290,16 @@ def _handshake(command: Sequence[str], *, timeout: float = 20.0) -> dict[str, An
                     f"({server.get('name')!r})"
                 )
             crlf = raw.endswith(b"\r\n")
-            proc.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
-            proc.stdin.write((json.dumps(_TOOLS_REQUEST) + "\n").encode("utf-8"))
-            proc.stdin.flush()
+            try:
+                proc.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
+                proc.stdin.write((json.dumps(_TOOLS_REQUEST) + "\n").encode("utf-8"))
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError) as exc:
+                # The server answered initialize and then died — the useful
+                # boundary is naming exactly when it closed the connection.
+                raise ProbeError(
+                    "the server closed the connection after answering initialize"
+                ) from exc
             tools_raw = _readline_with_timeout(proc, timeout)
             tools_reply: dict[str, Any] = json.loads(tools_raw.decode("utf-8"))
             tools = [t.get("name", "?") for t in tools_reply.get("result", {}).get("tools", [])]
@@ -264,7 +325,10 @@ def _handshake(command: Sequence[str], *, timeout: float = 20.0) -> dict[str, An
             stderr_thread.join(1.0)
         tail = "\n".join(errors[-5:]).strip()
         if tail:
-            raise ProbeError(f"{exc}\nThe server reported:\n{tail}") from None
+            # `from exc` (not `from None`): the augmented message replaces the
+            # text, but the original failure's traceback is the cause that
+            # explains *why* the handshake failed.
+            raise ProbeError(f"{exc}\nThe server reported:\n{tail}") from exc
         raise
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -278,8 +342,8 @@ def run_doctor(*, command: Sequence[str] | None = None, timeout: float = 20.0) -
     installer would register — not a hypothetical one.
     """
     resolved = list(command) if command is not None else resolve_server_command()
-    checks: list[dict[str, Any]] = [_sdk_check()]
-    checks.extend(_entry_point_checks(resolved))
+    checks: list[dict[str, Any]] = [_sdk_check(timeout=timeout)]
+    checks.extend(_entry_point_checks(resolved, timeout=timeout))
 
     handshake: dict[str, Any] | None = None
     try:

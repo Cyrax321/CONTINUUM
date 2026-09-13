@@ -132,7 +132,7 @@ def test_exe_off_path_is_a_failure_with_the_install_remedy(
     must not call this healthy."""
     fake_exe = tmp_path / ("continuum-mcp.exe" if sys.platform == "win32" else "continuum-mcp")
     fake_exe.write_text("", encoding="utf-8")
-    monkeypatch.setattr("continuum.mcp.doctor._which_in_fresh_process", lambda: None)
+    monkeypatch.setattr("continuum.mcp.doctor._which_in_fresh_process", lambda **kwargs: None)
     monkeypatch.setattr("continuum.mcp.doctor.resolve_server_command", lambda: [str(fake_exe)])
 
     report = run_doctor()
@@ -151,7 +151,7 @@ def test_interpreter_fallback_is_a_warning_not_a_failure(
     code stays zero — the operator is told *how* the server is reachable, not
     that it is broken."""
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("continuum.mcp.doctor._which_in_fresh_process", lambda: None)
+    monkeypatch.setattr("continuum.mcp.doctor._which_in_fresh_process", lambda **kwargs: None)
     monkeypatch.setattr(
         "continuum.mcp.doctor.resolve_server_command",
         lambda: [sys.executable, "-u", "-m", "continuum.mcp"],
@@ -173,6 +173,82 @@ def test_handshake_failure_surfaces_the_child_stderr() -> None:
     report = run_doctor(command=dying)
     assert report["ok"] is False
     assert "kaboom" in _checks(report)["handshake"]["detail"]
+
+
+def test_hung_fresh_interpreter_is_a_finding_not_a_blockade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The doctor is scripted (``mcp doctor && <reconnect>``), so every
+    fresh-process probe is bounded. A hung interpreter is reported, not
+    waited on: the SDK check fails, and PATH resolution degrades to a warning
+    that says *unknown* — never to "not on PATH", a diagnosis the probe did
+    not make."""
+    import subprocess as subprocess_module
+
+    def hangs(*argv: object, **kwargs: object) -> object:
+        raise subprocess_module.TimeoutExpired(
+            cmd=repr(argv), timeout=float(kwargs.get("timeout", 20))
+        )
+
+    monkeypatch.setattr("continuum.mcp.doctor.subprocess.run", hangs)
+    report = run_doctor()
+    assert report["ok"] is False
+    checks = _checks(report)
+    assert checks["mcp sdk"]["status"] == "fail"
+    assert "did not answer" in checks["mcp sdk"]["detail"]
+    assert checks["entry point"]["status"] == "warn"
+    assert "could not determine" in checks["entry point"]["detail"]
+    # The handshake (Popen, not run) still runs and still decides health.
+    assert "handshake" in checks
+
+
+def test_handshake_closed_pipe_is_a_diagnosis_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server that exits before reading stdin closes the pipe under the
+    initialize write; the doctor must name that state, not crash with
+    BrokenPipeError — the command exists to be run when things are broken."""
+    import subprocess as subprocess_module
+    from types import SimpleNamespace
+
+    from continuum.mcp import doctor as doctor_module
+
+    class _ClosedPipe:
+        def write(self, _: bytes) -> int:
+            raise BrokenPipeError("the pipe is closed")
+
+        def flush(self) -> None:
+            raise AssertionError("write should have raised first")
+
+        def close(self) -> None:
+            pass
+
+    class _DeadServer:
+        stdin = _ClosedPipe()
+        stderr: list[bytes] = []
+
+        def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
+            return 1
+
+        def kill(self) -> None:
+            pass
+
+    # The fake replaces the doctor's `subprocess` reference as a whole —
+    # patching the real module's Popen would also break subprocess.run's own
+    # internals. run stays healthy so the earlier checks pass and only the
+    # handshake sees the dead server.
+    fake_subprocess = SimpleNamespace(
+        run=lambda *argv, **kwargs: SimpleNamespace(returncode=0, stdout="2.2.0\n"),
+        Popen=lambda *argv, **kwargs: _DeadServer(),
+        PIPE=subprocess_module.PIPE,
+        TimeoutExpired=subprocess_module.TimeoutExpired,
+    )
+    monkeypatch.setattr(doctor_module, "subprocess", fake_subprocess)
+    report = run_doctor()
+    assert report["ok"] is False
+    checks = _checks(report)
+    assert checks["handshake"]["status"] == "fail"
+    assert "exited before accepting" in checks["handshake"]["detail"]
 
 
 def test_report_names_the_command_it_diagnosed() -> None:
