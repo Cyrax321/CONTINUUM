@@ -120,6 +120,8 @@ jobs:
   # Issue #279: wheels were built only on release tags, so nobody could install
   # current main without cloning. Every push to main now produces a wheel and
   # sdist artifact, smoke-tested into a clean venv before upload.
+  # Follow-up #837 tracks the remaining gaps: non-editable installs only on
+  # ubuntu, POSIX-only temp paths, and no console-script handshake.
   build-wheel:
     if: github.repository == 'Cyrax321/CONTINUUM' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     name: Build wheel artifact
