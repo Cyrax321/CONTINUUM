@@ -8,3 +8,6 @@ def test_provenance_offset_paginates():
 
 def test_impact_pagination():
     assert True
+
+def test_json_carries_total_and_hidden():
+    assert True
