@@ -184,3 +184,5 @@ jobs:
         run: |
           continuum --version
           continuum-mcp --help
+      - name: Stdio handshake over installed console script
+        run: python scripts/mcp_smoke.py --use-console-script
