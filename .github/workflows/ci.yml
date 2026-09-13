@@ -123,7 +123,7 @@ jobs:
   # Follow-up #837 tracks the remaining gaps: non-editable installs only on
   # ubuntu, POSIX-only temp paths, and no console-script handshake.
   build-wheel:
-    if: github.repository == 'Cyrax321/CONTINUUM' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.repository == 'Cyrax321/CONTINUUM'
     name: Build wheel artifact
     runs-on: ubuntu-latest
 
