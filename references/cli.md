@@ -48,7 +48,8 @@ continuum tui [--refresh N]                      # full-screen terminal dashboar
 continuum attest-keygen                          # generate Ed25519 signer key pair
 continuum attest <run_id>                        # sign run event-chain attestation
 continuum attest-verify <run_id> --attest <file> # verify signed attestation against live chain
-continuum benchmark [--total N]                  # run CONTINUUM-Bench harness
+continuum benchmark [--total N]
+continuum rollback <run_id> [--to N]                # roll the event log backwards                  # run CONTINUUM-Bench harness
 ```
 
 Every command accepts `--json`. Read-only commands (`inspect`, `status`, `history`, `events`,
