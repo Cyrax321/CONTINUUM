@@ -158,3 +158,29 @@ jobs:
         with:
           name: dist-main
           path: dist/
+
+  install-matrix:
+    name: Install (non-editable, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: build-wheel
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: dist-main
+          path: dist/
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install wheel non-editable with mcp extra
+        run: pip install "dist/*.whl[mcp]"
+      - name: Verify console scripts resolve via PATH
+        run: |
+          continuum --version
+          continuum-mcp --help
