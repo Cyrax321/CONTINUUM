@@ -135,6 +135,7 @@ class EventType(StrEnum):
     PLAN_UPSERT = "PLAN_UPSERT"
 
     # subagent spanning: trace delegation chains when a main agent spawns subagents
+    # subagent spanning: trace delegation chains when a main agent spawns subagents
     SUBAGENT_SPAWNED = "SUBAGENT_SPAWNED"
     SUBAGENT_COMPLETED = "SUBAGENT_COMPLETED"
     SUBAGENT_FAILED = "SUBAGENT_FAILED"
