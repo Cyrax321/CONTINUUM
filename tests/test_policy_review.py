@@ -298,6 +298,43 @@ def test_report_never_feeds_the_engine(seeded: str) -> None:
     )
 
 
+def test_unsettled_counts_each_distinct_in_flight_key(db_path: str) -> None:
+    """N forgotten claims of one type must read unsettled=N, not 1.
+
+    Each ``claim`` mints a distinct idempotency key, so the count is the
+    drift signal a maintainer reviews (PR #989 review).
+    """
+    with SQLiteStorage(db_path) as store:
+        store.create_run(Run(run_id="r", goal="g"))
+        store.append_event("r", EventType.RUN_STARTED, {"goal": "g"})
+        ledger = ActionLedger(store, "r")
+        for i in range(3):
+            ledger.claim("slack.post", {"channel": f"ops-{i}"})
+        report = build_policy_review(store, "r")
+    assert _rows(report, "side_effect_actions")["slack.post"]["unsettled"] == 3
+
+
+def test_attempt_cannot_borrow_a_later_attempts_outcome(db_path: str) -> None:
+    """An attempt with no terminal event of its own reads unknown.
+
+    The outcome scan stops at the next RECOVERY_STARTED: crediting attempt
+    one with attempt two's RECOVERY_COMPLETED would misattribute completion
+    (PR #989 review).
+    """
+    with SQLiteStorage(db_path) as store:
+        store.create_run(Run(run_id="r", goal="g"))
+        store.append_event("r", EventType.RUN_STARTED, {"goal": "g"})
+        # Attempt one: no outcome event of its own.
+        _repair(store, "r", [_STEP | {"kind": "revalidate_dependency", "target": "dataset"}])
+        # Attempt two: completed.
+        _repair(store, "r", [_STEP | {"kind": "revalidate_dependency", "target": "dataset"}])
+        store.append_event("r", EventType.RECOVERY_COMPLETED, {"mode": "resume"})
+        report = build_policy_review(store, "r")
+    row = _rows(report, "repair_kinds")["revalidate_dependency"]
+    assert row["attempts"] == 2
+    assert row["outcomes"] == {"completed": 1, "blocked": 0, "unknown": 1}
+
+
 # --- CLI surface --------------------------------------------------------------- #
 
 

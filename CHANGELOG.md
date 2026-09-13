@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`continuum policy-review` reports recovery history by action type (#743).**
+  A read-only, deterministic aggregate of repair attempts, human-gate
+  outcomes, compaction survival and reconciliation outcomes per action type,
+  over live and archived history alike, for periodic maintainer review. The
+  report is evidence for a human decision and never a policy engine: nothing
+  it computes feeds `plan_repairs` or changes a recovery verdict, and a high
+  human-required rate means the probes or the workflow deserve investigation,
+  not a lower safety bar. Without a `run_id` it spans every run.
+
 - **The escalation policy that budgets human attention (#1409).** Every action
   the ledger cannot settle on its own becomes `REQUIRES_REVIEW` and interrupts
   a human at once, and on a weeks-long run that floods the reviewer into

@@ -97,7 +97,15 @@ def _review_run(storage: Storage, run_id: str, report: dict[str, Any]) -> None:
         if event.type is not EventType.RECOVERY_STARTED:
             continue
         split(report["compact_survival"], event.sequence)
-        first_outcome = next((e for e in events[index + 1 :] if e.type in _OUTCOME_EVENTS), None)
+        # Bound the outcome scan at the next RECOVERY_STARTED: an attempt
+        # with no terminal event of its own must read unknown, not borrow
+        # the next attempt's outcome.
+        attempt_window = events[index + 1 :]
+        for later_index, later in enumerate(attempt_window):
+            if later.type is EventType.RECOVERY_STARTED:
+                attempt_window = attempt_window[:later_index]
+                break
+        first_outcome = next((e for e in attempt_window if e.type in _OUTCOME_EVENTS), None)
         outcome = "unknown"
         if first_outcome is not None:
             outcome = _OUTCOME_EVENTS[first_outcome.type]
@@ -181,8 +189,10 @@ def _review_run(storage: Storage, run_id: str, report: dict[str, Any]) -> None:
             else:
                 row["reconciled_absent"] += 1
     # An action whose latest status is still "started" is in flight or was
-    # forgotten mid-run: counted per action type, never silently dropped.
+    # forgotten mid-run: counted once per distinct key and action type,
+    # never silently dropped.
     unsettled_keys = {key for key, status in latest_status.items() if status == "started"}
+    key_action_type: dict[str, str] = {}
     for event in events:
         if event.type not in (
             EventType.ACTION_RECORDED,
@@ -192,8 +202,12 @@ def _review_run(storage: Storage, run_id: str, report: dict[str, Any]) -> None:
             continue
         action_type = _action_type_of(event)
         key = str(event.payload.get("key", ""))
-        if action_type is not None and key in unsettled_keys:
-            actions[action_type]["unsettled"] = 1
+        if action_type is not None:
+            key_action_type[key] = action_type
+    for key in unsettled_keys:
+        action_type = key_action_type.get(key)
+        if action_type is not None and action_type in actions:
+            actions[action_type]["unsettled"] += 1
 
     # -- human gates ------------------------------------------------------- #
     gates = report["human_gates"]
