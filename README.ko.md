@@ -228,7 +228,7 @@ CONTINUUM은 목업 단위 테스트뿐만 아니라 실제 LLM 에이전트, �
 - **서드파티 클라이언트**: Gemini CLI와 Kilo Code가 stdio JSON-RPC로 라이브 SQLite 저장소에 연결되어 다중 에이전트 공존과 인가 분리를 검증.
 - **프로토콜 준수**: `@modelcontextprotocol/inspector --cli`로 프로세스 죽음을 가로질러 엔드투엔드로 구동. 변경 도구는 기본적으로 `CONTINUUM_MCP_MUTATING_CLIENTS` 뒤에서 거부되며, 외부 클레임은 `REQUIRES_REVIEW`(`safe: false`)로 강등된다.
 - **자기 치유**: 하드킬된 서버는 시작 시 한 번의 재시도로 고립된 SQLite `-wal`/`-shm` 사이드카를 정리하여 복구한다.
-- **규모**: 약 2,195개 테스트가 수집됨(약 2,030개 통과, 나머지는 선택적 서비스 없이 스킵), Python 3.11, 3.12, 3.13에서 실행(unit, `hypothesis` 기반 속성 테스트, 동시성, 적대적). CONTINUUM-Bench는 다섯 개의 크래시 시나리오에 전용 argument-drift 시나리오를 더해 실행하며, CONTINUUM에 대해 0 중복 작업과 0 중복 사이드 이펙트를, 단순 재생에 대해 완전한 중복을 측정한다. 추가로 12 시나리오 복구 정확성 스위트(`continuum.benchmark.phase6`)가 내구성 실행 서베이의 크래시 지점을 실행 가능한 어설션으로 인코딩한다.
+- **규모**: 약 2,195개 테스트가 수집됨(약 2,030개 통과, 나머지는 선택적 서비스 없이 스킵), Python 3.11, 3.12, 3.13에서 실행(unit, `hypothesis` 기반 속성 테스트, 동시성, 적대적). CONTINUUM-Bench는 다섯 개의 크래시 시나리오에 전용 argument-drift 시나리오를 더해 실행하며, CONTINUUM에 대해 0 중복 작업과 0 중복 사이드 이펙트를, 단순 재생에 대해 완전한 중복을 측정한다. 추가로 14 시나리오 복구 정확성 스위트(`continuum.benchmark.phase6`)가 내구성 실행 서베이의 크래시 지점을 실행 가능한 어설션으로 인코딩한다.
 - **적대적 감사**: 전체 MCP 표면이 라이브 프로토콜 위에서 감사되었고, 세 가지 결함이 발견되어 수정되었다. 방법과 재현 단계는 [test.md](test.md)에 있다.
 
 ## MCP 통합
@@ -418,7 +418,7 @@ CONTINUUM은 하나의 라이브러리(`src/continuum`, 124 모듈) plus 대규�
 | `dashboard/` | 웹 대시보드 `app.py` `hitl.py`와 HITL 버튼 확인, 조정, 완료, 접두사 신뢰 조언, 고정 |
 | `cli/` | 38개 argparse 명령, 종료 코드가 평결, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | OpenTelemetry 스팬 프로세서 브리지 |
-| `benchmark/` | CONTINUUM-Bench 하네스, 5개 크래시 시나리오 + 인자 드리프트 + 12 시나리오 복구 스위트 |
+| `benchmark/` | CONTINUUM-Bench 하네스, 5개 크래시 시나리오 + 인자 드리프트 + 14 시나리오 복구 스위트 |
 
 ### 정직한 제한
 
