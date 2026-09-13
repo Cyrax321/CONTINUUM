@@ -134,6 +134,11 @@ class EventType(StrEnum):
     # structured plan (issue #312): durable milestones for long-horizon recovery
     PLAN_UPSERT = "PLAN_UPSERT"
 
+    # subagent spanning: trace delegation chains when a main agent spawns subagents
+    SUBAGENT_SPAWNED = "SUBAGENT_SPAWNED"
+    SUBAGENT_COMPLETED = "SUBAGENT_COMPLETED"
+    SUBAGENT_FAILED = "SUBAGENT_FAILED"
+
 
 class AppendOnlyViolation(RuntimeError):
     """Raised when an operation would rewrite history."""

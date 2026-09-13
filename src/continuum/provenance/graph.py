@@ -72,6 +72,7 @@ class ProvenanceGraph:
     nodes: dict[str, ProvenanceNode] = field(default_factory=dict)
     edges: dict[str, list[str]] = field(default_factory=dict)
     reverse_edges: dict[str, list[str]] = field(default_factory=dict)
+    subagent_spans: list[dict[str, Any]] = field(default_factory=list)
 
     def add_node(self, node: ProvenanceNode) -> None:
         self.nodes[node.event_id] = node
@@ -124,6 +125,7 @@ class ProvenanceGraph:
                 for parent, children in self.edges.items()
                 for child in children
             ],
+            "subagent_spans": list(self.subagent_spans),
         }
 
 
@@ -162,6 +164,31 @@ def build_provenance_graph(events: Any) -> ProvenanceGraph:
         for parent_id in node.caused_by:
             if parent_id in graph.nodes:
                 graph.add_edge(parent_id, node.event_id)
+    # Third pass: collect subagent spans for delegation tracing
+    for ev in sorted(events, key=lambda e: e.sequence):
+        if ev.type == EventType.SUBAGENT_SPAWNED:
+            payload = dict(ev.payload) if isinstance(ev.payload, dict) else {}
+            graph.subagent_spans.append(
+                {
+                    "event_id": ev.event_id,
+                    "parent_run_id": ev.run_id,
+                    "subagent_run_id": payload.get("subagent_run_id", ""),
+                    "task_description": payload.get("task_description", ""),
+                    "status": "active",
+                }
+            )
+        elif ev.type in (EventType.SUBAGENT_COMPLETED, EventType.SUBAGENT_FAILED):
+            payload = dict(ev.payload) if isinstance(ev.payload, dict) else {}
+            subagent_run_id = payload.get("subagent_run_id", "")
+            for span in graph.subagent_spans:
+                if span.get("subagent_run_id") == subagent_run_id:
+                    span["status"] = (
+                        "completed"
+                        if ev.type == EventType.SUBAGENT_COMPLETED
+                        else "failed"
+                    )
+                    span["result_summary"] = payload.get("result_summary")
+                    break
     return graph
 
 
