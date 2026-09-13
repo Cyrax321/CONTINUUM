@@ -68,6 +68,16 @@ class LedgerLockError(LedgerError):
 
 
 class LedgerEntryKind(StrEnum):
+    """What a ledger entry records about a run's recovery history.
+
+    ``DECISION`` seals a recovery contract (the engine's verdict);
+    ``GATE`` records a human-in-the-loop event (required/approved/rejected
+    or the escalation marker); ``ATTEMPT`` counts one recovery try. The
+    kind drives every reader here: approval ordering in ``pending_gate``
+    reads GATE vs DECISION, and both attempt counting and escalation in
+    ``record_attempt`` read ATTEMPT vs GATE.
+    """
+
     DECISION = "decision"
     GATE = "gate"
     ATTEMPT = "attempt"
@@ -109,10 +119,26 @@ class RecoveryLedgerEntry:
         return self.content_hash == stable_hash(self.content())
 
     def to_record(self) -> dict[str, Any]:
+        """The full JSON-serializable record, content hash included.
+
+        Exactly ``content()`` plus the ``content_hash`` that seals it - the
+        shape a backend writes to disk and ``from_record`` reads back, so a
+        round-trip preserves everything ``verify`` checks.
+        """
         return self.content() | {"content_hash": self.content_hash}
 
     @classmethod
     def from_record(cls, rec: dict[str, Any]) -> RecoveryLedgerEntry:
+        """Rebuild an entry from a backend record; raise on a malformed one.
+
+        The inverse of ``to_record``: validates the embedded contract with
+        pydantic and re-parses the ISO timestamp. Missing ``note``/``gate``
+        default the way older records were written, so files written before
+        those fields existed still load. A record missing any required key
+        (or carrying an invalid contract) raises ``KeyError`` /
+        ``ValidationError`` - a corrupt line must fail loudly, not load as
+        a silently wrong entry.
+        """
         contract = rec.get("contract")
         return cls(
             entry_id=rec["entry_id"],
@@ -130,29 +156,65 @@ class RecoveryLedgerEntry:
 
 
 class LedgerBackend:
-    """Where ledger entries live. Storage-agnostic by design."""
+    """Where ledger entries live. Storage-agnostic by design.
+
+    Implementations must be append-safe for ``save`` and atomic enough for
+    ``replace`` that a crash mid-compaction never leaves a half-written
+    chain. Callers hold the ledger lock across mutations, so a backend does
+    not need its own locking.
+    """
 
     def load(self, run_id: str) -> list[RecoveryLedgerEntry]:
+        """All stored entries for ``run_id``, in stored order.
+
+        An unknown run is an empty list, never an error - a run's first
+        append must not require the file to pre-exist. Order is whatever
+        the backend wrote; callers that need sequence order go through
+        ``RecoveryLedger.entries``, which sorts.
+        """
         raise NotImplementedError
 
     def save(self, entry: RecoveryLedgerEntry) -> None:
+        """Persist one entry by appending it to ``entry.run_id``'s store.
+
+        The entry arrives already sealed; the backend must not renumber or
+        re-hash it. Called under the ledger lock.
+        """
         raise NotImplementedError
 
     def replace(self, run_id: str, entries: Sequence[RecoveryLedgerEntry]) -> None:
+        """Swap the run's whole entry list - compaction's only write.
+
+        The sole sanctioned rewrite in the ledger's life: ``compact`` hands
+        over the re-sealed survivors and the backend discards everything
+        else for that run. Entries arrive hash-chained; the backend writes
+        them verbatim. Called under the ledger lock.
+        """
         raise NotImplementedError
 
 
 class MemoryLedgerBackend(LedgerBackend):
+    """In-process backend: run ids keyed to entry lists in a plain dict.
+
+    The default for tests and any single-process embedding. Copy-on-read
+    (``load`` returns a new list, ``replace`` stores a copy), so a caller
+    mutating a returned list cannot corrupt the store. Nothing survives
+    process exit - durability is what ``FileLedgerBackend`` is for.
+    """
+
     def __init__(self) -> None:
         self._store: dict[str, list[RecoveryLedgerEntry]] = {}
 
     def load(self, run_id: str) -> list[RecoveryLedgerEntry]:
+        """A copy of the run's entries; empty list for an unknown run."""
         return list(self._store.get(run_id, []))
 
     def save(self, entry: RecoveryLedgerEntry) -> None:
+        """Append the sealed entry to the run's list."""
         self._store.setdefault(entry.run_id, []).append(entry)
 
     def replace(self, run_id: str, entries: Sequence[RecoveryLedgerEntry]) -> None:
+        """Overwrite the run's entries with a copy of ``entries``."""
         self._store[run_id] = list(entries)
 
 
@@ -198,6 +260,13 @@ class FileLedgerBackend(LedgerBackend):
         os.makedirs(self._directory, exist_ok=True)
 
     def load(self, run_id: str) -> list[RecoveryLedgerEntry]:
+        """Parse the run's JSONL file into entries, oldest line first.
+
+        A missing file is an empty list (a run's first append creates the
+        file). Blank lines are skipped; a corrupt line raises from
+        ``json.loads`` or ``from_record`` - a ledger file must not load as
+        a half-silent chain, because ``verify`` trusts a contiguous prefix.
+        """
         path = self._path(run_id)
         if not os.path.exists(path):
             return []
@@ -211,11 +280,23 @@ class FileLedgerBackend(LedgerBackend):
         return out
 
     def save(self, entry: RecoveryLedgerEntry) -> None:
+        """Append one JSON record line, creating the directory and file.
+
+        Creates the ledger directory on first write so an operator never
+        has to pre-provision it. Append-only by construction: nothing
+        already on disk is read or rewritten.
+        """
         self._ensure_directory()
         with open(self._path(entry.run_id), "a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry.to_record()) + "\n")
 
     def replace(self, run_id: str, entries: Sequence[RecoveryLedgerEntry]) -> None:
+        """Rewrite the run's whole file with the compacted survivors.
+
+        Truncating-write (``"w"``), so the dropped prefix is gone the moment
+        the handle opens - compaction's trade of durability for boundedness,
+        as documented on ``compact``. Creates the directory on first write.
+        """
         self._ensure_directory()
         with open(self._path(run_id), "w", encoding="utf-8") as handle:
             for entry in entries:
@@ -365,6 +446,13 @@ class RecoveryLedger:
             return count
 
     def attempts(self, run_id: str) -> int:
+        """How many recovery attempts the ledger has recorded for the run.
+
+        Counts ATTEMPT entries in sequence order; 0 for a run with no
+        history. Compaction can lower this count - ``requires_human`` is
+        the escalation-safe reader, because it also honours the anchored
+        ``human_required`` marker that survives compaction.
+        """
         return sum(1 for e in self.entries(run_id) if e.kind == LedgerEntryKind.ATTEMPT.value)
 
     def requires_human(self, run_id: str, *, max_attempts: int = 3) -> bool:
@@ -404,9 +492,23 @@ class RecoveryLedger:
     # -- reading ---------------------------------------------------------- #
 
     def entries(self, run_id: str) -> list[RecoveryLedgerEntry]:
+        """All surviving entries, ascending by sequence.
+
+        The one reading door every other reader goes through: sorts the
+        backend's stored order into sequence order, so chain walks
+        (``verify``), approval checks (``pending_gate``) and attempt
+        counting all see the same chronology. Includes entries a
+        compaction kept (anchors, the newest window).
+        """
         return sorted(self._backend.load(run_id), key=lambda e: e.sequence)
 
     def last_decision(self, run_id: str) -> RecoveryLedgerEntry | None:
+        """The most recent DECISION entry, or None when the run has none.
+
+        The entry a resume consults for the latest sealed contract. It is
+        not necessarily the newest entry overall - later ATTEMPT or GATE
+        entries may sit above it.
+        """
         decisions = [e for e in self.entries(run_id) if e.kind == LedgerEntryKind.DECISION.value]
         return decisions[-1] if decisions else None
 
