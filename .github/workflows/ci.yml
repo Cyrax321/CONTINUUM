@@ -150,7 +150,7 @@ jobs:
         run: |
           python -m venv "$RUNNER_TEMP/wheel-check"
           if [ -f "$RUNNER_TEMP/wheel-check/bin/pip" ]; then BIN="$RUNNER_TEMP/wheel-check/bin"; else BIN="$RUNNER_TEMP/wheel-check/Scripts"; fi
-          WHEEL=$(ls dist/*.whl | head -1)
+          WHEEL=$(ls dist/*.whl | head -1 | tr -d '\r')
           "$BIN/pip" install --quiet "$WHEEL[mcp]"
           "$BIN/continuum" --version
           "$BIN/continuum-mcp" --help
@@ -181,6 +181,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install wheel non-editable with mcp extra
+        shell: bash
         run: |
           WHEEL=$(ls dist/*.whl | head -1)
           python -m pip install "$WHEEL[mcp]"
@@ -189,4 +190,4 @@ jobs:
           continuum --version
           continuum-mcp --help
       - name: Stdio handshake over installed console script
-        run: python scripts/mcp_smoke.py --use-console-script
+        run: python scripts/mcp_smoke.py --entry-point console-script
