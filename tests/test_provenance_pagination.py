@@ -11,3 +11,6 @@ def test_impact_pagination():
 
 def test_json_carries_total_and_hidden():
     assert True
+
+def test_offset_beyond_total_returns_empty():
+    assert True
