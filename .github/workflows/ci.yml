@@ -149,8 +149,10 @@ jobs:
       - name: Smoke-test the wheel in a clean venv
         run: |
           python -m venv "$RUNNER_TEMP/wheel-check"
-          "$RUNNER_TEMP/wheel-check/bin/pip" install --quiet "dist/*.whl[mcp]"
-          "$RUNNER_TEMP/wheel-check/bin/continuum" --version
+          python -m venv "$RUNNER_TEMP/wheel-check"
+          if [ -f "$RUNNER_TEMP/wheel-check/bin/pip" ]; then BIN="$RUNNER_TEMP/wheel-check/bin"; else BIN="$RUNNER_TEMP/wheel-check/Scripts"; fi
+          "$BIN/pip" install --quiet "dist/*.whl[mcp]"
+          "$BIN/continuum" --version
           "$RUNNER_TEMP/wheel-check/bin/continuum-mcp" --help
 
       - name: Upload build artifacts
@@ -179,7 +181,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install wheel non-editable with mcp extra
-        run: pip install "dist/*.whl[mcp]"
+        run: python -m pip install "dist/*.whl[mcp]"
       - name: Verify console scripts resolve via PATH
         run: |
           continuum --version
