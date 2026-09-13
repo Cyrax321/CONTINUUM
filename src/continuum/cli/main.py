@@ -3700,6 +3700,8 @@ def build_parser() -> argparse.ArgumentParser:
     impact.add_argument(
         "--evidence", required=True, help="evidence event id or payload evidence_id"
     )
+    impact.add_argument("--limit", type=int, default=None, help="limit nodes displayed")
+    impact.add_argument("--offset", type=int, default=0, help="offset for pagination")
     impact.add_argument(
         "--limit",
         type=int,
