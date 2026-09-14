@@ -1216,6 +1216,7 @@ def build_server(
         scoped_to_run: bool = True,
         pinning: dict[str, Any] | None = None,
         grant: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
     ) -> str:
         """Claim an action in the ledger and report whether to proceed."""
         from continuum.actions.grants import GrantDenied, normalize_grant
@@ -1316,6 +1317,7 @@ def build_server(
                 scoped_to_run=scoped_to_run,
                 pinning=pinning_clean or None,
                 grant=grant_clean,
+                correlation_id=correlation_id,
             )
         except GrantDenied as exc:
             return _json(

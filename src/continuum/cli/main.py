@@ -872,6 +872,53 @@ def cmd_impact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     return ExitCode.OK
 
 
+def cmd_correlate(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Show tool-to-action evidence chains by correlation ID (issue #785).
+
+    Read-only. Groups ACTION_* and TOOL_* events by their optional
+    correlation_id without settling anything: a match is linkage, not
+    proof the effect occurred.
+    """
+    storage.get_run(args.run_id)
+    try:
+        events = storage.read_all_events(args.run_id)
+    except Exception:
+        events = storage.read_events(args.run_id)
+    from continuum.provenance.correlation import correlate_events
+
+    result = correlate_events(events)
+    only = getattr(args, "correlation_id", None)
+    chains = result["chains"]
+    if only is not None:
+        chains = {only: chains.get(only, [])}
+    if getattr(args, "json", False):
+        _emit(
+            {
+                "run_id": args.run_id,
+                "chains": chains,
+                "unmatched_tool": result["unmatched_tool"],
+                "ambiguous": result["ambiguous"],
+            },
+            "",
+            as_json=True,
+            stream=out,
+        )
+        return ExitCode.OK
+    lines = [f"run: {args.run_id}  (tool-action correlation)"]
+    if not chains and not result["unmatched_tool"]:
+        lines.append("no correlated actions or tool observations")
+    for cid, refs in sorted(chains.items()):
+        lines.append(f"  {cid}: {len(refs)} event(s)")
+        for ref in refs:
+            lines.append(f"    {ref['sequence']:>5}  {ref['type']:<18} {ref['event_id']}")
+    if result["ambiguous"]:
+        lines.append(f"ambiguous: {', '.join(result['ambiguous'])} (claimed by multiple actions)")
+    if result["unmatched_tool"] and only is None:
+        lines.append(f"unmatched tool observations: {len(result['unmatched_tool'])}")
+    _emit({}, "\n".join(lines), as_json=False, stream=out, palette=getattr(args, "_palette", None))
+    return ExitCode.OK
+
+
 def cmd_diff(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Show the semantic diff between two stored state versions of one run.
 
@@ -3707,6 +3754,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="show at most N downstream nodes, display only",
     )
     impact.add_argument("--offset", type=int, default=0, help="skip the first M downstream nodes")
+
+    correlate = with_run(
+        add("correlate", cmd_correlate, "Show tool-action evidence chains. Read-only.")
+    )
+    correlate.add_argument(
+        "--correlation-id", default=None, help="show only one correlation chain"
+    )
 
     events = with_run(add("events", cmd_events, "List recorded events."))
     events.add_argument("--after", type=int, default=0, help="list events with sequence > N.")

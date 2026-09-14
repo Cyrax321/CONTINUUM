@@ -517,15 +517,26 @@ class GatewayServer:
                         ledger.complete(
                             decision.key, external_id=f"{method} {self.path} -> {status}"
                         )
+                        _tool_payload: dict[str, Any] = {
+                            "tool": "http",
+                            "path": f"{scheme}://{parts.netloc}{self.path}",
+                            "status": status,
+                            "via": "gateway",
+                        }
+                        _corr = body.get("correlation_id") if isinstance(body, dict) else None
+                        if _corr is not None:
+                            from continuum.provenance.correlation import normalize_correlation_id
+
+                            try:
+                                _clean = normalize_correlation_id(_corr)
+                            except ValueError:
+                                _clean = None
+                            if _clean is not None:
+                                _tool_payload["correlation_id"] = _clean
                         storage.append_event(
                             run_id,
                             EventType.TOOL_COMPLETED,
-                            {
-                                "tool": "http",
-                                "path": f"{scheme}://{parts.netloc}{self.path}",
-                                "status": status,
-                                "via": "gateway",
-                            },
+                            _tool_payload,
                             source=Origin.EXTERNAL_AGENT,
                         )
                     elif status < 500:
