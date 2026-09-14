@@ -73,6 +73,7 @@ class ProvenanceGraph:
     edges: dict[str, list[str]] = field(default_factory=dict)
     reverse_edges: dict[str, list[str]] = field(default_factory=dict)
     subagent_spans: list[dict[str, Any]] = field(default_factory=list)
+    compactions: list[dict[str, Any]] = field(default_factory=list)
 
     def add_node(self, node: ProvenanceNode) -> None:
         self.nodes[node.event_id] = node
@@ -126,6 +127,7 @@ class ProvenanceGraph:
                 for child in children
             ],
             "subagent_spans": list(self.subagent_spans),
+            "compactions": list(self.compactions),
         }
 
 
@@ -183,12 +185,21 @@ def build_provenance_graph(events: Any) -> ProvenanceGraph:
             for span in graph.subagent_spans:
                 if span.get("subagent_run_id") == subagent_run_id:
                     span["status"] = (
-                        "completed"
-                        if ev.type == EventType.SUBAGENT_COMPLETED
-                        else "failed"
+                        "completed" if ev.type == EventType.SUBAGENT_COMPLETED else "failed"
                     )
                     span["result_summary"] = payload.get("result_summary")
                     break
+        elif ev.type is EventType.PRECOMPACT_HOOK:
+            payload = dict(ev.payload) if isinstance(ev.payload, dict) else {}
+            graph.compactions.append(
+                {
+                    "event_id": ev.event_id,
+                    "sequence": int(ev.sequence),
+                    "retained_events": payload.get("retained_events"),
+                    "compacted_events": payload.get("compacted_events"),
+                    "summary": payload.get("summary"),
+                }
+            )
     return graph
 
 
