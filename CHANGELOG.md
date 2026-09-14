@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Closed the last install-doc contradictions from the #840 audit.** Most of
+  the issue's nine items had already been fixed and guarded on `main`; this
+  sweep clears the residue. `references/install.md` understated the suite as
+  1,300-strong while every guarded file said ~2,195 (it now joins
+  `tests/test_docs_counts.py`'s `COUNTED_FILES`, so it cannot drift again) and
+  its Postgres block gained the PowerShell variant the acceptance criteria
+  demand (`export` has no PowerShell equivalent). `docs/index.html`'s meta
+  description said "2,163 tests"; its test-count figure is now pinned to the
+  documented total by a new guard. `references/quickstart.md` leads with one
+  primary path, `pip install "continuum-agent[mcp]"` from PyPI, with the
+  clone+editable contributor install as a secondary section, replacing the
+  clone-first ordering that contradicted the README's PyPI-first framing.
+
 - **MCP and sidecar ledger writes now carry `EXTERNAL_AGENT` (#653).**
   `ContinuumMCP.ledger` and `SidecarServer._ledger` construct their
   `ActionLedger` with `source=AGENT_SOURCE`, matching the `EXTERNAL_AGENT`
@@ -745,7 +758,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,195 collected, ~2,030 passed, ~23 skipped on a minimal env).
+  (~2,196 collected, ~2,030 passed, ~23 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

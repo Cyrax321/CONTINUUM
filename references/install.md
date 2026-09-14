@@ -77,6 +77,14 @@ export CONTINUUM_TEST_POSTGRES_DSN=postgresql://continuum:continuum@localhost:54
 uv run --extra dev --extra postgres pytest tests/test_storage_postgres.py tests/test_action_index.py -q
 ```
 
+On Windows PowerShell, step 1 is the same `docker compose` command; step 2 sets
+the variable the PowerShell way (`export` has no equivalent there):
+
+```powershell
+$env:CONTINUUM_TEST_POSTGRES_DSN = "postgresql://continuum:continuum@localhost:5432/continuum_test"
+uv run --extra dev --extra postgres pytest tests/test_storage_postgres.py tests/test_action_index.py -q
+```
+
 Notes:
 
 - `compose.yaml` uses `postgres:16`, `POSTGRES_USER=continuum`, `POSTGRES_PASSWORD=continuum`, `POSTGRES_DB=continuum_test`, and host port `127.0.0.1:5432` bound to localhost, matching `.github/workflows/ci.yml`. The documented `CONTINUUM_TEST_POSTGRES_DSN` variable is exactly what `tests/test_storage_postgres.py` reads via `os.environ.get("CONTINUUM_TEST_POSTGRES_DSN")`.
@@ -97,7 +105,7 @@ continuum-mcp --help             # needs [mcp] or [dev]
 # powershell -ExecutionPolicy Bypass -File .\try-it.ps1
 # powershell -ExecutionPolicy Bypass -File .\try-it.ps1 cli --help
 
-# Full test suite (~1,300 tests; exact skips vary by environment)
+# Full test suite (~2,196 collected; exact skips vary by environment)
 pytest -q                        # or: ./try-it.sh test
 pytest --no-cov --tb=short -q    # faster, no coverage
 pytest tests/test_events.py -v   # single file

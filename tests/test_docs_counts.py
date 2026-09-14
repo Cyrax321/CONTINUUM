@@ -1,10 +1,11 @@
 """Guard the documented pytest counts against silent drift (#630).
 
-README.md, docs/CONTRIBUTING_ONBOARDING.md, and CHANGELOG.md each state the
-collected total. The guard asserts the three files agree with each other and
-with a live ``pytest --collect-only`` within tolerance. Skips vary by
-environment, so only collected totals are compared, never passed/skipped
-splits. Regenerate the figures with ``pytest --collect-only -q; pytest -q``.
+README.md, docs/CONTRIBUTING_ONBOARDING.md, CHANGELOG.md, and
+references/install.md each state the collected total. The guard asserts the
+files agree with each other and with a live ``pytest --collect-only`` within
+tolerance. Skips vary by environment, so only collected totals are compared,
+never passed/skipped splits. Regenerate the figures with
+``pytest --collect-only -q; pytest -q``.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ COUNTED_FILES = (
     ROOT / "README.md",
     ROOT / "docs" / "CONTRIBUTING_ONBOARDING.md",
     ROOT / "CHANGELOG.md",
+    ROOT / "references" / "install.md",
 )
 # Small PRs move the total by a handful of tests; doc rot moves it by the
 # hundreds (#316: exact, #630: 135). Tolerance 30 splits the difference.
@@ -64,14 +66,35 @@ def test_documented_counts_agree() -> None:
     assert len(set(totals.values())) == 1, f"documented counts disagree: {totals}"
 
 
+def test_index_html_test_figure_matches_the_docs() -> None:
+    """The marketing page states the suite size too, so it is watched (#840).
+
+    ``docs/index.html`` said ``2,163 tests`` while every guarded file said
+    ~2,195: the page is edited rarely enough that nothing compared it with the
+    rest of the docs. Its tool-count and CLI-command figures are already
+    guarded (``tests/test_mcp_docs.py`` scans ``*.html``); this pins the test
+    figure to the same total the markdown files carry.
+    """
+    text = (ROOT / "docs" / "index.html").read_text(encoding="utf-8")
+    figures = re.findall(r"\b([\d,]+)\s+tests\b", text)
+    assert figures, "docs/index.html states no test-count figure"
+    expected = documented_total(COUNTED_FILES[0])
+    for figure in figures:
+        stated = int(figure.replace(",", ""))
+        assert stated == expected, (
+            f"docs/index.html states {stated} tests, but the docs say ~{expected}: "
+            "bump the figure in the meta description together with the markdown files"
+        )
+
+
 @pytest.mark.slow
 def test_documented_count_matches_suite() -> None:
     documented = documented_total(COUNTED_FILES[0])
     live = live_total()
     assert abs(live - documented) <= TOLERANCE, (
         f"suite collects {live} tests but docs say ~{documented}: "
-        "re-sync README.md, docs/CONTRIBUTING_ONBOARDING.md, and CHANGELOG.md "
-        "(pytest --collect-only -q; pytest -q)"
+        "re-sync README.md, docs/CONTRIBUTING_ONBOARDING.md, CHANGELOG.md, and "
+        "references/install.md (pytest --collect-only -q; pytest -q)"
     )
 
 
