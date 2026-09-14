@@ -109,19 +109,3 @@ def collect_observations(
             entries.append({"truncated": True, "omitted": omitted})
             break
     return entries
-
-
-def observations_evidence_lines(observations: list[dict[str, Any]]) -> list[str]:
-    """Render observation rows as contract evidence strings."""
-    lines: list[str] = []
-    for entry in observations:
-        if entry.get("truncated"):
-            lines.append(
-                f"files-changed-since-checkpoint: ... {entry['omitted']} earlier row(s) omitted"
-            )
-            continue
-        lines.append(
-            f"files-changed-since-checkpoint: {entry['status']} "
-            f"{entry['path']} ({entry['tool']}, seq {entry['sequence']})"
-        )
-    return lines
