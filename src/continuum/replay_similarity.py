@@ -37,6 +37,14 @@ __all__ = [
 
 
 class SimilarityKind(StrEnum):
+    """Comparison strategy for post-restore call classification.
+
+    Selects how replay-vs-fork is decided: EXACT matches normalised
+    argument text byte for byte, FUZZY scores token-set overlap to catch
+    LLM paraphrasing, EMBEDDING delegates to a caller-supplied vector
+    function. Higher tolerance strategies return replay more often.
+    """
+
     EXACT = "exact"
     FUZZY = "fuzzy"
     EMBEDDING = "embedding"
@@ -44,6 +52,12 @@ class SimilarityKind(StrEnum):
 
 @dataclass(frozen=True)
 class SimilarityConfig:
+    """Thresholds and strategy selecting replay, fork, or fresh.
+
+    Bundles which SimilarityKind to compare with and the cutoffs that
+    map a similarity score in [0, 1] to a classify_call verdict.
+    """
+
     kind: SimilarityKind = SimilarityKind.EXACT
     """Which comparison strategy to use."""
     replay_threshold: float = 0.90
@@ -60,6 +74,11 @@ def token_set(text: str) -> frozenset[str]:
 
 
 def jaccard(a: frozenset[str], b: frozenset[str]) -> float:
+    """Token-set Jaccard similarity in [0, 1].
+
+    Both empty scores 1.0, one empty scores 0.0, otherwise the size of
+    the intersection over the size of the union.
+    """
     if not a and not b:
         return 1.0
     if not a or not b:
