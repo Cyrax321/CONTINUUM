@@ -46,8 +46,33 @@ here and exercised by the missing-SDK tests in `tests/test_mcp_server.py`.
 
 ## Registration
 
-Claude Code discovers the server from the project's `.mcp.json`, which declares
-it by bare command name:
+### `continuum mcp install` (cross-platform)
+
+The committed `.mcp.json` cannot express "`.venv/bin/continuum-mcp` on POSIX,
+`.venv\Scripts\continuum-mcp.exe` on Windows", and a bare command name is
+resolved by the host's `CreateProcess` against *its* PATH, not the child's
+environment. So resolution has to happen on the machine that will spawn the
+server, which is what this command does (issue #834):
+
+```bash
+continuum mcp install                        # local scope, this project
+continuum mcp install --scope project        # the shared .mcp.json instead
+```
+
+It verifies the `mcp` SDK by spawning a probe subprocess first (a missing extra
+is refused with `pip install "continuum-agent[mcp]"` and nothing is written),
+then bakes absolute values into the registration: the resolved console script
+(or `python -u -m continuum.mcp` when no executable is on PATH, the form that
+works on Windows with zero PATH assumptions) and an absolute `--db` (the host's
+spawn cwd is not the project root). The result connects regardless of the
+host's PATH and spawn cwd. Install is idempotent and repoints a moved
+virtualenv; `continuum mcp remove` deletes only the entries install wrote.
+See [the CLI reference](cli.md#mcp) for the flags.
+
+### The committed `.mcp.json`
+
+Claude Code also discovers the server from the project's `.mcp.json`, which
+declares it by bare command name:
 
 ```json
 {
@@ -197,6 +222,11 @@ claude                           # then start the client from that shell
 Nothing is written to the repository and `.mcp.json` resolves as intended.
 
 #### Remedy 2, pin the absolute path in the local scope
+
+`continuum mcp install` (above) is this remedy automated: it resolves the
+command on this machine, bakes it absolute with an absolute `--db`, and writes
+the local-scope entry itself. The manual form, for when you want to see every
+byte:
 
 When the client is not launched from a shell, a desktop app, or an IDE, register
 the resolved path instead:

@@ -57,6 +57,30 @@ All notable changes to this project are documented here. The format follows
   against the calling process's PATH, never the environment passed to the
   child, so the suite can now tell a broken entry point (#697) from an
   unreachable one.
+- **`continuum mcp install` / `mcp remove`: cross-platform MCP registration (#834).**
+  A committed `.mcp.json` cannot express "`.venv/bin/continuum-mcp` on POSIX,
+  `.venv\Scripts\continuum-mcp.exe` on Windows", and a bare command name is
+  resolved by the host's `CreateProcess` against *its* PATH, so registration
+  now happens on the machine that will spawn the server. `mcp install`
+  verifies the `mcp` SDK by spawning a probe subprocess first (a missing
+  extra is refused with `pip install "continuum-agent[mcp]"` and nothing is
+  written), then bakes absolute values into the host's config: the console
+  script installed beside this interpreter (before any PATH lookup, which can
+  hold a different environment's script), else the
+  `python -u -m continuum.mcp` fallback, plus an absolute `--db` (the host's
+  spawn cwd is not the project root) and the mutating-clients env. Default
+  scope is Claude Code local (`~/.claude.json`, this project, wins over the
+  committed `.mcp.json`); `--scope project` writes the shared file instead.
+  Install is idempotent and repoints a moved virtualenv; `mcp remove` deletes
+  only entries install wrote (narrow shape recognition, the
+  `clienthooks._is_managed_hook` discipline), so the committed registration
+  and hand-registered servers survive. New module `src/continuum/mcp/install.py`
+  with `HOST_PROFILES` structured like `CLIENT_PROFILES` so other hosts are
+  one dict entry. `tests/test_mcp_install.py` pins resolution, fallback,
+  refusal, idempotency, narrow removal, and the acceptance case: the baked
+  registration, read back from the settings file and spawned from a foreign
+  cwd with the install environment off PATH, completes `initialize` and
+  `tools/list` (12 tools).
 - **Completed actions record consumed inputs for restore-point admissibility (#558).**
   `ActionLedger.complete` and `reconcile` accept an optional `consumed_inputs`
   mapping (`checkpoint_seq`, `event_positions`, `component_ids`, `action_ids`),
@@ -745,7 +769,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,195 collected, ~2,030 passed, ~23 skipped on a minimal env).
+  (~2,212 collected, ~2,030 passed, ~23 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
