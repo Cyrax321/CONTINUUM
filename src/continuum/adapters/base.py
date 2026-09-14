@@ -111,3 +111,22 @@ class AgentAdapter(ABC):
         """
         pass  # noqa: B027 - intentional no-op default
 
+    def compact_context(
+        self,
+        run_id: str,
+        *,
+        retained_events: int,
+        compacted_events: int,
+        summary: str | None = None,
+    ) -> None:
+        """Record a context compaction boundary.
+
+        When an agent's context window is full and the framework compacts
+        (summarizes) the history, this records what was retained vs lost.
+        The post-compact state is marked PARTIAL since some history is gone.
+
+        Default implementation is a no-op. Override in adapters that
+        manage context compaction.
+        """
+        pass  # noqa: B027 - intentional no-op default
+
