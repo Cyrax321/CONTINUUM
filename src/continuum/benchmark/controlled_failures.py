@@ -14,6 +14,13 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class ControlledScenario:
+    """One deterministic failure row with its expected recovery verdict.
+
+    Each row names a scenario plus the checkpoint and environment
+    versions to construct and the recovery mode the harness must
+    produce for the run to pass.
+    """
+
     scenario: str
     checkpoint_version: str
     environment_version: str
@@ -103,6 +110,10 @@ SCENARIOS: tuple[ControlledScenario, ...] = (
 
 
 def by_name(name: str) -> ControlledScenario:
+    """Look up a controlled scenario by name.
+
+    Raises KeyError when no row matches the given name.
+    """
     for scenario in SCENARIOS:
         if scenario.scenario == name:
             return scenario
