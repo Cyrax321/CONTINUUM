@@ -136,6 +136,19 @@ def observe_event_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
     """
     tool = str(raw.get("tool_name") or "unknown")
     payload: dict[str, Any] = {"tool": tool}
+    # Correlation linkage (issue #785): propagate an explicit identifier
+    # when the harness supplies one, never invent from text or timestamps.
+    for _source in (raw, raw.get("tool_input") if isinstance(raw.get("tool_input"), dict) else {}):
+        if isinstance(_source, dict) and _source.get("correlation_id") is not None:
+            from continuum.provenance.correlation import normalize_correlation_id
+
+            try:
+                _clean = normalize_correlation_id(_source.get("correlation_id"))
+            except ValueError:
+                _clean = None
+            if _clean is not None:
+                payload["correlation_id"] = _clean
+            break
 
     tool_input = raw.get("tool_input")
     path: str | None = None

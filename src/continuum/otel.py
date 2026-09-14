@@ -83,6 +83,18 @@ def observation_from_span(name: str, attributes: Any, *, ok: bool = True) -> dic
             break
     payload["via"] = "otel"
     payload["ok"] = bool(ok)
+    for _key in ("continuum.correlation_id", "correlation_id"):
+        _value = _attr(attributes, _key)
+        if _value is not None:
+            from continuum.provenance.correlation import normalize_correlation_id
+
+            try:
+                _clean = normalize_correlation_id(_value)
+            except ValueError:
+                _clean = None
+            if _clean is not None:
+                payload["correlation_id"] = _clean
+            break
     return payload
 
 

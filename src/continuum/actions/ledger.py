@@ -744,6 +744,7 @@ class ActionLedger:
         grant: dict[str, str] | None = None,
         origin_digest: str | None = None,
         rendered_key: str | None = None,
+        correlation_id: str | None = None,
     ) -> Action:
         payload: dict[str, Any] = {
             "key": key,
@@ -770,6 +771,8 @@ class ActionLedger:
             digest = origin_digest if origin_digest is not None else action.origin_digest
             if digest is not None:
                 payload["origin_digest"] = digest
+        if correlation_id is not None:
+            payload["correlation_id"] = correlation_id
         if rendered_key is not None:
             payload["rendered_key"] = rendered_key
         elif action.arguments and "record_key" in action.arguments:
@@ -794,6 +797,7 @@ class ActionLedger:
         pinning: dict[str, str] | None = None,
         grant: Mapping[str, str] | None = None,
         origin_digest: str | None = None,
+        correlation_id: str | None = None,
     ) -> ActionOutcome:
         """Register intent to perform an action, or report it already happened.
 
@@ -968,6 +972,17 @@ class ActionLedger:
                     raise LedgerError(
                         f"origin_digest must be 64 lowercase hex, got {origin_digest!r}"
                     )
+            # Correlation identifier (issue #785): optional bounded linkage
+            # between this attempt and host-observed tool events. Validated
+            # fail-closed; absent preserves current behavior.
+            correlation_clean = None
+            if correlation_id is not None:
+                from continuum.provenance.correlation import normalize_correlation_id
+
+                try:
+                    correlation_clean = normalize_correlation_id(correlation_id)
+                except ValueError as exc:
+                    raise LedgerError(str(exc)) from exc
             action = Action(
                 run_id=self.run_id,
                 action_type=action_type,
@@ -985,6 +1000,7 @@ class ActionLedger:
                 grant=grant_clean,
                 origin_digest=origin_digest,
                 rendered_key=rendered_key,
+                correlation_id=correlation_clean,
             )
             return ActionOutcome(key=key, action=action, fresh=True)
 
