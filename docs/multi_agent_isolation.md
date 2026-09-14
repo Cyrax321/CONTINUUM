@@ -58,6 +58,16 @@ ownership model for the state itself.
   lease; without the lease the count can race. The spec requires the lease for
   any run where concurrent recovery is possible.
 
+## Tenant binding
+
+- The gateway enforces a bound tenant for memory-store routes (`src/continuum/gateway.py:227`). Only rendered keys starting with `mem:` are checked (`is_memory_key` in `src/continuum/gate.py:133`).
+
+- Key shape is `mem:{store_id}:{tenant}:{record_key}`, for example `mem:pgvector_main:acme:rec-42`. The tenant is the third colon-separated segment. A key template such as `mem:{store_id}:{tenant}:{record_key}` renders the request body fields into this shape (`render_key` in `src/continuum/gateway.py:155`).
+
+- The binding is configured in the gateway config file (default `.continuum/gateway.json`) as `bound_tenant` or `tenant`, read by `load_gateway_tenant` (`src/continuum/gateway.py:132`). A missing file means no binding. When set, the CLI threads it through `match_route` and `GatewayServer` (`src/continuum/cli/main.py`, `src/continuum/gateway.py:308`).
+
+- Denial behavior is fail-closed and runs before the ledger check. A bound tenant `acme` with a request for `globex` is denied with `tenant mismatch: bound 'acme' but key ... carries tenant 'globex'`. A malformed `mem:` key with fewer than four segments is denied as `malformed memory key`. This is pinned by `test_gateway_tenant_deny` and `test_gateway_tenant_deny_before_ledger` in `tests/test_memory_forensic.py:142`.
+
 ## What to build next
 
 - Add an integration test that spawns two `RecoveryLedger` instances with a
