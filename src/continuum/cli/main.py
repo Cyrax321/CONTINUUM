@@ -762,11 +762,46 @@ def cmd_provenance(args: argparse.Namespace, storage: Storage, out: Any, err: An
         events = storage.read_events(args.run_id)
     graph = build_provenance_graph(events)
     if getattr(args, "dot", False):
-        from continuum.provenance.graph import to_dot
+        from continuum.provenance.graph import ProvenanceGraph, to_dot
 
-        dot = to_dot(graph)
+        ordered_dot = sorted(graph.nodes.values(), key=lambda n: n.sequence)
+        page_dot = _page_bounds(
+            len(ordered_dot),
+            getattr(args, "limit", None),
+            getattr(args, "offset", None) or 0,
+            err,
+        )
+        if page_dot is None:
+            return ExitCode.ERROR
+        start_dot, end_dot, hidden_dot = page_dot
+        if hidden_dot:
+            shown_ids = {n.event_id for n in ordered_dot[start_dot:end_dot]}
+            sub = ProvenanceGraph()
+            for n in ordered_dot[start_dot:end_dot]:
+                sub.add_node(n)
+            for parent, children in graph.edges.items():
+                if parent not in shown_ids:
+                    continue
+                for child in children:
+                    if child in shown_ids:
+                        sub.edges[parent].append(child)
+                        sub.reverse_edges[child].append(parent)
+            dot = to_dot(sub)
+            dot += f"\n// ... {hidden_dot} of {len(ordered_dot)} nodes hidden by paging"
+        else:
+            dot = to_dot(graph)
         if getattr(args, "json", False):
-            _emit({"run_id": args.run_id, "dot": dot}, "", as_json=True, stream=out)
+            _emit(
+                {
+                    "run_id": args.run_id,
+                    "dot": dot,
+                    "nodes_total": len(ordered_dot),
+                    "nodes_hidden": hidden_dot,
+                },
+                "",
+                as_json=True,
+                stream=out,
+            )
         else:
             print(dot, file=out)
         return ExitCode.OK

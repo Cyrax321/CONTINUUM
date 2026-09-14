@@ -134,3 +134,19 @@ def test_no_flags_behaves_as_before(tmp_path: Path) -> None:
     payload = json.loads(out)
     assert payload["nodes_hidden"] == 0
     assert payload["nodes_total"] == len(payload["nodes"])
+
+
+def test_provenance_dot_limit_truncates_graph(tmp_path: Path) -> None:
+    db = seed_db(tmp_path)
+    code, out, err = run_cli("--db", db, "provenance", "run_1", "--dot", "--limit", "2")
+    assert code == ExitCode.OK, err
+    assert "digraph provenance" in out
+    assert "hidden by paging" in out
+    assert out.count("[label=") == 2
+
+
+def test_provenance_dot_limit_zero_is_refused(tmp_path: Path) -> None:
+    db = seed_db(tmp_path)
+    code, _, err = run_cli("--db", db, "provenance", "run_1", "--dot", "--limit", "0")
+    assert code == ExitCode.ERROR
+    assert "--limit must be 1 or more" in err
