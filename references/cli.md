@@ -36,6 +36,7 @@ continuum briefing                               # session-start context injecti
 continuum gateway --port 8765                    # enforcing proxy for registered upstreams. mutates
 continuum hooks install <client> [--with-gate]   # wire a coding CLI (claude-code, gemini, codex)
 continuum health <run_id>                        # advisory prefix-trust health check
+continuum policy-review [run_id]                 # advisory recovery-history report by action type
 continuum impact <run_id> --evidence <id>        # downstream impact of an evidence item
 continuum provenance <run_id>                    # show provenance DAG
 continuum record-plan <run_id> --plan-id <id>    # record structured plan upsert. mutates
@@ -53,7 +54,7 @@ continuum benchmark [--total N]                  # run CONTINUUM-Bench harness
 
 Every command accepts `--json`. Read-only commands (`inspect`, `status`, `history`, `events`,
 `diff`, `validate`, `resume`, `verify`, `actions`, `show-contract`, `replay`, `budget`, `tree`,
-`gate`, `briefing`, `health`, `impact`, `provenance`, `export-evidence`, `watch`) never write, so
+`gate`, `briefing`, `health`, `policy-review`, `impact`, `provenance`, `export-evidence`, `watch`) never write, so
 they are safe against a live database while an agent is mid-run. Mutating commands (`start`,
 `checkpoint`, `confirm`, `complete`, `fork`, `merge`, `restore`, `compact`, `precompact`, `rewind`,
 `observe`, `reconcile`, `gateway`, `record-plan`, `forget`) say so in their help.

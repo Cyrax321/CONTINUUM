@@ -1244,6 +1244,26 @@ def cmd_health(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     return ExitCode.OK
 
 
+def cmd_policy_review(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Advisory per-action-type report over recovery history (issue #743).
+
+    Aggregates repair attempts, human-gate outcomes, compaction survival and
+    reconciliation outcomes by action type, for periodic maintainer review.
+    Read-only, deterministic, live and archived history. The report is
+    evidence for a human decision, never a policy engine: nothing here feeds
+    ``plan_repairs`` or changes a recovery verdict, and a high human-required
+    rate means the probes or the workflow deserve investigation - not a
+    lower safety bar.
+    """
+    from continuum.recovery.policy_review import build_policy_review, render_policy_review
+
+    run_id = getattr(args, "run_id", None)
+    report = build_policy_review(storage, run_id)
+    text = "\n".join(render_policy_review(report))
+    _emit(report, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
+    return ExitCode.OK
+
+
 def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Report how a run may resume. Read-only unless ``--repair`` is given."""
     run_id = args.run_id
@@ -3710,6 +3730,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     health = with_run(add("health", cmd_health, "Advisory prefix-trust health check. Read-only."))
+    policy_review = add(
+        "policy-review",
+        cmd_policy_review,
+        "Advisory per-action-type report over recovery history. Read-only.",
+    )
+    policy_review.add_argument(
+        "run_id",
+        nargs="?",
+        default=None,
+        help="limit the report to one run; omit to review every run.",
+    )
     # Subparser default SUPPRESS: accepts trailing --json without shadowing the global flag (#677).
     health.add_argument(
         "--json",
