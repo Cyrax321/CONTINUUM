@@ -139,6 +139,9 @@ class EventType(StrEnum):
     SUBAGENT_COMPLETED = "SUBAGENT_COMPLETED"
     SUBAGENT_FAILED = "SUBAGENT_FAILED"
 
+    # precompact hook: context compaction boundary for agents that summarize history
+    PRECOMPACT_HOOK = "PRECOMPACT_HOOK"
+
 
 class AppendOnlyViolation(RuntimeError):
     """Raised when an operation would rewrite history."""
