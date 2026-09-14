@@ -3758,9 +3758,7 @@ def build_parser() -> argparse.ArgumentParser:
     correlate = with_run(
         add("correlate", cmd_correlate, "Show tool-action evidence chains. Read-only.")
     )
-    correlate.add_argument(
-        "--correlation-id", default=None, help="show only one correlation chain"
-    )
+    correlate.add_argument("--correlation-id", default=None, help="show only one correlation chain")
 
     events = with_run(add("events", cmd_events, "List recorded events."))
     events.add_argument("--after", type=int, default=0, help="list events with sequence > N.")

@@ -64,10 +64,7 @@ def normalize_correlation_id(value: Any) -> str | None:
             f"correlation_id must be 1-{CORRELATION_ID_MAX_LEN} chars, got {len(value)}"
         )
     if not CORRELATION_ID_PATTERN.match(value):
-        raise ValueError(
-            "correlation_id must match [A-Za-z0-9_-]{1,64}, "
-            f"got {value!r}"
-        )
+        raise ValueError(f"correlation_id must match [A-Za-z0-9_-]{{1,64}}, got {value!r}")
     return value
 
 

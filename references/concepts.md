@@ -110,6 +110,22 @@ graph. The sealed contract lists each blocking commitment with its chain
 position, so the refusal is machine-readable and auditable. Empty or absent
 consumed_inputs remains admissible for backward compatibility.
 
+### Tool-Action Correlation
+
+Host-observed tool events (`TOOL_CALLED`, `TOOL_COMPLETED`, `TOOL_FAILED`)
+and ledger action attempts (`ACTION_RECORDED` and settlements) can share an
+optional bounded `correlation_id` (`[A-Za-z0-9_-]{1,64}`). It is evidence
+linkage, not proof: a match never settles an uncertain action, bypasses
+reconciliation, or overrides the most-cautious recovery result. Absent means
+the client could not emit metadata and behavior is unchanged. Duplicates are
+reported as ambiguous. The ID rides in the event payload and is therefore
+hash-covered, surviving compaction and interchange. Use `continuum correlate`
+to inspect chains.
+
+This differs from idempotency keys (exactly-once enforcement identity with
+scope semantics), `caused_by` edges (causal derivation between decisions and
+records), and external-effect confirmation (probes and reconciliation).
+
 ### Recovery Contract
 
 Before allowing resume, CONTINUUM generates a deterministic, machine-readable contract:
