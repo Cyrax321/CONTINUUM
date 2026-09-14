@@ -58,6 +58,38 @@ ownership model for the state itself.
   lease; without the lease the count can race. The spec requires the lease for
   any run where concurrent recovery is possible.
 
+## Tenant binding
+
+Memory-store keys are tenant-scoped by shape: a route whose `key_template`
+renders to `mem:{store_id}:{tenant}:{record_key}` carries the tenant as the
+third segment of the identity. That tenant segment is part of the key's
+identity model, so it is enforced, not advisory.
+
+- **Where the binding is configured.** The gateway reads an optional
+  `bound_tenant` field (the alias `tenant` is accepted) from the same registry
+  file as its routes - `.continuum/gateway.json` by default, or the `--config`
+  path - via `load_gateway_tenant`
+  (`src/continuum/gateway.py:132`). No field, or a blank one, means no tenant
+  is bound and no tenant check runs.
+
+- **What key shape it applies to.** Only rendered memory keys
+  (`is_memory_key`, the `mem:` prefix, `src/continuum/gate.py:133`). A bound
+  tenant never inspects non-memory keys; the check applies after
+  `render_key` substitutes the request body into the template and before any
+  ledger lookup.
+
+- **Denial behavior.** When a tenant is bound and the rendered key's tenant
+  segment differs, the request is denied at the gateway with
+  `tenant mismatch: bound '<bound>' but key '<key>' carries tenant '<key's>'`
+  - before the ledger-claim check, so an unclaimed cross-tenant call fails
+  with the tenant reason, not an unclaimed one
+  (`src/continuum/gateway.py:227`). A `mem:` key too short to carry a tenant
+  segment is denied as malformed rather than guessed at. Without a bound
+  tenant, no check runs and a cross-tenant call fails only through the
+  ordinary claim rules (an unclaimed key is denied as `has no ledger claim`).
+  Both orders are pinned in `tests/test_memory_forensic.py`
+  (issue #566, parent #304).
+
 ## What to build next
 
 - Add an integration test that spawns two `RecoveryLedger` instances with a
