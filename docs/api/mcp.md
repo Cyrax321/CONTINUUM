@@ -165,7 +165,16 @@ is what usually hides it.
 
 #### Confirm the cause
 
-Ask whether the name resolves in the environment the client was launched from:
+`continuum mcp doctor` performs the whole client-side diagnosis: it checks that
+the `mcp` extra imports in a fresh interpreter, resolves `continuum-mcp` the way
+a host-spawned process would, and completes a live `initialize` handshake
+against the resolved command, reporting the child's stderr tail when the
+handshake fails. Exit 0 means the install is healthy; every failure names its
+cause and its fix, and `--json` emits the report for scripting and CI (issue
+#835).
+
+To diagnose by hand instead, ask whether the name resolves in the environment
+the client was launched from:
 
 ```
 which continuum-mcp        # macOS, Linux

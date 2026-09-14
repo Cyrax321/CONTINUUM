@@ -2789,6 +2789,33 @@ def cmd_hooks_remove(args: argparse.Namespace, storage: Storage, out: Any, err: 
     return ExitCode.OK
 
 
+def cmd_mcp_doctor(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Diagnose why an MCP host cannot connect to the server (issue #835).
+
+    A host that fails to start ``continuum-mcp`` reports one opaque string
+    (``CONNECTION_CLOSED``), because the useful stderr never crosses the
+    stdio protocol pipe and a spawn failure happens before any CONTINUUM
+    code runs. The doctor works client-side instead: it checks the ``mcp``
+    extra in a fresh interpreter, resolves the command the way a host would,
+    and completes a real ``initialize`` handshake against it.
+
+    The import is lazy so the CLI never pulls in the server stack at startup
+    (the base install may not have it). Exit 0 only when the handshake
+    completed; every failure state names its cause and its fix.
+    """
+    from continuum.mcp.doctor import render_doctor, run_doctor
+
+    report = run_doctor(timeout=getattr(args, "timeout", None) or 15.0)
+    _emit(
+        report,
+        render_doctor(report),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK if report["healthy"] else ExitCode.ERROR
+
+
 def cmd_gate(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Decide whether one tool call may proceed (issue #217).
 
@@ -4016,6 +4043,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hooks_client(remove, cmd_hooks_remove)
 
+    mcp = add("mcp", cmd_mcp_doctor, "Diagnose and register the MCP server install.")
+    mcp_sub = mcp.add_subparsers(dest="mcp_command", metavar="ACTION", required=True)
+
+    mcp_doctor = mcp_sub.add_parser(
+        "doctor",
+        help="Diagnose why an MCP host cannot connect: SDK, command resolution, live handshake.",
+    )
+    mcp_doctor.add_argument(
+        "--timeout",
+        type=float,
+        default=15.0,
+        help="seconds each handshake read waits before giving up (default: 15).",
+    )
+    mcp_doctor.set_defaults(func=cmd_mcp_doctor)
+
     verify = with_run(add("verify", cmd_verify, "Re-audit the event chain."))
     verify.add_argument(
         "--index",
@@ -4254,9 +4296,10 @@ def main(
     if getattr(args, "func", None) is None:
         return _bare_invocation(parser, args, out, err)
 
-    # hooks never touches a run, so it must not create an empty database as a
-    # side effect of editing a settings file.
-    if args.command in ("benchmark", "attest-keygen", "serve", "hooks"):
+    # hooks and mcp doctor never touch a run, so they must not create an
+    # empty database as a side effect (of editing a settings file, or of
+    # probing a server with a throwaway one).
+    if args.command in ("benchmark", "attest-keygen", "serve", "hooks", "mcp"):
         return int(args.func(args, None, out, err))
 
     # Instant resume detection (issue #394): SessionStart hook reads

@@ -42,6 +42,7 @@ continuum --json <command>                    # machine-readable output
 | `briefing` | Session-start context: active run, progress, next steps. Read-only. |
 | `gate` | Decide whether a tool call may proceed (pre-tool-use hook). Read-only. |
 | `hooks` | Manage host-side observation hooks. |
+| `mcp doctor` | Diagnose why an MCP host cannot connect: SDK extra, command resolution, live `initialize` handshake. Read-only. |
 | `verify <run_id>` | Re-audit the event chain for tampering. |
 | `reconcile <run_id>` | Settle uncertain actions with registered probes. Mutates storage. |
 | `actions <run_id>` | List recorded side effects and flag uncertain outcomes. |

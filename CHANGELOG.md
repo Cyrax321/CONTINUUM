@@ -40,6 +40,24 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`continuum mcp doctor` turns CONNECTION_CLOSED into a diagnosis (#835).**
+  New `mcp` command group with a `doctor` subcommand that reproduces an MCP
+  host's view of the install client-side: the `mcp` extra's importability in
+  a fresh interpreter, `continuum-mcp` resolution as a freshly spawned
+  process sees it (plus the `python -m continuum.mcp` fallback), and a live
+  spawn plus real `initialize` handshake that reports the server, the
+  negotiated protocol version, every tool, the observed wire framing
+  (CRLF/LF, referencing upstream
+  modelcontextprotocol/python-sdk#2433), and, on failure, the child's
+  stderr tail, which is the message a host never surfaces. Every finding
+  prints one actionable line with its fix; `--json` emits the report for
+  scripting and CI. Exit 0 only when the handshake completed, so the three
+  reproduced failure states (missing extra, script not on host PATH,
+  healthy install) are distinguishable by exit code alone. Implementation
+  is pure standard library (`src/continuum/mcp/doctor.py`), so the doctor
+  runs precisely in the state it diagnoses. Pairs with `continuum mcp
+  install` (#834).
+
 - **Nightly bench publish CI (#570).** New `.github/workflows/bench-nightly.yml`
   runs the full benchmark suite on a nightly schedule (plus manual dispatch)
   and commits the refreshed tables when the numbers move. `benchmarks/run.py`
@@ -745,7 +763,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,195 collected, ~2,030 passed, ~23 skipped on a minimal env).
+  (~2,201 collected, ~2,036 passed, ~23 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
