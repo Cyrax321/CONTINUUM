@@ -93,6 +93,7 @@ class RunStatus(StrEnum):
 
 class StateStatus(StrEnum):
     VALID = "valid"
+    PARTIAL = "partial"
     STALE = "stale"
     CONFLICTED = "conflicted"
     UNKNOWN = "unknown"
