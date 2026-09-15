@@ -269,3 +269,35 @@ def test_pg_action_index_covers_the_archive_after_rebuild(
     foreign = storage.foreign_action(key, exclude_run="some_other_run")
     assert foreign is not None
     assert foreign.status is ActionStatus.COMPLETED
+
+
+def test_pg_compact_rejects_through_sequence_that_would_eat_the_anchor(
+    storage: PostgresStorage,
+) -> None:
+    """Issue #1078: the SQLite engine refused an explicit through_sequence at
+    or above the anchor marker's sequence (#705) and Postgres did not, so the
+    marker and every live row after it were archived and deleted, and the next
+    append minted a fresh genesis that forked the live chain away from the
+    archive. The bound is now resolved by shared code, so the refusal holds on
+    both engines."""
+    make_run(storage, "pg_anchor", "guard target")
+    for i in range(4):
+        storage.append_event("pg_anchor", EventType.WORK_COMPLETED, {"i": i})
+    pre_live = len(storage.read_events("pg_anchor"))
+
+    with pytest.raises(ValueError, match="anchor"):
+        storage.compact_run("pg_anchor", through_sequence=10_000)
+
+    # The rejected call leaves a healthy, verifiable log: nothing was
+    # archived, only the forced checkpoint marker was appended.
+    report = storage.verify_events("pg_anchor")
+    assert report.ok, [v.kind for v in report.violations]
+    live = storage.read_events("pg_anchor")
+    assert len(live) == pre_live + 1
+    assert live[0].sequence == 1, "live rows must not have moved"
+
+    # A bounded value below the anchor still compacts normally.
+    result = storage.compact_run("pg_anchor", through_sequence=1)
+    assert result["archived"] >= 1
+    assert any(e.type is EventType.EVENT_LOG_ANCHORED for e in storage.read_events("pg_anchor"))
+    assert storage.verify_events("pg_anchor").ok, "chain must still verify after a safe compact"
