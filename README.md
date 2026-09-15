@@ -67,7 +67,7 @@ Paths that need no clone and no local install:
 | Watch crash recovery happen end to end | `docker run --rm ghcr.io/cyrax321/continuum` |
 | Use the CLI through Docker | `docker run --rm ghcr.io/cyrax321/continuum continuum --help` |
 | Run the CLI without cloning | `uvx --from git+https://github.com/Cyrax321/CONTINUUM.git continuum --help` |
-| Windows PowerShell (from a clone) | `powershell -ExecutionPolicy Bypass -File .\try-it.ps1` or `powershell -ExecutionPolicy Bypass -File .\try-it.ps1 cli --help` |
+| Windows PowerShell (from a clone) | `powershell -ExecutionPolicy Bypass -File .\try-it.ps1` (bootstraps its own venv on a fresh clone) or `powershell -ExecutionPolicy Bypass -File .\try-it.ps1 cli --help` |
 | Watch the same recovery in a notebook | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Cyrax321/CONTINUUM/blob/main/examples/demo.ipynb) |
 | The same notebook, on Binder | [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/Cyrax321/CONTINUUM/HEAD?labpath=examples%2Fdemo.ipynb) |
 | Full dev environment in the browser | [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Cyrax321/CONTINUUM?quickstart=1) |
