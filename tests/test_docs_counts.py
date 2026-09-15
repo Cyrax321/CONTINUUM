@@ -108,3 +108,41 @@ def test_documented_extras_exist_in_pyproject() -> None:
                         f"{path} installs the [{extra}] extra, but pyproject.toml "
                         f"declares only {sorted(declared)}"
                     )
+
+
+def _tree_counts() -> tuple[int, int]:
+    """Modules and test files, counted the way README.md states them.
+
+    The module figure excludes the top-level ``__init__.py`` (the package
+    entry point, not a module with a role) and the test figure counts
+    ``tests/test_*.py``. Both are read from the working tree, so a merged
+    module or test file fails the guard instead of silently aging the
+    sentence (#1068).
+    """
+    package_init = ROOT / "src" / "continuum" / "__init__.py"
+    modules = [p for p in (ROOT / "src" / "continuum").rglob("*.py") if p != package_init]
+    tests = list((ROOT / "tests").glob("test_*.py"))
+    return len(modules), len(tests)
+
+
+def test_readme_module_and_test_file_counts_match_tree() -> None:
+    """README's module and test-file counts must match the tree (#1068).
+
+    The sentence read "124 modules" and "161 test files" while the tree
+    carried 126 and 169. Only the two file counts had rotted: the ~2,241
+    collected total in the same sentence is covered by the tolerance guard
+    above, but the two file counts had no guard at all, and the test-file
+    figure was already stale the day it was written.
+    """
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    match = re.search(r"`src/continuum`,\s*(\d+)\s*modules\)\D*?(\d+)\s*test files", text)
+    assert match, "README states no module/test-file counts to guard"
+
+    documented_modules, documented_tests = int(match.group(1)), int(match.group(2))
+    live_modules, live_tests = _tree_counts()
+    assert documented_modules == live_modules, (
+        f"README says {documented_modules} modules but src/continuum carries {live_modules}"
+    )
+    assert documented_tests == live_tests, (
+        f"README says {documented_tests} test files but tests/ carries {live_tests}"
+    )
