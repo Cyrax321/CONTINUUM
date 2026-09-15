@@ -232,3 +232,38 @@ def test_mcp_read_tools_include_liveness(tmp_path: Path) -> None:
             _ = build_server(storage=store)
         except ModuleNotFoundError:
             pass
+
+
+def test_breach_proposes_wait_once_in_rationale_and_contract(tmp_path: Path) -> None:
+    # Regression for issue #1042: _decide appended the identical liveness
+    # WAIT proposal twice (a paste-over from commit 201219b), so a breached
+    # run's rationale and the sealed, hash-chained contract reason carried
+    # the same sentence twice - a reader auditing the contract could not
+    # tell one breach from a duplicated line. One breach, one sentence.
+    import sqlite3
+
+    from continuum.recovery import RecoveryEngine
+
+    db = str(tmp_path / "dup.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_liveness_dup"
+        store.create_run(Run(run_id=run_id, goal="ship"))
+        store.append_event(run_id, EventType.RUN_STARTED, {"goal": "ship"})
+
+    # Backdate the run's last event past the 3600s threshold: the advisory
+    # reads wall-clock silence, so an old timestamp is a deterministic breach.
+    old = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE events SET timestamp = ? WHERE run_id = ?", (old, run_id))
+    conn.commit()
+    conn.close()
+
+    with SQLiteStorage(db) as store:
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+        assert decision.mode.value == "wait"
+        breaches = [r for r in decision.rationale if r.startswith("liveness breach")]
+        assert len(breaches) == 1, decision.rationale
+        # The whole rationale is duplicate-free, not just the liveness line:
+        # dict.fromkeys at the rationale build guards any future signal.
+        assert len(decision.rationale) == len(set(decision.rationale))
+        assert decision.contract.reason.count("liveness breach") == 1
