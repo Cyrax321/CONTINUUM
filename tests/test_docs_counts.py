@@ -108,3 +108,48 @@ def test_documented_extras_exist_in_pyproject() -> None:
                         f"{path} installs the [{extra}] extra, but pyproject.toml "
                         f"declares only {sorted(declared)}"
                     )
+
+
+def test_docs_name_no_continuum_file_the_code_does_not_read() -> None:
+    """Every ``.continuum/<file>`` path in prose must exist in ``src/`` (#1161).
+
+    ``docs/guides/embed-codex.md`` offered ``monitored_commands`` in
+    ``.continuum/config`` as the durability fallback for an operator who cannot
+    route a write through Bash. No such loader exists: the key was written into
+    the guide and never wired, so the fallback sent the reader to a dead end at
+    the exact moment the guide is needed. The real ``.continuum/`` files
+    (budgets, gate, gateway, liveness, reconcilers, resume, webhooks, ...) each
+    appear as a literal somewhere under ``src/``, which is what this asserts.
+
+    A failure means one of two things, and only one is a code change: either add
+    the loader the prose promises, or fix the prose. If the path is meant as an
+    illustration rather than a real file, it belongs in ``ALLOWLIST`` below with
+    the reason, since an unguarded illustration is how #1161 read as a feature.
+    """
+    ALLOWLIST: dict[str, str] = {}
+
+    scanned = [
+        ROOT / "README.md",
+        *sorted(ROOT.joinpath("docs").rglob("*.md")),
+        *sorted(ROOT.joinpath("references").rglob("*.md")),
+    ]
+    src_text = "\n".join(
+        path.read_text(encoding="utf-8") for path in ROOT.joinpath("src").rglob("*.py")
+    )
+
+    named: dict[str, list[Path]] = {}
+    for path in scanned:
+        for match in re.findall(r"\.continuum/[A-Za-z0-9._-]+", path.read_text(encoding="utf-8")):
+            named.setdefault(match, []).append(path)
+    assert named, "no .continuum/ path appears in prose; the regex may have drifted"
+
+    unverified = {
+        path: sorted({str(p) for p in files})
+        for path, files in named.items()
+        if path not in ALLOWLIST and path not in src_text
+    }
+    assert not unverified, (
+        "prose names a .continuum/ file no code under src/ reads: "
+        f"{unverified}. Either wire the loader the docs promise, fix the prose, "
+        "or add the path to ALLOWLIST in this test with the reason."
+    )
