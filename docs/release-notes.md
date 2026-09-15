@@ -82,7 +82,7 @@ From then on every file the agent writes becomes digest-verified evidence, its s
 - Regenerate: `python demo-run/generate_crash_visual.py` - or `python scripts/generate_crash_visual.py`
 - Walkthrough: `docs/recovery_walkthrough.md` (`examples/recovery_walkthrough.py`)
 
-![Crash recovery: hard kill, refusal, reconcile, resume](docs/assets/crash-recovery.svg)
+![Crash recovery: hard kill, refusal, reconcile, resume](assets/crash-recovery.svg)
 
 Sample end-of-run audit printed by the harness (from this tree, not estimated):
 
