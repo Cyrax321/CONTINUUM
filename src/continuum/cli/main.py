@@ -82,6 +82,7 @@ from continuum.storage import (
     ConcurrentWriteError,
     CorruptedRecord,
     RunNotFound,
+    SchemaVersionError,
     Storage,
     StorageError,
     open_storage,
@@ -4329,6 +4330,11 @@ def _bare_invocation(
 
     try:
         storage = open_storage(args.db)
+    except SchemaVersionError as exc:
+        # A newer database must never be downgraded or silently replaced. Keep
+        # the branded launcher usable, but make the incompatibility visible in
+        # the splash and direct the operator to a compatible --db path.
+        return int(run_tui(None, database_error=str(exc), err=err))
     except (StorageError, ValueError, NotImplementedError, RuntimeError) as exc:
         print(f"error: {exc}", file=err)
         return ExitCode.ERROR
