@@ -768,6 +768,48 @@ def test_attest_keygen_writes_pem_files(tmp_path: Path) -> None:
     assert "PRIVATE KEY" in priv.read_text()
 
 
+@pytest.mark.skipif(
+    os.name != "posix", reason="permission bits are a POSIX concept (#1056)"
+)
+def test_attest_keygen_writes_the_private_key_owner_only(tmp_path: Path) -> None:
+    """The private PEM is unencrypted, so 0644 would hand it to every local user."""
+    import stat
+
+    priv = tmp_path / "signer.pem"
+    code, out, _ = run("attest-keygen", "--out", str(priv))
+    assert code == ExitCode.OK
+    assert stat.S_IMODE(priv.stat().st_mode) == 0o600
+    # The public key is meant to be shareable, so it keeps the ambient mode a
+    # plain write_text would give it — compared against a reference rather than
+    # a literal 0o644, which would break under a stricter umask.
+    reference = tmp_path / "reference.txt"
+    reference.write_text("public", encoding="utf-8")
+    assert (
+        stat.S_IMODE((tmp_path / "signer.pem.pub").stat().st_mode)
+        == stat.S_IMODE(reference.stat().st_mode)
+    )
+    # The operator is told the mode they actually got, in the same line of text.
+    assert "mode 600" in out
+
+
+@pytest.mark.skipif(
+    os.name != "posix", reason="permission bits are a POSIX concept (#1056)"
+)
+def test_attest_keygen_narrows_a_preexisting_world_readable_key(tmp_path: Path) -> None:
+    """An overwritten 0644 key keeps its old mode under open(2), so narrow it."""
+    import stat
+
+    priv = tmp_path / "signer.pem"
+    priv.write_text("stale placeholder", encoding="utf-8")
+    os.chmod(priv, 0o644)
+    assert stat.S_IMODE(priv.stat().st_mode) == 0o644
+
+    code, out, _ = run("attest-keygen", "--out", str(priv))
+    assert code == ExitCode.OK
+    assert stat.S_IMODE(priv.stat().st_mode) == 0o600
+    assert priv.read_text() != "stale placeholder"
+
+
 def test_attest_and_verify_round_trip(db: str, tmp_path: Path) -> None:
     from continuum.security.attestation import generate_keypair
 

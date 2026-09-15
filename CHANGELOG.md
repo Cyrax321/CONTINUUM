@@ -57,6 +57,22 @@ All notable changes to this project are documented here. The format follows
   entirely, and the MCP server raises it as a `ToolError` so the calling agent
   sees it.
 
+- **`continuum attest-keygen` writes the private key owner-only (#1056).** The
+  command wrote an unencrypted PKCS8 Ed25519 private key with
+  `Path.write_text`, which creates the file at 0666 masked by the ambient umask
+  — 0644 out of the box, readable by every local user on the host — while its
+  own output told the operator to keep it secret. Anyone with read access to the
+  file or a backup copy could produce validly-signed attestations for a tampered
+  event chain. The key is now created through `os.open` with an explicit 0600
+  mode, so it is owner-only from the moment it appears with no window at 0644,
+  and a pre-existing wider-mode file being overwritten is narrowed too, since
+  `open(2)` ignores the mode argument for a file that already exists. The public
+  key stays world-readable, as intended. The command now reports the mode it
+  applied next to the existing "keep the private key secret" line, so an operator
+  on a surprising filesystem can see what they actually got. Two tests pin the
+  property on POSIX (created mode, narrowing of a pre-existing 0644 key,
+  reported mode in output); Windows has no POSIX permission bits and is
+  skipped, matching the `tests/test_retry_budgets.py` precedent.
 - **The horizon `abort_condition_year` scenario now reaches abort (#1028).**
   The scenario was labelled `correct_mode="abort"` but drove the abort through
   `DECISION_INVALIDATED`, an event the recovery engine never routes to `ABORT`
