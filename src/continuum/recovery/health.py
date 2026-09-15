@@ -2,8 +2,19 @@
 
 A cadence contract declares the maximum expected wall-clock interval between
 ledger appends. Evaluation is purely comparative: ``now - last_event_ts``
-against a threshold, with an injected clock so tests never sleep. Breach is
-advisory only, it never moves the recovery mode.
+against a threshold, with an injected clock so tests never sleep.
+
+Breach is advisory in the narrow sense that it never auto-rolls state back
+(the original intent, issue #302): silence says nothing about *what* to roll
+back, so it routes to a person instead of rewinding. It is not inert. A breach
+reached through ``RecoveryEngine.assess`` proposes ``RecoveryMode.WAIT``, which
+is the most cautious proposal that still allows a lease to be recovered
+without human input, and WAIT maps to exit code 20 (``REQUIRES_HUMAN``). A run
+whose only problem is a silent interval therefore fails the documented
+"only a fully verified, safe-to-resume run exits 0" contract, and
+``continuum resume "$RUN" && ./start-agent.sh`` short-circuits. The threshold
+is thus an operator-set gate on resumption, not a passive annotation: enabling
+``.continuum/liveness.json`` can turn a green run into a blocked one.
 """
 
 from __future__ import annotations
@@ -117,7 +128,9 @@ def evaluate(
 ) -> LivenessResult:
     """Compute ``now - last_event_ts`` vs contract threshold.
 
-    Pure function with injected clock, no sleeps. Breach is advisory.
+    Pure function with injected clock, no sleeps. A breach never auto-rolls
+    state back, but it does propose WAIT through ``RecoveryEngine.assess``,
+    which surfaces as exit code 20; see the module docstring.
     """
     cfg = contract or CadenceContract()
     threshold = cfg.threshold_for(has_open_claim)
@@ -206,8 +219,10 @@ def advisory_for_storage(
     """Compute liveness advisory for a run, injected clock.
 
     Shared by CLI, dashboard, MCP and sidecar read paths so every surface
-    surfaces the same advisory with the same semantics. Breach is advisory
-    only, never moves recovery mode.
+    surfaces the same advisory with the same semantics. ``RecoveryEngine.assess``
+    feeds this advisory to ``_decide``, which proposes WAIT on breach, so a
+    breach surfaces as exit code 20 and blocks ``continuum resume``; it never
+    auto-rolls state back. See the module docstring.
     """
     try:
         contract = load_cadence_contract()
@@ -232,7 +247,11 @@ def advisory_for_storage(
 
 
 def advisory_text(advisory: dict[str, Any]) -> str:
-    """Render advisory as human text, never affects exit code."""
+    """Render advisory as human text.
+
+    The text itself never affects an exit code; the breach it reports does,
+    through the WAIT proposal in ``RecoveryEngine.assess`` (exit 20).
+    """
     breached = advisory.get("breached")
     silence = advisory.get("silence_seconds")
     threshold = advisory.get("threshold_seconds")

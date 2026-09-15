@@ -42,8 +42,13 @@ Liveness: BREACHED, silence 3.3s exceeds threshold 1s (phase otherwise). Advisor
 Exit code 20: breach is advisory, never a gate. A breach appends one
 `LIVENESS_SILENCE_DETECTED` event (hash-chained, carrying silence, threshold,
 and phase) unless the last liveness event already says detected, so repeated
-checks do not spam the log. Check again inside the window and the run reports
-recovery the same way:
+checks do not spam the log. "Advisory" means `watch` never rolls state back on
+silence — it does not mean the reading is inert. `continuum resume` reads the
+same advisory, and a breach proposes `WAIT` there, which is exit code 20 and
+blocks the resume, so `continuum resume "$RUN" && ./start-agent.sh`
+short-circuits. The threshold is therefore an operator-set gate on
+resumption, not a passive annotation. Check again inside the window and the
+run reports recovery the same way:
 
 ```bash
 continuum --db $DB watch live-demo --max-silence 1h
@@ -92,8 +97,10 @@ your own secret path or bearer check.
 
 ## Rules worth knowing
 
-- Watch never gates: breach exits 20 and appends audit events, but resume
-  decisions stay with the recovery engine.
+- Watch never gates: breach exits 20 and appends audit events, and it never
+  rolls state back. `resume` does read the same advisory though, and a breach
+  proposes `WAIT` there (exit 20, resume blocked), so the threshold is a gate
+  on resumption even though it is not one on state.
 - Silence is measured from the last event timestamp with an injected clock,
   so the check is deterministic and testable, not wall-clock flaky.
 - A run with no events at all is never breached: there is no silence to
