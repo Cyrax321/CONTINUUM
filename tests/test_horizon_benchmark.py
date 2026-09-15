@@ -172,11 +172,16 @@ def test_table_regenerates_from_runner_no_invented_numbers(tmp_path: Path) -> No
             import sys
 
             try:
+                # The runner executes the full Phase 6 recovery suite, the
+                # fault-injection suite and the crash-recovery benchmark before
+                # it can rewrite the table, so under branch coverage on a
+                # loaded Windows runner it clears 60s. Match the --publish
+                # budget below rather than timing out a run that is working.
                 result = subprocess.run(
                     [sys.executable, str(root / "benchmarks/run.py")],
                     capture_output=True,
                     text=True,
-                    timeout=60,
+                    timeout=600,
                     cwd=root,
                 )
                 assert result.returncode == 0, result.stderr
