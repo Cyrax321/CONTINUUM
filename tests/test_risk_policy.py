@@ -109,3 +109,57 @@ def test_risk_events_are_hash_chained(tmp_path: Path) -> None:
         report = store.verify_events(run_id)
         assert report.ok is True
         assert report.trusted_through[run_id] == 3
+
+
+def test_risk_rationale_names_every_trigger_of_the_winning_mode(tmp_path: Path) -> None:
+    # Issue #1057: equal-severity triggers each landed in triggering_risks
+    # but only the first was named in the rationale that becomes the sealed
+    # reason, leaving contributor event ids unexplained.
+    from continuum.recovery import RecoveryEngine
+
+    db = str(tmp_path / "risk_multi.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_multi"
+        store.create_run_started(Run(run_id=run_id, goal="multi trigger"))
+        ingest_risk(store, run_id, {"trigger": "error_cascade", "score": 0.9})
+        ingest_risk(store, run_id, {"trigger": "token_runaway", "score": 0.8})
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    assert decision.mode.value == "wait"
+    assert len(decision.contract.triggering_risks) == 2
+    assert "risk error_cascade, token_runaway triggers wait" in decision.rationale
+    assert decision.contract.reason == "risk error_cascade, token_runaway triggers wait"
+
+
+def test_risk_rationale_names_only_the_winning_mode_contributors(tmp_path: Path) -> None:
+    # A trigger proposing a less severe mode is not a contributor: the
+    # rollback winner's reason names the rollback trigger alone.
+    from continuum.recovery import RecoveryEngine
+
+    db = str(tmp_path / "risk_severe.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_severe"
+        store.create_run_started(Run(run_id=run_id, goal="severity ordering"))
+        ingest_risk(store, run_id, {"trigger": "error_cascade"})
+        ingest_risk(store, run_id, {"trigger": "meltdown"})
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    assert decision.mode.value == "rollback"
+    assert decision.contract.reason == "risk meltdown triggers rollback"
+
+
+def test_risk_rationale_dedupes_a_repeated_trigger(tmp_path: Path) -> None:
+    # The same trigger observed twice is one sentence, not two (#1042's
+    # failure mode must not be reintroduced by naming every contributor).
+    from continuum.recovery import RecoveryEngine
+
+    db = str(tmp_path / "risk_repeat.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_repeat"
+        store.create_run_started(Run(run_id=run_id, goal="repeat trigger"))
+        ingest_risk(store, run_id, {"trigger": "error_cascade"})
+        ingest_risk(store, run_id, {"trigger": "error_cascade"})
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    assert decision.contract.reason == "risk error_cascade triggers wait"
+    assert decision.contract.reason.count("error_cascade") == 1

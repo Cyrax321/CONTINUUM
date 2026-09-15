@@ -421,8 +421,8 @@ class RecoveryEngine:
             except Exception:
                 risk_events = []
             best_mode = None
-            best_trigger = None
             triggering: list[str] = []
+            triggers: list[str] = []
             for risk_ev in risk_events:
                 trig = risk_ev.payload.get("trigger")
                 if not isinstance(trig, str):
@@ -436,14 +436,21 @@ class RecoveryEngine:
                     continue
                 if best_mode is None or SEVERITY[candidate] > SEVERITY[best_mode]:
                     best_mode = candidate
-                    best_trigger = trig
                     triggering = [risk_ev.event_id]
+                    triggers = [trig]
                 elif SEVERITY[candidate] == SEVERITY[best_mode]:
                     triggering.append(risk_ev.event_id)
+                    if trig not in triggers:
+                        triggers.append(trig)
             if best_mode is not None:
                 risk_mode = best_mode
                 triggering_risks = triggering
-                risk_rationale = f"risk {best_trigger} triggers {best_mode.value}"
+                # Name every trigger that proposed the winning mode, not just
+                # the first: the ids in triggering_risks are all contributors
+                # to the verdict the sealed reason justifies (issue #1057).
+                # Deduplicated by trigger so an equal-severity repeat does not
+                # duplicate the sentence the way #1042's double-append did.
+                risk_rationale = f"risk {', '.join(sorted(triggers))} triggers {best_mode.value}"
         except Exception:
             triggering_risks = []
             risk_mode = None
