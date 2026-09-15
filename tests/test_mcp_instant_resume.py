@@ -84,6 +84,78 @@ def test_banner_appears_only_when_interrupted_run_exists(tmp_path: Path) -> None
         os.chdir(orig_cwd)
 
 
+def test_banner_notes_a_run_not_in_the_database_instead_of_advertising_it(
+    tmp_path: Path,
+) -> None:
+    """Issue #1063: a stale resume.json must not advertise a ghost run."""
+    import io
+    import os
+
+    from continuum.cli.main import main as cli_main
+
+    orig_cwd = Path.cwd()
+    try:
+        os.chdir(tmp_path)
+        Path(".continuum").mkdir(parents=True, exist_ok=True)
+        Path(".continuum/resume.json").write_text(json.dumps({"run_id": "ghost"}), encoding="utf-8")
+
+        db = tmp_path / "continuum.db"
+        storage = SQLiteStorage(str(db))
+        storage.create_run(Run(run_id="real", goal="live run"))
+        storage.append_event(
+            "real", EventType.RUN_STARTED, {"goal": "live run"}, source=Origin.EXTERNAL_AGENT
+        )
+        storage.close()
+
+        out, err = io.StringIO(), io.StringIO()
+        code = cli_main(["--db", str(db), "briefing"], out=out, err=err)
+        assert code == 0
+        output = out.getvalue()
+        # The banner's resume command could only fail with a not-found error;
+        # the ghost gets a one-line note instead.
+        assert "Interrupted run ghost – resume pending" not in output
+        assert "continuum resume ghost" not in output
+        assert "ghost is no longer in the database" in output
+        # The briefing body beneath the note covers the live run.
+        assert "CONTINUUM active run: real" in output
+    finally:
+        os.chdir(orig_cwd)
+
+
+def test_banner_omitted_when_interrupted_run_is_completed(tmp_path: Path) -> None:
+    """A completed run has no pending interruption to surface."""
+    import io
+    import os
+
+    from continuum.cli.main import main as cli_main
+
+    orig_cwd = Path.cwd()
+    try:
+        os.chdir(tmp_path)
+        db = tmp_path / "continuum.db"
+        storage = SQLiteStorage(str(db))
+        storage.create_run(Run(run_id="done", goal="finished"))
+        storage.append_event(
+            "done", EventType.RUN_STARTED, {"goal": "finished"}, source=Origin.EXTERNAL_AGENT
+        )
+        from continuum.models import RunStatus
+
+        storage.update_run(storage.get_run("done").touch(status=RunStatus.COMPLETED))
+        storage.close()
+        # The file the last checkpoint wrote survives the completion.
+        Path(".continuum").mkdir(parents=True, exist_ok=True)
+        Path(".continuum/resume.json").write_text(json.dumps({"run_id": "done"}), encoding="utf-8")
+
+        out, err = io.StringIO(), io.StringIO()
+        code = cli_main(["--db", str(db), "briefing"], out=out, err=err)
+        assert code == 0
+        output = out.getvalue()
+        assert "Interrupted run done – resume pending" not in output
+        assert "no longer in the database" not in output
+    finally:
+        os.chdir(orig_cwd)
+
+
 def test_banner_latency_is_fast(tmp_path: Path) -> None:
     """Reading resume.json out of band is well under a second."""
     import os

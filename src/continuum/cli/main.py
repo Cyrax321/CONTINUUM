@@ -2346,40 +2346,44 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     # Fast path for SessionStart hook: check resume.json before touching DB.
     # This keeps the hook silent and fast when no interrupted run exists.
     resume_path = Path(".continuum/resume.json")
-    if not args.run_id and getattr(args, "hook_event_name", "SessionStart") == "SessionStart":
-        if not resume_path.exists():
-            # Silent when no interrupted run, as required for token floor.
-            return ExitCode.OK
-        # When file exists, inject its banner out of band before the full
-        # briefing. The file was written on the last checkpoint and contains
-        # the run_id that the hook should surface.
+    if (
+        not args.run_id
+        and getattr(args, "hook_event_name", "SessionStart") == "SessionStart"
+        and not resume_path.exists()
+    ):
+        # Silent when no interrupted run, as required for token floor.
+        return ExitCode.OK
+
+    # The file was written on the last checkpoint. Read it once and validate
+    # the run it names before anything is surfaced: a stale file must not
+    # advertise a run the database no longer holds, because the banner's
+    # resume command could only fail (issue #1063).
+    resume_run: str | None = None
+    resume_run_completed = False
+    unrecoverable_run: str | None = None
+    if resume_path.exists():
         try:
             resume_data = json.loads(resume_path.read_text(encoding="utf-8"))
-            banner_run = resume_data.get("run_id")
-            if banner_run:
-                # Verify the run is still active (not completed) before
-                # surfacing, but do it without a full project if possible.
-                # A quick existence check is enough; the full briefing below
-                # will do the thorough assessment.
-                pass
         except Exception:
             # Corrupt file is not a blocker; fall through to normal briefing
             # which will do the DB check and report correctly.
-            pass
+            resume_data = None
+        if isinstance(resume_data, dict):
+            candidate = resume_data.get("run_id")
+            if isinstance(candidate, str) and candidate:
+                try:
+                    resume_run_completed = storage.get_run(candidate).status is RunStatus.COMPLETED
+                    resume_run = candidate
+                except Exception:
+                    unrecoverable_run = candidate
 
     run_id = args.run_id
     if not run_id:
         # Prefer the resume.json run_id when present, as it was written at
         # checkpoint time and is available without a DB scan. Fall back to
         # the active-run query for cases where the file is stale or missing.
-        if resume_path.exists():
-            try:
-                resume_data = json.loads(resume_path.read_text(encoding="utf-8"))
-                candidate = resume_data.get("run_id")
-                if candidate and storage.get_run(candidate):
-                    run_id = candidate
-            except Exception:
-                pass
+        if resume_run:
+            run_id = resume_run
         if not run_id:
             active = storage.get_active_run()
             run_id = active.run_id if active else None
@@ -2420,20 +2424,19 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
         return ExitCode.OK
 
     lines: list[str] = []
-    # Instant resume banner (issue #394): when .continuum/resume.json exists
-    # it was written on the last checkpoint and names the interrupted run.
-    # Inject a banner out of band so the SessionStart hook surfaces the run
-    # without the agent having to discover and call resume itself.
-    if Path(".continuum/resume.json").exists():
-        try:
-            _resume = json.loads(Path(".continuum/resume.json").read_text(encoding="utf-8"))
-            _banner_run = _resume.get("run_id")
-            if _banner_run:
-                lines.append(f"Interrupted run {_banner_run} – resume pending")
-                lines.append(f"  run: continuum resume {_banner_run} --json")
-                lines.append("")
-        except Exception:
-            pass
+    # Instant resume banner (issue #394): surface the interrupted run the
+    # file named so the SessionStart hook points the agent at resume without
+    # it having to discover the command itself. Only for a run the database
+    # still holds, that is not completed, and that this briefing actually
+    # covers; a file naming a run that is gone gets a note instead of a
+    # resume command that cannot work (issue #1063).
+    if resume_run and not resume_run_completed and run_id == resume_run:
+        lines.append(f"Interrupted run {resume_run} – resume pending")
+        lines.append(f"  run: continuum resume {resume_run} --json")
+        lines.append("")
+    elif unrecoverable_run:
+        lines.append(f"Interrupted run {unrecoverable_run} is no longer in the database")
+        lines.append("")
     lines += [
         f"CONTINUUM active run: {run_id}",
     ]
