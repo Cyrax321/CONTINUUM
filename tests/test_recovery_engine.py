@@ -319,6 +319,47 @@ def test_the_contract_refuses_out_of_order_work(store: SQLiteStorage) -> None:
     assert decision.permits(decision.contract.next_allowed_action or "")
 
 
+@pytest.mark.parametrize(
+    ("trigger", "mode", "safety"),
+    [
+        ("side_effect_duplicate", RecoveryMode.ABORT, RecoverySafety.UNSAFE),
+        ("meltdown", RecoveryMode.ROLLBACK, RecoverySafety.BLOCKED),
+    ],
+)
+def test_a_blocked_or_unsafe_run_permits_no_action(
+    store: SQLiteStorage,
+    trigger: str,
+    mode: RecoveryMode,
+    safety: RecoverySafety,
+) -> None:
+    """A risk-driven ROLLBACK or ABORT must not also name a permitted step.
+
+    Both coexist with a non-empty repair plan, so advertising ``plan.first`` as
+    the next allowed action would hand a caller that gates on ``permits()`` a
+    green light on a run the engine has declared off-limits (issue #1058).
+    """
+    seed(store)
+    store.append_event(
+        "run_1",
+        EventType.RISK_OBSERVED,
+        {"trigger": trigger, "score": 1.0},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v4"))
+
+    assert decision.mode is mode
+    assert decision.contract.recovery_status is safety
+    # The repair still exists as required work; it is simply not *permitted*.
+    assert decision.plan.of_kind(RepairKind.REVALIDATE_DEPENDENCY)
+    assert "revalidate_dependency:dataset" in decision.contract.required_actions
+    # Nothing is advertised, and nothing is permitted, on this run.
+    assert decision.contract.next_allowed_action is None
+    assert not decision.permits("revalidate_dependency:dataset")
+    assert not decision.permits("anything_at_all")
+    # The rendering agrees with the field instead of inventing permission.
+    assert "none (settle required_actions first)" in render_contract(decision.contract)
+
+
 def test_contracts_are_deterministic(store: SQLiteStorage) -> None:
     seed(store)
     engine = RecoveryEngine(store)
