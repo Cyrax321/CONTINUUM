@@ -43,6 +43,7 @@ from continuum.storage.base import (
     RunNotFound,
     Storage,
 )
+from continuum.storage.compaction import resolve_compaction_bound
 from continuum.storage.migrations import SCHEMA_VERSION, migrate_schema
 
 __all__ = ["SQLiteStorage", "SCHEMA_VERSION"]
@@ -500,36 +501,12 @@ class SQLiteStorage(Storage):
         rejected (issue #705) instead of silently deleting the anchor and
         every live row, which would leave the next append minting a fresh
         genesis and fork the hash chain away from the archive.
-        """
-        from continuum.checkpoint.manager import CheckpointManager
 
-        lv = self.latest_version(run_id)
-        head = self.last_sequence(run_id)
-        needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
-        if needs_fresh_anchor:
-            try:
-                CheckpointManager(self).checkpoint(run_id, force_version=True)
-            except Exception as exc:
-                raise ValueError(f"run {run_id!r} could not be anchored: {exc}") from exc
-            lv = self.latest_version(run_id)
-        storage_version = lv
-        if storage_version is None:
-            raise ValueError(f"run {run_id!r} could not be anchored: no projectable state")
-        # The anchor marker is appended at the head of the log in the
-        # transaction below, so its sequence is the current head + 1.
-        anchor_sequence = self.last_sequence(run_id) + 1
-        if through_sequence is not None and through_sequence >= anchor_sequence:
-            raise ValueError(
-                f"through_sequence {through_sequence} would archive the anchor marker"
-                f" at sequence {anchor_sequence}: the live log must retain its anchor"
-            )
-        through = (
-            through_sequence
-            if through_sequence is not None
-            else min(storage_version.source_sequence, self.last_sequence(run_id))
-        )
-        if through < 1:
-            raise ValueError("nothing to compact: anchor would be empty")
+        The bound is resolved by :func:`continuum.storage.compaction.
+        resolve_compaction_bound`, shared with the Postgres engine, so a
+        safety check added to one backend applies to both (issue #1078).
+        """
+        storage_version, through = resolve_compaction_bound(self, run_id, through_sequence)
 
         with self._write() as conn:
             self._append_chained(

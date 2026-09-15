@@ -33,6 +33,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Postgres compaction no longer archives and deletes its own anchor marker
+  (#1078).** `SQLiteStorage.compact_run` refused an explicit `through_sequence`
+  at or above the anchor marker's sequence (#705), but `PostgresStorage.
+  compact_run` computed `through` straight from the argument and ran the
+  archive and delete over it, so a direct caller of the storage API could
+  remove the marker and every live row after it. The next append then minted a
+  fresh genesis with `prev_hash = None` and the live chain forked away from the
+  archive, defeating the single-transaction marker-plus-move that both engines
+  implement. The SQLite and Postgres engines now resolve the bound through one
+  shared helper, `continuum.storage.compaction.
+  resolve_compaction_bound`, so the anchor guard and the other safety checks
+  cannot drift apart between backends again. The CLI still calls
+  `compact_run` with no bound, so only a direct API caller could reach this;
+  that remains a real hole for a library whose storage is a public interface.
+  Behaviour on SQLite is unchanged, and the Postgres suite gains the anchor
+  rejection test the SQLite suite already had.
+
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
   types at the top level (`{"send_invoice": {...}}`) instead of nesting them
