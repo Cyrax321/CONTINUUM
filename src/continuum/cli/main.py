@@ -64,7 +64,7 @@ from continuum.models import (
     SemanticState,
     StateStatus,
 )
-from continuum.observability import render_dashboard
+from continuum.observability import collect_from_decision, render_dashboard
 from continuum.provenance.graph import build_provenance_graph, downstream_of
 from continuum.provenance_map import summarize
 from continuum.recovery import RecoveryEngine, render_contract
@@ -993,6 +993,9 @@ def cmd_validate(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
         expected_model=args.model,
     )
     if getattr(args, "dashboard", False):
+        # Feed the process-wide metrics collector so get_metrics() reflects
+        # the recovery that produced this dashboard (#1032).
+        collect_from_decision(decision)
         out.write(render_dashboard(decision) + "\n")
         out.flush()
         return exit_code_for(decision.mode)
