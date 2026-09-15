@@ -77,6 +77,7 @@ That line must never launch an agent onto stale state, so **only a verified-safe
 | Code | Meaning |
 |:--|:--|
 | `0` | verified safe to resume |
+| `1` | usage error or unexpected command failure |
 | `10` | recoverable, but repairs are required first |
 | `20` | a human must decide (typically an unreconciled side effect) |
 | `30` | not safe to resume |
