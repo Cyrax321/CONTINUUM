@@ -144,6 +144,28 @@ action (`Liveness: ok/breached ...`); `continuum watch` evaluates it on
 demand with its own contract, walked through in
 docs/guides/liveness-watch.md.
 
+## The verdict is advisory
+
+Everything above is the engine telling you the truth about the run. It is not
+the engine stopping your process. `RecoveryDecision.permits()` reports what
+the contract allows, and nothing in the library intervenes if a caller reads
+a `False` and acts anyway. A worker that calls `CheckpointManager.restore`
+directly, rather than `continuum resume`, can continue past a
+`REQUEST_HUMAN` verdict, because it never asked the engine whether to.
+
+That makes the walkthrough's "resume" the load-bearing step in a way the
+output does not advertise: the exit code, not the verdict, is what gates the
+pipeline. `continuum resume` exits `0` only for `RESUME`, so chaining
+`continuum resume "$RUN" && ./start-agent.sh` cannot launch onto stale
+state. Call `restore` from your own code and you keep the verdict but drop
+the only enforcement that ships enabled.
+
+Enforcement beyond the exit code exists as separate seams, none enabled by
+default: the host gate (`continuum gate`), the HTTP gateway (`continuum
+gateway`), the replay guard (`continuum.replayguard` in-process), and
+observation hooks (`continuum hooks install`). Wire one if you want the
+verdict enforced rather than merely reported.
+
 ## What just happened
 
 - No duplicate Slack message: the interrupted effect was reconciled by probe

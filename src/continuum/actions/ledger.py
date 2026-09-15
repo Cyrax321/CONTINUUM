@@ -780,6 +780,27 @@ class ActionLedger:
         self.storage.append_event(self.run_id, event_type, payload, source=self._source)
         return action
 
+    @staticmethod
+    def _count_claim() -> None:
+        """Increment the process-wide claim counter (#1032).
+
+        Best effort by design: a metrics failure must never change whether an
+        action is claimable, so collection errors are swallowed rather than
+        propagated into a safety-critical return path.
+        """
+        with suppress(Exception):
+            from continuum.observability import ACTIONS_CLAIMED, get_metrics
+
+            get_metrics().increment(ACTIONS_CLAIMED)
+
+    @staticmethod
+    def _count_complete() -> None:
+        """Increment the process-wide completion counter (#1032), best effort."""
+        with suppress(Exception):
+            from continuum.observability import ACTIONS_COMPLETED, get_metrics
+
+            get_metrics().increment(ACTIONS_COMPLETED)
+
     @_single_writer
     def claim(
         self,
@@ -986,6 +1007,7 @@ class ActionLedger:
                 origin_digest=origin_digest,
                 rendered_key=rendered_key,
             )
+            self._count_claim()
             return ActionOutcome(key=key, action=action, fresh=True)
 
         if existing.status is ActionStatus.COMPLETED:
@@ -1005,6 +1027,7 @@ class ActionLedger:
                 }
             )
             self._record(key, action)
+            self._count_claim()
             return ActionOutcome(key=key, action=action, fresh=True)
 
         if existing.status is ActionStatus.FAILED:
@@ -1014,6 +1037,7 @@ class ActionLedger:
                 update={"status": ActionStatus.STARTED, "started_at": utcnow()}
             )
             self._record(key, action)
+            self._count_claim()
             return ActionOutcome(key=key, action=action, fresh=True)
 
         # STARTED or UNKNOWN: a previous attempt was interrupted.
@@ -1105,6 +1129,7 @@ class ActionLedger:
             }
         )
         recorded = self._record(key, action)
+        self._count_complete()
         # Settlement drawdown (issue #413): same per-authorization bucket as claims.
         if existing.status is ActionStatus.STARTED:
             auth_settle = self._budget_authorization_id(

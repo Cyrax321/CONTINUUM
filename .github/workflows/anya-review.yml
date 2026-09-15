@@ -7,19 +7,27 @@ on:
     types: [created]
   pull_request:
     types: [review_requested, synchronize]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to review
+        required: true
+        type: string
 
 jobs:
   anya-review:
     if: |
-      (
-        github.event_name == 'pull_request' &&
+      github.event_name == 'workflow_dispatch' || (
         (
-          github.event.action == 'synchronize' ||
-          github.event.requested_reviewer.login == 'anya-research'
+          github.event_name == 'pull_request' &&
+          (
+            github.event.action == 'synchronize' ||
+            github.event.requested_reviewer.login == 'anya-research'
+          )
+        ) || (
+          github.event.comment.user.type == 'User' &&
+          startsWith(github.event.comment.body, '/anya review')
         )
-      ) || (
-        github.event.comment.user.type == 'User' &&
-        startsWith(github.event.comment.body, '/anya review')
       )
     runs-on: ubuntu-latest
     permissions:
@@ -36,12 +44,50 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The opencode action asserts the event is issue_comment or
+      # pull_request_review_comment and resolves the PR from
+      # payload.issue.number. A workflow_dispatch carries neither, so the
+      # action hangs. Synthesize an issue_comment payload from the input.
+      - name: Build agent event context
+        id: ctx
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
+          PR_IN: ${{ github.event.inputs.pr }}
+        run: |
+          set -uo pipefail
+          PR="$PR_IN"
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.pull_request.number }}"
+          fi
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.issue.number }}"
+          fi
+          OWNER="${{ github.repository_owner }}"
+          REPO="${{ github.event.repository.name }}"
+          ACTOR="${{ github.actor }}"
+          # issue_comment payload shape, matching the action's own README.
+          # payload.issue.pull_request present marks it as a PR, not an issue.
+          MOCK=$(printf '{"eventName":"issue_comment","repo":{"owner":"%s","repo":"%s"},"actor":"%s","payload":{"issue":{"number":%s,"pull_request":{}},"comment":{"id":1,"body":"/anya review"}}}' \
+            "$OWNER" "$REPO" "$ACTOR" "$PR")
+          {
+            echo "pr=$PR"
+            echo "mock<<MOCKEOF"
+            printf '%s' "$MOCK"
+            echo
+            echo "MOCKEOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Built agent context for PR #$PR."
+
       - name: Check for prior Anya review on pushes
         id: gate
         env:
           GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
         run: |
-          PR="${{ github.event.pull_request.number }}"
+          PR="${{ github.event.inputs.pr }}"
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.pull_request.number }}"
+          fi
           if [ -z "$PR" ] || [ "$PR" = "null" ]; then
             PR="${{ github.event.issue.number }}"
           fi
@@ -91,7 +137,10 @@ jobs:
           GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
         run: |
           set -uo pipefail
-          PR="${{ github.event.pull_request.number }}"
+          PR="${{ github.event.inputs.pr }}"
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.pull_request.number }}"
+          fi
           if [ -z "$PR" ] || [ "$PR" = "null" ]; then
             PR="${{ github.event.issue.number }}"
           fi
@@ -117,6 +166,7 @@ jobs:
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.ANYA_TOKEN }}
+          MOCK_EVENT: ${{ steps.ctx.outputs.mock }}
         with:
           model: opencode/muse-spark-1.3-contributor-free
           use_github_token: true
@@ -268,7 +318,10 @@ jobs:
           GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
         run: |
           set -uo pipefail
-          PR="${{ github.event.pull_request.number }}"
+          PR="${{ github.event.inputs.pr }}"
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.pull_request.number }}"
+          fi
           if [ -z "$PR" ] || [ "$PR" = "null" ]; then
             PR="${{ github.event.issue.number }}"
           fi
@@ -309,7 +362,10 @@ jobs:
           VERDICT_IN: ${{ steps.scrub.outputs.verdict }}
         run: |
           set -uo pipefail
-          PR="${{ github.event.pull_request.number }}"
+          PR="${{ github.event.inputs.pr }}"
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.pull_request.number }}"
+          fi
           if [ -z "$PR" ] || [ "$PR" = "null" ]; then
             PR="${{ github.event.issue.number }}"
           fi
@@ -452,7 +508,10 @@ jobs:
           GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
         run: |
           set -uo pipefail
-          PR="${{ github.event.pull_request.number }}"
+          PR="${{ github.event.inputs.pr }}"
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.pull_request.number }}"
+          fi
           if [ -z "$PR" ] || [ "$PR" = "null" ]; then
             PR="${{ github.event.issue.number }}"
           fi
@@ -473,7 +532,10 @@ jobs:
           GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
         run: |
           set -uo pipefail
-          PR="${{ github.event.pull_request.number }}"
+          PR="${{ github.event.inputs.pr }}"
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.pull_request.number }}"
+          fi
           if [ -z "$PR" ] || [ "$PR" = "null" ]; then
             PR="${{ github.event.issue.number }}"
           fi
@@ -506,7 +568,10 @@ jobs:
           GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
         run: |
           set -uo pipefail
-          PR="${{ github.event.pull_request.number }}"
+          PR="${{ github.event.inputs.pr }}"
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.pull_request.number }}"
+          fi
           if [ -z "$PR" ] || [ "$PR" = "null" ]; then
             PR="${{ github.event.issue.number }}"
           fi

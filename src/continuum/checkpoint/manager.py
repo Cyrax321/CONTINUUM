@@ -214,6 +214,12 @@ class CheckpointManager:
         self._last_checkpoint_at[run_id] = stored.created_at
         self._last_state[run_id] = stored.state
         self._annotation_sequence[run_id] = annotation.sequence
+        # Process-wide counter (#1032). Best effort: a metrics failure must
+        # never break checkpointing, which is the safety-critical path.
+        with contextlib.suppress(Exception):
+            from continuum.observability import CHECKPOINTS_CREATED, get_metrics
+
+            get_metrics().increment(CHECKPOINTS_CREATED)
         # Instant resume detection (issue #394): persist a tiny file the
         # SessionStart hook can read without touching SQLite. Best effort;
         # a failure here must not break checkpointing itself.

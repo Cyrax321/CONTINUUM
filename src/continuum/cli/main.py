@@ -895,15 +895,24 @@ def _human_steps(decision: Any, run_id: str) -> list[str]:
     """Executable next steps for this decision, derived from live config.
 
     Read-only: the reconciler registry and gate config are inspected, never
-    executed. Absent files simply mean fewer shortcuts to suggest.
+    executed. Absent files simply mean fewer shortcuts to suggest. A
+    malformed registry is not: it is an operator mistake that should reach
+    `main`'s `ValueError` handler rather than degrade to an empty registry
+    with no signal something is wrong (issue #1062).
     """
     from continuum.gate import DEFAULT_GATE_CONFIG_PATH
-    from continuum.reconcilers import DEFAULT_RECONCILERS_PATH, load_reconcilers
+    from continuum.reconcilers import (
+        DEFAULT_RECONCILERS_PATH,
+        ReconcilerConfigError,
+        load_reconcilers,
+    )
     from continuum.recovery.guidance import human_steps_for
 
     try:
         probes = load_reconcilers(Path(DEFAULT_RECONCILERS_PATH))
         probed: list[str] = list(probes)
+    except ReconcilerConfigError:
+        raise
     except Exception:
         probed = []
     gate_configured = Path(DEFAULT_GATE_CONFIG_PATH).exists()

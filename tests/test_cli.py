@@ -566,6 +566,25 @@ def test_resume_without_repair_is_still_read_only(db: str) -> None:
     assert SQLiteStorage(db).last_sequence("run_1") == before
 
 
+def test_resume_surfaces_a_malformed_reconciler_registry(
+    db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registry missing the ``probes`` wrapper must not degrade to silence.
+
+    The guidance probe around ``load_reconcilers`` used to catch every
+    exception and fall back to an empty registry, so `resume` printed its
+    normal guidance with no hint the config itself was wrong (#1062).
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".continuum").mkdir()
+    (tmp_path / ".continuum" / "reconcilers.json").write_text(
+        '{"send_invoice": {"command": "check-outbox"}}'
+    )
+    code, _, err = run("--db", db, "resume", "run_1")
+    assert code == ExitCode.ERROR
+    assert "send_invoice" in err
+
+
 def test_tolerating_unknown_is_opt_in(db: str) -> None:
     interrupt_a_side_effect(db)
     strict, _, _ = run("--db", db, "resume", "run_1", "--env", "dataset=v3")

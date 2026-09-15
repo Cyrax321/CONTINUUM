@@ -89,7 +89,14 @@ _SAFETY_FOR_MODE: dict[RecoveryMode, RecoverySafety] = {
 
 @dataclass(frozen=True, slots=True)
 class RecoveryDecision:
-    """The engine's verdict, with everything needed to justify it."""
+    """The engine's verdict, with everything needed to justify it.
+
+    Advisory by default: this object describes the state of the run, it does
+    not control the process that asked about it (#1031). Nothing in the library
+    stops a caller from resuming after a verdict other than ``RESUME``. See
+    :meth:`permits` for the enforcement seams that do exist, none of which is
+    enabled without explicit configuration.
+    """
 
     run_id: str
     mode: RecoveryMode
@@ -127,7 +134,28 @@ class RecoveryDecision:
         return self.contract.next_allowed_action
 
     def permits(self, action: str) -> bool:
-        """Whether ``action`` is the one step the contract currently allows."""
+        """Whether ``action`` is the one step the contract currently allows.
+
+        Advisory, not enforcing. This reports what the contract allows; it does
+        not stop a caller from proceeding. CONTINUUM computes the verdict, it
+        does not supervise the process that asked for it (#1031).
+
+        A caller can ignore a ``False`` return and act anyway, and nothing in
+        the library will intervene. If you need the verdict *enforced*, that is
+        a separate seam and none of them is on by default:
+
+        * the host gate (``continuum gate``, :mod:`continuum.recovery.gate`)
+        * the HTTP gateway (``continuum gateway``, :mod:`continuum.gateway`)
+        * the replay guard (:mod:`continuum.replayguard`)
+        * observation hooks (``continuum hooks install``,
+          :mod:`continuum.clienthooks`)
+
+        Each must be configured explicitly; a plain ``pip install
+        continuum-agent`` gets none of them. The one enforcement that does ship
+        enabled is the CLI exit code: ``continuum resume`` exits non-zero unless
+        the run is verified safe, so ``continuum resume "$RUN" && ./start.sh``
+        cannot launch onto stale state (see :mod:`continuum.cli.exitcodes`).
+        """
         if self.mode is RecoveryMode.RESUME:
             return True
         return action == self.contract.next_allowed_action
@@ -499,7 +527,7 @@ class RecoveryEngine:
             plan=plan,
         )
 
-        return RecoveryDecision(
+        decision = RecoveryDecision(
             run_id=run_id,
             mode=mode,
             contract=contract,
@@ -512,6 +540,20 @@ class RecoveryEngine:
             tail_evidence=tail_evidence,
             informed_retry=informed_retry,
         )
+
+        # Process-wide counters (#1032). Imported lazily: observability imports
+        # RecoveryDecision from this module, so a top-level import would be
+        # circular. Collection is best-effort and never affects the verdict: a
+        # caller who resets or replaces the collector still gets the same
+        # decision, and a failure here must not change a safety property.
+        try:
+            from continuum.observability import collect_from_decision
+
+            collect_from_decision(decision)
+        except Exception:
+            pass
+
+        return decision
 
     # -- the decision rule ------------------------------------------------ #
 

@@ -1040,11 +1040,19 @@ def build_server(
         # the plan plus whatever automation this project has registered, so
         # the resuming agent never translates statuses into commands itself.
         from continuum.gate import DEFAULT_GATE_CONFIG_PATH
-        from continuum.reconcilers import DEFAULT_RECONCILERS_PATH, load_reconcilers
+        from continuum.reconcilers import (
+            DEFAULT_RECONCILERS_PATH,
+            ReconcilerConfigError,
+            load_reconcilers,
+        )
         from continuum.recovery.guidance import human_steps_for, self_report_guidance
 
         try:
             probed = list(load_reconcilers(Path(DEFAULT_RECONCILERS_PATH)))
+        except ReconcilerConfigError as exc:
+            from mcp.server.mcpserver.exceptions import ToolError
+
+            raise ToolError(str(exc)) from exc
         except Exception:
             probed = []
         human_steps = human_steps_for(
