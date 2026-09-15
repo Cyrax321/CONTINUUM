@@ -59,6 +59,12 @@ def test_engine_maps_breach_to_wait(tmp_path: Path) -> None:
         assert decision.contract.liveness is not None
         assert decision.contract.liveness["breached"] is True
         assert decision.contract.liveness["breaches"] >= 0
+        # A breach is advisory in the sense of #302 (never a rollback), but it
+        # is not inert: WAIT reaches `continuum resume` as exit 20, which is the
+        # link the health.py docstring and the liveness-watch guide describe.
+        from continuum.cli.exitcodes import exit_code_for
+
+        assert exit_code_for(decision.mode) == 20
 
 
 def test_watch_appends_detected_and_recovered(tmp_path: Path) -> None:
