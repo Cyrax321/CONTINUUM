@@ -23,7 +23,7 @@ from continuum.budgets import (
     evaluate_budget,
     load_budgets,
 )
-from continuum.checkpoint import CheckpointManager
+from continuum.checkpoint import CheckpointManager, clear_resume_pointer
 from continuum.events import EventType
 from continuum.models import Action, ActionStatus, Origin, RunStatus, StateStatus
 from continuum.recovery import RecoveryEngine
@@ -412,4 +412,7 @@ def complete_run(storage: Storage, run_id: str) -> str:
         source=Origin.HUMAN,
     )
     storage.update_run(run.touch(status=RunStatus.COMPLETED))
+    # Same cleanup the CLI performs: a closed run is no longer interrupted, so
+    # the resume banner must not keep naming it as the active run.
+    clear_resume_pointer(run_id)
     return f"run {run_id} completed"

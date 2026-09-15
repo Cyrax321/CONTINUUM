@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from continuum.actions import ActionLedger
+from continuum.checkpoint import clear_resume_pointer
 from continuum.events import EventType
 from continuum.models import ActionStatus, Origin, RunStatus
 from continuum.storage.base import Storage
@@ -95,6 +96,9 @@ def complete_run(storage: Storage, run_id: str, summary: str = "") -> None:
         note["summary"] = summary
     storage.append_event(run_id, EventType.RUN_COMPLETED, note, source=Origin.HUMAN)
     storage.update_run(run.touch(status=RunStatus.COMPLETED))
+    # Same cleanup the CLI performs: a closed run is no longer interrupted, so
+    # the resume banner must not keep naming it as the active run.
+    clear_resume_pointer(run_id)
 
 
 def reconcile_action(
