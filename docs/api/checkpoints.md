@@ -60,13 +60,14 @@ The inverse of the checkpoint's resume-pointer write. Every checkpoint writes
 `.continuum/resume.json` so a `SessionStart` hook can banner the interrupted
 run without opening the database; a run closed as completed is no longer
 interrupted, so this removes the pointer when it names `run_id`. Every path
-that closes a run — `continuum complete`, the TUI, and the dashboard HITL
-button — routes through here, so a completion cannot leave the next session
+that closes a run, `continuum complete`, the TUI, and the dashboard HITL
+button, routes through here, so a completion cannot leave the next session
 banner surfacing finished work.
 
 A pointer naming a different run is left in place. A missing, unreadable, or
-undeletable file is not an error: the pointer is a cache, and failing its
-removal would cost the completion itself.
+undeletable file, or one holding valid JSON that is not an object, is not an
+error: the pointer is a cache, and failing its removal would cost the
+completion itself.
 
 ## Policy
 

@@ -66,6 +66,17 @@ def test_an_unreadable_pointer_is_tolerated(project: Path) -> None:
     assert _POINTER.exists()  # not our file to delete; just not understood
 
 
+@pytest.mark.parametrize("contents", ["5", '"r1"', '["r1"]', "null", "true"])
+def test_valid_non_object_json_is_tolerated(project: Path, contents: str) -> None:
+    # Valid JSON that is not an object has no ``run_id`` to compare against, and
+    # ``.get`` on it would raise AttributeError out of a completion path. The
+    # pointer is still just a cache, so the failure is swallowed the same way.
+    _POINTER.parent.mkdir(parents=True, exist_ok=True)
+    _POINTER.write_text(contents, encoding="utf-8")
+    assert clear_resume_pointer("r1") is False
+    assert _POINTER.exists()
+
+
 @pytest.mark.parametrize(
     ("closer", "label"),
     [

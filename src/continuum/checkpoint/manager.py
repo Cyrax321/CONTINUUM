@@ -421,6 +421,9 @@ def clear_resume_pointer(run_id: str) -> bool:
     A pointer naming any other run is left alone. Missing or unreadable files
     are not errors, and a failure to unlink is swallowed: a stale pointer costs
     a wrong banner, but failing the removal would cost the completion itself.
+    Valid JSON that is not an object (a bare number, string, list, or ``null``
+    from a truncated or tampered file) is likewise not an error, since the
+    pointer cannot name this run either.
     Returns whether the pointer named this run and was removed.
     """
     path = Path(_RESUME_JSON)
@@ -428,7 +431,7 @@ def clear_resume_pointer(run_id: str) -> bool:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    if payload.get("run_id") != run_id:
+    if not isinstance(payload, dict) or payload.get("run_id") != run_id:
         return False
     try:
         path.unlink()

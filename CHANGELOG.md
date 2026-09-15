@@ -66,9 +66,11 @@ All notable changes to this project are documented here. The format follows
   left the next session banner surfacing finished work as the active run. The
   cleanup is now a single helper (`continuum.checkpoint.clear_resume_pointer`)
   all three paths route through. A pointer naming any other run is left in
-  place, and an unreadable or undeletable file is tolerated rather than failing
-  the completion. `tests/test_resume_pointer.py` pins the helper and each of
-  the three completion paths, and was verified to fail without the fix.
+  place, and an unreadable or undeletable file, or one holding valid JSON that
+  is not an object, is tolerated rather than failing the completion.
+  `tests/test_resume_pointer.py` pins the helper and each of the three
+  completion paths, and was verified to fail without the fix.
+
 - **The horizon `abort_condition_year` scenario now reaches abort (#1028).**
   The scenario was labelled `correct_mode="abort"` but drove the abort through
   `DECISION_INVALIDATED`, an event the recovery engine never routes to `ABORT`
