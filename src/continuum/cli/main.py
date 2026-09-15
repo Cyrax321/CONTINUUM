@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import sqlite3
+import stat
 import sys
 from collections.abc import Sequence
 from datetime import datetime
@@ -3548,19 +3549,52 @@ def cmd_benchmark(args: argparse.Namespace, storage: Storage, out: Any, err: Any
     return ExitCode.OK
 
 
+def _write_private_key(path: Path, pem: str) -> int:
+    """Write an unencrypted private key PEM at 0600 and return the mode applied.
+
+    The PEM is PKCS8 with no encryption, so the file mode is the only barrier
+    between the key material and every other local user. ``Path.write_text``
+    would create it at 0666 masked by the ambient umask (0644 out of the box),
+    which is world-readable. Opening through ``os.open`` with an explicit mode
+    creates the file owner-only from the start, with no window at 0644.
+
+    A pre-existing file is narrowed too: ``open(2)`` ignores the mode argument
+    when the file already exists, so a 0644 key being overwritten would keep its
+    old mode without the explicit ``chmod``.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+    except Exception:
+        os.close(fd)
+        raise
+    with handle:
+        handle.write(pem)
+    # The mode argument above is ignored when the path already existed, so an
+    # overwritten key still needs narrowing.
+    os.chmod(path, 0o600)
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
 def cmd_attest_keygen(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Generate an Ed25519 signer key pair for event-chain attestation.
 
     Does not touch storage: key custody is the operator's responsibility, so the
-    tool only writes the two PEM files and says where they went.
+    tool only writes the two PEM files and says where they went. The private key
+    is written owner-only (0600): it is unencrypted PKCS8, so a world-readable
+    file would hand raw signing material to every local user (#1056).
     """
     private_pem, public_pem = generate_keypair()
     priv_path = Path(args.out) if args.out else Path("signer.pem")
     pub_path = Path(args.pub) if args.pub else priv_path.with_suffix(priv_path.suffix + ".pub")
-    priv_path.write_text(private_pem, encoding="utf-8")
+    applied = _write_private_key(priv_path, private_pem)
     pub_path.write_text(public_pem, encoding="utf-8")
     payload = {"private_key": str(priv_path), "public_key": str(pub_path)}
-    text = f"Wrote private key {priv_path} and public key {pub_path}. Keep the private key secret."
+    text = (
+        f"Wrote private key {priv_path} (mode {applied:o}, owner-only) and "
+        f"public key {pub_path}. Keep the private key secret."
+    )
     _emit(payload, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
     return ExitCode.OK
 
