@@ -17,6 +17,7 @@ import pytest
 from continuum.actions import ActionLedger
 from continuum.actions.idempotency import idempotency_key
 from continuum.cli import ExitCode, main
+from continuum.recovery.family import children_of
 from continuum.storage import SQLiteStorage
 
 
@@ -51,6 +52,10 @@ def test_children_record_their_parent(db: str) -> None:
     with SQLiteStorage(db) as store:
         assert store.get_run("kid").parent_run_id == "par"
         assert store.get_run("par").parent_run_id is None
+        # the query the family roll-up reads through, not just the column:
+        # a backend that drops the value on write leaves children_of empty
+        # and the resume block silently vacuous (issue #1079)
+        assert [c.run_id for c in children_of(store, "par")] == ["kid"]
 
 
 def test_a2a_task_id_lands_in_metadata(db: str) -> None:

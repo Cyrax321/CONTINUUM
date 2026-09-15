@@ -33,6 +33,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The Postgres backend now persists and returns `runs.parent_run_id` (#1079).**
+  The column was declared in the schema but both inserts (`create_run` and
+  `create_run_started`) omitted it and `_row_to_run` did not read it, so a
+  fork's lineage was silently dropped on write and came back as the model
+  default `None` even for a row that had a value. `children_of` filters
+  `list_runs` on that column, so it always returned empty on Postgres,
+  `roll_up_children` never reported a family block, and the rule both the CLI
+  and the TUI render ("a parent may not RESUME while any child is unsafe")
+  could not fire. The SQLite backend already did all three; the schema needed
+  no change, so existing Postgres databases are fixed on their next write and
+  the foreign-key constraint that was declared but never exercised now holds.
+  A deployment would have looked healthy and simply never blocked a parent
+  over an unsafe child, with no error anywhere.
+
+  Added a Postgres contract test that forks and asserts `children_of` returns
+  the child through the query the roll-up reads, not just the column, and
+  strengthened the SQLite family test to assert the same. Nothing caught the
+  gap before because the SQLite tests covered the round-trip and the Postgres
+  suite never forked.
+
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
   types at the top level (`{"send_invoice": {...}}`) instead of nesting them
