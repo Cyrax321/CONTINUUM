@@ -49,6 +49,42 @@ def test_ingest_risk_fail_open_on_garbage(tmp_path: Path) -> None:
         assert len(store.read_events(run_id)) == 1
 
 
+def test_ingest_risk_keeps_caller_supplied_ts(tmp_path: Path) -> None:
+    # Issue #1075: a payload carrying ts but no timestamp took the
+    # mint-server-now branch, silently replacing the probe's observation
+    # time with CONTINUUM's ingestion time.
+    db = str(tmp_path / "risk_ts.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_ts"
+        store.create_run_started(Run(run_id=run_id, goal="caller ts"))
+        observed = "2020-01-01T00:00:00+00:00"
+        assert ingest_risk(store, run_id, {"trigger": "latency_anomaly", "ts": observed}) is True
+        assert store.read_events(run_id)[-1].payload["ts"] == observed
+
+
+def test_ingest_risk_honours_timestamp_spelling(tmp_path: Path) -> None:
+    # Issue #1075: a payload carrying timestamp but no ts took neither
+    # branch, so the recorded event had no ts at all.
+    db = str(tmp_path / "risk_timestamp.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_timestamp"
+        store.create_run_started(Run(run_id=run_id, goal="timestamp spelling"))
+        observed = "2020-02-02T00:00:00+00:00"
+        assert (
+            ingest_risk(store, run_id, {"trigger": "token_runaway", "timestamp": observed}) is True
+        )
+        assert store.read_events(run_id)[-1].payload["ts"] == observed
+
+
+def test_ingest_risk_mints_ts_only_when_caller_supplies_none(tmp_path: Path) -> None:
+    db = str(tmp_path / "risk_mint.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_mint"
+        store.create_run_started(Run(run_id=run_id, goal="mint"))
+        assert ingest_risk(store, run_id, {"trigger": "loop"}) is True
+        assert store.read_events(run_id)[-1].payload.get("ts")
+
+
 def test_policy_defaults_and_conservative(tmp_path: Path) -> None:
     # Defaults are loaded when file missing
     missing = tmp_path / "no_policy.json"
