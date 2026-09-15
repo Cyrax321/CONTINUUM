@@ -13,7 +13,7 @@ from typing import Any
 
 from continuum.checkpoint import CheckpointManager
 from continuum.events import EventType
-from continuum.models import Run
+from continuum.models import EnvironmentSnapshot, EnvResource, Run
 from continuum.storage import SQLiteStorage
 
 
@@ -51,6 +51,16 @@ class HorizonRun:
     clock: SimulatedClock
     manager: CheckpointManager
     reconstruction_cycles: int = 0
+    environment: EnvironmentSnapshot | None = None
+    """Current external environment; observable drift updates it after the pin."""
+
+    def observe_environment(self, resources: dict[str, str] | None = None) -> None:
+        """Re-capture the environment, recording mutated resource versions."""
+        merged = dict(self.environment.resources) if self.environment else {}
+        merged.update(
+            {name: EnvResource(name=name, version=v) for name, v in (resources or {}).items()}
+        )
+        self.environment = EnvironmentSnapshot(run_id=self.run_id, resources=merged)
 
     def checkpoint(self, **kw: Any) -> None:
         try:
@@ -84,7 +94,7 @@ class HorizonRun:
         from continuum.recovery import RecoveryEngine
 
         try:
-            RecoveryEngine(self.storage).assess(self.run_id)
+            RecoveryEngine(self.storage).assess(self.run_id, current_environment=self.environment)
             self.reconstruction_cycles += 1
         except Exception:
             pass
@@ -120,8 +130,14 @@ def run_horizon_scenario(
                 storage.append_event(
                     run_id, EventType.DEPENDENCY_DECLARED, {"resource": k, "version": v}
                 )
-        # Checkpoint every cycle
-        horizon.checkpoint()
+            # The mutated resource is observable in the current environment,
+            # so recovery can diff it against the checkpoint baseline.
+            horizon.observe_environment(
+                {k: str(v) for k, v in mutations[cycle].items() if k != "goal"}
+            )
+        # Checkpoint every cycle, sealing the environment observed so far as
+        # the baseline the next drift is diffed against.
+        horizon.checkpoint(environment=horizon.environment)
         # Compact every 10 cycles
         if cycle % 10 == 0 and cycle > 0:
             horizon.compact()

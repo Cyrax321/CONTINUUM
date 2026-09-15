@@ -44,6 +44,49 @@ def test_judge_labels_exist_for_every_scenario_and_disagreements_resolved() -> N
 
 
 @pytest.mark.slow
+def test_abort_scenario_reaches_abort_through_the_risk_path() -> None:
+    # Pin issue #1028: the abort label must be reachable through the
+    # mechanism the engine actually routes to ABORT. DECISION_INVALIDATED
+    # produces no abort proposal, so the scenario drives it via RISK_OBSERVED
+    # with the "side_effect_duplicate" trigger (the issue #303 risk mapping).
+    # If an engine change drops that risk path, this turns red instead of
+    # silently re-deflating the published accuracy figure.
+    from benchmarks.horizon.runner import run_single_horizon
+
+    result = run_single_horizon("abort_condition_year")
+    assert result.metrics["correct_mode"] == "abort"
+    assert result.metrics["actual_mode"] == "abort", result.notes
+    assert result.passed
+
+
+@pytest.mark.slow
+def test_drift_scenario_repairs_without_escalation() -> None:
+    # Pin the other half of issue #1028: quarterly dataset drift is a
+    # re-pinnable dependency, so the runner supplies a drifted current
+    # environment at assess time and the engine must answer "repair"
+    # (REVALIDATE_DEPENDENCY), not escalate to request_human.
+    from benchmarks.horizon.runner import run_single_horizon
+
+    result = run_single_horizon("quarterly_drift_year")
+    assert result.metrics["correct_mode"] == "repair"
+    assert result.metrics["actual_mode"] == "repair", result.notes
+    assert result.passed
+
+
+@pytest.mark.slow
+def test_horizon_suite_accuracy_is_full() -> None:
+    # The published README/bench.md figures quote this suite's accuracy.
+    # After issue #1028 every scenario's label is reachable through a real
+    # engine mechanism, so 5/5 must pass; a red result here means a scenario
+    # and the engine disagree again, not that the label should be relaxed.
+    from benchmarks.horizon.runner import run_horizon_suite
+
+    report = run_horizon_suite()
+    failed = [r.scenario for r in report.results if not r.passed]
+    assert not failed, f"horizon scenarios failing: {failed}"
+
+
+@pytest.mark.slow
 def test_all_six_metrics_emitted_per_run_and_rendered() -> None:
     from benchmarks.horizon.emitter import emit_horizon_report
     from benchmarks.horizon.runner import run_horizon_suite

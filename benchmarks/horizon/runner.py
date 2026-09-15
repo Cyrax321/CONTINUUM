@@ -14,11 +14,29 @@ from typing import Any
 
 from continuum.benchmark.phase6.metrics import BenchmarkReport, RecoveryOutcome, ScenarioResult
 from continuum.events import EventType
+from continuum.models import EnvironmentSnapshot, EnvResource, Origin
 from continuum.recovery import RecoveryEngine
 
 from .driver import run_horizon_scenario
 from .judge import judge
-from .scenarios import HORIZON_SCENARIOS
+from .scenarios import HORIZON_SCENARIOS, HorizonScenario
+
+
+def _drifted_environment(run_id: str, scen: HorizonScenario) -> EnvironmentSnapshot | None:
+    """Current environment where every declared dependency has moved on.
+
+    The scenario's mutations declare the run's pinned dependencies. At resume
+    time the world has drifted past the last pin, which is exactly the state
+    the validator needs to mark the dependency STALE (not UNKNOWN) and the
+    engine to propose REVALIDATE_DEPENDENCY — a repair, not an escalation.
+    """
+    if scen.correct_mode != "repair" or not scen.mutations:
+        return None
+    resources: dict[str, EnvResource] = {}
+    for mutation in scen.mutations.values():
+        for name, version in mutation.items():
+            resources[name] = EnvResource(name=name, version=f"{version}.drifted")
+    return EnvironmentSnapshot(run_id=run_id, resources=resources)
 
 
 def run_single_horizon(scenario_name: str) -> ScenarioResult:
@@ -34,24 +52,24 @@ def run_single_horizon(scenario_name: str) -> ScenarioResult:
         total_cycles=scen.cycles,
         mutations=scen.mutations,
     )
-    # For abort scenario, inject a decision invalidation to make it abort
+    # For abort scenario, ingest a risk signal that the policy maps to ABORT.
+    # DECISION_INVALIDATED never routes to ABORT (nothing in the engine
+    # proposes it), so the abort label is driven through the risk path of
+    # issue #303: trigger "side_effect_duplicate" -> ABORT.
     if scen.correct_mode == "abort":
-        # Invalidate a decision to force abort-like behavior
-        try:
-            horizon.storage.append_event(
-                horizon.run_id, EventType.DECISION_CREATED, {"decision_id": "d1", "decision": "x"}
-            )
-            horizon.storage.append_event(
-                horizon.run_id,
-                EventType.DECISION_INVALIDATED,
-                {"decision_id": "d1", "status": "invalid", "reason": "abort"},
-            )
-        except Exception:
-            pass
+        horizon.storage.append_event(
+            horizon.run_id,
+            EventType.RISK_OBSERVED,
+            {"trigger": "side_effect_duplicate", "score": 1.0},
+            source=Origin.EXTERNAL_MONITOR,
+        )
     # Assess recovery
     try:
         engine = RecoveryEngine(horizon.storage)
-        decision = engine.assess(horizon.run_id)
+        decision = engine.assess(
+            horizon.run_id,
+            current_environment=_drifted_environment(horizon.run_id, scen),
+        )
         actual_mode = decision.mode.value
         # Map engine modes to judge's simplified modes
         # engine has: resume, repair_and_resume, request_human, replan, rollback, abort, wait

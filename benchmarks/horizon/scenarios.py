@@ -39,7 +39,11 @@ class HorizonScenario:
 # - Scenario "budget_exhaustion": both labeled request_human, no disagreement
 # - Scenario "compaction_stress": both labeled resume, no disagreement
 # - Scenario "abort_condition": Author1 said abort, Author2 said request_human;
-#   resolved to abort because the run's goal is invalidated (decision invalidated), not just review
+#   resolved to abort because the observed duplicate side effect is a
+#   deliberate-fork signal the run must not paper over. The abort label is
+#   driven by a RISK_OBSERVED event (trigger "side_effect_duplicate"), the
+#   mechanism the engine actually routes to ABORT (issue #303 risk mapping);
+#   DECISION_INVALIDATED produces no abort proposal (issue #1028).
 
 HORIZON_SCENARIOS: list[HorizonScenario] = [
     HorizonScenario(
@@ -76,7 +80,7 @@ HORIZON_SCENARIOS: list[HorizonScenario] = [
     ),
     HorizonScenario(
         name="abort_condition_year",
-        description="Goal invalidated via decision invalidation: should abort",
+        description="Duplicate side effect observed by an external monitor: should abort",
         correct_mode="abort",
         cycles=120,
         mutations={60: {"goal": "invalidated"}},
