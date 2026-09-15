@@ -145,7 +145,17 @@ def build_contract(
             f"projection (invalid: log stops folding at sequence {state.unprojectable_at_sequence})"
         )
 
-    next_action = plan.first.action_name if plan.first else None
+    # A run the engine has blocked or declared unsafe must not advertise a
+    # permitted step (issue #1058). ROLLBACK and ABORT exist precisely to say
+    # "do not continue this run", yet both can coexist with a non-empty repair
+    # plan: the risk path proposes them while the validator still has a repair
+    # to offer. Naming that repair as ``next_allowed_action`` hands any caller
+    # that gates on it a green light on a run that must not be resumed, and
+    # every downstream surface (``render``, the dashboard, the resume report and
+    # the MCP field) echoes it. The plan is still recorded verbatim in
+    # ``required_actions``; it is simply not *permitted*.
+    repair_permitted = safety not in {RecoverySafety.BLOCKED, RecoverySafety.UNSAFE}
+    next_action = plan.first.action_name if (plan.first and repair_permitted) else None
 
     if reason is None:
         reason = validation.report.reason

@@ -140,6 +140,10 @@ class RecoveryDecision:
         not stop a caller from proceeding. CONTINUUM computes the verdict, it
         does not supervise the process that asked for it (#1031).
 
+        A run blocked or declared unsafe permits nothing at all, not even the
+        repair its plan names: ROLLBACK and ABORT mean the run must not be
+        continued, so no action reads as a green light (issue #1058).
+
         A caller can ignore a ``False`` return and act anyway, and nothing in
         the library will intervene. If you need the verdict *enforced*, that is
         a separate seam and none of them is on by default:
@@ -158,6 +162,13 @@ class RecoveryDecision:
         """
         if self.mode is RecoveryMode.RESUME:
             return True
+        # A blocked or unsafe run permits nothing, not even the repair the
+        # contract's plan happens to name (issue #1058): ROLLBACK and ABORT say
+        # the run must not be continued, so no action is a green light. Guarded
+        # explicitly rather than relying on ``next_allowed_action`` being null,
+        # because a caller can hold a contract whose field predates this rule.
+        if self.contract.recovery_status in {RecoverySafety.BLOCKED, RecoverySafety.UNSAFE}:
+            return False
         return action == self.contract.next_allowed_action
 
     def render(self) -> str:
