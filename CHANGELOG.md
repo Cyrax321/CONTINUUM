@@ -57,6 +57,19 @@ All notable changes to this project are documented here. The format follows
   entirely, and the MCP server raises it as a `ToolError` so the calling agent
   sees it.
 
+- **A tampered checkpoint is reported as corrupted, not as missing (#1059).**
+  Both checkpoint resolvers wrapped `storage.get_checkpoint` in a bare
+  `except Exception: pass`, so a record whose body failed validation or whose
+  sealed integrity hash no longer matched was silently retried as a version
+  number and finally reported as a lookup miss. `resolve_checkpoint` and
+  `_anchor_for` now let `CorruptedRecord` through, wrapping it in the same
+  `RewindError`/`ValueError` the resolvers already raise, but naming the
+  corruption instead of pointing the operator at a typo or a missing version.
+  The tamper-evidence the storage layer raises is the one signal an operator
+  most needs on this path, and it was the signal both resolvers converted into
+  noise. A genuine lookup miss still falls through to the version and
+  source-sequence strategies exactly as before.
+
 - **The horizon `abort_condition_year` scenario now reaches abort (#1028).**
   The scenario was labelled `correct_mode="abort"` but drove the abort through
   `DECISION_INVALIDATED`, an event the recovery engine never routes to `ABORT`
