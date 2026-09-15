@@ -64,7 +64,7 @@ Paths that need no clone and no local install:
 | Path | How |
 |:--|:--|
 | Install from PyPI | `pip install continuum-agent==0.1.2`, then `continuum --help` |
-| Install with Homebrew | `brew install wized2/continuum/continuum`, then `continuum --version` |
+| Install with Homebrew | `brew install wized2/continuum/continuum`, then `continuum --help` |
 | Watch crash recovery happen end to end | `docker run --rm ghcr.io/cyrax321/continuum` |
 | Use the CLI through Docker | `docker run --rm ghcr.io/cyrax321/continuum continuum --help` |
 | Run the CLI without cloning | `uvx --from git+https://github.com/Cyrax321/CONTINUUM.git continuum --help` |
