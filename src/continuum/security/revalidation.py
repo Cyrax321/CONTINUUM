@@ -1,5 +1,14 @@
 """Periodic revalidation scheduler (Extension 2).
 
+SPECIFIED, NOT SHIPPED: this module is complete and tested but has no product
+caller — the scheduling trigger below does not run anywhere, and CONTINUUM
+revalidates at crash/resume exactly as it did before the module was added
+(issue #1030). Wiring it is a maintainer call (the mid-run path differs from
+revalidation-at-resume: a running run is still mutating state, so a mid-run
+``assess()`` can observe a transiently inconsistent fold). Until then,
+"Extension 2" means "specified and tested, not present in any run's
+behaviour".
+
 CONTINUUM already revalidates semantic state against the environment at
 crash/resume (proven against real SIGKILL sessions). This module adds a
 scheduling path that invokes that *same* logic during a normal, uninterrupted

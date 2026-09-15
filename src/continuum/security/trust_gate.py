@@ -1,5 +1,12 @@
 """Trust gate for the secure planning loop (Extension 1).
 
+SPECIFIED, NOT SHIPPED: this module is complete and tested but has no product
+caller — no code in the recovery engine or validator consults it (issue
+#1030). CONTINUUM today revalidates at crash/resume only; the routing below
+exists as a staging area for the wiring decision, which is a maintainer call
+about recovery semantics. Until it is wired (or removed), "Extension 1" means
+"specified and tested, not present in any run's behaviour".
+
 Combines a planner-emitted :class:`PlanBranch` with a perception
 :class:`ObservationProvenance`. A high-risk branch resolved by anything other
 than a ``verified`` observation, or any ``environment_observed`` claim that is
