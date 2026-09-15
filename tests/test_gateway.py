@@ -22,6 +22,7 @@ from continuum.gateway import (
     GatewayConfigError,
     GatewayServer,
     Route,
+    _path_under_prefix,
     load_gateway_config,
     render_key,
 )
@@ -59,6 +60,41 @@ def config_file(tmp_path: Path) -> str:
 def gateway(db: str, tmp_path: Path):
     """A live gateway bound to an ephemeral port."""
     cfg = load_gateway_config(Path(config_file(tmp_path)))
+    server = GatewayServer(lambda: SQLiteStorage(db), "run_1", cfg, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"127.0.0.1:{server.port}"
+    server.shutdown()
+
+
+# Two operations on one host and method, differing only in prefix and key
+# template. ``/v1/refunds`` is listed first on purpose: a gateway that takes
+# the first host-and-method route and checks only its prefix would refuse a
+# perfectly good invoice request, and would render the wrong key for a refund.
+MULTI_ROUTES = [
+    {
+        "host": "api.example.com",
+        "methods": ["POST"],
+        "prefix": "/v1/refunds",
+        "action_type": "send_refund",
+        "key_template": "refund:{id}",
+    },
+    {
+        "host": "api.example.com",
+        "methods": ["POST"],
+        "prefix": "/v1/invoices",
+        "action_type": "send_invoice",
+        "key_template": "invoice:{id}",
+    },
+]
+
+
+@pytest.fixture
+def gateway_multi(db: str, tmp_path: Path):
+    """A live gateway serving two prefixes on one host and method."""
+    path = tmp_path / "gateway_multi.json"
+    path.write_text(json.dumps({"upstreams": MULTI_ROUTES}))
+    cfg = load_gateway_config(path)
     server = GatewayServer(lambda: SQLiteStorage(db), "run_1", cfg, port=0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -216,9 +252,7 @@ def test_off_prefix_path_is_refused_fail_closed(db: str, gateway: str) -> None:
     assert folded[key].status is ActionStatus.STARTED
 
 
-def test_off_prefix_path_with_query_string_smuggling_is_refused(
-    db: str, gateway: str
-) -> None:
+def test_off_prefix_path_with_query_string_smuggling_is_refused(db: str, gateway: str) -> None:
     """The query string is not part of the prefix scope, so it cannot satisfy it."""
     claim(db, "invoice:I-4")
     status, body = post(gateway, "/v1/refunds?x=/v1/invoices", {"id": "I-4"})
@@ -234,16 +268,142 @@ def test_a_path_sharing_the_prefix_spelling_is_refused(db: str, gateway: str) ->
     assert "outside it" in body["reason"]
 
 
+def test_off_prefix_path_with_dot_segments_is_refused(db: str, gateway: str) -> None:
+    """``/v1/invoices/../refunds`` reads as an invoices path but is not one.
+
+    The request is forwarded as sent, so an upstream is free to resolve the
+    dot segments and serve ``/v1/refunds``. Comparing the raw path would wave
+    exactly that through, so the check resolves dot segments first (#1051).
+    """
+    key = claim(db, "invoice:I-30")
+    status, body = post(gateway, "/v1/invoices/../refunds", {"id": "I-30"})
+    assert status == 403
+    assert "outside it" in body["reason"]
+
+    with SQLiteStorage(db) as store:
+        from continuum.actions.ledger import fold_action_events
+
+        folded = fold_action_events(store.read_events("run_1"))
+    assert folded[key].status is ActionStatus.STARTED
+
+
+def test_off_prefix_path_with_percent_encoded_traversal_is_refused(db: str, gateway: str) -> None:
+    """``%2f`` decodes to a separator, so it cannot smuggle a traversal either.
+
+    ``/v1/invoices/..%2frefunds`` is past the segment boundary, so only the
+    decoding and the dot-segment resolution expose it as a refund path.
+    """
+    key = claim(db, "invoice:I-31")
+    status, body = post(gateway, "/v1/invoices/..%2frefunds", {"id": "I-31"})
+    assert status == 403
+    assert "outside it" in body["reason"]
+
+    with SQLiteStorage(db) as store:
+        from continuum.actions.ledger import fold_action_events
+
+        folded = fold_action_events(store.read_events("run_1"))
+    assert folded[key].status is ActionStatus.STARTED
+
+
 def test_a_path_under_the_prefix_is_in_scope(db: str, gateway: str) -> None:
     """Prefix matching, not exact matching: /v1/invoices/I-1 is an invoice path.
 
     api.example.com is unreachable from CI, so the request dies at the network
-    with 502 — but that is past the prefix check, which is what this pins. An
+    with 502, but that is past the prefix check, which is what this pins. An
     off-prefix path returns 403 long before forwarding.
     """
     claim(db, "invoice:I-6")
     status, _body = post(gateway, "/v1/invoices/I-6", {"id": "I-6"})
     assert status != 403
+
+
+@pytest.mark.parametrize(
+    ("path", "prefix", "expected"),
+    [
+        # Outside and inside the prefix, at the segment boundary.
+        ("/v1/refunds", "/v1/invoices", False),
+        ("/v1/invoices", "/v1/invoices", True),
+        ("/v1/invoices/I-1", "/v1/invoices", True),
+        ("/v1/invoices-archive", "/v1/invoices", False),
+        # A trailing slash on either side is the same segment boundary.
+        ("/v1/invoices/", "/v1/invoices/", True),
+        ("/v1/invoices", "/v1/invoices/", True),
+        # The query string is not part of the scope.
+        ("/v1/refunds?x=/v1/invoices", "/v1/invoices", False),
+        ("/v1/invoices?x=/v1/refunds", "/v1/invoices", True),
+        # Traversal and encoding are resolved before the comparison.
+        ("/v1/invoices/../refunds", "/v1/invoices", False),
+        ("/v1/invoices/..%2frefunds", "/v1/invoices", False),
+        ("/v1/invoices/sub/../I-1", "/v1/invoices", True),
+        # An empty prefix or "/" is the registry's whole-host default.
+        ("/anything", "/", True),
+        ("/anything", "", True),
+        ("/", "/", True),
+        # A missing leading slash is repaired on both sides, not treated as
+        # outside the scope.
+        ("v1/invoices/I-1", "/v1/invoices", True),
+        ("/v1/invoices", "v1/invoices", True),
+    ],
+)
+def test_path_under_prefix_holds_at_the_boundaries(path: str, prefix: str, expected: bool) -> None:
+    """The scope rule, checked directly so the edge cases do not need a socket."""
+    assert _path_under_prefix(path, prefix) is expected
+
+
+def test_a_request_for_a_later_configured_prefix_is_not_measured_against_the_first(
+    db: str, gateway_multi: str
+) -> None:
+    """/v1/invoices is a registered operation even though it is listed second.
+
+    Without prefix-aware selection the gateway takes the refunds route, renders
+    ``refund:I-40`` against an invoice claim, and answers with claim
+    instructions for an operation the caller never named.
+    """
+    claim(db, "invoice:I-40")
+    status, _body = post(gateway_multi, "/v1/invoices", {"id": "I-40"})
+    # Past route selection and past the claim check. The upstream is
+    # unreachable, so the request dies at the network, not at the gate.
+    assert status != 403
+
+
+def test_an_off_prefix_path_is_refused_across_all_configured_prefixes(
+    db: str, gateway_multi: str
+) -> None:
+    """A path under no configured prefix can spend none of the claims."""
+    key = claim(db, "invoice:I-41")
+    status, body = post(gateway_multi, "/internal/admin/purge", {"id": "I-41"})
+    assert status == 403
+    assert "outside all of them" in body["reason"]
+    assert "/v1/invoices" in body["reason"]
+    assert "/v1/refunds" in body["reason"]
+
+    with SQLiteStorage(db) as store:
+        from continuum.actions.ledger import fold_action_events
+
+        folded = fold_action_events(store.read_events("run_1"))
+    assert folded[key].status is ActionStatus.STARTED
+
+
+def test_a_claim_cannot_be_spent_on_another_registered_operation(
+    db: str, gateway_multi: str
+) -> None:
+    """/v1/refunds is registered, so it is not off-prefix, but it is not free.
+
+    Selecting the refunds route renders ``refund:I-42``, which the invoice
+    claim never covered, so the call is refused on the claim rather than on the
+    prefix. Either way the invoice claim is not spent.
+    """
+    key = claim(db, "invoice:I-42")
+    status, body = post(gateway_multi, "/v1/refunds", {"id": "I-42"})
+    assert status == 403
+    assert "no ledger claim" in body["reason"]
+    assert "refund:I-42" in body["reason"]
+
+    with SQLiteStorage(db) as store:
+        from continuum.actions.ledger import fold_action_events
+
+        folded = fold_action_events(store.read_events("run_1"))
+    assert folded[key].status is ActionStatus.STARTED
 
 
 def test_body_missing_template_field_denies_with_config_error(db: str, gateway: str) -> None:

@@ -174,25 +174,44 @@ def _path_under_prefix(path: str, prefix: str) -> bool:
 
     Matching is by prefix, not exact path, so ``/v1/invoices/I-1`` stays in
     scope for a ``/v1/invoices`` route. A segment boundary is required, so
-    ``/v1/invoices-archive`` does not match ``/v1/invoices`` — without it an
+    ``/v1/invoices-archive`` does not match ``/v1/invoices``: without it an
     operator who registered ``/v1/invoices`` would be exposing every path that
     merely shares its spelling. An empty prefix or ``/`` means the whole host,
     the registry's own default when no prefix is configured.
 
-    The query string is stripped here rather than trusted from the caller: a
-    check on a raw path is bypassable with ``?x=/v1/invoices``, and the
-    property must hold even if a future caller forgets to strip it.
-    """
-    from urllib.parse import urlsplit
+    The path is normalised before it is compared, because the request is
+    forwarded as sent and an upstream is free to resolve what it received:
 
-    path = urlsplit(path).path
-    if not prefix or prefix == "/":
+    - the query string is stripped, since a raw-path check is bypassable with
+      ``?x=/v1/invoices``;
+    - percent-encodings are decoded, since ``/v1/invoices/..%2frefunds`` is
+      past the segment boundary and only the decoding exposes it as a
+      refunds path;
+    - dot segments are resolved, since ``/v1/invoices/../refunds`` reaches
+      ``/v1/refunds`` upstream while reading as an invoices path to a
+      startswith check.
+
+    Normalising is deliberately aggressive, so a request a lenient upstream
+    would have been willing to serve can be refused here. That is the
+    fail-closed side of the trade-off, and it is the right side for a check
+    that gates a claim (#1051).
+    """
+    from posixpath import normpath
+    from urllib.parse import unquote, urlsplit
+
+    raw_path = urlsplit(path).path
+    resolved = normpath(unquote(raw_path)) if raw_path.strip() else "/"
+    if not resolved.startswith("/"):
+        resolved = "/" + resolved
+
+    scope = normpath(prefix) if prefix.strip() else ""
+    if not scope or scope == "/":
         return True
-    if not path.startswith("/"):
-        path = "/" + path
-    if path == prefix:
+    if not scope.startswith("/"):
+        scope = "/" + scope
+    if resolved == scope:
         return True
-    return path.startswith(prefix if prefix.endswith("/") else prefix + "/")
+    return resolved.startswith(scope if scope.endswith("/") else scope + "/")
 
 
 def match_route(
@@ -215,8 +234,11 @@ def match_route(
     scope it has, so a request outside it is refused before the key is
     rendered: otherwise a claim for ``/v1/invoices`` would be spendable on
     ``/v1/refunds`` and settle as completed against evidence that records the
-    off-prefix URL (#1051). ``None`` preserves the caller's existing whole-host
-    behaviour for callers that supply no path.
+    off-prefix URL (#1051). When several routes share the host and method, the
+    path selects which one is in play, so a request for a later-configured
+    prefix is not measured against the first route in the list. ``None``
+    preserves the caller's existing whole-host behaviour for callers that
+    supply no path.
     """
     from continuum.actions.idempotency import idempotency_key
     from continuum.models import ActionStatus
@@ -243,8 +265,8 @@ def match_route(
     if not candidates:
         return Decision(False, f"no upstream registered for host {host!r}")
 
-    route = next((r for r in candidates if method.upper() in r.methods), None)
-    if route is None:
+    method_candidates = [r for r in candidates if method.upper() in r.methods]
+    if not method_candidates:
         return Decision(
             False,
             f"host {host!r} is registered but {method} is not among its allowed "
@@ -255,15 +277,35 @@ def match_route(
     # so a request outside it is refused fail-closed here, before the key is
     # rendered. Checking any later would let an off-prefix call consume a claim
     # and settle as completed against evidence recording the wrong URL.
+    #
+    # Several routes can share a host and method and differ only in prefix, so
+    # the request selects the route whose prefix it is actually under rather
+    # than taking the first candidate and checking only that one's prefix.
+    # Otherwise a request for a later-configured prefix would be refused against
+    # a route it was never asking about, and a claim would be evaluated against
+    # the wrong route's key template. A path under none of the configured
+    # prefixes is refused outright.
+    #
     # ``path=None`` is the whole-host behaviour callers had before the fix, so
     # an in-process caller that supplies no path is not silently broken.
-    if path is not None and not _path_under_prefix(path, route.prefix):
-        return Decision(
-            False,
-            f"host {host!r} is registered for prefix {route.prefix!r} but the "
-            f"request path {path!r} is outside it",
-            route=route,
-        )
+    scoped = method_candidates
+    if path is not None:
+        scoped = [r for r in method_candidates if _path_under_prefix(path, r.prefix)]
+        if not scoped:
+            prefixes = [r.prefix or "/" for r in method_candidates]
+            if len(prefixes) == 1:
+                reason = (
+                    f"host {host!r} is registered for prefix {prefixes[0]!r} but "
+                    f"the request path {path!r} is outside it"
+                )
+            else:
+                reason = (
+                    f"host {host!r} serves {method} under prefixes {prefixes} "
+                    f"but the request path {path!r} is outside all of them"
+                )
+            return Decision(False, reason, route=method_candidates[0])
+
+    route = scoped[0]
 
     try:
         rendered = render_key(route.key_template, body)
