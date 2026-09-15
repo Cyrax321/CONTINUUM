@@ -231,6 +231,8 @@ def _path_under_prefix(path: str, prefix: str) -> bool:
     fail-closed side of the trade-off, and it is the right side for a check
     that gates a claim (#1051).
     """
+    from posixpath import normpath
+
     resolved = _resolved_request_path(path)
 
     scope = normpath(prefix) if prefix.strip() else ""

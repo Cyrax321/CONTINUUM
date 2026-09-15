@@ -23,6 +23,7 @@ from continuum.gateway import (
     GatewayServer,
     Route,
     _path_under_prefix,
+    _resolved_request_path,
     load_gateway_config,
     render_key,
 )
@@ -181,6 +182,65 @@ def test_claimed_request_is_forwarded_settled_and_recorded(db: str, gateway: str
     action = folded[key]
     assert action.side_effect_uncertain is True
     assert action.status is ActionStatus.UNKNOWN
+
+
+def test_the_forwarded_path_is_the_resolved_one(db: str, gateway: str) -> None:
+    """The upstream receives the resolved path, not the raw one (#1051).
+
+    ``/v1/invoices/sub/../I-2`` is an in-prefix path, so the claim is spent
+    legitimately, but the raw form is what an upstream or an intermediary proxy
+    may then normalize. Forwarding the raw path would let the upstream resolve
+    a path the gate never measured, so the resolved form is what is sent.
+    """
+    claim(db, "invoice:I-2")
+
+    forwarded: dict[str, str] = {}
+
+    class _FakeResponse:
+        status = 200
+
+        def read(self) -> bytes:
+            return b"{}"
+
+        def getheader(self, name: str, default: str | None = None) -> str | None:
+            return default
+
+    class _FakeConn:
+        def __init__(self, netloc: str, **kw: object) -> None:
+            forwarded["netloc"] = netloc
+
+        def request(self, method: str, url: str, **kw: object) -> None:
+            forwarded["method"] = method
+            forwarded["url"] = url
+
+        def getresponse(self) -> _FakeResponse:
+            return _FakeResponse()
+
+        def close(self) -> None:
+            pass
+
+    import http.client as http_client
+
+    original = http_client.HTTPSConnection
+    http_client.HTTPSConnection = _FakeConn  # type: ignore[assignment]
+    try:
+        status, _body = post(gateway, "/v1/invoices/sub/../I-2", {"id": "I-2"})
+    finally:
+        http_client.HTTPSConnection = original  # type: ignore[assignment]
+
+    assert status == 200, _body
+    # The traversal was resolved before forwarding and before recording.
+    assert forwarded["url"] == "/v1/invoices/I-2", forwarded
+
+    with SQLiteStorage(db) as store:
+        events = [
+            e
+            for e in store.read_events("run_1")
+            if e.type is EventType.TOOL_COMPLETED and e.payload.get("via") == "gateway"
+        ]
+    assert events, "a forwarded call must be recorded as evidence"
+    recorded = events[0].payload["path"]
+    assert recorded == "https://api.example.com/v1/invoices/I-2", recorded
 
 
 def test_completed_effect_blocks_the_duplicate(db: str, gateway: str) -> None:

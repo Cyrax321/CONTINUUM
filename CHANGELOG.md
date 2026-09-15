@@ -59,11 +59,15 @@ All notable changes to this project are documented here. The format follows
   reading as an invoices path to a `startswith` check). Normalising is
   deliberately aggressive, so a request a lenient upstream would have served
   can be refused; that is the fail-closed side of the trade-off. Decoding is
-  repeated to a fixed point rather than applied once, because the request is
-  forwarded as sent and an upstream or intermediary proxy may decode it
-  again: `/v1/invoices/..%252frefunds` decodes once to a single opaque
-  segment a `normpath` call cannot collapse, so one pass would approve it
-  while a proxy that decodes twice resolves it to `/v1/refunds`. Route
+  repeated to a fixed point rather than applied once, because an upstream or
+  intermediary proxy may decode it again: `/v1/invoices/..%252frefunds`
+  decodes once to a single opaque segment a `normpath` call cannot collapse,
+  so one pass would approve it while a proxy that decodes twice resolves it
+  to `/v1/refunds`. The same resolved form is what is forwarded and what the
+  run's evidence records, so an upstream that normalizes dot segments or
+  decodes percent-encodings resolves the exact path the gate measured, and
+  the `TOOL_COMPLETED` event cannot disagree with the path that was
+  authorised. Route
   selection is now prefix-aware: when several routes share a host and method,
   the request picks the route whose prefix it is under, rather than taking the
   first candidate and checking only that one's prefix, so a request for a
@@ -885,7 +889,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,284 collected, ~2,246 passed, ~38 skipped on a minimal env).
+  (~2,292 collected, ~2,254 passed, ~38 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
