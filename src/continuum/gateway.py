@@ -169,6 +169,32 @@ def render_key(template: str, body: dict[str, Any]) -> str:
     return template.format(**{f: normalize_key_value(body[f]) for f in fields})
 
 
+def _resolved_request_path(path: str) -> str:
+    """The canonical form of a request path, for checking and forwarding alike.
+
+    A request is checked in this resolved form and forwarded in it too, so the
+    path an upstream resolves is the same one the gate measured (#1051).
+    Forwarding the raw path instead would let a normalizing upstream reach a
+    path the check never evaluated.
+    """
+    from posixpath import normpath
+    from urllib.parse import unquote, urlsplit
+
+    raw_path = urlsplit(path).path
+    if not raw_path.strip():
+        return "/"
+    decoded = unquote(raw_path)
+    while True:
+        again = unquote(decoded)
+        if again == decoded:
+            break
+        decoded = again
+    resolved = normpath(decoded)
+    if not resolved.startswith("/"):
+        resolved = "/" + resolved
+    return resolved
+
+
 def _path_under_prefix(path: str, prefix: str) -> bool:
     """Whether a request path falls under a route's configured prefix.
 
@@ -191,18 +217,21 @@ def _path_under_prefix(path: str, prefix: str) -> bool:
       ``/v1/refunds`` upstream while reading as an invoices path to a
       startswith check.
 
+    Decoding is repeated to a fixed point rather than applied once. The request
+    is forwarded as sent, and nothing stops an upstream or an intermediary
+    proxy from decoding it again: ``/v1/invoices/..%252frefunds`` decodes once
+    to ``/v1/invoices/..%2frefunds``, one opaque segment ``normpath`` cannot
+    collapse, so a single pass would pass it while a proxy that decodes twice
+    resolves it to ``/v1/refunds``. Decoding until the path stops changing
+    closes that at every depth, and a path that unquotes differently on each
+    pass is exactly the shape of a smuggling attempt.
+
     Normalising is deliberately aggressive, so a request a lenient upstream
     would have been willing to serve can be refused here. That is the
     fail-closed side of the trade-off, and it is the right side for a check
     that gates a claim (#1051).
     """
-    from posixpath import normpath
-    from urllib.parse import unquote, urlsplit
-
-    raw_path = urlsplit(path).path
-    resolved = normpath(unquote(raw_path)) if raw_path.strip() else "/"
-    if not resolved.startswith("/"):
-        resolved = "/" + resolved
+    resolved = _resolved_request_path(path)
 
     scope = normpath(prefix) if prefix.strip() else ""
     if not scope or scope == "/":
@@ -286,6 +315,13 @@ def match_route(
     # the wrong route's key template. A path under none of the configured
     # prefixes is refused outright.
     #
+    # When prefixes overlap, the most specific one wins. ``/v1/invoices/I-1`` is
+    # under both a ``/v1`` and a ``/v1/invoices`` route, and whichever was
+    # listed first is an accident of configuration: the key template that
+    # renders is the longest prefix's, so the choice does not depend on
+    # registration order. Two routes sharing one prefix tie, and the sort is
+    # stable, so they keep their configuration order.
+    #
     # ``path=None`` is the whole-host behaviour callers had before the fix, so
     # an in-process caller that supplies no path is not silently broken.
     scoped = method_candidates
@@ -304,6 +340,7 @@ def match_route(
                     f"but the request path {path!r} is outside all of them"
                 )
             return Decision(False, reason, route=method_candidates[0])
+        scoped.sort(key=lambda r: len(r.prefix or ""), reverse=True)
 
     route = scoped[0]
 
@@ -556,8 +593,11 @@ class GatewayServer:
 
                     # The query string is not part of the prefix scope: leaving
                     # it in would let ``?x=/v1/invoices`` satisfy the check
-                    # (#1051).
-                    request_path = urlsplit(self.path).path
+                    # (#1051). The request is also forwarded in this resolved
+                    # form, so an upstream that normalizes dot segments or
+                    # decodes percent-encodings resolves the same path the gate
+                    # measured rather than one it never checked.
+                    request_path = _resolved_request_path(self.path)
                     decision = match_route(
                         server._routes,
                         host=host.split(":")[0],
@@ -578,7 +618,7 @@ class GatewayServer:
 
                     from continuum.actions.ledger import ActionLedger
 
-                    parts = urlsplit(f"https://{decision.route.host}{self.path}")
+                    parts = urlsplit(f"https://{decision.route.host}{request_path}")
                     import http.client as http_client
 
                     scheme = "https"
@@ -593,7 +633,7 @@ class GatewayServer:
                         headers["Content-Type"] = "application/json"
                         headers["Content-Length"] = str(len(payload))
                     try:
-                        conn.request(method, self.path, body=payload, headers=headers)
+                        conn.request(method, request_path, body=payload, headers=headers)
                         resp = conn.getresponse()
                         resp_body = resp.read()
                         status = resp.status
@@ -612,14 +652,14 @@ class GatewayServer:
                     ledger = ActionLedger(storage, run_id)
                     if status < 400:
                         ledger.complete(
-                            decision.key, external_id=f"{method} {self.path} -> {status}"
+                            decision.key, external_id=f"{method} {request_path} -> {status}"
                         )
                         storage.append_event(
                             run_id,
                             EventType.TOOL_COMPLETED,
                             {
                                 "tool": "http",
-                                "path": f"{scheme}://{parts.netloc}{self.path}",
+                                "path": f"{scheme}://{parts.netloc}{request_path}",
                                 "status": status,
                                 "via": "gateway",
                             },

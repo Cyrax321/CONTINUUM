@@ -58,12 +58,20 @@ All notable changes to this project are documented here. The format follows
   resolved (`/v1/invoices/../refunds` reaches `/v1/refunds` upstream while
   reading as an invoices path to a `startswith` check). Normalising is
   deliberately aggressive, so a request a lenient upstream would have served
-  can be refused; that is the fail-closed side of the trade-off. Route
+  can be refused; that is the fail-closed side of the trade-off. Decoding is
+  repeated to a fixed point rather than applied once, because the request is
+  forwarded as sent and an upstream or intermediary proxy may decode it
+  again: `/v1/invoices/..%252frefunds` decodes once to a single opaque
+  segment a `normpath` call cannot collapse, so one pass would approve it
+  while a proxy that decodes twice resolves it to `/v1/refunds`. Route
   selection is now prefix-aware: when several routes share a host and method,
   the request picks the route whose prefix it is under, rather than taking the
   first candidate and checking only that one's prefix, so a request for a
   later-configured prefix is not refused against a route it never asked about
-  and is never measured against the wrong route's key template.
+  and is never measured against the wrong route's key template. Where those
+  prefixes overlap, the longest one wins, so `/v1/invoices/I-1` is measured
+  against the `/v1/invoices` route whether or not a broader `/v1` route was
+  listed first, and the rendered key does not depend on registration order.
 
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
@@ -877,7 +885,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,280 collected, ~2,242 passed, ~38 skipped on a minimal env).
+  (~2,284 collected, ~2,246 passed, ~38 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

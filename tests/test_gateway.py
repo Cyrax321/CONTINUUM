@@ -335,6 +335,12 @@ def test_a_path_under_the_prefix_is_in_scope(db: str, gateway: str) -> None:
         ("/v1/invoices/../refunds", "/v1/invoices", False),
         ("/v1/invoices/..%2frefunds", "/v1/invoices", False),
         ("/v1/invoices/sub/../I-1", "/v1/invoices", True),
+        # Decoding runs to a fixed point: the gateway forwards the path as
+        # sent, and an upstream or proxy that decodes twice would resolve
+        # these to /v1/refunds after the claim was approved.
+        ("/v1/invoices/..%252frefunds", "/v1/invoices", False),
+        ("/v1/invoices/..%25252frefunds", "/v1/invoices", False),
+        ("/v1/invoices/%252e%252e/refunds", "/v1/invoices", False),
         # An empty prefix or "/" is the registry's whole-host default.
         ("/anything", "/", True),
         ("/anything", "", True),
@@ -348,6 +354,29 @@ def test_a_path_under_the_prefix_is_in_scope(db: str, gateway: str) -> None:
 def test_path_under_prefix_holds_at_the_boundaries(path: str, prefix: str, expected: bool) -> None:
     """The scope rule, checked directly so the edge cases do not need a socket."""
     assert _path_under_prefix(path, prefix) is expected
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        # The query string survives as sent but never reaches the scope check.
+        ("/v1/invoices?x=1", "/v1/invoices"),
+        # Dot segments, single and repeated decoding, and a bare host root.
+        ("/v1/invoices/sub/../I-1", "/v1/invoices/I-1"),
+        ("/v1/invoices/..%2frefunds", "/v1/refunds"),
+        ("/v1/invoices/..%252frefunds", "/v1/refunds"),
+        ("/v1/./invoices/", "/v1/invoices"),
+        ("", "/"),
+        ("/", "/"),
+    ],
+)
+def test_resolved_request_path_is_the_canonical_form(path: str, expected: str) -> None:
+    """The path the gate checks is the path it forwards and records (#1051).
+
+    A normalizing upstream must resolve the same path the prefix check
+    measured, so resolution happens once here and is reused for both.
+    """
+    assert _resolved_request_path(path) == expected
 
 
 def test_a_request_for_a_later_configured_prefix_is_not_measured_against_the_first(
@@ -404,6 +433,57 @@ def test_a_claim_cannot_be_spent_on_another_registered_operation(
 
         folded = fold_action_events(store.read_events("run_1"))
     assert folded[key].status is ActionStatus.STARTED
+
+
+# Overlapping prefixes on one host and method. ``/v1`` is listed first on
+# purpose: ``/v1/invoices/I-43`` is under both, and a selection that keeps
+# config order would render the broad route's key template and measure an
+# invoice claim against it.
+OVERLAP_ROUTES = [
+    {
+        "host": "api.example.com",
+        "methods": ["POST"],
+        "prefix": "/v1",
+        "action_type": "broad",
+        "key_template": "broad:{id}",
+    },
+    {
+        "host": "api.example.com",
+        "methods": ["POST"],
+        "prefix": "/v1/invoices",
+        "action_type": "send_invoice",
+        "key_template": "invoice:{id}",
+    },
+]
+
+
+@pytest.fixture
+def gateway_overlap(db: str, tmp_path: Path):
+    """A live gateway serving nested prefixes on one host and method."""
+    path = tmp_path / "gateway_overlap.json"
+    path.write_text(json.dumps({"upstreams": OVERLAP_ROUTES}))
+    cfg = load_gateway_config(path)
+    server = GatewayServer(lambda: SQLiteStorage(db), "run_1", cfg, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"127.0.0.1:{server.port}"
+    server.shutdown()
+
+
+def test_an_overlapping_prefix_selects_the_most_specific_route(
+    db: str, gateway_overlap: str
+) -> None:
+    """A path under two prefixes is measured against the longer one.
+
+    ``/v1/invoices/I-43`` is under both ``/v1`` and ``/v1/invoices``. The
+    specific route renders ``invoice:I-43``, which the invoice claim covers,
+    so the request is forwarded; the broad route's template would render
+    ``broad:I-43`` and the call would be refused on the claim. Whichever
+    route was configured first must not change which key is rendered.
+    """
+    claim(db, "invoice:I-43")
+    status, body = post(gateway_overlap, "/v1/invoices/I-43", {"id": "I-43"})
+    assert status != 403, body
 
 
 def test_body_missing_template_field_denies_with_config_error(db: str, gateway: str) -> None:
