@@ -52,6 +52,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`continuum attest-keygen` writes the private key 0600 instead of whatever
+  the ambient umask allows (#1056).** `Path.write_text` always creates at 0666
+  masked by umask, so the unencrypted Ed25519 private PEM landed at 0644 —
+  world-readable — while the command's own output told the operator to keep it
+  secret, and every local user or backup copy could produce validly-signed
+  attestations for a tampered chain. The private key is now created through
+  `os.open` with mode 0600 and narrowed by `chmod` afterwards, because
+  `os.open`'s mode only applies at creation and a pre-existing 0644 file being
+  overwritten would otherwise keep its wider mode. The public key stays
+  world-readable, as it should. The applied mode is now stated in both the
+  human output and the JSON payload, so an operator on a filesystem without
+  permission bits can see what they actually got. A filesystem that cannot
+  express the mode keeps what it can, the same compromise `save_budgets` makes
+  for the budget registry — a private key landing weaker than a budget file was
+  an inconsistency rather than a convention.
+
 - **The docs-count guard now reads `references/` and the translated READMEs,
   and the stale counts they held are re-synced (#1109, #1071).** The guard in
   `tests/test_docs_counts.py` watched only three files, so `references/testing.md`

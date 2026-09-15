@@ -12,6 +12,7 @@ import io
 import json
 import os
 import sqlite3
+import stat
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -765,6 +766,40 @@ def test_attest_keygen_writes_pem_files(tmp_path: Path) -> None:
     assert code == ExitCode.OK
     assert priv.exists()
     assert (tmp_path / "signer.pem.pub").exists()
+    assert "PRIVATE KEY" in priv.read_text()
+
+
+# Windows chmod only toggles the read-only attribute, so a writable file
+# reports 0o666 no matter what POSIX mode was requested; the mode assertions
+# below are meaningless there. The same guard test_retry_budgets uses.
+posix_only = pytest.mark.skipif(os.name != "posix", reason="permission bits are a POSIX concept")
+
+
+@posix_only
+def test_attest_keygen_writes_private_key_owner_only(tmp_path: Path) -> None:
+    # Issue #1056: write_text created the unencrypted private PEM at 0644,
+    # world-readable under a standard umask. It must land 0600, and the
+    # output states the mode that was applied so a surprising filesystem
+    # is visible to the operator.
+    priv = tmp_path / "signer.pem"
+    code, out, _ = run("attest-keygen", "--out", str(priv))
+    assert code == ExitCode.OK
+    assert stat.S_IMODE(priv.stat().st_mode) == 0o600
+    assert "0o600" in out
+    # The public key is not secret and stays world-readable.
+    assert stat.S_IMODE((tmp_path / "signer.pem.pub").stat().st_mode) & 0o044
+
+
+@posix_only
+def test_attest_keygen_narrows_preexisting_wide_mode(tmp_path: Path) -> None:
+    # Overwriting a pre-existing 0644 file must not keep the old mode:
+    # the replacement key would sit world-readable.
+    priv = tmp_path / "signer.pem"
+    priv.write_text("stale", encoding="utf-8")
+    priv.chmod(0o644)
+    code, _, _ = run("attest-keygen", "--out", str(priv))
+    assert code == ExitCode.OK
+    assert stat.S_IMODE(priv.stat().st_mode) == 0o600
     assert "PRIVATE KEY" in priv.read_text()
 
 
