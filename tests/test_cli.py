@@ -805,6 +805,34 @@ def test_attest_keygen_narrows_a_preexisting_world_readable_key(tmp_path: Path) 
     assert priv.read_text() != "stale placeholder"
 
 
+def test_write_private_key_closes_the_fd_if_wrapping_fails(tmp_path: Path, monkeypatch) -> None:
+    """A failure to wrap the fd must not leak it (#1056)."""
+    import errno
+    import importlib
+
+    # `continuum.cli.main` the attribute is the re-exported entry point, not
+    # this module, so reach the module itself by name.
+    cli_main = importlib.import_module("continuum.cli.main")
+
+    wrapped: list[int] = []
+
+    def failing_fdopen(fd: int, *args: object, **kwargs: object) -> object:
+        wrapped.append(fd)
+        raise OSError(errno.EIO, "simulated failure")
+
+    monkeypatch.setattr(os, "fdopen", failing_fdopen)
+
+    with pytest.raises(OSError):
+        cli_main._write_private_key(tmp_path / "signer.pem", "unused")
+
+    assert wrapped, "os.fdopen was never reached"
+    for fd in wrapped:
+        # The guard closed the fd, so it is no longer a valid descriptor.
+        with pytest.raises(OSError) as exc:
+            os.fstat(fd)
+        assert exc.value.errno == errno.EBADF
+
+
 def test_attest_and_verify_round_trip(db: str, tmp_path: Path) -> None:
     from continuum.security.attestation import generate_keypair
 

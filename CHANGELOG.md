@@ -72,7 +72,9 @@ All notable changes to this project are documented here. The format follows
   on a surprising filesystem can see what they actually got. Two tests pin the
   property on POSIX (created mode, narrowing of a pre-existing 0644 key,
   reported mode in output); Windows has no POSIX permission bits and is
-  skipped, matching the `tests/test_retry_budgets.py` precedent.
+  skipped, matching the `tests/test_retry_budgets.py` precedent. A third test
+  covers the file-descriptor leak guard in the write helper on every platform.
+
 - **The horizon `abort_condition_year` scenario now reaches abort (#1028).**
   The scenario was labelled `correct_mode="abort"` but drove the abort through
   `DECISION_INVALIDATED`, an event the recovery engine never routes to `ABORT`
