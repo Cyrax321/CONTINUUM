@@ -153,6 +153,16 @@ docs/guides/liveness-watch.md.
 - No lost rationale: the contract carries its own reason, evidence, and a
   single next allowed action, sealed by hash.
 
+One thing this walkthrough deliberately does not show: the verdict is
+**advisory**. `assess()` is read-only and nothing in the library stops a
+caller that ignores REQUEST_HUMAN and calls `restore()` directly. What makes
+the verdict physical is the surface you read it from: the CLI exit code (only
+a verified-safe run exits 0, so `continuum resume "$RUN" && ./start-agent.sh`
+short-circuits), or one of the four enforcement seams — host gate hooks, the
+HTTP gateway, the replay guard, client hooks — each of which denies a side
+effect that has no claim. See "Enforcement seams" in README.md for when to
+use which.
+
 ## Reproduce
 
 ```shell

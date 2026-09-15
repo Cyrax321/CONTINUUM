@@ -89,7 +89,18 @@ _SAFETY_FOR_MODE: dict[RecoveryMode, RecoverySafety] = {
 
 @dataclass(frozen=True, slots=True)
 class RecoveryDecision:
-    """The engine's verdict, with everything needed to justify it."""
+    """The engine's verdict, with everything needed to justify it.
+
+    ADVISORY, NOT ENFORCING: computing this verdict changes nothing, and
+    nothing in the library stops a caller that ignores it. CONTINUUM is a
+    library, not a supervisor — a caller may legitimately inspect a verdict
+    and override it. Enforcement is a host decision, made at the four seams
+    (host gate hooks, the HTTP gateway, the replay guard, the client
+    hooks); see the "Enforcement seams" section of README.md. The one
+    built-in enforcement is the CLI exit code: only a verified-safe run
+    exits 0, so `continuum resume "$RUN" && ./start-agent.sh` cannot launch
+    onto state the engine declared unsafe.
+    """
 
     run_id: str
     mode: RecoveryMode
@@ -127,7 +138,12 @@ class RecoveryDecision:
         return self.contract.next_allowed_action
 
     def permits(self, action: str) -> bool:
-        """Whether ``action`` is the one step the contract currently allows."""
+        """Whether ``action`` is the one step the contract currently allows.
+
+        The intended per-action enforcement hook, honoured by the CLI exit
+        code and available to any seam that wants per-step granularity.
+        Advisory by itself: see the class docstring.
+        """
         if self.mode is RecoveryMode.RESUME:
             return True
         return action == self.contract.next_allowed_action

@@ -41,7 +41,7 @@
 
 ## Contents
 
-[Why](#why) · [Quick Start](#quick-start) · [How it works](#how-it-works) · [Where CONTINUUM sits](#where-continuum-sits) · [Features](#features) · [Security Extension](#security-extension) · [Empirical Verification](#empirical-verification) · [MCP Integration](#mcp-integration) · [Framework Integration](#framework-integration) · [Core Concepts](#core-concepts) · [Architecture](#architecture) · [API and CLI](#api-and-cli) · [Roadmap](#roadmap) · [What CONTINUUM Is Not](#what-continuum-is-not) · [Related work](#related-work) · [Status and limitations](#status-and-limitations) · [Contributing](#contributing) · [License](#license)
+[Why](#why) · [Quick Start](#quick-start) · [How it works](#how-it-works) · [Where CONTINUUM sits](#where-continuum-sits) · [Features](#features) · [Security Extension](#security-extension) · [Empirical Verification](#empirical-verification) · [MCP Integration](#mcp-integration) · [Framework Integration](#framework-integration) · [Core Concepts](#core-concepts) · [Architecture](#architecture) · [API and CLI](#api-and-cli) · [Roadmap](#roadmap) · [What CONTINUUM Is Not](#what-continuum-is-not) · [Enforcement seams](#enforcement-seams) · [Related work](#related-work) · [Status and limitations](#status-and-limitations) · [Contributing](#contributing) · [License](#license)
 
 ---
 
@@ -519,8 +519,37 @@ Beyond the original plan: the MCP server, MCP authorization and caller-authentic
 | A vector database | Structured semantic state, not embeddings |
 | A RAG system | Verified checkpoints, not retrieval-augmented memory |
 | A workflow engine | A recovery layer, not an orchestrator |
+| A supervisor that stops your process | A library that computes a verifiable verdict; enforcement is the host's decision (see [Enforcement seams](#enforcement-seams)) |
 
 The core abstraction: `semantic state + environment validation + action reconciliation = safe recovery`.
+
+## Enforcement seams
+
+The recovery verdict is **advisory by default**. `RecoveryEngine.assess()` is
+read-only, and `RecoveryDecision.permits()` — the per-action enforcement hook —
+is honoured by the surfaces below, not by the library. A caller that calls
+`CheckpointManager.restore()` directly and ignores the verdict is not stopped:
+CONTINUUM is a library, not a supervisor, and a verdict a caller may
+legitimately want to override must not be a landmine during a crash.
+
+The one always-on enforcement is the CLI exit code: only a verified-safe run
+exits `0`, so `continuum resume "$RUN" && ./start-agent.sh` short-circuits
+before launching onto state the engine declared unsafe
+([exit-code contract](docs/api/cli.md)).
+
+To make the verdict physically block a side effect, wire one of the four
+seams — each exposes the same log and gate at a different boundary:
+
+| Seam | What it enforces | How to turn it on |
+|:--|:--|:--|
+| Host gate hooks (`continuum gate`, [recovery/gate.py](src/continuum/recovery/gate.py)) | Pre-tool-use denial of unclaimed side effects, inside the agent host (Claude Code, Codex) | `continuum hooks install --with-gate` ([guide](docs/guides/embed-claude-code.md)) |
+| HTTP gateway ([gateway.py](src/continuum/gateway.py)) | Every tool call crossing the boundary is claim-checked before it reaches the real tool | `continuum gateway` ([docs](docs/multi_agent_isolation.md)) |
+| Replay guard ([replayguard.py](src/continuum/replayguard.py)) | Framework-side: node replay after interrupt/crash is answered from the ledger, never re-fired | `protected_call` / `langgraph_protected_node` in your framework code ([adapters guide](docs/adapters_guide.md)) |
+| Client hooks ([clienthooks.py](src/continuum/clienthooks.py), `continuum hooks install`) | Observation of tool events into the hash-chained log, so a verdict is computed from what actually happened | `continuum hooks install` ([guide](docs/guides/embed-codex.md)) |
+
+The right seam depends on where the side effect crosses your boundary: inside
+the agent host, at an HTTP proxy, in framework code, or at the client. All
+four fail closed — a call they cannot classify is denied, never allowed.
 
 ## Related work
 
