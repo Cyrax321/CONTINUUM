@@ -30,12 +30,8 @@ jobs:
               echo "#$N already has Anya formal review, skipping."
               continue
             fi
-            RECENT=$(gh run list --workflow=anya-review.yml --limit 30 --json conclusion,status,createdAt,event,headBranch --jq --arg br "$BR" '
-              [.[]
-               | select(.headBranch == $br)
-               | select(.event == "pull_request" or .status == "in_progress" or .status == "queued")
-               | select(.status == "in_progress" or .status == "queued" or .createdAt > (now - 2700 | todate))
-              ] | length')
+            RECENT=$(gh run list --workflow=anya-review.yml --limit 30 --json conclusion,status,createdAt,event,headBranch | jq --arg br "$BR" '
+              [.[] | select(.headBranch == $br) | select(.event == "pull_request" or .status == "in_progress" or .status == "queued") | select(.status == "in_progress" or .status == "queued" or .createdAt > (now - 2700 | todate))] | length')
             if [ "$RECENT" != "0" ]; then
               echo "#$N has recent Anya activity, skipping."
               continue
@@ -45,3 +41,56 @@ jobs:
             gh pr edit "$N" --add-reviewer anya-research > /dev/null
             echo "Refired assignment on #$N."
           done
+
+  # Reviews assigned-but-unreviewed PRs from a schedule event, which always
+  # carries secrets. This is the only path that reaches fork PRs: their own
+  # pull_request events arrive with secrets withheld, so the assignment event
+  # stands down and the sweep performs the review instead.
+  sweep:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      actions: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      MAX_REVIEWS: "3"
+      DOCS_ONLY: "true"
+    steps:
+      - name: Sweep assigned PRs needing review
+        env:
+          GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
+        run: |
+          set -uo pipefail
+          DISPATCHED=0
+          for PR in $(gh pr list --limit 50 --json number,headRefName,reviewRequests --jq '.[] | select([.reviewRequests[].login] | index("anya-research")) | "\(.number) \(.headRefName)"' | tr '\n' ';'); do
+            N="${PR%% *}"
+            BR="${PR##* }"
+            FORMAL=$(gh api "repos/${{ github.repository }}/pulls/$N/reviews" --jq '[.[] | select(.user.login == "anya-research" and .state != "COMMENTED" and .state != "DISMISSED")] | length')
+            if [ "$FORMAL" != "0" ]; then
+              echo "#$N already has an Anya formal review, skipping."
+              continue
+            fi
+            # A dispatched run lands on the default branch, so match by the
+            # display title (it carries the PR title) and not headBranch.
+            INFLIGHT=$(gh run list --workflow=anya-review.yml --limit 30 --json status,displayTitle | jq --arg t "$BR" '[.[] | select(.displayTitle | tostring | contains($t)) | select(.status == "in_progress" or .status == "queued")] | length')
+            if [ "$INFLIGHT" != "0" ]; then
+              echo "#$N has a review in flight, skipping."
+              continue
+            fi
+            if [ "$DOCS_ONLY" = "true" ]; then
+              NONDOCS=$(gh pr view "$N" --json files --jq '[.files[].path | select(test("\\.md$|^docs/|^references/") | not)] | length')
+              if [ "$NONDOCS" != "0" ]; then
+                echo "#$N touches code, out of the docs-only scope, skipping."
+                continue
+              fi
+            fi
+            if [ "$DISPATCHED" -ge "$MAX_REVIEWS" ]; then
+              echo "Reached the per-cycle cap of $MAX_REVIEWS reviews, stopping."
+              break
+            fi
+            gh workflow run anya-review.yml -f pr="$N"
+            DISPATCHED=$((DISPATCHED + 1))
+            echo "Dispatched review for #$N."
+            sleep 20
+          done
+          echo "Sweep dispatched $DISPATCHED review(s)."
