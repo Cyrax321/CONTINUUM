@@ -427,7 +427,7 @@ Schema v6. SQLite is primary, Postgres is CI verified. One log, many projections
 
 ### Module map: one library, many surfaces
 
-CONTINUUM is one library (`src/continuum`, 124 modules) plus a large test suite (161 test files, ~2,501 tests). All modules append to and replay one hash chained event log:
+CONTINUUM is one library (`src/continuum`, 127 modules) plus a large test suite (178 test files, ~2,501 tests). All modules append to and replay one hash chained event log:
 
 | Module | Role |
 |:--|:--|
