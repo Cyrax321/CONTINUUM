@@ -20,9 +20,11 @@ See ``continuum.cli.exitcodes``.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sqlite3
+import stat
 import sys
 from collections.abc import Sequence
 from datetime import datetime
@@ -3552,15 +3554,34 @@ def cmd_attest_keygen(args: argparse.Namespace, storage: Storage, out: Any, err:
     """Generate an Ed25519 signer key pair for event-chain attestation.
 
     Does not touch storage: key custody is the operator's responsibility, so the
-    tool only writes the two PEM files and says where they went.
+    tool only writes the two PEM files and says where they went. The private
+    PEM is unencrypted key material, so it is created 0600 and an existing
+    file being overwritten is narrowed to 0600 as well (issue #1056).
     """
     private_pem, public_pem = generate_keypair()
     priv_path = Path(args.out) if args.out else Path("signer.pem")
     pub_path = Path(args.pub) if args.pub else priv_path.with_suffix(priv_path.suffix + ".pub")
-    priv_path.write_text(private_pem, encoding="utf-8")
+    # ``Path.write_text`` would create the file at 0666 masked by umask (0644
+    # out of the box), leaving the key world-readable. ``os.open``'s mode only
+    # applies at creation, so a pre-existing wider mode is narrowed afterwards;
+    # a filesystem without permission bits keeps whatever it can express, the
+    # same compromise ``save_budgets`` makes.
+    fd = os.open(priv_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(private_pem)
+    with contextlib.suppress(OSError):
+        os.chmod(priv_path, 0o600)
+    mode = stat.S_IMODE(priv_path.stat().st_mode)
     pub_path.write_text(public_pem, encoding="utf-8")
-    payload = {"private_key": str(priv_path), "public_key": str(pub_path)}
-    text = f"Wrote private key {priv_path} and public key {pub_path}. Keep the private key secret."
+    payload = {
+        "private_key": str(priv_path),
+        "public_key": str(pub_path),
+        "private_key_mode": oct(mode),
+    }
+    text = (
+        f"Wrote private key {priv_path} (mode {oct(mode)}) and public key {pub_path}. "
+        "Keep the private key secret."
+    )
     _emit(payload, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
     return ExitCode.OK
 
