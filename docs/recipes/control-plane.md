@@ -17,7 +17,7 @@ Key fields for a dashboard:
 
 - `run_id`, `mode` (`RESUME`/`REQUEST_HUMAN`/…), `safe` (bool, only `RESUME` with `safe:true` exits 0)
 - `contract.recovery_status`, `contract.verified`, `contract.invalidated`, `contract.required_actions`, `contract.next_allowed_action`
-- `contract.human_steps`, `contract.post_checkpoint_observations`, `informed_retry`
+- `human_steps`, `contract.post_checkpoint_observations`, `informed_retry`
 
 Minimal polling loop:
 
