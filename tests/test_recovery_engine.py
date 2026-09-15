@@ -27,6 +27,7 @@ from continuum.recovery import (
 )
 from continuum.recovery.guidance import human_steps_for
 from continuum.storage import SQLiteStorage
+from continuum.storage.base import CorruptedRecord
 
 
 @pytest.fixture
@@ -705,3 +706,77 @@ def test_a_healthy_log_still_resumes_with_degrade_wired_in(store: SQLiteStorage)
     assert decision.contract.verified == ["external_dependency:dataset", "goal", "progress"]
     assert decision.contract.invalidated == []
     assert "next_allowed:      continue" in render_contract(decision.contract)
+
+
+# --- the consumed-authority block must fail closed (#1066) ----------------- #
+
+
+def _seed_consumed_authority(store: SQLiteStorage) -> None:
+    """A run holding an unreconciled consumed credential: blocked on read."""
+    seed(store)
+    store.append_event(
+        "run_1",
+        EventType.AUTHORITY_CONSUMED,
+        {"authority_id": "auth-1"},
+        source=Origin.HUMAN,
+    )
+
+
+def test_a_consumed_authority_blocks_resume(store: SQLiteStorage) -> None:
+    _seed_consumed_authority(store)
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v3"))
+
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    assert not decision.permits("anything_at_all")
+    assert any("consumed authority blocks resume" in r for r in decision.rationale)
+
+
+def test_an_unreadable_authority_ledger_fails_closed(
+    store: SQLiteStorage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read failure must not convert a blocked run into a resumable one.
+
+    The block substitutes nothing for the unreadable ledger: an empty map is the
+    *unblocked* answer, so swallowing the error would make ``continuum resume``
+    report safe exactly when the gate would still deny (issue #1066).
+    """
+    _seed_consumed_authority(store)
+
+    def unreadable(events: object) -> set[str]:
+        raise CorruptedRecord("events table: unreadable page (transient)")
+
+    monkeypatch.setattr(
+        "continuum.recovery.engine.collect_consumed_authorities",
+        unreadable,
+    )
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v3"))
+
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    assert decision.contract.recovery_status is RecoverySafety.REQUIRES_HUMAN
+    assert not decision.permits("anything_at_all")
+    # The decision names the failure rather than silently reporting clean.
+    assert any("could not be evaluated" in r for r in decision.rationale)
+
+
+def test_an_unreadable_ledger_never_downgrades_a_harder_verdict(
+    store: SQLiteStorage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Escalating to REQUEST_HUMAN must not weaken an already-cautious verdict."""
+    _seed_consumed_authority(store)
+    # A risk trigger policy maps to ABORT, which outranks REQUEST_HUMAN.
+    store.append_event(
+        "run_1",
+        EventType.RISK_OBSERVED,
+        {"trigger": "side_effect_duplicate", "score": 1.0},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+    monkeypatch.setattr(
+        "continuum.recovery.engine.collect_consumed_authorities",
+        lambda events: (_ for _ in ()).throw(CorruptedRecord("unreadable")),
+    )
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v4"))
+
+    assert decision.mode is RecoveryMode.ABORT
+    assert not decision.permits("anything_at_all")

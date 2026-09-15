@@ -475,14 +475,30 @@ class RecoveryEngine:
         # map inside collect_consumed_authorities.
         try:
             consumed_authorities = collect_consumed_authorities(self.storage.read_events(run_id))
-        except Exception:
-            consumed_authorities = {}
-        if consumed_authorities:
-            mode = RecoveryMode.REQUEST_HUMAN
+        except Exception as exc:
+            # Fail closed (issue #1066). An empty map is the *unblocked* answer,
+            # so substituting it here would turn an unreadable ledger into a
+            # clean bill of health: `continuum resume` would report safe exactly
+            # when the gate would still deny, which is the one thing this block
+            # exists to prevent. We could not evaluate the block, so escalate to
+            # the most cautious answer available rather than assert a safety
+            # conclusion we did not compute -- keeping the engine's convention
+            # that degradation never raises.
+            consumed_authorities = None
+            mode = max((mode, RecoveryMode.REQUEST_HUMAN), key=lambda m: SEVERITY[m])
             rationale = (
                 *rationale,
-                f"consumed authority blocks resume: {sorted(consumed_authorities)}",
+                "consumed authority block could not be evaluated: the ledger is "
+                f"unreadable ({exc}); assume a consumed credential awaits "
+                "reconciliation until a human confirms otherwise",
             )
+        else:
+            if consumed_authorities:
+                mode = RecoveryMode.REQUEST_HUMAN
+                rationale = (
+                    *rationale,
+                    f"consumed authority blocks resume: {sorted(consumed_authorities)}",
+                )
 
         reason = "; ".join(rationale) if rationale else validation.report.reason
 
