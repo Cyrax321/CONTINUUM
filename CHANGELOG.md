@@ -33,6 +33,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The Codex embed guide no longer offers a config key that no code reads
+  (#1161).** `docs/guides/embed-codex.md` told an operator who cannot route a
+  file write through Bash that the durability alternative was `continuum
+  observe` via the adapter's `checkpoint_node`, or via `monitored_commands` in
+  `.continuum/config`. The second half was invented: no loader exists for a
+  `.continuum/config` file, and `monitored_commands` is defined and consulted
+  nowhere in `src/`, `tests/`, or the other docs. It was written into the guide
+  by the embeddability sprint commit (9e655be) and never wired. The guide
+  now offers only the `checkpoint_node` route, which is real
+  (`src/continuum/adapters/langgraph.py`, `langchain.py`) and does not depend
+  on Codex traversing the tool call at all, and it names the two source files
+  so the claim is checkable. This is the fallback an operator reaches for when
+  the shell-routing workaround above it does not apply, which is exactly the
+  `apply_patch` case the surrounding paragraph is about, so leaving the key in
+  place sent the reader to a dead end at the moment the guide is most needed.
+  Prose-only; no runtime or behaviour change.
+
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
   types at the top level (`{"send_invoice": {...}}`) instead of nesting them
