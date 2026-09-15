@@ -144,6 +144,15 @@ action (`Liveness: ok/breached ...`); `continuum watch` evaluates it on
 demand with its own contract, walked through in
 docs/guides/liveness-watch.md.
 
+One thing to keep straight when reading this output: every verdict above —
+`Recovery decision: REQUEST_HUMAN`, `Next permitted action: ...` — is advice
+from the engine, not an enforcement boundary. Nothing in the library stops a
+caller that reads `REQUEST_HUMAN` and restores the checkpoint anyway (the
+CLI does refuse: `continuum resume` exits non-zero, so
+`continuum resume "$RUN" && ./start-agent.sh` short-circuits). Making the
+library itself refuse means wiring one of the opt-in enforcement seams; see
+docs/guides/enforcement-seams.md.
+
 ## What just happened
 
 - No duplicate Slack message: the interrupted effect was reconciled by probe
@@ -152,6 +161,8 @@ docs/guides/liveness-watch.md.
   clean parts of the state were left alone.
 - No lost rationale: the contract carries its own reason, evidence, and a
   single next allowed action, sealed by hash.
+- No silent override: the verdict says what it says, and the docs say the
+  caller is on its own honour unless it wires a seam.
 
 ## Reproduce
 

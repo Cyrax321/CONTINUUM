@@ -519,8 +519,19 @@ Beyond the original plan: the MCP server, MCP authorization and caller-authentic
 | A vector database | Structured semantic state, not embeddings |
 | A RAG system | Verified checkpoints, not retrieval-augmented memory |
 | A workflow engine | A recovery layer, not an orchestrator |
+| A supervisor | A recovery library whose verdicts are advisory unless you wire an enforcement seam |
 
 The core abstraction: `semantic state + environment validation + action reconciliation = safe recovery`.
+
+**The verdict is advisory by default.** `RecoveryEngine.assess()` answers *where a run stands*;
+it does not stop a caller that ignores the answer. A plain `pip install continuum-agent`
+gets the diagnosis, not a guard: nothing prevents a worker from calling
+`CheckpointManager.restore()` directly and resuming state the engine just declared unsafe.
+What is enforced out of the box is the CLI's exit code (only a verified-safe run exits `0`,
+so `continuum resume "$RUN" && ./start-agent.sh` cannot launch onto stale state). To make
+the library itself refuse, wire one of the four opt-in enforcement seams — the gate host
+hook, the HTTP gateway, the replay guard, or the observation hooks — each documented in
+[docs/guides/enforcement-seams.md](docs/guides/enforcement-seams.md).
 
 ## Related work
 
@@ -536,6 +547,7 @@ CONTINUUM sits at the overlap of durable execution, idempotent side-effect track
 - **Shell command enforcement gap**: the gate enforces claims for structured tool calls but cannot see inside Bash/curl commands. Documented as v1 scope refusal.
 - **Framework adapters remain experimental.** All three framework adapters now carry live-model soft-resume and hard-crash proofs (OpenRouter, `gpt-4o-mini`), including the crash contract that blocks resume on an uncertain side effect, and now have crash-and-resume verification tests achieving parity with the generic facade (Refs #285). Prefer `GenericAgentAdapter` for production recovery.
 - **Agent/MCP runs need an explicit confirm before auto-resume.** Externally-reported state is `REQUIRES_REVIEW`, so `continuum resume` returns `request_human` until a human confirms. By design, not a bug; see [Framework Integration](#framework-integration).
+- **Recovery verdicts are advisory by default.** `RecoveryEngine.assess()` and `RecoveryDecision.permits()` tell the caller what is allowed; nothing in the library blocks a caller that proceeds anyway. Enforcement is opt-in through four seams (gate, gateway, replay guard, hooks) or by honouring the CLI exit codes; see [What CONTINUUM Is Not](#what-continuum-is-not) and [docs/guides/enforcement-seams.md](docs/guides/enforcement-seams.md).
 - **e2e autonomy test series** (issue [#6](https://github.com/Cyrax321/CONTINUUM/issues/6)): three full Claude Code runs scored 7/7 mechanics with unprompted recovery behavior observed. Further iterations across diverse prompt styles remain open.
 
 ## About

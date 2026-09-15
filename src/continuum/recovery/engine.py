@@ -89,7 +89,18 @@ _SAFETY_FOR_MODE: dict[RecoveryMode, RecoverySafety] = {
 
 @dataclass(frozen=True, slots=True)
 class RecoveryDecision:
-    """The engine's verdict, with everything needed to justify it."""
+    """The engine's verdict, with everything needed to justify it.
+
+    Advisory by design: nothing in this library stops a caller who ignores
+    the verdict. CONTINUUM is a recovery library, not a supervisor; ``assess``
+    answers "where does this run stand" and the caller decides what to do
+    with the answer. Enforcement is opt-in through the four seams (the gate
+    host hook, the HTTP gateway, the replay guard, the observation hooks)
+    or by honouring the CLI's exit codes, which already encode the verdict
+    for shell pipelines. A caller that calls ``CheckpointManager.restore``
+    directly is trusting its own judgement, exactly as if it had never
+    asked. See ``permits`` for the per-action form of the same contract.
+    """
 
     run_id: str
     mode: RecoveryMode
@@ -127,7 +138,14 @@ class RecoveryDecision:
         return self.contract.next_allowed_action
 
     def permits(self, action: str) -> bool:
-        """Whether ``action`` is the one step the contract currently allows."""
+        """Whether ``action`` is the one step the contract currently allows.
+
+        This is advice, not enforcement: ``True``/``False`` tells the caller
+        what the contract permits, but nothing in the library blocks a
+        caller that proceeds anyway. ``permits`` is the per-action form of
+        the same fact as ``safe``; enforcement is opt-in via the seams
+        documented on the class.
+        """
         if self.mode is RecoveryMode.RESUME:
             return True
         return action == self.contract.next_allowed_action
