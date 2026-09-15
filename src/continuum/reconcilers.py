@@ -101,9 +101,7 @@ def load_reconcilers(path: Path) -> dict[str, dict[str, Any]]:
             if looks_like_probes
             else ""
         )
-        raise ReconcilerConfigError(
-            f"{location}: expected {{'probes': {{...}}}}{hint}"
-        )
+        raise ReconcilerConfigError(f"{location}: expected {{'probes': {{...}}}}{hint}")
     if not isinstance(raw.get("probes"), dict):
         raise ReconcilerConfigError(f"{location}: expected {{'probes': {{...}}}}")
     probes: dict[str, dict[str, Any]] = {}
