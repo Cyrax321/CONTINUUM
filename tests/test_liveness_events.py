@@ -241,3 +241,110 @@ def test_max_silence_override_wins_without_open_claim(tmp_path: Path) -> None:
     with SQLiteStorage(db) as store:
         types = [e.type for e in store.read_events(run_id)]
         assert EventType.LIVENESS_SILENCE_DETECTED in types
+
+
+def _append_timed(
+    store: SQLiteStorage, run_id: str, etype: EventType, payload: dict, ts: datetime
+) -> None:
+    """Append a hash-chained event with an explicit timestamp (for backdating)."""
+    from continuum.events import Event
+
+    prev_hash = store.read_events(run_id)[-1].hash
+    ev = Event(
+        run_id=run_id,
+        sequence=store.last_sequence(run_id) + 1,
+        type=etype,
+        timestamp=ts,
+        payload=payload,
+        prev_hash=prev_hash,
+    ).sealed()
+    store.append_sealed(ev)
+
+
+def test_watch_does_not_duplicate_detected_after_compaction(tmp_path: Path) -> None:
+    """An archived DETECTED is still the open episode: watch must not re-mint it (#1072).
+
+    The episode scan in cmd_watch read the live tail only, so after
+    compaction moved the DETECTED into events_archive the same breach episode
+    looked unrecorded and every watch invocation appended another
+    LIVENESS_SILENCE_DETECTED for it.
+    """
+    db = str(tmp_path / "watch_compact_dup.db")
+    run_id = "run_watch_compact_dup"
+    old_ts = datetime.now(UTC) - timedelta(hours=3)
+    with SQLiteStorage(db) as store:
+        store.create_run_started(Run(run_id=run_id, goal="compact dup"))
+        _append_timed(
+            store,
+            run_id,
+            EventType.WORK_COMPLETED,
+            {"doc": 0},
+            old_ts,
+        )
+        _append_timed(
+            store,
+            run_id,
+            EventType.LIVENESS_SILENCE_DETECTED,
+            {"silence_seconds": 10800, "threshold_seconds": 3600, "phase": "otherwise"},
+            old_ts,
+        )
+        store.compact_run(run_id)
+        # The compacted prefix (DETECTED included) is archived; only the anchor
+        # is live. Append an old-timestamp live tail so the run is still silent.
+        assert store.read_events(run_id)[-1].type is not EventType.LIVENESS_SILENCE_DETECTED, (
+            "setup error: DETECTED must land in the archive, not stay live"
+        )
+        _append_timed(store, run_id, EventType.WORK_COMPLETED, {"doc": 1}, old_ts)
+
+    out, err = io.StringIO(), io.StringIO()
+    code = main(
+        ["--db", db, "watch", run_id, "--max-silence", "3600", "--on-breach", "exit"],
+        out=out,
+        err=err,
+    )
+    assert code == 20, out.getvalue()
+    with SQLiteStorage(db) as store:
+        detected = [
+            e
+            for e in store.read_all_events(run_id)
+            if e.type is EventType.LIVENESS_SILENCE_DETECTED
+        ]
+        assert len(detected) == 1, "compaction must not cause a duplicate DETECTED"
+
+
+def test_watch_mints_recovered_after_compaction(tmp_path: Path) -> None:
+    """A compacted run that resumed must still mint LIVENESS_RECOVERED (#1072).
+
+    With the episode scan reading the live tail only, an archived DETECTED was
+    invisible, so the not-breached branch never fired and the episode never
+    terminated in the audit trail.
+    """
+    db = str(tmp_path / "watch_compact_recovered.db")
+    run_id = "run_watch_compact_recovered"
+    old_ts = datetime.now(UTC) - timedelta(hours=3)
+    with SQLiteStorage(db) as store:
+        store.create_run_started(Run(run_id=run_id, goal="compact recovered"))
+        _append_timed(store, run_id, EventType.WORK_COMPLETED, {"doc": 0}, old_ts)
+        _append_timed(
+            store,
+            run_id,
+            EventType.LIVENESS_SILENCE_DETECTED,
+            {"silence_seconds": 10800, "threshold_seconds": 3600, "phase": "otherwise"},
+            old_ts,
+        )
+        store.compact_run(run_id)
+        # Fresh live tail: the run has resumed, so it is no longer breached.
+        _append_timed(store, run_id, EventType.WORK_COMPLETED, {"doc": 1}, datetime.now(UTC))
+
+    out, err = io.StringIO(), io.StringIO()
+    code = main(
+        ["--db", db, "watch", run_id, "--max-silence", "3600", "--on-breach", "exit"],
+        out=out,
+        err=err,
+    )
+    assert code == 0, out.getvalue()
+    with SQLiteStorage(db) as store:
+        recovered = [
+            e for e in store.read_all_events(run_id) if e.type is EventType.LIVENESS_RECOVERED
+        ]
+        assert len(recovered) == 1, "recovery of an archived episode must be recorded"

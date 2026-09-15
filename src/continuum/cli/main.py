@@ -1107,9 +1107,17 @@ def cmd_watch(args: argparse.Namespace, storage: Storage, out: Any, err: Any) ->
         return 1
 
     breached = bool(advisory.get("breached"))
-    # Append liveness events as needed (mutating only on breach/recovery)
+    # Append liveness events as needed (mutating only on breach/recovery).
+    # The episode scan walks the full history including the archived prefix
+    # (read_all_events) so compaction cannot break the state machine: without
+    # it, a compacted run whose DETECTED lives in the archive looks like it
+    # never breached, minting a duplicate DETECTED for the same episode and
+    # never minting LIVENESS_RECOVERED (issue #1072).
     try:
-        events = storage.read_events(run_id)
+        try:
+            events = storage.read_all_events(run_id)
+        except Exception:
+            events = storage.read_events(run_id)
         last_liveness = None
         for ev in reversed(events):
             if ev.type.value in ("LIVENESS_SILENCE_DETECTED", "LIVENESS_RECOVERED"):
