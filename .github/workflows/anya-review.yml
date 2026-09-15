@@ -84,6 +84,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
         run: |
+          # GitHub withholds repository secrets from pull_request events
+          # raised by a fork, so ANYA_TOKEN is empty there and every gh call
+          # below fails with "set the GH_TOKEN environment variable". Stand
+          # down instead of turning the PR's own check red. The /anya review
+          # comment path still carries the token and reaches the same code.
+          if [ -z "$GH_TOKEN" ]; then
+            echo "No ANYA_TOKEN on this event, standing down."
+            echo "GitHub withholds repository secrets from pull_request events"
+            echo "raised by a fork, so the gate cannot read the PR and the"
+            echo "review steps cannot post. The /anya review comment path"
+            echo "carries the token and reaches the same code."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           PR="${{ github.event.inputs.pr }}"
           if [ -z "$PR" ] || [ "$PR" = "null" ]; then
             PR="${{ github.event.pull_request.number }}"
