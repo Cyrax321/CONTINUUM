@@ -926,21 +926,29 @@ class ActionLedger:
         # drifted arguments. The check mirrors the grant check but scans
         # AUTHORITY_CONSUMED events. A live retry under the same key and
         # authority is allowed, mirroring the grant live_match rule.
+        from continuum.gate import collect_consumed_authorities, find_consumed_authority
+
         authority_id = None
+        prior_ev = None
         if grant_clean is not None:
             authority_id = grant_clean["id"]
-        elif isinstance(arguments, Mapping):
-            for _k in ("authority_id", "authority", "token", "approval_id"):
-                if _k in arguments and isinstance(arguments[_k], str) and arguments[_k].strip():
-                    authority_id = arguments[_k].strip()
-                    break
-        if authority_id is not None:
-            from continuum.gate import collect_consumed_authorities
-
             if authority_history is None:
                 authority_history = self.storage.read_all_events(self.run_id)
-            consumed = collect_consumed_authorities(authority_history)
-            prior_ev = consumed.get(authority_id)
+            prior_ev = collect_consumed_authorities(authority_history).get(authority_id)
+        elif isinstance(arguments, Mapping):
+            # Detection is value-based and shape-agnostic (issue #1074): a spent
+            # authority nested inside the argument structure -- {"payment":
+            # {"auth_token": ...}}, an ordinary shape for a credentials tool --
+            # must be caught, not only one sitting under four hard-coded
+            # top-level field names, which the old scan missed. The scan is the
+            # shared helper the gate and gateway use, so the three enforcers
+            # cannot disagree about depth.
+            if authority_history is None:
+                authority_history = self.storage.read_all_events(self.run_id)
+            authority_id, prior_ev = find_consumed_authority(
+                arguments, collect_consumed_authorities(authority_history)
+            )
+        if authority_id is not None and prior_ev is not None:
             # Allow live retry under same key with same authority
             live_auth_match = (
                 existing is not None
