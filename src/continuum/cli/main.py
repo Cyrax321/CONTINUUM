@@ -31,7 +31,12 @@ from typing import Any
 
 from continuum import __version__
 from continuum.actions import ActionLedger
-from continuum.checkpoint import CheckpointError, CheckpointManager, CheckpointTrigger
+from continuum.checkpoint import (
+    CheckpointError,
+    CheckpointManager,
+    CheckpointTrigger,
+    clear_resume_pointer,
+)
 from continuum.cli.colour import Palette
 from continuum.cli.exitcodes import ExitCode, exit_code_for
 from continuum.clienthooks import (
@@ -1809,15 +1814,8 @@ def cmd_complete(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     updated = run.touch(status=RunStatus.COMPLETED)
     storage.update_run(updated)
     # Instant resume file tracks the most recent checkpoint; a completed run
-    # is no longer interrupted, so remove the file if it refers to this run.
-    try:
-        resume_path = Path(".continuum/resume.json")
-        if resume_path.exists():
-            data = json.loads(resume_path.read_text(encoding="utf-8"))
-            if data.get("run_id") == args.run_id:
-                resume_path.unlink()
-    except Exception:
-        pass
+    # is no longer interrupted, so the pointer must not keep naming it.
+    clear_resume_pointer(args.run_id)
     payload = {
         "run_id": args.run_id,
         "status": updated.status.value,
