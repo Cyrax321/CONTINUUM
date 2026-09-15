@@ -46,6 +46,17 @@ All notable changes to this project are documented here. The format follows
   loads as a valid empty registry. `gate.py` has the identical pattern for its
   `tools` wrapper; left alone here since it's outside this issue's scope.
 
+  The three guidance call sites that read the registry (`resume` in the CLI,
+  the TUI's recovery view, and the MCP server's `continuum_resume`) each
+  caught every exception around `load_reconcilers` and fell back to an empty
+  probe list, so the new diagnostic above was getting silently absorbed the
+  same way the old empty-dict default was. Each now lets `ReconcilerConfigError`
+  through, matching how it already handles other errors: the CLI's existing
+  top-level `ValueError` handler prints it and exits non-zero, the TUI
+  prepends it to the rendered steps rather than dropping the run's guidance
+  entirely, and the MCP server raises it as a `ToolError` so the calling agent
+  sees it.
+
 - **The horizon `abort_condition_year` scenario now reaches abort (#1028).**
   The scenario was labelled `correct_mode="abort"` but drove the abort through
   `DECISION_INVALIDATED`, an event the recovery engine never routes to `ABORT`

@@ -182,19 +182,28 @@ def overview_lines(storage: Storage, run_id: str) -> list[str]:
 def _human_steps(decision: Any, run_id: str) -> list[str]:
     """Executable next steps, mirroring the CLI's read-only probe of config."""
     from continuum.gate import DEFAULT_GATE_CONFIG_PATH
-    from continuum.reconcilers import DEFAULT_RECONCILERS_PATH, load_reconcilers
+    from continuum.reconcilers import (
+        DEFAULT_RECONCILERS_PATH,
+        ReconcilerConfigError,
+        load_reconcilers,
+    )
     from continuum.recovery.guidance import human_steps_for
 
+    config_error: str | None = None
     try:
         probed: list[str] = list(load_reconcilers(Path(DEFAULT_RECONCILERS_PATH)))
+    except ReconcilerConfigError as exc:  # surfaced like other rows in this file, not dropped
+        probed = []
+        config_error = str(exc)
     except Exception:
         probed = []
-    return human_steps_for(
+    steps = human_steps_for(
         decision,
         run_id=run_id,
         probed_types=probed,
         gate_configured=Path(DEFAULT_GATE_CONFIG_PATH).exists(),
     )
+    return [f"error: {config_error}"] + steps if config_error else steps
 
 
 def recovery_lines(storage: Storage, run_id: str) -> list[str]:

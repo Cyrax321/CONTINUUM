@@ -167,6 +167,27 @@ def test_recovery_lines_render_the_verdict_and_the_family_block(
     assert "FAMILY BLOCKED" in lines
 
 
+def test_recovery_lines_surface_a_malformed_reconciler_registry(
+    db: str, store: SQLiteStorage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registry missing the ``probes`` wrapper must not degrade to silence.
+
+    The guidance probe around ``load_reconcilers`` used to catch every
+    exception and fall back to an empty registry, so the dashboard showed
+    "no probe registered" with no hint the config itself was wrong (#1062).
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".continuum").mkdir()
+    (tmp_path / ".continuum" / "reconcilers.json").write_text(
+        '{"send_invoice": {"command": "check-outbox"}}'
+    )
+    run("--db", db, "start", "solo", "--goal", "work")
+
+    lines = "\n".join(tui_model.recovery_lines(store, "solo"))
+    assert "error:" in lines
+    assert "send_invoice" in lines
+
+
 # --------------------------------------------------------------------------- #
 # the landing splash
 # --------------------------------------------------------------------------- #
