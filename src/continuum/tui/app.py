@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import sys
+import textwrap
 from collections.abc import Callable
 from typing import Any
 
@@ -54,8 +55,9 @@ class TuiApp:
     TABS = ("overview", "recovery", "checkpoints", "actions", "events", "family", "budget")
     _TABLE_TABS = frozenset({"checkpoints", "actions", "events", "budget"})
 
-    def __init__(self, storage: Storage) -> None:
+    def __init__(self, storage: Storage | None, *, database_error: str | None = None) -> None:
         self.storage = storage
+        self.database_error = database_error
         self.view = "landing"
         self.width = 80  # the driver restamps this from the real screen each draw
         self.tab = 0
@@ -63,6 +65,7 @@ class TuiApp:
         self.cursor = -1  # selected body line in a table tab, -1 when none
         self.scroll = 0
         self.rows: list[RunRow] = []
+        self._run_count: int | None = None
         self.lines: list[str] = []
         self.pending: tuple[str, Callable[[], str]] | None = None
         self.message = ""
@@ -75,9 +78,21 @@ class TuiApp:
 
     def refresh(self) -> None:
         """Reload the current view's data from storage. Read-only."""
-        if self.view in ("landing", "runs"):
-            # the landing screen shows the run count, and leaving it lands on
-            # the runs list, so both views read the same rows
+        if self.storage is None:
+            self.rows = []
+            self.lines = [
+                "Database unavailable.",
+                self.database_error or "No compatible database was opened.",
+                "Run `continuum --db <compatible-database> tui` to open run data.",
+            ]
+            return
+        if self.view == "landing":
+            # the splash only needs a count; assessing recovery for every run
+            # on every tick would price the idle screen at a full store scan
+            self.rows = []
+            self._run_count = self._count_runs()
+            self.cursor = -1
+        elif self.view == "runs":
             self.rows = model.run_rows(self.storage)
             self.cursor = -1  # the runs list marks its selection itself
             if self.rows:
@@ -85,12 +100,25 @@ class TuiApp:
         else:
             self._refresh_detail()
 
+    def _count_runs(self) -> int:
+        """Count runs without assessing recovery for each: a bare list read."""
+        assert self.storage is not None
+        return len(self.storage.list_runs())
+
     def _run_id(self) -> str | None:
         if 0 <= self.index < len(self.rows):
             return self.rows[self.index].run_id
         return None
 
     def _refresh_detail(self) -> None:
+        storage = self.storage
+        if storage is None:
+            self.lines = [
+                "Database unavailable; run data cannot be opened.",
+                self.database_error or "No compatible database was opened.",
+            ]
+            self.cursor = -1
+            return
         run_id = self._run_id()
         if run_id is None:
             self.lines = ["No run selected. Press esc to go back to the runs list."]
@@ -98,13 +126,31 @@ class TuiApp:
             return
         tab = self.TABS[self.tab]
         self.cursor = -1
+        try:
+            self._render_detail_tab(storage, run_id, tab)
+        except Exception as exc:
+            # One unreadable run must fail this view alone, never the process:
+            # the dashboard is the operator's window into a broken store, so
+            # crashing here would hide the very thing being investigated.
+            self.lines = [
+                f"Cannot read run {run_id} ({tab} tab): {exc}",
+                "",
+                "The rest of the dashboard is unaffected. Press esc for the runs list,",
+                "r to retry, or run `continuum verify` outside the dashboard for detail.",
+            ]
+        if self.scroll > max(0, len(self.lines) - 1):
+            self.scroll = 0
+
+    def _render_detail_tab(self, storage: Storage, run_id: str, tab: str) -> None:
+        """Fill self.lines for one tab. Raises on an unreadable run; the
+        caller renders the failure instead of letting it escape the app."""
         rows: list[Any]  # one of the model's table row types, per tab
         if tab == "overview":
-            self.lines = model.overview_lines(self.storage, run_id)
+            self.lines = model.overview_lines(storage, run_id)
         elif tab == "recovery":
-            self.lines = model.recovery_lines(self.storage, run_id)
+            self.lines = model.recovery_lines(storage, run_id)
         elif tab == "checkpoints":
-            rows = model.checkpoint_rows(self.storage, run_id)
+            rows = model.checkpoint_rows(storage, run_id)
             self.lines = [f"{'CHECKPOINT':<12} {'VERSION':<9} {'TRIGGER':<10} COMPLETED"]
             self.lines += [
                 f"{r.checkpoint_id[:10]:<12} v{r.version:<8} {r.trigger:<10} {r.completed}"
@@ -112,7 +158,7 @@ class TuiApp:
             ] or ["No checkpoints recorded. Press c to force one."]
             self.cursor = 1 if len(self.lines) > 1 else -1
         elif tab == "actions":
-            rows = model.action_rows(self.storage, run_id)
+            rows = model.action_rows(storage, run_id)
             self.lines = [f"{'STATUS':<16} {'TYPE':<24} {'EXTERNAL ID':<20} KEY"]
             self.lines += [
                 (
@@ -123,30 +169,34 @@ class TuiApp:
             ] or ["No actions recorded."]
             self.cursor = 1 if len(self.lines) > 1 else -1
         elif tab == "events":
-            rows = model.event_rows(self.storage, run_id)
+            rows = model.event_rows(storage, run_id)
             self.lines = [f"{'SEQ':>5}  {'TYPE':<26} PAYLOAD"]
             self.lines += [f"{r.sequence:>5}  {r.type:<26} {r.summary}" for r in rows] or [
                 "No events."
             ]
             self.cursor = 1 if len(self.lines) > 1 else -1
         elif tab == "family":
-            self.lines = model.family_lines(self.storage, run_id)
+            self.lines = model.family_lines(storage, run_id)
         elif tab == "budget":
-            rows = model.budget_rows(self.storage, run_id)
+            rows = model.budget_rows(storage, run_id)
             self.lines = [f"{'ACTION TYPE':<28} {'ATTEMPTS':>8} {'MAX':>4} {'REMAINING':>10}"]
             self.lines += [
                 f"{r.action_type:<28} {r.attempts:>8} {r.max_attempts:>4} {r.remaining:>10}"
                 for r in rows
-            ] or ["No budgets configured."]
+            ] or ["No action attempts recorded."]
             self.cursor = 1 if len(self.lines) > 1 else -1
-        if self.scroll > max(0, len(self.lines) - 1):
-            self.scroll = 0
 
     def _selected_action(self) -> model.ActionRow | None:
         """The action row under the cursor, on the actions tab only."""
-        if self.view != "detail" or self.TABS[self.tab] != "actions" or self.cursor < 1:
+        storage = self.storage
+        if (
+            storage is None
+            or self.view != "detail"
+            or self.TABS[self.tab] != "actions"
+            or self.cursor < 1
+        ):
             return None
-        rows = model.action_rows(self.storage, self._run_id() or "")
+        rows = model.action_rows(storage, self._run_id() or "")
         offset = self.cursor - 1
         if 0 <= offset < len(rows):
             return rows[offset]
@@ -180,12 +230,23 @@ class TuiApp:
             art: list[str] = list(_LOGO_LINES)
         else:  # too narrow for the logo: a banner that fits, not one that clips
             art = ["C O N T I N U U M"]
-        runs_line = f"{len(self.rows)} run(s) recorded" if self.rows else "no runs recorded yet"
+        count = self._run_count or 0
+        runs_line = f"{count} run(s) recorded" if count else "no runs recorded yet"
+        status: list[str] = []
+        if self.database_error:
+            status = [
+                center(line)
+                for line in textwrap.wrap(
+                    f"database unavailable: {self.database_error}",
+                    width=max(1, self.width),
+                )
+            ]
         return (
             [""]
             + [center(line) for line in art]
             + ["", ""]
             + [center(_LANDING_TAGLINE), center(f"v{__version__}   {runs_line}")]
+            + status
             + ["", "", center("press any key to open the dashboard")]
         )
 
@@ -196,6 +257,12 @@ class TuiApp:
         if self.view == "landing":
             return self._landing_lines()
         if self.view == "runs":
+            if self.storage is None:
+                return [
+                    "Database unavailable; no runs can be displayed.",
+                    self.database_error or "No compatible database was opened.",
+                    "Use --db with a compatible database, then run `continuum tui`.",
+                ]
             if not self.rows:
                 return ['No runs recorded. Start one with: continuum start <id> --goal "..."']
             lines = [f"{'RUN':<20} {'STATUS':<10} {'EVT':>5}  {'MODE':<14} {'SAFE':<7} GOAL"]
@@ -343,38 +410,42 @@ class TuiApp:
 
     def _queue_checkpoint(self) -> None:
         run_id = self._run_id()
-        if run_id is None:
+        storage = self.storage
+        if run_id is None or storage is None:
             self.message = "no run selected"
             return
         self.pending = (
             f"force a checkpoint on run {run_id} now?",
-            lambda: model.force_checkpoint(self.storage, run_id),
+            lambda: model.force_checkpoint(storage, run_id),
         )
 
     def _queue_complete(self) -> None:
         run_id = self._run_id()
-        if run_id is None:
+        storage = self.storage
+        if run_id is None or storage is None:
             self.message = "no run selected"
             return
         self.pending = (
             f"close run {run_id} as completed? (REVIEW_CONFIRMED + RUN_COMPLETED)",
-            lambda: model.complete_run(self.storage, run_id),
+            lambda: model.complete_run(storage, run_id),
         )
 
     def _queue_confirm(self) -> None:
         run_id = self._run_id()
-        if run_id is None:
+        storage = self.storage
+        if run_id is None or storage is None:
             self.message = "no run selected"
             return
         self.pending = (
             f"confirm the self-reported goal and progress of run {run_id}? (REVIEW_CONFIRMED)",
-            lambda: model.confirm_state(self.storage, run_id),
+            lambda: model.confirm_state(storage, run_id),
         )
 
     def _queue_reconcile(self, *, occurred: bool) -> None:
         run_id = self._run_id()
         row = self._selected_action()
-        if run_id is None or row is None:
+        storage = self.storage
+        if run_id is None or storage is None or row is None:
             self.message = "select an action row first (cursor is on the actions list)"
             return
         if not row.uncertain:
@@ -383,7 +454,7 @@ class TuiApp:
         self.pending = (
             f"settle {row.action_type} on run {run_id} as "
             f"{'OCCURRED' if occurred else 'NOT OCCURRED'}? (ACTION_RECONCILED)",
-            lambda: model.reconcile_action(self.storage, run_id, row.key, occurred=occurred),
+            lambda: model.reconcile_action(storage, run_id, row.key, occurred=occurred),
         )
 
 
@@ -480,7 +551,13 @@ def _driver(curses: Any, screen: Any, app: TuiApp, refresh_seconds: float) -> in
             return ExitCode.OK
 
 
-def run_tui(storage: Storage, *, refresh_seconds: float = 0.0, err: Any = None) -> int:
+def run_tui(
+    storage: Storage | None,
+    *,
+    refresh_seconds: float = 0.0,
+    database_error: str | None = None,
+    err: Any = None,
+) -> int:
     """Open the full-screen dashboard; returns a process exit status.
 
     Refuses rather than half-rendering when curses is unavailable or stdout
@@ -505,18 +582,28 @@ def run_tui(storage: Storage, *, refresh_seconds: float = 0.0, err: Any = None) 
         )
         return ExitCode.ERROR
     try:
-        return _run(curses, storage, refresh_seconds)
+        return _run(curses, storage, refresh_seconds, database_error)
     except curses.error as exc:  # a terminal too small or too alien for curses
         print("error: this terminal cannot run the tui:", exc, file=err)
         print("use `continuum dashboard` for the browser dashboard", file=err)
         return ExitCode.ERROR
 
 
-def _run(curses: Any, storage: Storage, refresh_seconds: float) -> int:
+def _run(
+    curses: Any,
+    storage: Storage | None,
+    refresh_seconds: float,
+    database_error: str | None = None,
+) -> int:
     """Enter curses mode; the wrapper restores the terminal on the way out."""
 
     def inner(screen: Any) -> int:
-        return _driver(curses, screen, TuiApp(storage), refresh_seconds)
+        return _driver(
+            curses,
+            screen,
+            TuiApp(storage, database_error=database_error),
+            refresh_seconds,
+        )
 
     result: int = curses.wrapper(inner)
     return result

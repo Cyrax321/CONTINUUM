@@ -9,7 +9,9 @@ never half-render.
 from __future__ import annotations
 
 import io
+import json
 import sys
+import types
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -119,6 +121,8 @@ def test_event_rows_include_the_archived_prefix_after_compaction(
 ) -> None:
     """A compacted run must read the same as one that was never compacted."""
     run("--db", db, "start", "r1", "--goal", "g")
+    if not hasattr(store, "compact_run"):
+        pytest.skip("event-log compaction is not available in this storage version")
     store.compact_run("r1")
 
     rows = tui_model.event_rows(store, "r1")
@@ -144,6 +148,33 @@ def test_budget_rows_count_attempts_over_the_whole_log(db: str, store: SQLiteSto
     assert rows["send_invoice"].remaining == rows["send_invoice"].max_attempts - 2
 
 
+def test_budget_rows_read_the_configured_registry(
+    db: str, store: SQLiteStorage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Limits come from .continuum/budgets.json, and configured types with no
+    attempts still appear with a full allowance."""
+    run("--db", db, "start", "r1", "--goal", "g")
+    ActionLedger(SQLiteStorage(db), "r1").claim("send_invoice", {}, key="invoice:I-1")
+    registry = tmp_path / ".continuum" / "budgets.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(
+        json.dumps(
+            {
+                "default_max_attempts": 3,
+                "action_types": {"send_invoice": {"max_attempts": 5}, "unused_type": 2},
+            }
+        )
+    )
+    monkeypatch.setattr(tui_model, "DEFAULT_BUDGETS_PATH", str(registry))
+
+    rows = {r.action_type: r for r in tui_model.budget_rows(store, "r1")}
+    assert rows["send_invoice"].max_attempts == 5
+    assert rows["send_invoice"].remaining == 4
+    assert rows["unused_type"].attempts == 0
+    assert rows["unused_type"].max_attempts == 2
+    assert rows["unused_type"].remaining == 2
+
+
 def test_family_lines_show_every_child_verdict(db: str, store: SQLiteStorage) -> None:
     run("--db", db, "start", "par", "--goal", "supervise")
     run("--db", db, "start", "kid", "--goal", "work", "--parent", "par")
@@ -165,6 +196,19 @@ def test_recovery_lines_render_the_verdict_and_the_family_block(
     assert "CONTINUUM RECOVERY" in lines
     assert "Recovery decision:" in lines
     assert "FAMILY BLOCKED" in lines
+
+
+def test_a_completed_child_never_blocks_the_parent(db: str, store: SQLiteStorage) -> None:
+    """Terminal children are excluded, matching roll_up_children and resume."""
+    run("--db", db, "start", "par", "--goal", "supervise")
+    run("--db", db, "start", "kid", "--goal", "work", "--parent", "par")
+    run("--db", db, "start", "done", "--goal", "finished", "--parent", "par")
+    ActionLedger(SQLiteStorage(db), "kid").claim("send_invoice", {}, key="invoice:I-9")
+    run("--db", db, "complete", "done")
+
+    lines = "\n".join(tui_model.recovery_lines(store, "par"))
+    assert "FAMILY BLOCKED" in lines  # the live child still blocks
+    assert "done" not in lines  # but the completed child is not counted
 
 
 # --------------------------------------------------------------------------- #
@@ -435,6 +479,23 @@ def test_the_driver_draws_the_splash_first(db: str) -> None:
     assert "press any key" in drawn
 
 
+def test_the_incompatible_database_splash_still_draws_the_logo() -> None:
+    app = TuiApp(
+        None,
+        database_error=(
+            "database schema v6 was written by a newer CONTINUUM; this build understands v2"
+        ),
+    )
+    screen = _FakeScreen([])
+
+    code = _driver(_FakeCurses(), screen, app, 0.0)
+
+    drawn = "\n".join(text for _, text in screen.lines)
+    assert code == ExitCode.OK
+    assert "██╔═══██╗" in drawn
+    assert "database unavailable" in drawn
+
+
 def test_run_tui_refuses_when_curses_is_missing(db: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "curses", None)
     err = io.StringIO()
@@ -449,16 +510,15 @@ def test_run_tui_refuses_without_a_tty(db: str, monkeypatch: pytest.MonkeyPatch)
         def isatty(self) -> bool:
             return False
 
+    # stub curses so the import succeeds on Windows too: this test is about
+    # the TTY refusal, not the platform's curses availability
+    monkeypatch.setitem(sys.modules, "curses", types.ModuleType("curses"))
     monkeypatch.setattr(sys, "stdout", _NotATty())
     err = io.StringIO()
     code = run_tui(SQLiteStorage(db), err=err)
 
     assert code == ExitCode.ERROR
-    # On platforms without curses (Windows) the import check refuses first,
-    # before the TTY check is reached. Both are refusals pointing at the
-    # browser dashboard, so either message satisfies this test.
-    out = err.getvalue()
-    assert "not a TTY" in out or "not available on this platform" in out
+    assert "not a TTY" in err.getvalue()
 
 
 def test_the_tui_command_is_registered_and_documented(
@@ -500,7 +560,38 @@ def test_bare_continuum_opens_the_tui_when_interactive(
     assert seen["storage"] is not None
 
 
-def test_bare_continuum_prints_help_when_piped(db: str) -> None:
+def test_bare_continuum_restores_splash_for_an_incompatible_database(
+    db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A newer DB is preserved, but it must not hide the branded launcher."""
+    from continuum.storage import SchemaVersionError
+
+    seen: dict[str, Any] = {}
+
+    def fail_open(path: str) -> Any:
+        raise SchemaVersionError(
+            "database schema v6 was written by a newer CONTINUUM; this build understands v2"
+        )
+
+    def fake_run_tui(storage: Any, **kw: Any) -> int:
+        seen["storage"] = storage
+        seen.update(kw)
+        return 77
+
+    import importlib
+
+    cli_module = importlib.import_module("continuum.cli.main")
+    monkeypatch.setattr(cli_module, "open_storage", fail_open)
+    monkeypatch.setattr("continuum.tui.run_tui", fake_run_tui)
+
+    code = main(["--db", db], out=_Tty())
+
+    assert code == 77
+    assert seen["storage"] is None
+    assert "schema v6" in seen["database_error"]
+
+
+def test_bare_continuum_prints_help_without_a_tty(db: str) -> None:
     """A script running `continuum` blind must find usage text, not curses."""
     code, out, _ = run("--db", db)
 
@@ -531,3 +622,52 @@ def test_bare_continuum_reports_an_unopenable_database(db: str, tmp_path: Path) 
     assert code == ExitCode.ERROR
     assert "error:" in err.getvalue()
     assert "usage:" not in out.getvalue()
+
+
+def test_an_unreadable_run_fails_one_view_not_the_dashboard(
+    db: str, store: SQLiteStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The detail view must degrade to an error page, never crash the app."""
+    run("--db", db, "start", "broken", "--goal", "unreadable")
+    app = TuiApp(store)
+    app.handle_key("enter")  # landing -> runs
+    app.handle_key("enter")  # runs -> detail (overview tab)
+
+    def boom(storage: Any, run_id: str) -> list[str]:
+        raise RuntimeError("chain will not fold")
+
+    monkeypatch.setattr(tui_model, "overview_lines", boom)
+    app.handle_key("r")  # refresh the detail view through the failure
+
+    body = "\n".join(app.body_lines())
+    assert "Cannot read run broken" in body
+    assert "chain will not fold" in body
+    # the app is still alive: tab switches keep working
+    app.handle_key("2")  # recovery tab
+    assert app.TABS[app.tab] == "recovery"
+
+
+def test_the_splash_counts_runs_without_assessing_recovery(
+    db: str, store: SQLiteStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The idle splash must be cheap: a count, not a per-run recovery assess."""
+    run("--db", db, "start", "one", "--goal", "a")
+    run("--db", db, "start", "two", "--goal", "b")
+
+    calls: list[int] = []
+    real_run_rows = tui_model.run_rows
+
+    def counting(storage: Any) -> list[Any]:
+        calls.append(1)
+        return real_run_rows(storage)
+
+    monkeypatch.setattr(tui_model, "run_rows", counting)
+    app = TuiApp(store)
+
+    body = "\n".join(app.body_lines())
+    assert "2 run(s) recorded" in body
+    assert not calls  # the splash counted without reading any rows
+
+    app.handle_key("enter")  # leaving the splash does read the full rows
+    assert calls
+    assert len(app.rows) == 2
