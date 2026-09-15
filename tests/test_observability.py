@@ -1,4 +1,9 @@
-"""Tests for the observability module (metrics collector + Phase 14 dashboard)."""
+"""Tests for the observability module (Phase 14 recovery dashboard).
+
+The process-wide metrics collector that used to be tested here was removed
+(issue #1032): it had no caller outside the tests, and the recovery ledger is
+the durable record of what actually happened.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +11,6 @@ from continuum.checkpoint.manager import RestoredRun
 from continuum.environment.diff import EnvironmentDiff
 from continuum.models import (
     Action,
-    ActionStatus,
     Component,
     ComponentValidationEntry,
     Goal,
@@ -17,26 +21,14 @@ from continuum.models import (
     StateStatus,
     StateValidationResult,
 )
-from continuum.observability import (
-    CHECKPOINTS_CREATED,
-    RECOVERIES_BLOCKED,
-    RECOVERIES_RESUMED,
-    UNKNOWN_SIDE_EFFECTS,
-    VALIDATIONS_RUN,
-    Metrics,
-    collect_from_decision,
-    get_metrics,
-    render_dashboard,
-    reset_metrics,
-    set_metrics,
-)
+from continuum.observability import render_dashboard
 from continuum.recovery.engine import RecoveryDecision
 from continuum.recovery.planner import RepairKind, RepairPlan, RepairStep
 from continuum.state.validator import ValidationOutcome
 
 
 def _decision(can_resume: bool, uncertain: tuple[Action, ...] = ()) -> RecoveryDecision:
-    """Build a minimal RecoveryDecision for dashboard/metrics tests."""
+    """Build a minimal RecoveryDecision for dashboard tests."""
     state = SemanticState(run_id="run_x", goal=Goal(description="recover"))
     contract = RecoveryContract(
         run_id="run_x",
@@ -87,56 +79,6 @@ def _decision(can_resume: bool, uncertain: tuple[Action, ...] = ()) -> RecoveryD
         uncertain_actions=uncertain,
         rationale=("dataset version drift",),
     )
-
-
-def test_metrics_counter_is_monotonic_and_rejects_negative() -> None:
-    m = Metrics()
-    m.increment(CHECKPOINTS_CREATED, 3)
-    m.increment(CHECKPOINTS_CREATED)
-    assert m.counters[CHECKPOINTS_CREATED] == 4
-    try:
-        m.increment(CHECKPOINTS_CREATED, -1)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("negative increment should raise")
-
-
-def test_metrics_timer_accumulates() -> None:
-    m = Metrics()
-    with m.timer("validate"):
-        pass
-    assert "validate" in m.timers
-    assert m.timers["validate"] >= 0.0
-
-
-def test_get_metrics_returns_active_collector() -> None:
-    reset_metrics()
-    before = get_metrics()
-    token = set_metrics(Metrics())
-    try:
-        assert get_metrics() is not before
-    finally:
-        token.var.reset(token)
-
-
-def test_collect_from_decision_counts_resumed() -> None:
-    reset_metrics()
-    collect_from_decision(_decision(can_resume=True))
-    snap = get_metrics().snapshot()
-    assert snap["counters"][VALIDATIONS_RUN] == 1
-    assert snap["counters"][RECOVERIES_RESUMED] == 1
-    assert snap["counters"].get(RECOVERIES_BLOCKED, 0) == 0
-    assert snap["gauges"]["validation.invalid"] == 1
-
-
-def test_collect_from_decision_counts_blocked_and_unknown() -> None:
-    reset_metrics()
-    action = Action(run_id="run_x", action_type="github.create_issue", status=ActionStatus.UNKNOWN)
-    collect_from_decision(_decision(can_resume=False, uncertain=(action,)))
-    snap = get_metrics().snapshot()
-    assert snap["counters"][RECOVERIES_BLOCKED] == 1
-    assert snap["counters"][UNKNOWN_SIDE_EFFECTS] == 1
 
 
 def test_render_dashboard_contains_state_components_and_plan() -> None:

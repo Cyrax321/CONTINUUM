@@ -23,6 +23,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Removed
 
+- **Dead observability metrics collector (#1032).** `src/continuum/observability.py`
+  exported a process-wide metrics API — `Metrics`, `get_metrics`, `set_metrics`,
+  `reset_metrics`, `collect_from_decision`, and seven counter constants — that
+  nothing outside the tests ever called; only `render_dashboard` had a product
+  caller (the `continuum` CLI's `--dashboard` path). Dead code in a module
+  people read to understand what is measured misled the next reader into
+  assuming metrics were being collected when they were not. Removed per Option
+  B in the issue: the recovery ledger (`recovery/ledger.py`) is the durable,
+  tamper-evident record of what actually happened and survives the crash, where
+  a process-global counter would not, so "how many runs resumed and how many
+  blocked" stays answerable. The collector is recoverable from git history if a
+  future observability surface needs it.
+
 - **Dead `observations_evidence_lines` helper (#867).** The function in
   `src/continuum/recovery/observations.py` was defined once and called
   nowhere: leftover scaffolding from #208 whose engine-side rendering at

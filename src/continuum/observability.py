@@ -1,155 +1,24 @@
-"""Observability and the Phase 14 recovery dashboard.
+"""Observability: the Phase 14 recovery dashboard.
 
-This module is additive. It provides a process-wide metrics collector that core
-modules can emit to without taking a hard dependency on storage or the recovery
-engine, plus a read-only renderer for the Phase 14 recovery dashboard built
-from an existing :class:`~continuum.recovery.engine.RecoveryDecision`.
+This module renders the read-only recovery dashboard built from an existing
+:class:`~continuum.recovery.engine.RecoveryDecision`.
+
+The process-wide metrics collector that used to live here (``Metrics``,
+``get_metrics``/``set_metrics``/``reset_metrics``, ``collect_from_decision`` and
+the counter constants) had no caller outside the tests, so it was removed
+(issue #1032). What an operator actually needs to know — how many runs resumed
+and how many blocked — is answerable from the recovery ledger
+(:mod:`continuum.recovery.ledger`), which is an append-only, tamper-evident
+audit that survives a crash; a process-global counter is not. The collector is
+recoverable from git history if a future surface needs it.
 """
 
 from __future__ import annotations
 
-import time
-from contextvars import ContextVar, Token
-from dataclasses import dataclass, field
-from typing import Any
-
 from continuum.models import StateStatus
 from continuum.recovery.engine import RecoveryDecision
 
-__all__ = [
-    "Metrics",
-    "get_metrics",
-    "set_metrics",
-    "reset_metrics",
-    "render_dashboard",
-    "collect_from_decision",
-    "CHECKPOINTS_CREATED",
-    "VALIDATIONS_RUN",
-    "ACTIONS_CLAIMED",
-    "ACTIONS_COMPLETED",
-    "UNKNOWN_SIDE_EFFECTS",
-    "RECOVERIES_RESUMED",
-    "RECOVERIES_BLOCKED",
-]
-
-
-# Standard counter names --------------------------------------------------- #
-CHECKPOINTS_CREATED = "checkpoints.created"
-VALIDATIONS_RUN = "validations.run"
-ACTIONS_CLAIMED = "actions.claimed"
-ACTIONS_COMPLETED = "actions.completed"
-UNKNOWN_SIDE_EFFECTS = "actions.unknown_side_effects"
-RECOVERIES_RESUMED = "recoveries.resumed"
-RECOVERIES_BLOCKED = "recoveries.blocked"
-
-
-class _Timer:
-    """Context manager that records elapsed seconds into a :class:`Metrics`."""
-
-    def __init__(self, metrics: Metrics, name: str) -> None:
-        self._metrics = metrics
-        self._name = name
-        self._started: float | None = None
-
-    def __enter__(self) -> _Timer:
-        self._started = time.perf_counter()
-        return self
-
-    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
-        assert self._started is not None
-        self._metrics.record_time(self._name, time.perf_counter() - self._started)
-
-
-@dataclass
-class Metrics:
-    """A process-wide accumulator for recovery signals.
-
-    Counters are monotonic; timers accumulate elapsed seconds per name. The
-    collector is intentionally dependency-free so core modules can emit metrics
-    without importing storage or the recovery engine.
-    """
-
-    counters: dict[str, int] = field(default_factory=dict)
-    timers: dict[str, float] = field(default_factory=dict)
-    gauges: dict[str, float] = field(default_factory=dict)
-
-    def increment(self, name: str, by: int = 1) -> None:
-        """Increment a monotonic counter by ``by``.
-
-        Counters are initialized to zero on first use. Raises
-        :class:`ValueError` if ``by`` is negative, preserving counter
-        monotonicity.
-        """
-        if by < 0:
-            raise ValueError("counters may only increase")
-        self.counters[name] = self.counters.get(name, 0) + by
-
-    def set_gauge(self, name: str, value: float) -> None:
-        """Set the instantaneous value of the named gauge.
-
-        Unlike monotonic counters, gauges record point-in-time values that
-        can fluctuate across updates.
-        """
-        self.gauges[name] = value
-
-    def record_time(self, name: str, seconds: float) -> None:
-        """Accumulate elapsed duration in seconds for ``name``.
-
-        Adds ``seconds`` to the named timer. Raises :class:`ValueError`
-        if ``seconds`` is negative.
-        """
-        if seconds < 0:
-            raise ValueError("elapsed time may not be negative")
-        self.timers[name] = self.timers.get(name, 0.0) + seconds
-
-    def timer(self, name: str) -> _Timer:
-        """Return a context manager that measures and records elapsed duration.
-
-        Measures wall-clock time using :func:`time.perf_counter` while the
-        block executes, adding the elapsed seconds to ``name`` upon exit.
-        """
-        return _Timer(self, name)
-
-    def snapshot(self) -> dict[str, Any]:
-        """Return a point-in-time copy of all recorded metrics.
-
-        Returns a dictionary with shallow copies of ``counters``,
-        ``timers``, and ``gauges`` so callers can inspect or serialize
-        metrics without mutating internal state.
-        """
-        return {
-            "counters": dict(self.counters),
-            "timers": dict(self.timers),
-            "gauges": dict(self.gauges),
-        }
-
-    def reset(self) -> None:
-        """Clear all recorded counters, timers, and gauges in place."""
-        self.counters.clear()
-        self.timers.clear()
-        self.gauges.clear()
-
-
-_DEFAULT_METRICS: ContextVar[Metrics | None] = ContextVar("continuum_metrics", default=None)
-
-
-def get_metrics() -> Metrics:
-    """Return the active collector, creating a default one if none is set."""
-    metrics = _DEFAULT_METRICS.get()
-    if metrics is None:
-        metrics = Metrics()
-        _DEFAULT_METRICS.set(metrics)
-    return metrics
-
-
-def set_metrics(metrics: Metrics) -> Token[Metrics | None]:
-    """Install ``metrics`` as the active collector for this context."""
-    return _DEFAULT_METRICS.set(metrics)
-
-
-def reset_metrics() -> None:
-    """Replace the active collector with a fresh one."""
-    _DEFAULT_METRICS.set(Metrics())
+__all__ = ["render_dashboard"]
 
 
 _STATUS_SYMBOL = {
@@ -219,17 +88,3 @@ def render_dashboard(decision: RecoveryDecision) -> str:
     lines.append("")
     lines.append("=" * 64)
     return "\n".join(lines)
-
-
-def collect_from_decision(decision: RecoveryDecision) -> None:
-    """Update the active metrics collector from a recovery ``decision``."""
-    metrics = get_metrics()
-    metrics.increment(VALIDATIONS_RUN)
-    statuses = decision.validation.report.statuses
-    metrics.set_gauge("validation.components", len(statuses))
-    metrics.set_gauge(
-        "validation.invalid",
-        sum(1 for e in statuses if e.status is not StateStatus.VALID),
-    )
-    metrics.increment(RECOVERIES_RESUMED if decision.safe else RECOVERIES_BLOCKED)
-    metrics.increment(UNKNOWN_SIDE_EFFECTS, len(decision.uncertain_actions))
