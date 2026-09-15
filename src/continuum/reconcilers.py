@@ -8,12 +8,13 @@ a project register one probe per action type:
     .continuum/reconcilers.json
     {"probes": {"send_invoice": {"command": "check-outbox", "timeout": 10}}}
 
-The ``probes`` wrapper is the shape :func:`load_reconcilers` reads: a file that
-maps action types at the top level is valid JSON, registers nothing, and leaves
-every uncertain action reported as having no probe. ``timeout`` is in seconds,
-optional, and defaults to 10 seconds; it must be a positive number, and a probe
-that outlives it is an error rather than a verdict, so its action stays in the
-human queue (issue #322).
+The ``probes`` wrapper is the shape :func:`load_reconcilers` reads: a
+non-empty file that maps action types at the top level instead is valid
+JSON but the wrong shape, and is refused rather than silently registering
+nothing (issue #1062). ``timeout`` is in seconds, optional, and defaults to
+10 seconds; it must be a positive number, and a probe that outlives it is
+an error rather than a verdict, so its action stays in the human queue
+(issue #322).
 
 A probe receives the full Action record as JSON on stdin and prints exactly
 one verdict on its last stdout line: ``occurred=true``, ``occurred=false`` or
@@ -90,6 +91,11 @@ def load_reconcilers(path: Path) -> dict[str, dict[str, Any]]:
         raise ReconcilerConfigError(f"{location} is not valid JSON ({exc})") from exc
     if not isinstance(raw, dict) or not isinstance(raw.get("probes", {}), dict):
         raise ReconcilerConfigError(f"{location}: expected {{'probes': {{...}}}}")
+    if raw and "probes" not in raw:
+        raise ReconcilerConfigError(
+            f"{location}: expected {{'probes': {{...}}}}, found top-level keys "
+            f"{sorted(raw)!r} instead — wrap them under a 'probes' key"
+        )
     probes: dict[str, dict[str, Any]] = {}
     for action_type, spec in (raw.get("probes") or {}).items():
         if not isinstance(spec, dict) or not isinstance(spec.get("command"), str):

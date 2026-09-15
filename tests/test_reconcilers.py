@@ -93,6 +93,27 @@ def test_a_boolean_timeout_is_refused_rather_than_read_as_one_second(tmp_path: P
         load_reconcilers(p)
 
 
+def test_probes_not_wrapped_under_the_probes_key_is_refused(tmp_path: Path) -> None:
+    """A registry that maps action types at the top level is the wrong shape.
+
+    ``raw.get("probes", {})`` and ``raw.get("probes") or {}`` both default to an
+    empty dict for a file missing the ``probes`` key entirely, so this used to
+    load silently as an empty registry instead of raising: every action of that
+    type then read as having no probe registered, with nothing pointing at the
+    missing wrapper as the cause (issue #1062).
+    """
+    p = tmp_path / "r.json"
+    p.write_text(json.dumps({"send_invoice": {"command": "check-outbox", "timeout": 5}}))
+    with pytest.raises(ReconcilerConfigError, match="probes"):
+        load_reconcilers(p)
+
+
+def test_an_empty_registry_file_is_still_a_valid_empty_registry(tmp_path: Path) -> None:
+    p = tmp_path / "r.json"
+    p.write_text("{}")
+    assert load_reconcilers(p) == {}
+
+
 # --- verdict parsing -------------------------------------------------------------- #
 
 
