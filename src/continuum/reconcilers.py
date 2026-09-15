@@ -88,10 +88,26 @@ def load_reconcilers(path: Path) -> dict[str, dict[str, Any]]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ReconcilerConfigError(f"{location} is not valid JSON ({exc})") from exc
-    if not isinstance(raw, dict) or not isinstance(raw.get("probes", {}), dict):
+    if not isinstance(raw, dict):
+        raise ReconcilerConfigError(f"{location}: expected {{'probes': {{...}}}}")
+    if "probes" not in raw:
+        # Top-level action-type map is a common mistake: valid JSON, silent empty
+        # registry, and every uncertain action then looks "unregistered" (#1062).
+        looks_like_probes = any(
+            isinstance(v, dict) and isinstance(v.get("command"), str) for v in raw.values()
+        )
+        hint = (
+            " top-level keys look like probe specs — wrap them under a 'probes' object"
+            if looks_like_probes
+            else ""
+        )
+        raise ReconcilerConfigError(
+            f"{location}: expected {{'probes': {{...}}}}{hint}"
+        )
+    if not isinstance(raw.get("probes"), dict):
         raise ReconcilerConfigError(f"{location}: expected {{'probes': {{...}}}}")
     probes: dict[str, dict[str, Any]] = {}
-    for action_type, spec in (raw.get("probes") or {}).items():
+    for action_type, spec in raw["probes"].items():
         if not isinstance(spec, dict) or not isinstance(spec.get("command"), str):
             raise ReconcilerConfigError(
                 f"{location}: probe {action_type!r} needs a string 'command'"
