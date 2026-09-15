@@ -1,10 +1,16 @@
 """Guard the documented pytest counts against silent drift (#630).
 
-README.md, docs/CONTRIBUTING_ONBOARDING.md, and CHANGELOG.md each state the
-collected total. The guard asserts the three files agree with each other and
-with a live ``pytest --collect-only`` within tolerance. Skips vary by
-environment, so only collected totals are compared, never passed/skipped
-splits. Regenerate the figures with ``pytest --collect-only -q; pytest -q``.
+README.md, the five translated READMEs, docs/CONTRIBUTING_ONBOARDING.md, and
+CHANGELOG.md each state the collected total. The guard asserts they agree with
+each other and with a live ``pytest --collect-only`` within tolerance. Skips
+vary by environment, so only collected totals are compared, never
+passed/skipped splits. Regenerate the figures with ``pytest --collect-only -q;
+pytest -q``.
+
+The translations were re-synced by hand once and then left alone, so they aged
+past the guard's own tolerance with nothing failing (#1071): the English docs
+get re-synced, the translations do not, and no test read any of them. They are
+user-facing, so they are counted now.
 """
 
 from __future__ import annotations
@@ -19,6 +25,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 COUNTED_FILES = (
     ROOT / "README.md",
+    # The five translations each state the same total in their own prose
+    # (#1071). English-only coverage is what let them drift unnoticed.
+    ROOT / "README.es.md",
+    ROOT / "README.ja.md",
+    ROOT / "README.ko.md",
+    ROOT / "README.pt-BR.md",
+    ROOT / "README.zh-CN.md",
     ROOT / "docs" / "CONTRIBUTING_ONBOARDING.md",
     ROOT / "CHANGELOG.md",
 )
@@ -35,10 +48,47 @@ _COLLECTED_RES = (
     re.compile(r"~([\d,]+)\s+tests\b"),
 )
 
+# The translations state the same figures in their own spelling (#1071): the
+# pytest comment, the scale bullet, and the library sentence. Passed/skipped
+# figures are deliberately unmatched, as above. Each pattern was verified
+# against its file to match the collected total only; the shared
+# "~2,195 tests" tail form is covered by ``_COLLECTED_RES`` above.
+_TRANSLATED_RES = {
+    "es": (
+        re.compile(r"~\s*([\d,]+)\s+recogidos"),
+        re.compile(r"([\d,]+)\s+tests\s+recogidos"),
+    ),
+    "pt-BR": (
+        re.compile(r"~\s*([\d,]+)\s+coletados"),
+        re.compile(r"([\d,]+)\s+testes\s+coletados"),
+    ),
+    "ja": (
+        re.compile(r"約\s*([\d,]+)\s*件収集"),
+        re.compile(r"約\s*([\d,]+)\s*件のテストが収集"),
+        re.compile(r"約\s*([\d,]+)\s*テスト"),
+    ),
+    "ko": (
+        re.compile(r"약\s*([\d,]+)개\s*수집"),
+        re.compile(r"약\s*([\d,]+)개\s*테스트가\s*수집"),
+        re.compile(r"약\s*([\d,]+)\s*테스트"),
+    ),
+    "zh-CN": (
+        re.compile(r"约\s*([\d,]+)\s*个收集"),
+        re.compile(r"约\s*([\d,]+)\s*个测试被收集"),
+        re.compile(r"约\s*([\d,]+)\s*个测试"),
+    ),
+}
+
 
 def documented_total(path: Path) -> int:
     text = path.read_text(encoding="utf-8")
-    matches = [m for rx in _COLLECTED_RES for m in rx.findall(text)]
+    res = list(_COLLECTED_RES)
+    # A translated README is matched by its own spelling plus the shared
+    # "~2,195 tests" tail form, which the translations also use.
+    stem = path.name[len("README.") : -len(".md")] if path.name.startswith("README.") else ""
+    if stem in _TRANSLATED_RES:
+        res += list(_TRANSLATED_RES[stem])
+    matches = [m for rx in res for m in rx.findall(text)]
     assert matches, f"{path.name} states no collected-total figure"
     totals = {int(m.replace(",", "")) for m in matches}
     assert len(totals) == 1, f"{path.name} states inconsistent figures: {sorted(totals)}"
