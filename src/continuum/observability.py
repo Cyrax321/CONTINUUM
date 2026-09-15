@@ -6,8 +6,8 @@ This module renders the read-only recovery dashboard built from an existing
 The process-wide metrics collector that used to live here (``Metrics``,
 ``get_metrics``/``set_metrics``/``reset_metrics``, ``collect_from_decision`` and
 the counter constants) had no caller outside the tests, so it was removed
-(issue #1032). What an operator actually needs to know — how many runs resumed
-and how many blocked — is answerable from the recovery ledger
+(issue #1032). What an operator actually needs to know, how many runs resumed
+and how many blocked, is answerable from the recovery ledger
 (:mod:`continuum.recovery.ledger`), which is an append-only, tamper-evident
 audit that survives a crash; a process-global counter is not. The collector is
 recoverable from git history if a future surface needs it.

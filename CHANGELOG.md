@@ -24,8 +24,8 @@ All notable changes to this project are documented here. The format follows
 ### Removed
 
 - **Dead observability metrics collector (#1032).** `src/continuum/observability.py`
-  exported a process-wide metrics API — `Metrics`, `get_metrics`, `set_metrics`,
-  `reset_metrics`, `collect_from_decision`, and seven counter constants — that
+  exported a process-wide metrics API (`Metrics`, `get_metrics`, `set_metrics`,
+  `reset_metrics`, `collect_from_decision`, and seven counter constants) that
   nothing outside the tests ever called; only `render_dashboard` had a product
   caller (the `continuum` CLI's `--dashboard` path). Dead code in a module
   people read to understand what is measured misled the next reader into
