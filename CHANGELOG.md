@@ -18,6 +18,30 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The gateway now enforces a route's configured prefix (#1051).** The gateway
+  read a route's `prefix`, stored it on the `Route` record, and never compared
+  the request path against it: `match_route` narrowed candidates by host and
+  then by method, so every path on a registered host was treated as the
+  registered operation. A caller holding a live claim for `invoice:I-1` — an
+  authorization to post one invoice — could spend it on `/v1/refunds`, on
+  `/internal/admin/purge`, or on any other path that host served. The gateway
+  forwarded the request, settled the claim as completed, and wrote a
+  `TOOL_COMPLETED` event whose `path` recorded the off-prefix URL, so the run's
+  evidence said the invoice was sent while the upstream saw something else
+  entirely. The prefix is a route's only per-path scope, so there was no
+  workaround: an operator cannot register "host plus one path" because the host
+  match is whole-host. The request path (query string stripped) is now compared
+  against `route.prefix` before the key is rendered, so an off-prefix call is
+  refused fail-closed with a 403 naming the configured prefix and can neither
+  consume nor settle a claim. Matching is by prefix, not exact path, so
+  `/v1/invoices/I-1` stays in scope for `/v1/invoices`; a segment boundary is
+  required, so `/v1/invoices-archive` is not; and an empty prefix or `/` keeps
+  its whole-host meaning. The query string is stripped inside the check rather
+  than trusted from the caller, since a check on the raw path is bypassable
+  with `?x=/v1/invoices`. Four tests pin the property: off-prefix denial with
+  the claim left untouched, query-string smuggling, shared-spelling paths, and
+  a path under the prefix still being in scope.
+
 - **The horizon `abort_condition_year` scenario now reaches abort (#1028).**
   The scenario was labelled `correct_mode="abort"` but drove the abort through
   `DECISION_INVALIDATED`, an event the recovery engine never routes to `ABORT`

@@ -195,6 +195,57 @@ def test_method_mismatch_is_refused(db: str, gateway: str) -> None:
     assert "not among its allowed methods" in body["reason"]
 
 
+def test_off_prefix_path_is_refused_fail_closed(db: str, gateway: str) -> None:
+    """A claim scoped to /v1/invoices must not be spendable on /v1/refunds (#1051).
+
+    The prefix is a route's only per-path scope: refusing here, before the key
+    is rendered, is what keeps an invoice claim from settling as completed
+    against evidence that records a refund URL.
+    """
+    key = claim(db, "invoice:I-3")
+    status, body = post(gateway, "/v1/refunds", {"id": "I-3"})
+    assert status == 403
+    assert "outside it" in body["reason"]
+    assert "/v1/invoices" in body["reason"]
+
+    # The claim is untouched: nothing was consumed or settled by the attempt.
+    with SQLiteStorage(db) as store:
+        from continuum.actions.ledger import fold_action_events
+
+        folded = fold_action_events(store.read_events("run_1"))
+    assert folded[key].status is ActionStatus.STARTED
+
+
+def test_off_prefix_path_with_query_string_smuggling_is_refused(
+    db: str, gateway: str
+) -> None:
+    """The query string is not part of the prefix scope, so it cannot satisfy it."""
+    claim(db, "invoice:I-4")
+    status, body = post(gateway, "/v1/refunds?x=/v1/invoices", {"id": "I-4"})
+    assert status == 403
+    assert "outside it" in body["reason"]
+
+
+def test_a_path_sharing_the_prefix_spelling_is_refused(db: str, gateway: str) -> None:
+    """/v1/invoices-archive is a different segment, not a longer invoice path."""
+    claim(db, "invoice:I-5")
+    status, body = post(gateway, "/v1/invoices-archive", {"id": "I-5"})
+    assert status == 403
+    assert "outside it" in body["reason"]
+
+
+def test_a_path_under_the_prefix_is_in_scope(db: str, gateway: str) -> None:
+    """Prefix matching, not exact matching: /v1/invoices/I-1 is an invoice path.
+
+    api.example.com is unreachable from CI, so the request dies at the network
+    with 502 — but that is past the prefix check, which is what this pins. An
+    off-prefix path returns 403 long before forwarding.
+    """
+    claim(db, "invoice:I-6")
+    status, _body = post(gateway, "/v1/invoices/I-6", {"id": "I-6"})
+    assert status != 403
+
+
 def test_body_missing_template_field_denies_with_config_error(db: str, gateway: str) -> None:
     claim(db, "invoice:seed")
     status, body = post(gateway, "/v1/invoices", {})

@@ -169,6 +169,32 @@ def render_key(template: str, body: dict[str, Any]) -> str:
     return template.format(**{f: normalize_key_value(body[f]) for f in fields})
 
 
+def _path_under_prefix(path: str, prefix: str) -> bool:
+    """Whether a request path falls under a route's configured prefix.
+
+    Matching is by prefix, not exact path, so ``/v1/invoices/I-1`` stays in
+    scope for a ``/v1/invoices`` route. A segment boundary is required, so
+    ``/v1/invoices-archive`` does not match ``/v1/invoices`` — without it an
+    operator who registered ``/v1/invoices`` would be exposing every path that
+    merely shares its spelling. An empty prefix or ``/`` means the whole host,
+    the registry's own default when no prefix is configured.
+
+    The query string is stripped here rather than trusted from the caller: a
+    check on a raw path is bypassable with ``?x=/v1/invoices``, and the
+    property must hold even if a future caller forgets to strip it.
+    """
+    from urllib.parse import urlsplit
+
+    path = urlsplit(path).path
+    if not prefix or prefix == "/":
+        return True
+    if not path.startswith("/"):
+        path = "/" + path
+    if path == prefix:
+        return True
+    return path.startswith(prefix if prefix.endswith("/") else prefix + "/")
+
+
 def match_route(
     routes: list[Route],
     *,
@@ -177,11 +203,21 @@ def match_route(
     body: dict[str, Any],
     actions_by_key: dict[str, Any],
     run_id: str,
+    path: str | None = None,
     bound_tenant: str | None = None,
     storage: Any | None = None,
     consumed_authorities: Any | None = None,
 ) -> Decision:
-    """The gateway's verdict for one request, mirroring gate's table."""
+    """The gateway's verdict for one request, mirroring gate's table.
+
+    ``path`` is the request's path with any query string stripped
+    (:func:`urllib.parse.urlsplit`). A route's ``prefix`` is the only per-path
+    scope it has, so a request outside it is refused before the key is
+    rendered: otherwise a claim for ``/v1/invoices`` would be spendable on
+    ``/v1/refunds`` and settle as completed against evidence that records the
+    off-prefix URL (#1051). ``None`` preserves the caller's existing whole-host
+    behaviour for callers that supply no path.
+    """
     from continuum.actions.idempotency import idempotency_key
     from continuum.models import ActionStatus
 
@@ -213,6 +249,20 @@ def match_route(
             False,
             f"host {host!r} is registered but {method} is not among its allowed "
             f"methods {[m.lower() for m in candidates[0].methods]}",
+        )
+
+    # Prefix scope (issue #1051): the prefix is a route's only per-path scope,
+    # so a request outside it is refused fail-closed here, before the key is
+    # rendered. Checking any later would let an off-prefix call consume a claim
+    # and settle as completed against evidence recording the wrong URL.
+    # ``path=None`` is the whole-host behaviour callers had before the fix, so
+    # an in-process caller that supplies no path is not silently broken.
+    if path is not None and not _path_under_prefix(path, route.prefix):
+        return Decision(
+            False,
+            f"host {host!r} is registered for prefix {route.prefix!r} but the "
+            f"request path {path!r} is outside it",
+            route=route,
         )
 
     try:
@@ -460,6 +510,12 @@ class GatewayServer:
                     from continuum.gate import collect_consumed_authorities
 
                     consumed = collect_consumed_authorities(history)
+                    from urllib.parse import urlsplit
+
+                    # The query string is not part of the prefix scope: leaving
+                    # it in would let ``?x=/v1/invoices`` satisfy the check
+                    # (#1051).
+                    request_path = urlsplit(self.path).path
                     decision = match_route(
                         server._routes,
                         host=host.split(":")[0],
@@ -467,6 +523,7 @@ class GatewayServer:
                         body=body,
                         actions_by_key=actions,
                         run_id=run_id,
+                        path=request_path,
                         bound_tenant=getattr(server, "_bound_tenant", None),
                         storage=storage,
                         consumed_authorities=consumed,
@@ -476,8 +533,6 @@ class GatewayServer:
                             403, {"error": "denied by CONTINUUM gateway", "reason": decision.reason}
                         )
                         return
-
-                    from urllib.parse import urlsplit
 
                     from continuum.actions.ledger import ActionLedger
 
