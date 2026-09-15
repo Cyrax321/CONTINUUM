@@ -469,12 +469,23 @@ class RecoveryEngine:
         try:
             consumed_authorities = collect_consumed_authorities(self.storage.read_events(run_id))
         except Exception:
-            consumed_authorities = {}
+            # An empty map is the *unblocked* answer, and this block exists to
+            # be the check that survives a degraded log: when the ledger
+            # cannot be read, degrade to the most cautious verdict instead of
+            # asserting a safety conclusion the engine could not compute
+            # (issue #1066).
+            consumed_authorities = None
         if consumed_authorities:
             mode = RecoveryMode.REQUEST_HUMAN
             rationale = (
                 *rationale,
                 f"consumed authority blocks resume: {sorted(consumed_authorities)}",
+            )
+        elif consumed_authorities is None:
+            mode = RecoveryMode.REQUEST_HUMAN
+            rationale = (
+                *rationale,
+                "consumed authority ledger unreadable: cannot clear the resume block",
             )
 
         reason = "; ".join(rationale) if rationale else validation.report.reason
