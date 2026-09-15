@@ -94,7 +94,7 @@ def load_reconcilers(path: Path) -> dict[str, dict[str, Any]]:
     if raw and "probes" not in raw:
         raise ReconcilerConfigError(
             f"{location}: expected {{'probes': {{...}}}}, found top-level keys "
-            f"{sorted(raw)!r} instead — wrap them under a 'probes' key"
+            f"{sorted(raw)!r} instead, wrap them under a 'probes' key"
         )
     probes: dict[str, dict[str, Any]] = {}
     for action_type, spec in (raw.get("probes") or {}).items():

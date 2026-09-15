@@ -104,11 +104,12 @@ def test_probes_not_wrapped_under_the_probes_key_is_refused(tmp_path: Path) -> N
     """
     p = tmp_path / "r.json"
     p.write_text(json.dumps({"send_invoice": {"command": "check-outbox", "timeout": 5}}))
-    with pytest.raises(ReconcilerConfigError, match="probes"):
+    with pytest.raises(ReconcilerConfigError, match="send_invoice"):
         load_reconcilers(p)
 
 
 def test_an_empty_registry_file_is_still_a_valid_empty_registry(tmp_path: Path) -> None:
+    """An empty dict has no top-level keys to mistake for a missing wrapper."""
     p = tmp_path / "r.json"
     p.write_text("{}")
     assert load_reconcilers(p) == {}
