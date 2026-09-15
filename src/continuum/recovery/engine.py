@@ -481,24 +481,30 @@ class RecoveryEngine:
             # blocks resume, and the AUTHORITY_RECONCILED that clears it may
             # live in the archived prefix too.
             consumed_authorities = collect_consumed_authorities(archive_aware_events)
-        except Exception:
-            # An empty map is the *unblocked* answer, and this block exists to
-            # be the check that survives a degraded log: when the ledger
-            # cannot be read, degrade to the most cautious verdict instead of
-            # asserting a safety conclusion the engine could not compute
-            # (issue #1066).
+        except Exception as exc:
+            # Fail closed (issue #1066). An empty map is the *unblocked* answer,
+            # so substituting it here would turn an unreadable ledger into a
+            # clean bill of health: `continuum resume` would report safe exactly
+            # when the gate would still deny, which is the one thing this block
+            # exists to prevent. We could not evaluate the block, so escalate to
+            # the most cautious answer available rather than assert a safety
+            # conclusion we did not compute -- keeping the engine's convention
+            # that degradation never raises.
             consumed_authorities = None
+            mode = max((mode, RecoveryMode.REQUEST_HUMAN), key=lambda m: SEVERITY[m])
+            rationale = (
+                *rationale,
+                "consumed authority block could not be evaluated: the ledger is "
+                f"unreadable ({exc}); assume a consumed credential awaits "
+                "reconciliation until a human confirms otherwise",
+            )
         if consumed_authorities:
-            mode = RecoveryMode.REQUEST_HUMAN
+            # Escalate, never downgrade: a consumed authority cannot lower a
+            # verdict a harder signal already produced (#1066).
+            mode = max((mode, RecoveryMode.REQUEST_HUMAN), key=lambda m: SEVERITY[m])
             rationale = (
                 *rationale,
                 f"consumed authority blocks resume: {sorted(consumed_authorities)}",
-            )
-        elif consumed_authorities is None:
-            mode = RecoveryMode.REQUEST_HUMAN
-            rationale = (
-                *rationale,
-                "consumed authority ledger unreadable: cannot clear the resume block",
             )
 
         reason = "; ".join(rationale) if rationale else validation.report.reason
