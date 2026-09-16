@@ -495,7 +495,7 @@ continuum tree <parent_run_id>                    # multi-agent hierarchy view
 
 Optional registries live beside your code and are data, not code: `.continuum/gate.json` (side-effect tools + stable-key templates), `.continuum/reconcilers.json` (probes that check external systems), `.continuum/gateway.json` (upstream routes).
 
-Most commands accept global `--json` **before** the subcommand (e.g. `continuum --json resume RUN`), and read-only commands never write, so they are safe against a live database while an agent is mid-run. Exit codes are a safety contract (only a verified-safe run exits 0). Full command list, exit-code table, and state-diff output in [references/cli.md](references/cli.md).
+Most commands accept global `--json` **before** the subcommand (e.g. `continuum --json resume RUN`), and read-only commands never write, so they are safe against a live database while an agent is mid-run. The two exceptions are audit-only and fire solely for a run that is already parked: `resume` records its webhook delivery outcome when the verdict is `REQUEST_HUMAN` and an endpoint is subscribed, and `watch` records a liveness verdict flip; neither append projects onto state or moves the exit code. Exit codes are a safety contract (only a verified-safe run exits 0). Full command list, exit-code table, and state-diff output in [references/cli.md](references/cli.md).
 
 ## Roadmap
 

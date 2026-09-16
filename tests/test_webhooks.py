@@ -466,6 +466,61 @@ def test_resume_notifies_on_request_human(tmp_path: Path, monkeypatch: pytest.Mo
         server.shutdown()
 
 
+def test_resume_notification_append_is_audit_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delivery outcome appends, but moves no state (issue #1175).
+
+    ``resume`` is documented read-only apart from this one append, so the claim
+    earns a test: the ``NOTIFICATION_FAILED`` a plain ``resume`` leaves behind
+    must not change the projected state or the verdict a later resume returns,
+    or the read-only framing would be false in the part that matters. The
+    projection returns ``False`` for notification events, so folding the log
+    with and without the append has to land on identical state.
+    """
+    from continuum.state.semantic import project
+
+    monkeypatch.chdir(tmp_path)
+    db = str(tmp_path / "demo.db")
+    _seed_blocked_run(db)
+    # An unreachable endpoint, so the append is the dead-letter variant.
+    _write_registry(tmp_path, "http://127.0.0.1:1/unreachable")
+
+    def projected() -> dict:
+        with SQLiteStorage(db) as storage:
+            # source_sequence is the event high-water mark, not state: it moves
+            # by one with the append and is asserted separately below.
+            state = project("run_1", storage.read_events("run_1")).model_dump(mode="json")
+            state.pop("source_sequence")
+            return state
+
+    def source_sequence() -> int:
+        with SQLiteStorage(db) as storage:
+            return project("run_1", storage.read_events("run_1")).source_sequence
+
+    def event_types() -> list[str]:
+        with SQLiteStorage(db) as storage:
+            return [event.type.value for event in storage.read_events("run_1")]
+
+    before = projected()
+    seq_before = source_sequence()
+    assert EventType.NOTIFICATION_FAILED.value not in event_types()
+
+    # Plain resume, no --repair: the bell rings and dead-letters exactly once.
+    code, _, err = _run_cli("--db", db, "resume", "run_1", "--env", "dataset=v3")
+    assert code == ExitCode.REQUIRES_HUMAN, err
+    assert "delivery failed" in err
+    assert event_types().count(EventType.NOTIFICATION_FAILED.value) == 1
+
+    # The audit record is the only change in the log: identical projected state,
+    # the cursor advanced by exactly one event, and the next resume still
+    # returns the same verdict.
+    assert projected() == before
+    assert source_sequence() == seq_before + 1
+    code2, _, _ = _run_cli("--db", db, "resume", "run_1", "--env", "dataset=v3")
+    assert code2 == code
+
+
 def test_resume_without_registry_stays_silent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
