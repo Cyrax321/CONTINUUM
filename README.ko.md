@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI 진입점
 continuum-mcp --help             # MCP 서버 진입점 ([mcp] 또는 [dev] 필요)
-pytest -q                        # 최소 환경에서 약 2,195개 수집, 약 2,030개 통과, 약 23개 스킵 (정확한 수는 환경에 따라 다름)
+pytest -q                        # 최소 환경에서 약 2,241개 수집, 약 2,216개 통과, 약 25개 스킵 (정확한 수는 환경에 따라 다름)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI가 강제하는 세 가지 게이트
 ```
@@ -188,7 +188,7 @@ python demo-run/generate_crash_visual.py
 | 환경 재검증 | 각 체크포인트 구성 요소는 재개 전에 현재 세계에 대해 검증됨 |
 | 출처를 인식하는 상태 | 에이전트가 보고한 진행 상황은 `REQUIRES_REVIEW`로 표시되며 스스로 인증되지 않음 |
 | 복구 엔진 | 결정적이고 봉인된 다음 액션 계약을 가진 일곱 가지 복구 모드 |
-| 기본적으로 거부하는 MCP 서버 | 열한 개의 도구, 읽기/변경 분리, 호출자 allowlist |
+| 기본적으로 거부하는 MCP 서버 | 열두 개의 도구, 읽기/변경 분리, 호출자 allowlist |
 | 프레임워크 어댑터 | 범용 Python, OpenAI Agents SDK, LangGraph, LangChain 통합 |
 | 안전한 계획 루프 | 이중 신호 관측 검증이 고위험 분기를 REQUIRES_REVIEW로 승격 |
 | 주기적 재검증 | 환경이 일정에 따라 다시 검사되어 실행 중 드리프트를 한 주기 내에 포착 |
@@ -228,7 +228,7 @@ CONTINUUM은 목업 단위 테스트뿐만 아니라 실제 LLM 에이전트, �
 - **서드파티 클라이언트**: Gemini CLI와 Kilo Code가 stdio JSON-RPC로 라이브 SQLite 저장소에 연결되어 다중 에이전트 공존과 인가 분리를 검증.
 - **프로토콜 준수**: `@modelcontextprotocol/inspector --cli`로 프로세스 죽음을 가로질러 엔드투엔드로 구동. 변경 도구는 기본적으로 `CONTINUUM_MCP_MUTATING_CLIENTS` 뒤에서 거부되며, 외부 클레임은 `REQUIRES_REVIEW`(`safe: false`)로 강등된다.
 - **자기 치유**: 하드킬된 서버는 시작 시 한 번의 재시도로 고립된 SQLite `-wal`/`-shm` 사이드카를 정리하여 복구한다.
-- **규모**: 약 2,195개 테스트가 수집됨(약 2,030개 통과, 나머지는 선택적 서비스 없이 스킵), Python 3.11, 3.12, 3.13에서 실행(unit, `hypothesis` 기반 속성 테스트, 동시성, 적대적). CONTINUUM-Bench는 다섯 개의 크래시 시나리오에 전용 argument-drift 시나리오를 더해 실행하며, CONTINUUM에 대해 0 중복 작업과 0 중복 사이드 이펙트를, 단순 재생에 대해 완전한 중복을 측정한다. 추가로 14 시나리오 복구 정확성 스위트(`continuum.benchmark.phase6`)가 내구성 실행 서베이의 크래시 지점을 실행 가능한 어설션으로 인코딩한다.
+- **규모**: 약 2,241개 테스트가 수집됨(약 2,216개 통과, 나머지는 선택적 서비스 없이 스킵), Python 3.11, 3.12, 3.13에서 실행(unit, `hypothesis` 기반 속성 테스트, 동시성, 적대적). CONTINUUM-Bench는 다섯 개의 크래시 시나리오에 전용 argument-drift 시나리오를 더해 실행하며, CONTINUUM에 대해 0 중복 작업과 0 중복 사이드 이펙트를, 단순 재생에 대해 완전한 중복을 측정한다. 추가로 14 시나리오 복구 정확성 스위트(`continuum.benchmark.phase6`)가 내구성 실행 서베이의 크래시 지점을 실행 가능한 어설션으로 인코딩한다.
 - **적대적 감사**: 전체 MCP 표면이 라이브 프로토콜 위에서 감사되었고, 세 가지 결함이 발견되어 수정되었다. 방법과 재현 단계는 [test.md](test.md)에 있다.
 
 ## MCP 통합
@@ -240,7 +240,7 @@ uv pip install -e ".[mcp]"
 CONTINUUM_MCP_MUTATING_CLIENTS=your-client-name continuum-mcp
 ```
 
-stdio를 통한 열한 개의 도구. 세 개는 읽기 전용(`continuum_validate`, `continuum_resume`, `continuum_list_actions`), 여덟 개는 변경한다. 사이드 이펙트는 2단계(청구, 실행, 완료)이며, 변경 도구는 기본적으로 allowlist 뒤에서 거부된다. 에이전트가 보고한 상태는 출처 `Origin.EXTERNAL_AGENT`로 기록되고 `REQUIRES_REVIEW`로 표시된다.
+stdio를 통한 열두 개의 도구. 세 개는 읽기 전용(`continuum_validate`, `continuum_resume`, `continuum_list_actions`), 아홉 개는 변경한다. 사이드 이펙트는 2단계(청구, 실행, 완료)이며, 변경 도구는 기본적으로 allowlist 뒤에서 거부된다. 에이전트가 보고한 상태는 출처 `Origin.EXTERNAL_AGENT`로 기록되고 `REQUIRES_REVIEW`로 표시된다.
 
 검증 세부사항(시작 시 크래시 복구와 Claude Code를 통한 엔드투엔드 테스트 포함)은 [references/mcp.md](references/mcp.md)에 있다. 등록된 서버가 `CONNECTION_CLOSED`를 보고하면, 원인은 거의 항상 `PATH` 해결이며 서버 자체가 아니다. [docs/api/mcp.md](docs/api/mcp.md#troubleshooting)에 진단과 두 가지 수정책이 있다.
 
@@ -328,7 +328,7 @@ CONTINUUM은 하나의 불변식을 중심으로 구성된다. **모든 사실�
 | 심 | 연결 방법 | 얻게 되는 것 |
 |:--|:--|:--|
 | 1 인프로세스 | `GenericAgentAdapter.intercept_action(...)`와 `wrap_tool(key_fn=...)`(LangChain, LangGraph, OpenAI Agents SDK용) | Python 프레임워크, 신뢰할 수 있는 쓰기 |
-| 2 MCP 서버 | `continuum-mcp` 12개 도구를 stdio를 통해(`continuum_record_progress`, `continuum_intercept_action`, `continuum_complete_action` 등) | 모든 MCP 대응 클라이언트, 3 읽기 전용 + 8 변경, allowlist `CONTINUUM_MCP_MUTATING_CLIENTS` |
+| 2 MCP 서버 | `continuum-mcp` 12개 도구를 stdio를 통해(`continuum_record_progress`, `continuum_intercept_action`, `continuum_complete_action` 등) | 모든 MCP 대응 클라이언트, 3 읽기 전용 + 9 변경, allowlist `CONTINUUM_MCP_MUTATING_CLIENTS` |
 | 3 CLI 수명 주기 훅 | `continuum hooks install claude-code --with-gate` (`gemini`와 `codex`도) | 코딩 CLI: `SessionStart briefing`, `PostToolUse observe`, `PreToolUse gate`, CLAUDE.md 불필요 |
 | 4 강제 HTTP 게이트웨이 | `continuum gateway --port 8765`와 `.continuum/gateway.json` | 모든 언어, 모든 아웃바운드 HTTP는 청구를 요구하며 게이트웨이는 실제 상태 코드로부터 정산 |
 | 5 OpenTelemetry 브리지 | `make_span_processor(storage)` | 모든 트레이싱된 앱, 스팬이 `TOOL_COMPLETED` 증거가 됨 |
@@ -394,7 +394,7 @@ RESUME < REPAIR_AND_RESUME < REPLAN < WAIT < REQUEST_HUMAN < ROLLBACK < ABORT
 
 ### 모듈 맵, 하나의 라이브러리, 많은 표면
 
-CONTINUUM은 하나의 라이브러리(`src/continuum`, 124 모듈) plus 대규모 테스트 스위트(161 테스트 파일, 약 2,195 테스트)이다. 모든 모듈은 하나의 해시 체인 이벤트 로그에 추가하고 재생한다.
+CONTINUUM은 하나의 라이브러리(`src/continuum`, 126 모듈) plus 대규모 테스트 스위트(170 테스트 파일, 약 2,241 테스트)이다. 모든 모듈은 하나의 해시 체인 이벤트 로그에 추가하고 재생한다.
 
 | 모듈 | 역할 |
 |:--|:--|
@@ -416,7 +416,7 @@ CONTINUUM은 하나의 라이브러리(`src/continuum`, 124 모듈) plus 대규�
 | `mcp/` | 12개 stdio 도구 plus 인가 `authz.py` 토큰 인증, allowlist, 확인 토큰 |
 | `serve/` | Sidecar stdio JSON 와이어 + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | 웹 대시보드 `app.py` `hitl.py`와 HITL 버튼 확인, 조정, 완료, 접두사 신뢰 조언, 고정 |
-| `cli/` | 38개 argparse 명령, 종료 코드가 평결, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 46개 argparse 명령, 종료 코드가 평결, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | OpenTelemetry 스팬 프로세서 브리지 |
 | `benchmark/` | CONTINUUM-Bench 하네스, 5개 크래시 시나리오 + 인자 드리프트 + 14 시나리오 복구 스위트 |
 
@@ -457,7 +457,7 @@ continuum attest <run_id> --key signer.pem       # 외부 검증자를 위해 �
 continuum hooks install claude-code --with-gate   # 코딩 CLI: 증거, 브리핑, 게이트
 continuum gateway --port 8765                     # 다른 모든 것을 위한 강제 HTTP 프록시
 provider.add_span_processor(continuum.otel.make_span_processor(storage))  # OTel을 증거로
-continuum-mcp                                     # MCP가 가능한 모든 것: 열한 개 도구 서버
+continuum-mcp                                     # MCP가 가능한 모든 것: 열두 개 도구 서버
 continuum briefing                                # 세션 시작 컨텍스트 주입
 continuum budget <run_id>                        # 재시도 예산 사용량 보고서
 continuum tree <parent_run_id>                   # 다중 에이전트 계층 보기

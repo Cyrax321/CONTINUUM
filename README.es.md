@@ -96,7 +96,7 @@ Verifica:
 ```bash
 continuum --help                 # punto de entrada CLI
 continuum-mcp --help             # punto de entrada servidor MCP (necesita [mcp] o [dev])
-pytest -q                        # ~2,195 recogidos, ~2,030 pasando, ~23 saltados en un entorno mínimo (los recuentos exactos varían)
+pytest -q                        # ~2,241 recogidos, ~2,216 pasando, ~25 saltados en un entorno mínimo (los recuentos exactos varían)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # las tres puertas que CI exige
 ```
@@ -189,7 +189,7 @@ Recorrido completo con código en `docs/recovery_walkthrough.md` (`examples/reco
 | Revalidación del entorno | Cada componente del checkpoint se verifica contra el mundo actual antes de reanudar |
 | Estado con procedencia | El progreso reportado por el agente se marca `REQUIRES_REVIEW`, nunca se auto certifica |
 | Motor de recuperación | Siete modos de recuperación con un contrato determinista y sellado para la siguiente acción |
-| Servidor MCP que deniega por defecto | Once herramientas, separación lectura/mutación, allowlist de llamantes |
+| Servidor MCP que deniega por defecto | Doce herramientas, separación lectura/mutación, allowlist de llamantes |
 | Adaptadores de frameworks | Integraciones Python genérico, OpenAI Agents SDK, LangGraph y LangChain |
 | Bucle de planificación seguro | La verificación de observaciones con dos señales escala ramas de alto riesgo a REQUIRES_REVIEW |
 | Revalidación periódica | El entorno se vuelve a comprobar según agenda, detectando deriva a mitad de ejecución dentro de un ciclo |
@@ -229,7 +229,7 @@ CONTINUUM se verifica contra agentes LLM reales, límites de protocolo en vivo y
 - **Clientes de terceros**: Gemini CLI y Kilo Code conectados vía stdio JSON-RPC contra el almacén SQLite en vivo, validando coexistencia multiagente y aislamiento de autorización.
 - **Cumplimiento de protocolo**: conducido de extremo a extremo con `@modelcontextprotocol/inspector --cli` a través de muertes de proceso, las herramientas mutantes deniegan por defecto tras `CONTINUUM_MCP_MUTATING_CLIENTS`, los reclamos externos degradan a `REQUIRES_REVIEW` (`safe: false`).
 - **Auto reparación**: servidores matados de forma brusca se recuperan de sidecars huérfanos `-wal`/`-shm` de SQLite mediante limpieza de un solo reintento al arrancar.
-- **Escala**: cerca de 2,195 tests recogidos (~2,030 pasando, el resto se salta sin servicios opcionales) en Python 3.11, 3.12 y 3.13 (unitarios, basados en propiedades con `hypothesis`, concurrencia, adversariales). CONTINUUM-Bench ejecuta cinco escenarios de caída más un escenario dedicado de deriva de argumentos, midiendo 0 trabajo duplicado y 0 efectos secundarios duplicados para CONTINUUM frente a duplicación total para la reproducción ingenua, más una suite separada de 14 escenarios de corrección de recuperación (`continuum.benchmark.phase6`) que codifica los puntos de caída del estudio de ejecución durable como aserciones ejecutables.
+- **Escala**: cerca de 2,241 tests recogidos (~2,216 pasando, el resto se salta sin servicios opcionales) en Python 3.11, 3.12 y 3.13 (unitarios, basados en propiedades con `hypothesis`, concurrencia, adversariales). CONTINUUM-Bench ejecuta cinco escenarios de caída más un escenario dedicado de deriva de argumentos, midiendo 0 trabajo duplicado y 0 efectos secundarios duplicados para CONTINUUM frente a duplicación total para la reproducción ingenua, más una suite separada de 14 escenarios de corrección de recuperación (`continuum.benchmark.phase6`) que codifica los puntos de caída del estudio de ejecución durable como aserciones ejecutables.
 - **Auditoría adversarial**: la superficie MCP completa fue auditada sobre el protocolo en vivo, se encontraron y corrigieron tres defectos. Método y pasos de reproducción en [test.md](test.md).
 
 ## Integración MCP
@@ -241,7 +241,7 @@ uv pip install -e ".[mcp]"
 CONTINUUM_MCP_MUTATING_CLIENTS=your-client-name continuum-mcp
 ```
 
-Once herramientas vía stdio. Tres son de solo lectura (`continuum_validate`, `continuum_resume`, `continuum_list_actions`), ocho mutan. Los efectos secundarios son en dos fases (reclamar, ejecutar, completar) y las herramientas mutantes deniegan por defecto tras una allowlist. El estado reportado por el agente se registra con procedencia `Origin.EXTERNAL_AGENT` y se marca `REQUIRES_REVIEW`.
+Doce herramientas vía stdio. Tres son de solo lectura (`continuum_validate`, `continuum_resume`, `continuum_list_actions`), nueve mutan. Los efectos secundarios son en dos fases (reclamar, ejecutar, completar) y las herramientas mutantes deniegan por defecto tras una allowlist. El estado reportado por el agente se registra con procedencia `Origin.EXTERNAL_AGENT` y se marca `REQUIRES_REVIEW`.
 
 Detalles de verificación, incluida la recuperación tras caída al arrancar y la prueba extremo a extremo con Claude Code, en [references/mcp.md](references/mcp.md). Si un servidor registrado reporta `CONNECTION_CLOSED`, la causa casi siempre es la resolución de `PATH` y no el servidor en sí: [docs/api/mcp.md](docs/api/mcp.md#troubleshooting) tiene el diagnóstico y dos remedios.
 
@@ -329,7 +329,7 @@ Cualquier harness se conecta al mismo registro encadenado. La misma ejecución p
 | Costura | Cómo conectar | Qué te aporta |
 |:--|:--|:--|
 | 1 En proceso | `GenericAgentAdapter.intercept_action(...)` y `wrap_tool(key_fn=...)` en LangChain, LangGraph, OpenAI Agents SDK | Frameworks Python, escrituras confiables |
-| 2 Servidor MCP | `continuum-mcp` 12 herramientas vía stdio (`continuum_record_progress`, `continuum_intercept_action`, `continuum_complete_action`, etc.) | Cualquier cliente capaz de MCP, 3 solo lectura + 8 mutantes, allowlist `CONTINUUM_MCP_MUTATING_CLIENTS` |
+| 2 Servidor MCP | `continuum-mcp` 12 herramientas vía stdio (`continuum_record_progress`, `continuum_intercept_action`, `continuum_complete_action`, etc.) | Cualquier cliente capaz de MCP, 3 solo lectura + 9 mutantes, allowlist `CONTINUUM_MCP_MUTATING_CLIENTS` |
 | 3 Hooks de ciclo de vida CLI | `continuum hooks install claude-code --with-gate` también `gemini` y `codex` | CLIs de código: `SessionStart briefing`, `PostToolUse observe`, `PreToolUse gate`, sin necesidad de CLAUDE.md |
 | 4 Gateway HTTP de cumplimiento | `continuum gateway --port 8765` con `.continuum/gateway.json` | Cualquier lenguaje, cualquier HTTP saliente debe tener un reclamo, el gateway liquida desde el código de estado real |
 | 5 Puente OpenTelemetry | `make_span_processor(storage)` | Cualquier app trazada, los spans se convierten en evidencia `TOOL_COMPLETED` |
@@ -395,7 +395,7 @@ Esquema v6. SQLite es primario, Postgres verificado por CI. Un registro, muchas 
 
 ### Mapa de módulos, una librería, muchas superficies
 
-CONTINUUM es una librería (`src/continuum`, 124 módulos) más una suite de tests grande (161 archivos de test, ~2,195 tests). Todos los módulos añaden y reproducen un registro de eventos encadenado:
+CONTINUUM es una librería (`src/continuum`, 126 módulos) más una suite de tests grande (170 archivos de test, ~2,241 tests). Todos los módulos añaden y reproducen un registro de eventos encadenado:
 
 | Módulo | Rol |
 |:--|:--|
@@ -417,7 +417,7 @@ CONTINUUM es una librería (`src/continuum`, 124 módulos) más una suite de tes
 | `mcp/` | 12 herramientas stdio más autorización `authz.py` autenticación por token, allowlist, token de confirmación |
 | `serve/` | Sidecar stdio cable JSON + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Dashboard web `app.py` `hitl.py` con botones HITL confirmar/reconciliar/completar, aviso de confianza de prefijo, fijaciones |
-| `cli/` | 38 comandos argparse, códigos de salida como veredicto, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 46 comandos argparse, códigos de salida como veredicto, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | Puente de procesador de spans de OpenTelemetry |
 | `benchmark/` | Harness de CONTINUUM-Bench, 5 escenarios de caída + deriva de argumentos + suite de recuperación de 14 escenarios |
 
@@ -458,7 +458,7 @@ Todo el cableado está del lado del host, la cooperación del modelo es opcional
 continuum hooks install claude-code --with-gate   # CLIs de código: evidencia, briefing, puerta
 continuum gateway --port 8765                     # proxy HTTP de cumplimiento para todo lo demás
 provider.add_span_processor(continuum.otel.make_span_processor(storage))  # OTel a evidencia
-continuum-mcp                                     # cualquier cosa capaz de MCP: el servidor de once herramientas
+continuum-mcp                                     # cualquier cosa capaz de MCP: el servidor de doce herramientas
 continuum briefing                                # inyección de contexto al inicio de sesión
 continuum budget <run_id>                        # informe de uso de presupuesto de reintentos
 continuum tree <parent_run_id>                   # vista de jerarquía multiagente
