@@ -306,6 +306,26 @@ def render_key(template: str, tool_input: Mapping[str, Any]) -> str:
             f"but the call supplied {sorted(tool_input)!r}"
         )
     values = {f: normalize_key_value(tool_input[f]) for f in fields}
+    if is_memory_template(template):
+        # A memory key's segments are colon-delimited, so a colon inside a
+        # value shifts them and defeats the positional tenant check the
+        # gateway performs on the rendered key (#1149). Reject at the
+        # boundary rather than letting an ambiguous key be emitted. Only the
+        # placeholders before the terminal segment can shift the positions:
+        # a colon in the last field stays inside it and is re-parsed
+        # downstream as ":".join(parts[3:]), so record keys like
+        # "doc:section:1" keep working. The check reads the formatted value
+        # rather than only ``str`` ones: ``normalize_key_value`` passes other
+        # types through, and ``str.format`` renders a list such as
+        # ``["x:acme:"]`` as ``['x:acme:']``, which carries the same shifting
+        # colon without ever being a string.
+        guarded = set(fields[:-1])
+        for field, value in values.items():
+            if field in guarded and ":" in str(value):
+                raise GateConfigError(
+                    f"memory template {template!r} field {field!r} must not contain ':' "
+                    f"(it would shift the key's colon-delimited segments), got {value!r}"
+                )
     return template.format(**values)
 
 

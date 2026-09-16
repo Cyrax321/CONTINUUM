@@ -315,3 +315,114 @@ def test_derive_memory_key_and_is_memory_helpers() -> None:
         {"store_id": "pgvector_main", "tenant": "acme", "record_key": "rec-42"}
     )
     assert rendered == "mem:pgvector_main:acme:rec-42"
+
+
+def test_gateway_denies_a_colon_that_shifts_the_tenant_segment(tmp_path) -> None:
+    """A colon in a non-terminal memory field shifts the colon-delimited
+    segments, so the positional tenant check would read the attacker's value
+    as the tenant and let the write land under another tenant (#1149). The
+    render boundary rejects the ambiguous key, so match_route denies closed
+    instead."""
+    from continuum.gateway import Route, render_key
+
+    # Honest and attacking bodies render to the same-looking segment position.
+    with pytest.raises(Exception, match="must not contain ':'"):
+        render_key(
+            "mem:{store_id}:{tenant}:{record_key}",
+            {"store_id": "pgvector_main:acme", "tenant": "globex", "record_key": "rec-42"},
+        )
+
+    route = Route(
+        host="pgvector.internal",
+        methods=("POST",),
+        prefix="/upsert",
+        action_type="mem_write",
+        key_template="mem:{store_id}:{tenant}:{record_key}",
+    )
+    path = str(tmp_path / "gw.db")
+    with SQLiteStorage(path) as store:
+        store.create_run(Run(run_id="run_1", goal="g"))
+        store.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+        actions = fold_action_events(store.read_events("run_1"))
+        # store_id carries the bound tenant, so parts[2] would read "acme"
+        # while the real tenant is globex.
+        decision = match_route(
+            [route],
+            host="pgvector.internal",
+            method="POST",
+            path="/upsert",
+            body={"store_id": "pgvector_main:acme", "tenant": "globex", "record_key": "rec-42"},
+            actions_by_key=actions,
+            run_id="run_1",
+            bound_tenant="acme",
+        )
+        assert decision.allow is False
+        assert "must not contain ':'" in decision.reason
+
+
+def test_gateway_allows_a_colon_in_the_record_key(tmp_path) -> None:
+    """The terminal segment cannot shift the tenant position, so a record key
+    that legitimately carries a colon must still render and route (#1149
+    review). cmd_tombstone re-parses such keys as ":".join(parts[3:]), so
+    rejecting them would regress a supported write."""
+    from continuum.gate import render_key as gate_render_key
+    from continuum.gateway import Route, render_key
+
+    # A colon in the terminal segment stays inside it: parts[2] is still "acme".
+    body = {"store_id": "pgvector_main", "tenant": "acme", "record_key": "doc:section:1"}
+    rendered = render_key("mem:{store_id}:{tenant}:{record_key}", body)
+    assert rendered == "mem:pgvector_main:acme:doc:section:1"
+    # The hook's render_key must agree, or a call claimed at one seam looks
+    # unclaimed at the other.
+    assert gate_render_key("mem:{store_id}:{tenant}:{record_key}", body) == rendered
+
+    route = Route(
+        host="pgvector.internal",
+        methods=("POST",),
+        prefix="/upsert",
+        action_type="mem_write",
+        key_template="mem:{store_id}:{tenant}:{record_key}",
+    )
+    path = str(tmp_path / "gw.db")
+    with SQLiteStorage(path) as store:
+        store.create_run(Run(run_id="run_1", goal="g"))
+        store.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+        ledger = ActionLedger(store, "run_1")
+        assert ledger.claim("mem_write", {}, key=rendered, scoped_to_run=False).fresh
+        actions = fold_action_events(store.read_events("run_1"))
+        decision = match_route(
+            [route],
+            host="pgvector.internal",
+            method="POST",
+            path="/upsert",
+            body=body,
+            actions_by_key=actions,
+            run_id="run_1",
+            bound_tenant="acme",
+            storage=store,
+        )
+        assert decision.allow is True
+
+
+def test_memory_renderers_reject_a_colon_in_a_formatted_non_string() -> None:
+    """``normalize_key_value`` passes non-strings through, and ``str.format``
+    renders a list such as ``["x:acme:"]`` as ``['x:acme:']`` -- a colon the
+    string-only guard never inspected, in a position that shifts the tenant
+    segment (#1149 review). Both seams must read the formatted value, or a
+    caller who cannot pass a string can still build an ambiguous key."""
+    from continuum.gate import GateConfigError
+    from continuum.gate import render_key as render_gate_key
+    from continuum.gateway import GatewayConfigError
+    from continuum.gateway import render_key as render_gateway_key
+
+    payload = {
+        "store_id": ["x:acme:"],
+        "tenant": "globex",
+        "record_key": "rec-42",
+    }
+
+    with pytest.raises(GateConfigError, match=r"must not contain ':'"):
+        render_gate_key("mem:{store_id}:{tenant}:{record_key}", payload)
+
+    with pytest.raises(GatewayConfigError, match=r"must not contain ':'"):
+        render_gateway_key("mem:{store_id}:{tenant}:{record_key}", payload)
