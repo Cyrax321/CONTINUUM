@@ -18,6 +18,7 @@ import pytest
 
 from continuum.actions import ActionLedger
 from continuum.actions.idempotency import resolve_authorization_id
+from continuum.actions.ledger import LedgerError
 from continuum.budgets import get_remaining, load_budgets
 from continuum.events import EventType
 from continuum.models import Run
@@ -176,3 +177,45 @@ def test_budget_file_absent_is_unbound(tmp_path: Path, monkeypatch: pytest.Monke
         ledger.fail(outcome.key, "boom", certain=True)
     # No exception, and no file was created
     assert not budgets_path.exists()
+
+
+def test_a_rejected_claim_consumes_no_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claim rejected before recording consumes no slot (issue #1168).
+
+    The drawdown is coupled to the recorded ``ACTION_RECORDED`` event, so a
+    claim rejected by its own input validation must leave the counter and the
+    log agreeing that zero attempts exist. Drawing down first left a counter
+    increment with no event, so with ``max_attempts: 1`` one bad digest
+    permanently blocked a resource nothing had ever touched.
+    """
+    budgets_path = _budgets_path()
+    budgets_path.parent.mkdir(parents=True, exist_ok=True)
+    budgets_path.write_text(json.dumps({"action_types": {"send_invoice": {"max_attempts": 1}}}))
+
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="g"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    ledger = ActionLedger(storage, "run_1")
+
+    with pytest.raises(LedgerError, match="origin_digest must be 64 lowercase hex"):
+        ledger.claim("send_invoice", {"invoice": "INV-001"}, origin_digest="not-hex")
+
+    # No ACTION_RECORDED landed, so no budget entry may exist either.
+    assert storage.last_sequence("run_1") == 1
+    raw = load_budgets(budgets_path)
+    assert not raw.get("authorization_bound", {}).get("send_invoice")
+
+    # The retry the operator meant to make all along still has its full budget.
+    outcome = ledger.claim("send_invoice", {"invoice": "INV-001"})
+    assert outcome.fresh
+    assert storage.last_sequence("run_1") == 2
+
+    # The cap still holds against the next attempt once one has really been used.
+    with pytest.raises(Exception, match="budget exhausted"):
+        ledger.claim("send_invoice", {"invoice": "INV-001"}, key="fresh-key")
+    raw = load_budgets(budgets_path)
+    auth_id = resolve_authorization_id("send_invoice", None, {"invoice": "INV-001"})
+    assert auth_id is not None
+    assert get_remaining(raw, "send_invoice", auth_id) == 0

@@ -977,8 +977,6 @@ class ActionLedger:
         budget_auth_id = self._budget_authorization_id(action_type, None, arguments, volatile)
 
         if existing is None:
-            if budget_auth_id is not None:
-                self._budget_consume_claim(action_type, budget_auth_id)
             # Origin digest (issue #566): optional 64 hex, validated by Action.
             # Fail closed on bad digest rather than storing garbage that
             # forensic joins would then misattribute.
@@ -999,6 +997,13 @@ class ActionLedger:
                 started_at=utcnow(),
                 origin_digest=origin_digest,
             )
+            # Budget drawdown is coupled to the recorded event (issue #1168):
+            # every check that can reject the claim runs first, so a claim that
+            # is never recorded and never performed consumes no slot. Drawing
+            # down before the validation above left a counter increment with no
+            # ACTION_RECORDED to match it against.
+            if budget_auth_id is not None:
+                self._budget_consume_claim(action_type, budget_auth_id)
             self._record(
                 key,
                 action,
@@ -1015,8 +1020,6 @@ class ActionLedger:
 
         if existing.status is ActionStatus.COMPENSATED:
             # The effect was undone, so performing it again is legitimate.
-            if budget_auth_id is not None:
-                self._budget_consume_claim(action_type, budget_auth_id)
             action = existing.model_copy(
                 update={
                     "status": ActionStatus.STARTED,
@@ -1026,16 +1029,19 @@ class ActionLedger:
                     "external_id": None,
                 }
             )
+            # Drawdown happens last, just before the event lands (#1168).
+            if budget_auth_id is not None:
+                self._budget_consume_claim(action_type, budget_auth_id)
             self._record(key, action)
             self._count_claim()
             return ActionOutcome(key=key, action=action, fresh=True)
 
         if existing.status is ActionStatus.FAILED:
-            if budget_auth_id is not None:
-                self._budget_consume_claim(action_type, budget_auth_id)
             action = existing.model_copy(
                 update={"status": ActionStatus.STARTED, "started_at": utcnow()}
             )
+            if budget_auth_id is not None:
+                self._budget_consume_claim(action_type, budget_auth_id)
             self._record(key, action)
             self._count_claim()
             return ActionOutcome(key=key, action=action, fresh=True)
