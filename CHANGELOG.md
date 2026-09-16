@@ -66,6 +66,16 @@ All notable changes to this project are documented here. The format follows
   `references/testing.md`, `references/install.md`, and the translated READMEs
   now carry the same figures as `README.md`.
 
+- **A consumed authority no longer downgrades a stricter recovery verdict
+  (#1146).** `RecoveryEngine.assess` overwrote the mode with
+  `REQUEST_HUMAN` whenever a consumed authority blocked resume, discarding an
+  `ABORT` or `ROLLBACK` the risk policy had already proposed — both strictly
+  more cautious, per the module's own "the engine always returns the maximum
+  proposed mode" invariant. The rationale still named the abort the verdict
+  no longer delivered. The block now escalates to `max(mode, REQUEST_HUMAN)`
+  instead of replacing it, so the authority raises the floor without
+  weakening the ceiling.
+
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
   types at the top level (`{"send_invoice": {...}}`) instead of nesting them
