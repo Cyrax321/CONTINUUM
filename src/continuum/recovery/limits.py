@@ -30,7 +30,7 @@ def run_with_limits(
     The caller can decide how to handle the timeout. Using a thread avoids
     signal restrictions on non main threads and works on all platforms.
 
-    On timeout the worker thread is not killed — Python cannot do that — it is
+    On timeout the worker thread is not killed (Python cannot do that), it is
     detached. The exception reaches the caller at the deadline, not when the
     runaway happens to finish.
     """
