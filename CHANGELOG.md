@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The TUI `tree` view fetches the run once instead of twice (#1157).**
+  `family_lines` in `src/continuum/tui/model.py` called
+  `storage.get_run(run_id)` twice and discarded the first result: the first
+  call was the run-existence guard, the second fetched the record the header
+  actually renders. Both hit storage for the same row, and on the SQLite and
+  Postgres backends that is a round trip on a view an operator re-renders
+  while watching a run tree. The assignment now does both jobs: `run =
+  storage.get_run(run_id)` raises `RunNotFound` for a missing run exactly as
+  the standalone guard did, so no behaviour changes beyond the spared query.
+  The neighbouring views (`checkpoint_rows`, `action_rows`, `event_rows`,
+  `budget_rows`) already fetched the row exactly once for the same guard
+  purpose, so this removes the outlier.
+
 - **The advisory verdict contract is now stated where a reader can find it (#1031).**
   `RecoveryDecision` and its `permits()` method describe themselves as
   advisory, not enforcing, and name the four enforcement seams a caller can

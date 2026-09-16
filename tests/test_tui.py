@@ -154,6 +154,15 @@ def test_family_lines_show_every_child_verdict(db: str, store: SQLiteStorage) ->
     assert "!!" in lines
 
 
+def test_family_lines_refuse_a_missing_run(store: SQLiteStorage) -> None:
+    """``get_run`` is the run-existence guard as well as the header's record,
+    so one call does both and still raises on a missing run (issue #1157)."""
+    from continuum.storage import RunNotFound
+
+    with pytest.raises(RunNotFound):
+        tui_model.family_lines(store, "ghost")
+
+
 def test_recovery_lines_render_the_verdict_and_the_family_block(
     db: str, store: SQLiteStorage
 ) -> None:
