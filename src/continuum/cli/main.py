@@ -1356,6 +1356,20 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             )
             return 2
         run_id = active.run_id
+    # Terminal runs have nothing to resume (#1197). Exit non-zero so
+    # `continuum resume && ./start-agent.sh` cannot continue onto a closed run.
+    run = storage.get_run(run_id)
+    if run.status in (
+        RunStatus.COMPLETED,
+        RunStatus.ABORTED,
+        RunStatus.FAILED,
+        RunStatus.CRASHED,
+    ):
+        print(
+            f"Run {run_id} is terminal ({run.status.value}); nothing to resume.",
+            file=err,
+        )
+        return 2
     engine = RecoveryEngine(storage, strict_unknown=not args.tolerate_unknown)
     decision = engine.assess(
         run_id,
