@@ -196,7 +196,7 @@ Full walkthrough with code is in `docs/recovery_walkthrough.md` (`examples/recov
 | Framework adapters | Generic Python, OpenAI Agents SDK, LangGraph, and LangChain integrations |
 | Secure planning loop | Two-signal observation verification escalates high-risk branches to REQUIRES_REVIEW |
 | Periodic revalidation | Environment re-checked on a schedule, catching mid-run drift within one cycle |
-| Tamper-evident log | Hash-chained event log (36 event types) with integrity verification |
+| Tamper-evident log | Hash-chained event log (51 event types) with integrity verification |
 | Enforcing gate | Unclaimed side-effect calls are refused before they fire; deny messages teach the claim protocol |
 | Observation hooks | Every file a coding CLI writes becomes digest-verified evidence, outside model control |
 | Session briefing | Fresh sessions learn run state deterministically at start, including the last session's reasoning summary |
@@ -415,7 +415,7 @@ Schema v6. SQLite is primary, Postgres is CI verified. One log, many projections
 
 | Table | Purpose |
 |:--|:--|
-| `events` | Hash chained append only log (44 event types in v0.2) |
+| `events` | Hash chained append only log (51 event types) |
 | `runs` | Run metadata with `parent_run_id` for multi agent |
 | `versions` | SemanticState snapshots per checkpoint |
 | `checkpoints` | Sealed checkpoint records with `RECOVERY` anchors |
