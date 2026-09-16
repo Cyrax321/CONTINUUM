@@ -844,7 +844,7 @@ reproducible evidence. It rests on two layers:
 
 - `tests/test_phase6.py` (15 tests): every scenario runs green under the harness,
   plus harness self-checks (recorded failure, recorded exception, report +
-  summary). `benchmarks/run.py` executes all 12 scenarios and emits a report.
+  summary). `benchmarks/run.py` executes all 14 scenarios and emits a report.
 - The pre-existing `tests/test_benchmark.py` (CONTINUUM-Bench) continues to pass.
 
 ### 17.4 Baseline vs final test result
