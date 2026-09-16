@@ -17,7 +17,7 @@ from typing import Any
 from continuum.events import EventType
 from continuum.models import Origin, Run
 from continuum.recovery.gate import (
-    EditPreconditionError,
+    MergePreconditionError,
     check_merge_preconditions,
     check_preconditions,
 )
@@ -28,12 +28,6 @@ __all__ = [
     "approve_merge",
     "merge_to_anchor",
 ]
-
-
-class MergePreconditionError(EditPreconditionError):
-    """Alias for :class:`EditPreconditionError` with ``edit_type == "merge"``."""
-
-    pass
 
 
 def merge_to_anchor(

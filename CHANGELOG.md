@@ -33,6 +33,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Edit-precondition gate now raises edit-type specific subclasses (#1114).**
+  `check_preconditions` previously raised `ForkPreconditionError` for forks
+  but defaulted to base `EditPreconditionError` for other edit types. It now
+  raises `RestorePreconditionError` for restores and `MergePreconditionError`
+  for merges, allowing callers to distinguish refusal types by exception class.
+
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
   types at the top level (`{"send_invoice": {...}}`) instead of nesting them

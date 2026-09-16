@@ -20,7 +20,10 @@ from typing import Any
 
 from continuum.events import EventType
 from continuum.models import Origin, Run
-from continuum.recovery.gate import EditPreconditionError, check_preconditions
+from continuum.recovery.gate import (
+    RestorePreconditionError,
+    check_preconditions,
+)
 from continuum.storage.base import Storage
 
 __all__ = [
@@ -28,12 +31,6 @@ __all__ = [
     "approve_restore",
     "restore_to_anchor",
 ]
-
-
-class RestorePreconditionError(EditPreconditionError):
-    """Alias for :class:`EditPreconditionError` with ``edit_type == "restore"``."""
-
-    pass
 
 
 def _anchor_for(
