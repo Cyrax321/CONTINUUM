@@ -33,6 +33,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **STATUS.md's interface counts are recounted and each now names the commit it
+  was measured at (#1070).** The Verified and Interfaces sections presented
+  aged figures as if they were live: 33 CLI commands while the built parser
+  exposes 46, 11 MCP tools split 3 read-only and 8 mutating while the server
+  exposes 12 split 3 and 9, and 1047 tests collected while the suite collects
+  2255. Every figure was right when it was written, the CLI and MCP counts
+  coming from a 2026-08-24 recount at `4453c72`; they aged as features landed
+  rather than being wrong at authorship, the twelfth MCP tool
+  (`continuum_record_plan`) and thirteen more CLI subcommands arriving after
+  that baseline. All three figures are recounted at `cef019d` on 2026-09-16
+  and now carry the commit and date they were measured at, so a reader can
+  tell a snapshot from a current claim and judge how far a number has
+  travelled instead of trusting it silently. Figures inside dated verification
+  records (the 2026-08-24 full-gate audit at `8013f6a`, the 2026-08-12 MCP
+  Inspector run) are left as written: they report what those runs observed, not
+  the current interface. Documentation only; no behaviour changes.
+
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
   types at the top level (`{"send_invoice": {...}}`) instead of nesting them
