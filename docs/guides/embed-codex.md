@@ -108,7 +108,7 @@ PY
 # or wrap apply_patch in a Bash echo so the hook still sees it
 ```
 
-If you cannot route through Bash, the durability alternative is `continuum observe` via the adapter's `checkpoint_node` or via `monitored_commands` in `.continuum/config` (not covered here). The constraint is Codex's, not CONTINUUM's, so this doc states it explicitly rather than hiding it.
+If you cannot route through Bash, the durability alternative is `continuum observe` via the LangChain/LangGraph adapter's `checkpoint_node` (there is no `.continuum/config` `monitored_commands` key). The constraint is Codex's, not CONTINUUM's, so this doc states it explicitly rather than hiding it.
 
 ### PreToolUse gate (optional)
 
