@@ -120,7 +120,7 @@ class Storage(ABC):
         """
         raise NotImplementedError
 
-    def read_archived_events(self, run_id: str) -> Sequence[Event]:
+    def read_archived_events(self, run_id: str, *, upto: int | None = None) -> Sequence[Event]:
         """Read events moved into ``events_archive``, oldest first.
 
         Engines without an archive return an empty sequence, so a caller that
@@ -128,11 +128,16 @@ class Storage(ABC):
         :meth:`read_events` unconditionally. This is what keeps exactly-once
         action claims (and any other fold over history) intact across
         compaction: an archived fact is still a recorded fact.
+
+        ``upto`` bounds the read in the engine, so a narrow window on a heavily
+        compacted run does not materialize the whole archive to discard most of
+        it. Compaction exists to bound replay cost; an unbounded archive read
+        would undo that.
         """
-        del run_id
+        del run_id, upto
         return []
 
-    def read_all_events(self, run_id: str) -> Sequence[Event]:
+    def read_all_events(self, run_id: str, *, upto: int | None = None) -> Sequence[Event]:
         """Full history including archived prefix, sorted by sequence.
 
         After compaction the live log holds only the anchor and tail; any
@@ -146,9 +151,13 @@ class Storage(ABC):
         Callers folding the same history more than once should reuse the returned
         sequence within that operation instead of rescanning the archive.
         Sorted to keep hash chain order stable.
+
+        ``upto`` bounds both the archive and live reads in the engine, which
+        keeps a windowed caller (``replay --upto``) from loading a month of
+        archived history to look at its first event.
         """
-        archived = list(self.read_archived_events(run_id))
-        live = list(self.read_events(run_id))
+        archived = list(self.read_archived_events(run_id, upto=upto))
+        live = list(self.read_events(run_id, upto=upto))
         if not archived:
             return live
         if not live:

@@ -33,6 +33,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`continuum replay --upto` works on a compacted run (#1172).** The windowed
+  diagnostic read only the live event tail, where `RUN_STARTED` no longer lives
+  after compaction, so its guard rejected every request and advised the
+  operator to increase `--upto` — advice that could not help, because the event
+  was in `events_archive`, not behind the window. `--upto 999` failed on a run
+  whose last sequence was 13, which is what proved the message wrong about the
+  cause. `cmd_replay` now windows `read_all_events` (the read `cmd_events`
+  already uses, so the two commands agree on what "the event log" is), windowed
+  requests reach the anchored-replay branch instead of being gated out by
+  `--upto is None`, and `_verify_against_stored` reads the stored version's own
+  prefix from the full history so a window ending inside the archived prefix
+  still verifies instead of reporting a sound version as corrupt. The guard
+  still fires, and now truthfully, for a window that genuinely excludes
+  `RUN_STARTED`. Compaction is the feature that exists for long-lived runs, so
+  the bisecting diagnostic was missing precisely where it was most needed.
+
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
   types at the top level (`{"send_invoice": {...}}`) instead of nesting them
