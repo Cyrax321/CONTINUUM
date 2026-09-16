@@ -1410,7 +1410,12 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
         try:
             current = normalize_pinning(json.loads(args.pinning))
-            recorded = latest_pinning(storage.read_events(run_id))
+            # Full history, not the live tail: compaction archives the
+            # pre-anchor prefix, and every ACTION_RECORDED carrying a pinning
+            # lives in it, so the live tail folds to {} and every key would
+            # read as newly pinned (issue #1126). The anchor marker that
+            # remains carries only anchored_through/version.
+            recorded = latest_pinning(storage.read_all_events(run_id))
             drift_lines = compute_drift(recorded, current)
             if drift_lines:
                 text += "\n\nPinning drift (informational):\n" + "\n".join(

@@ -33,6 +33,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`resume --pinning` drift now reads full history, so a compacted run stops
+  reporting every key as newly pinned (#1126).** `cmd_resume` folded
+  `latest_pinning` over `read_events`, the live tail only. `compact_run`
+  archives the pre-anchor prefix and every `ACTION_RECORDED` carrying a
+  pinning lives in it, while the anchor marker left behind carries only
+  `anchored_through`/`version`, so the fold returned `{}` and
+  `pinning_drift({}, current)` named every key as newly pinned on a run whose
+  recorded pinning was identical. The masked directions were the ones an
+  operator would act on: a genuinely changed hash rendered as "newly pinned",
+  and a key that had been unpinned never rendered at all, since the
+  "unpinned (was ...)" line needs the old value from the record it could no
+  longer see. The display stays informational only (#241) but was wrong in
+  the direction of hiding drift. The fold now reads `read_all_events`, which
+  merges the archived prefix back in by sequence, so "newest non-empty
+  pinning" stays correct across compaction. This is the same read-site class
+  as #1050 (assess) and #1072 (watch).
+
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
   types at the top level (`{"send_invoice": {...}}`) instead of nesting them
