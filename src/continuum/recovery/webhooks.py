@@ -93,8 +93,17 @@ class WebhookRegistry:
     dashboard_base_url: str | None = None
 
     def for_event(self, event: str) -> list[WebhookEndpoint]:
-        """Endpoints whose event filter subscribes to ``event``."""
-        return [e for e in self.endpoints if event in e.events]
+        """Endpoints whose event filter subscribes to ``event``.
+
+        ``request_human`` also matches endpoints that only listed
+        ``requires_review``: production notify always passes a RecoveryMode
+        string, and ``requires_review`` is not a RecoveryMode member, so
+        without this alias those endpoints would never fire (#1180).
+        """
+        aliases = {event}
+        if event == EVENT_REQUEST_HUMAN:
+            aliases.add(EVENT_REQUIRES_REVIEW)
+        return [e for e in self.endpoints if e.events & aliases]
 
 
 def load_webhook_registry(path: Path) -> WebhookRegistry:

@@ -489,3 +489,28 @@ def test_resume_with_malformed_registry_warns_but_keeps_the_verdict(
     # The bell is broken, not the verdict: same exit code, one warning.
     assert code == ExitCode.REQUIRES_HUMAN
     assert "warning:" in err and "notification skipped" in err
+
+
+def test_request_human_also_notifies_requires_review_subscribers(store: SQLiteStorage) -> None:
+    """#1180: requires_review is not a RecoveryMode; production only passes request_human."""
+    captured: dict = {}
+    server = _receiver(captured)
+    try:
+        endpoint = WebhookEndpoint(
+            url=f"http://127.0.0.1:{server.server_port}/hook",
+            events=frozenset({EVENT_REQUIRES_REVIEW}),
+            retries=0,
+        )
+        records = notify_blocked(
+            store,
+            "run_1",
+            mode=EVENT_REQUEST_HUMAN,
+            payload={"run_id": "run_1"},
+            contract=_contract(),
+            registry=WebhookRegistry(endpoints=(endpoint,)),
+        )
+        assert [r.status for r in records] == ["sent"]
+        assert len(captured.get("hits", [])) == 1
+    finally:
+        server.shutdown()
+
