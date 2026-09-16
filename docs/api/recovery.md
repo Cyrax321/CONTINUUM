@@ -9,7 +9,7 @@ from continuum.recovery.engine import RecoveryEngine
 
 engine = RecoveryEngine(storage)
 decision = engine.assess(run_id, current_environment=env)
-print(decision.mode)        # RESUME | REPLAY | REQUEST_HUMAN | ABORT
+print(decision.mode)        # RESUME | REPAIR_AND_RESUME | ROLLBACK | WAIT | REQUEST_HUMAN | REPLAN | ABORT
 if decision.permits("resume"):
     ...
 ```
@@ -38,7 +38,7 @@ resume an interrupted run without having remembered its id.
 
 ### `mode`
 
-One of `RESUME` (safe to continue from the checkpoint), `REPLAY` (re-run from a
+One of `RESUME` (safe to continue from the checkpoint), `REPLAN` (re-run from a
 recorded plan), `REQUEST_HUMAN` (a human must adjudicate an uncertain side
 effect), or `ABORT` (the run cannot be trusted to continue).
 
