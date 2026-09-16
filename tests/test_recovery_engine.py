@@ -872,3 +872,30 @@ def test_an_unreadable_ledger_never_downgrades_a_harder_verdict(
 
     assert decision.mode is RecoveryMode.ABORT
     assert not decision.permits("anything_at_all")
+
+
+def test_a_readable_ledger_never_downgrades_a_harder_verdict(
+    store: SQLiteStorage,
+) -> None:
+    """A *readable* consumed authority must not weaken a harder verdict either.
+
+    The failure branch above only guards the unreadable path. The success
+    branch used to overwrite the mode outright, so a run with both a real
+    consumed authority and a risk-driven ABORT came back REQUEST_HUMAN (issue
+    #1066 review). Escalation is a floor, not a replacement.
+    """
+    _seed_consumed_authority(store)
+    # A risk trigger policy maps to ABORT, which outranks REQUEST_HUMAN.
+    store.append_event(
+        "run_1",
+        EventType.RISK_OBSERVED,
+        {"trigger": "side_effect_duplicate", "score": 1.0},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+    # The ledger reads fine here: the block is evaluated, not degraded.
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v4"))
+
+    assert decision.mode is RecoveryMode.ABORT
+    assert not decision.permits("anything_at_all")
+    # The block is still surfaced as a contributing reason.
+    assert any("consumed authority blocks resume" in r for r in decision.rationale)
