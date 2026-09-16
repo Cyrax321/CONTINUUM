@@ -93,11 +93,22 @@ def record_span(
     *,
     ok: bool = True,
     run_id: str | None = None,
+    span_id: str | None = None,
+    trace_id: str | None = None,
 ) -> str | None:
-    """Record one span into the active (or explicit) run. Returns run_id."""
+    """Record one span into the active (or explicit) run. Returns run_id.
+
+    ``span_id`` / ``trace_id`` are carried into the observation payload when
+    supplied, so a settlement made from the span (issue #268) can cite the exact
+    trace evidence it was based on instead of only the event id.
+    """
     payload = observation_from_span(name, attributes, ok=ok)
     if payload is None:
         return None
+    if span_id:
+        payload["span_id"] = span_id
+    if trace_id:
+        payload["trace_id"] = trace_id
     target = run_id
     if target is None:
         active = storage.get_active_run()
@@ -145,12 +156,15 @@ def make_span_processor(
             attributes = getattr(span, "attributes", {}) or {}
             status = getattr(span, "status", None)
             ok = getattr(status, "is_ok", True) if status is not None else True
+            context = getattr(span, "context", None)
             record_span(
                 storage,
                 span.name,
                 attributes,
                 ok=bool(ok),
                 run_id=self._run_id,
+                span_id=getattr(context, "span_id", None),
+                trace_id=getattr(context, "trace_id", None),
             )
 
         def on_start(self, span: Any, parent_context: Any = None) -> None:

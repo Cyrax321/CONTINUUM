@@ -114,8 +114,8 @@ The authority-probe flow (`--authority`, verdicts, unblocking) is walked through
 in `docs/guides/authority-probes.md`.
 
 `reconcile <run_id>` reads its probe registry from `.continuum/reconcilers.json`
-unless `--config <path>` names another file, and each probe's `timeout` is in
-seconds and optional:
+unless `--config <path>` names another file, and each command probe's `timeout`
+is in seconds and optional:
 
 ```json
 {
@@ -131,6 +131,31 @@ number is refused rather than clamped, and the `probes` wrapper is required: a
 file that maps action types at the top level registers nothing, so `reconcile`
 reports every uncertain action as having no probe rather than saying the registry
 was wrong (issue #322).
+
+A probe may also be one of the built-in evidence types, selected by `type`
+(issue #268). A spec with no `type` is a command probe, so an existing registry
+keeps working unchanged:
+
+```json
+{
+  "probes": {
+    "write_report": {"type": "artifact_check", "path_key": "path"},
+    "tool.call": {"type": "otel_span", "identity": ["path"]}
+  }
+}
+```
+
+`artifact_check` settles a path-scoped action from the filesystem (existence plus
+a SHA-256 digest); `otel_span` settles it from a tool-call span already recorded
+in the run's observations, and the settlement event cites the span and trace ids.
+Each type's required keys are enforced and unknown keys are refused, so a typo'd
+spec fails loudly instead of registering a probe that settles nothing. The two
+types and the contradiction check are walked through in
+`docs/guides/evidence-reconciliation.md`.
+
+`--strict` escalates any action a probe could not settle to `REQUIRES_REVIEW`
+rather than leaving it pending, and a contradiction between the ledger and the
+filesystem makes the command exit 20 with the finding named.
 
 ## hooks
 
