@@ -1344,6 +1344,50 @@ def cmd_notify_test(args: argparse.Namespace, storage: None, out: Any, err: Any)
     return ExitCode.OK
 
 
+# The statuses get_active_run deliberately excludes: a run in any of them is
+# finished and can never be offered for resume ("a completed run is terminal",
+# test_cli.py). resume's explicit-id path must refuse the same set.
+_TERMINAL_RUN_STATUSES = frozenset(
+    {RunStatus.COMPLETED, RunStatus.CRASHED, RunStatus.ABORTED, RunStatus.FAILED}
+)
+
+
+def _report_terminal_run(args: argparse.Namespace, run: Run, out: Any) -> int:
+    """Answer ``resume`` for a run that is already finished (issue #1197).
+
+    A terminal run has nothing to resume, so the verdict must not be RESUME --
+    the one mode ``exit_code_for`` maps to 0, the code the exit-code contract
+    reserves for "verified safe to resume" -- whatever the folded event log
+    says about its consistency. This reports the fact; it is not an escalation,
+    so unlike a blocked run it does not ring the webhook bell.
+    """
+    status = run.status.value
+    text = (
+        "CONTINUUM RECOVERY\n\n"
+        f"Run: {run.run_id}\n\n"
+        "Recovery decision: NOT_RESUMABLE\n"
+        f"  because the run is {status}: a terminal run has nothing to resume.\n"
+        "Next permitted action: none (start a new run instead)\n"
+    )
+    payload: dict[str, Any] = {
+        "run_id": run.run_id,
+        "goal": run.goal,
+        "status": status,
+        "mode": RecoveryMode.REQUEST_HUMAN.value,
+        "safe": False,
+        "next_allowed_action": "none",
+        "terminal": True,
+    }
+    _emit(
+        payload,
+        text,
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.REQUIRES_HUMAN
+
+
 def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Report how a run may resume. Read-only unless ``--repair`` is given."""
     run_id = args.run_id
@@ -1356,6 +1400,16 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             )
             return 2
         run_id = active.run_id
+    # A terminal run would otherwise assess as RESUME: the folded log of a
+    # cleanly closed run is consistent, and RESUME is the mode exit_code_for
+    # sends to 0 -- the code reserved for "verified safe to resume". That let
+    # `resume "$RUN" && ./start-agent.sh` launch an agent onto a run that was
+    # already completed or aborted, and let --repair append RECOVERY_STARTED
+    # to a closed log. get_active_run excludes these statuses from the
+    # implicit target for the same reason; the explicit path now matches it.
+    run = storage.get_run(run_id)
+    if run.status in _TERMINAL_RUN_STATUSES:
+        return _report_terminal_run(args, run, out)
     engine = RecoveryEngine(storage, strict_unknown=not args.tolerate_unknown)
     decision = engine.assess(
         run_id,
@@ -1447,7 +1501,7 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     text += "\n\n" + _liveness_text(liveness)
     payload = {
         "run_id": decision.run_id,
-        "goal": storage.get_run(run_id).goal,
+        "goal": run.goal,
         "mode": presented_mode,
         "safe": presented_safe,
         "next_allowed_action": decision.next_allowed_action,
