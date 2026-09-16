@@ -87,6 +87,14 @@ That line must never launch an agent onto stale state, so **only a verified-safe
 
 A recovery mode nobody has classified falls through to *unsafe*, never to `0`.
 
+Exit `20` carries a second, blunter answer: the run is already over. `resume` on a
+completed, crashed, aborted or failed run — the four statuses `get_active_run` excludes from
+the implicit target — reports `NOT_RESUMABLE` rather than assessing a folded log that would
+look consistent, so the line above cannot launch an agent onto a finished run. That case
+keeps exit `20`, because a caller's branching does not change, but the printed decision line
+and the JSON payload's `"terminal": true` field let a script tell *a person must decide* from
+*this run is done*.
+
 ```text
 $ continuum resume run_4821 --env dataset=v4
 
