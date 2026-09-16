@@ -33,6 +33,24 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The projection fold no longer reports 11 event types it understands as
+  not understood (#1169).** `_dispatch` in `src/continuum/state/semantic.py`
+  folds 20 `EventType` members into state and `_NON_PROJECTING` declares 20
+  more as recorded facts the fold is right to skip, but 11 members were in
+  neither list: `RUN_RESTORED`, `RUN_MERGED`, `REVIEW_CONFIRMED`,
+  `AUTHORITY_CONSUMED`, `AUTHORITY_RECONCILED`, `PERCEPTION_OBSERVED`,
+  `BRANCH_RESOLVED`, `REASONING_SUMMARY`, `NOTIFICATION_SENT`,
+  `NOTIFICATION_FAILED`, and `MEMORY_TOMBSTONED`. Each fell through to
+  `case _: return False` and was counted in `report.ignored_types`, the field
+  `ProjectionReport.complete` defines as "the fold understood every event type
+  it consumed", so any run that restored, merged, confirmed, or notified
+  reported `complete = False` with `report.applied` understated. All 11 are
+  read elsewhere as audit facts, not state, so the fold's behaviour was right
+  and its bookkeeping was wrong; they are now declared non-projecting, each
+  with a comment naming what reads it. `tests/test_projection_coverage.py`
+  pins the invariant that every enum member is either folded or declared, so
+  a twelfth cannot ship as a false negative. The projected state is unchanged.
+
 - **`references/architecture-data.md` now matches the code it claims to be
   verified against (#1108).** The file is the source-verified companion to
   `references/architecture.md`, but it had drifted far enough to contradict
@@ -870,7 +888,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,299 collected, ~2,274 passed, ~25 skipped on a minimal env).
+  (~2,302 collected, ~2,277 passed, ~25 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
