@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from continuum.events import EventType
-from continuum.gate import is_memory_key, normalize_key_value
+from continuum.gate import is_memory_key, is_memory_template, normalize_key_value
 from continuum.models import Origin
 
 __all__ = [
@@ -159,6 +159,17 @@ def render_key(template: str, body: dict[str, Any]) -> str:
     (:func:`continuum.gate.normalize_key_value`): the proxy and the hook must
     derive the same key for the same operation, or a call claimed through one
     seam looks unclaimed at the other.
+
+    A memory template's segments are colon-delimited
+    (``mem:{store_id}:{tenant}:{record_key}``), so a placeholder value that
+    itself contains a colon shifts the segments and defeats the positional
+    tenant check in :func:`match_route` -- a caller controlling ``store_id``
+    could make ``parts[2]`` read as the bound tenant while the real ``tenant``
+    was something else (#1149). Such a value is rejected at the boundary so the
+    flattened key can only ever be re-parsed one way. Only the placeholders
+    before the terminal segment are guarded: a colon in the last field cannot
+    move ``parts[2]`` and is re-parsed downstream as ``":".join(parts[3:])``,
+    so a record key like ``doc:section:1`` stays valid.
     """
     import string
 
@@ -166,7 +177,21 @@ def render_key(template: str, body: dict[str, Any]) -> str:
     missing = [f for f in fields if f not in body]
     if missing:
         raise GatewayConfigError(f"key template {template!r} needs body field(s) {missing}")
-    return template.format(**{f: normalize_key_value(body[f]) for f in fields})
+    values = {f: normalize_key_value(body[f]) for f in fields}
+    if is_memory_template(template):
+        # Only the placeholders before the terminal segment can shift the
+        # positions, and the check reads the formatted value rather than only
+        # ``str`` ones: ``str.format`` renders a non-string such as
+        # ``["x:acme:"]`` as ``['x:acme:']``, which carries the same shifting
+        # colon without ever being a string.
+        guarded = set(fields[:-1])
+        for field, value in values.items():
+            if field in guarded and ":" in str(value):
+                raise GatewayConfigError(
+                    f"memory template {template!r} field {field!r} must not contain ':' "
+                    f"(it would shift the key's colon-delimited segments), got {value!r}"
+                )
+    return template.format(**values)
 
 
 def match_route(
