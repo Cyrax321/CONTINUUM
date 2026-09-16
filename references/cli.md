@@ -52,7 +52,7 @@ continuum attest-verify <run_id> --attest <file> # verify signed attestation aga
 continuum benchmark [--total N]                  # run CONTINUUM-Bench harness
 ```
 
-Every command accepts `--json`. Read-only commands (`inspect`, `status`, `history`, `events`,
+Most commands accept global `--json` **before** the subcommand (e.g. `continuum --json resume RUN`). Read-only commands (`inspect`, `status`, `history`, `events`,
 `diff`, `validate`, `resume`, `verify`, `actions`, `show-contract`, `replay`, `budget`, `tree`,
 `gate`, `briefing`, `health`, `impact`, `provenance`, `export-evidence`, `watch`) never write, so
 they are safe against a live database while an agent is mid-run. Mutating commands (`start`,
