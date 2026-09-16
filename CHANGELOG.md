@@ -33,6 +33,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The TUI and dashboard `complete` verbs now perform the whole verb (#1153).**
+  Only `continuum complete` appended `REVIEW_CONFIRMED`, flipped the run row,
+  and cleared `.continuum/resume.json`; the TUI skipped the file, and the
+  dashboard skipped both the file and the confirmation. A run closed from the
+  dashboard left the resume file pointing at finished work, so the next
+  session's instant-resume fast path landed the operator back in the run they
+  had just closed, the exact hijack `cmd_complete` exists to prevent; and a
+  dashboard-closed externally-driven run stayed self-certified, because the
+  event that clears that marker never landed. The tail now lives in
+  `continuum.runs.close_run` and all three surfaces call it, so the events,
+  the row flip, and the cleanup cannot drift apart again. The resume delete
+  stays conditional on the file naming the run being closed, and an unreadable
+  file still does not block completing a run.
+
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
   types at the top level (`{"send_invoice": {...}}`) instead of nesting them

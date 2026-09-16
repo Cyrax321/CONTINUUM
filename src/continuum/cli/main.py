@@ -68,6 +68,7 @@ from continuum.observability import render_dashboard
 from continuum.provenance.graph import build_provenance_graph, downstream_of
 from continuum.provenance_map import summarize
 from continuum.recovery import RecoveryEngine, render_contract
+from continuum.runs import close_run
 from continuum.security.attestation import (
     generate_keypair,
     sign_chain,
@@ -1793,31 +1794,12 @@ def cmd_complete(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
         )
         return ExitCode.OK
 
-    note = {"summary": args.summary} if args.summary else {}
-    storage.append_event(
-        args.run_id,
-        EventType.REVIEW_CONFIRMED,
-        {"components": ["goal", "progress"]},
-        source=Origin.HUMAN,
-    )
-    storage.append_event(
-        args.run_id,
-        EventType.RUN_COMPLETED,
-        {"closed_by": "cli", **note},
-        source=Origin.HUMAN,
-    )
-    updated = run.touch(status=RunStatus.COMPLETED)
-    storage.update_run(updated)
-    # Instant resume file tracks the most recent checkpoint; a completed run
-    # is no longer interrupted, so remove the file if it refers to this run.
-    try:
-        resume_path = Path(".continuum/resume.json")
-        if resume_path.exists():
-            data = json.loads(resume_path.read_text(encoding="utf-8"))
-            if data.get("run_id") == args.run_id:
-                resume_path.unlink()
-    except Exception:
-        pass
+    # The REVIEW_CONFIRMED + RUN_COMPLETED pair, the row flip, and the
+    # instant-resume cleanup are shared with the TUI and the dashboard HITL
+    # button (issue #1153): one helper, so the three surfaces cannot drift
+    # apart and a run closed from any of them stops hijacking the next
+    # session's resume.
+    updated = close_run(storage, args.run_id, closed_by="cli", summary=args.summary or "")
     payload = {
         "run_id": args.run_id,
         "status": updated.status.value,
