@@ -119,8 +119,9 @@ class OtelSpanReconciler(Reconciler):
         tool = self._tool or action.action_type
         if payload.get("tool") != tool:
             return False
-        # Only tokens present on both sides constrain the match; an action with
-        # no path to compare must not match every write the tool ever made.
+        # Only tokens present on both sides constrain the match; a match
+        # requires at least one to agree, so an action with no path to compare
+        # cannot settle from the tool's next unrelated write.
         agreed = 0
         for key in self._identity_keys:
             claimed = action.arguments.get(key)
@@ -130,7 +131,7 @@ class OtelSpanReconciler(Reconciler):
             if claimed != observed:
                 return False
             agreed += 1
-        return True
+        return agreed > 0
 
     def resolve(self, action: Action) -> Resolution | None:
         """Find a matching completed span after the claim and settle from it.

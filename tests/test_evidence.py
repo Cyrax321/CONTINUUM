@@ -135,6 +135,32 @@ def test_otel_span_ignores_a_span_for_a_different_path(db: str, tmp_path: Path) 
         assert probe.resolve(action) is None
 
 
+def test_otel_span_ignores_every_span_when_the_action_has_no_identity_token(
+    db: str, tmp_path: Path
+) -> None:
+    """An action with no path must not match the tool's next unrelated write.
+
+    The matcher only rejects an explicit disagreement between tokens present on
+    both sides. An action carrying none of them used to fall through to a
+    blanket match, settling from a span that wrote an unrelated file.
+    """
+    # Claimed with no path argument, so no token can constrain a match.
+    with SQLiteStorage(db) as store:
+        ActionLedger(store, "run_1").claim("write_file", {}, scoped_to_run=True)
+    with SQLiteStorage(db) as store:
+        record_span(
+            store,
+            "execute_tool",
+            {"gen_ai.tool.name": "write_file", "file_path": str(tmp_path / "unrelated.txt")},
+            span_id="span_any",
+        )
+
+    probe = OtelSpanReconciler(SQLiteStorage(db), "run_1")
+    with SQLiteStorage(db) as store:
+        action = ActionLedger(store, "run_1").pending()[0]
+        assert probe.resolve(action) is None
+
+
 def test_failed_span_does_not_settle_as_not_occurred(db: str, tmp_path: Path) -> None:
     """A failed span is not evidence of absence, so the action stays uncertain."""
     target = tmp_path / "out.txt"
