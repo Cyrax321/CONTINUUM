@@ -46,7 +46,7 @@ directly. `on_unknown` is called when the ledger cannot decide the outcome.
 ### `resume(run_id, *, current_environment=None, expected_model=None, replay=True) -> RecoveryDecision`
 
 Assess recovery safety and return a `RecoveryDecision` for the run, without
-changing anything. The decision's `mode` is one of `RESUME`, `REPLAY`,
+changing anything. The decision's `mode` is one of `RESUME`, `REPLAN`,
 `REQUEST_HUMAN`, or `ABORT`.
 
 ## LangGraphAgentAdapter
