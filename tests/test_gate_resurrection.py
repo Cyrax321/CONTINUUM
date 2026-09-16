@@ -7,7 +7,7 @@ import pytest
 from continuum.actions.authority import record_authority_consumed
 from continuum.actions.ledger import ActionLedger
 from continuum.events import EventType
-from continuum.gate import collect_consumed_authorities, decide
+from continuum.gate import collect_consumed_authorities, decide, is_authority_consumed
 from continuum.models import Run
 from continuum.storage import SQLiteStorage
 
@@ -59,6 +59,47 @@ def test_gate_blocks_resurrection() -> None:
         assert "auth-999" not in decision2.reason or decision2.allow is False
         # The gate should not mention auth-999 as consumed
         assert "auth-999" not in decision.reason
+    finally:
+        storage.close()
+
+
+def test_is_authority_consumed_is_the_one_definition_of_the_check() -> None:
+    """The exported helper answers the membership question for both callers (#1154)."""
+    storage = _storage_with_run()
+    try:
+        ev = record_authority_consumed(storage, "run_1", "auth-123", via_action_id="act-1")
+        consumed = collect_consumed_authorities(storage.read_events("run_1"))
+        # The map stores the Event itself, not a payload dict, which is why the
+        # callers can read sequence and payload straight off the value (#1154).
+        assert consumed["auth-123"].sequence == ev.sequence
+        assert consumed["auth-123"].payload["via_action_id"] == "act-1"
+        assert is_authority_consumed("auth-123", consumed) is True
+        assert is_authority_consumed("auth-999", consumed) is False
+    finally:
+        storage.close()
+    # An absent or empty map means nothing is spent; the None case is what the
+    # callers' outer guards used to duplicate inline.
+    assert is_authority_consumed("auth-123", None) is False
+    assert is_authority_consumed("auth-123", {}) is False
+
+
+def test_gate_denies_a_consumed_authority_in_an_unrelated_field() -> None:
+    """The check is value-based, so a spent id anywhere in the input denies (#289b)."""
+    storage = _storage_with_run()
+    try:
+        ev = record_authority_consumed(storage, "run_1", "auth-anywhere", via_action_id="act-1")
+        consumed = collect_consumed_authorities(storage.read_events("run_1"))
+        decision = decide(
+            {"my_tool": {"key_template": "{id}"}},
+            "my_tool",
+            {"id": "x", "reference": "auth-anywhere"},
+            run_id="run_1",
+            actions_by_key={},
+            consumed_authorities=consumed,
+        )
+        assert not decision.allow
+        assert "auth-anywhere" in decision.reason
+        assert str(ev.sequence) in decision.reason
     finally:
         storage.close()
 

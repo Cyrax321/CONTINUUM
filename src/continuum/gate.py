@@ -101,8 +101,16 @@ def collect_consumed_authorities(events: Any) -> dict[str, Any]:
     return consumed
 
 
-def is_authority_consumed(authority_id: str, consumed: Any) -> bool:
-    """True when authority_id is in the consumed map."""
+def is_authority_consumed(authority_id: str, consumed: Mapping[str, Any] | None) -> bool:
+    """True when ``authority_id`` is marked consumed.
+
+    ``consumed`` is the map :func:`collect_consumed_authorities` builds: the
+    authority id keyed to the AUTHORITY_CONSUMED ``Event`` that spent it, not to
+    a bare payload dict. An empty map or ``None`` means nothing is spent. This
+    is the single definition of the check: both :func:`decide` and the gateway's
+    ``match_route`` route through it instead of testing membership inline, so the
+    two enforcement seams cannot drift apart (#1154).
+    """
     if not consumed:
         return False
     return authority_id in consumed
@@ -274,28 +282,21 @@ def decide(
     # argument names does not resurrect spent authority. The message names the
     # original consumption event so the operator can audit the lineage.
     if consumed_authorities:
-        for _key, _value in tool_input.items():
-            if isinstance(_value, str) and _value in consumed_authorities:
+        for _value in tool_input.values():
+            if isinstance(_value, str) and is_authority_consumed(_value, consumed_authorities):
+                # collect_consumed_authorities stores the Event itself as the
+                # map value, so the sequence and payload come straight off it.
+                # There is no dict-shaped map in the contract, so there is no
+                # fallback ladder to keep in step with (#1154).
                 ev = consumed_authorities[_value]
-                seq = (
-                    getattr(ev, "sequence", "?")
-                    if hasattr(ev, "sequence")
-                    else ev.get("sequence", "?")
-                )
-                payload = getattr(ev, "payload", {}) or {}
-                if hasattr(ev, "payload"):
-                    seq = ev.sequence
-                    payload = ev.payload
-                else:
-                    payload = ev.get("payload", {})
+                payload = ev.payload or {}
                 consumer = payload.get("consumer_run_id", "?")
                 return Decision(
                     False,
-                    f"Authority {_value!r} consumed at seq {seq} by run {consumer!r}. Obtain a fresh authority.",
+                    f"Authority {_value!r} consumed at seq {ev.sequence} by run {consumer!r}. "
+                    "Obtain a fresh authority.",
                 )
-        # Also check string values that may be nested as authority_id field
-        # is sometimes the whole value; the loop above already covers top-level
-        # values, which is sufficient for the tested shapes.
+        # Top-level values only; a nested spent authority is #1074, not here.
 
     if config is None:
         return Decision(True, "no gate configured")
