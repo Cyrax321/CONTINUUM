@@ -537,7 +537,7 @@ Enforcement exists, but as separate seams you opt into. None is enabled by a pla
 | Replay guard for framework calls | `continuum.replayguard` in-process |
 | Observation hooks | `continuum hooks install` |
 
-The one enforcement that ships enabled is the CLI exit code. `continuum resume` exits non-zero unless the run is verified safe (`RESUME`), so `continuum resume "$RUN" && ./start-agent.sh` cannot launch onto stale state. Every other mode maps to a distinct non-zero code, and a mode nobody has classified falls through to `UNSAFE` rather than `OK`.
+The one enforcement that ships enabled is the CLI exit code. `continuum resume` exits non-zero unless the run is verified safe (`RESUME`), so `continuum resume "$RUN" && ./start-agent.sh` cannot launch onto stale state. Every other mode maps to a non-zero code, grouped into bands of ten that name the reaction (repair, human, unsafe) with distinct codes for the modes a script must tell apart, and a mode nobody has classified falls through to `UNSAFE` rather than `OK`.
 
 If you want the verdict enforced, wire a seam or gate your pipeline on the exit code. Do not assume the library is supervising the process.
 

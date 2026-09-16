@@ -80,8 +80,16 @@ That line must never launch an agent onto stale state, so **only a verified-safe
 | `1` | usage error or unexpected command failure |
 | `10` | recoverable, but repairs are required first |
 | `20` | a human must decide (typically an unreconciled side effect) |
+| `25` | a liveness breach: wait for the run to recover on its own |
 | `30` | not safe to resume |
+| `35` | not safe as-is; roll back to a prior checkpoint first |
 | `2` / `3` / `4` | not found / integrity failure / not implemented |
+
+Codes group into bands of ten, where the band names the reaction and the offset
+distinguishes two modes that need different handling: `20` pages a person, `25`
+polls a clock, `30` gives up, `35` rolls back. A consumer that only wants the
+reaction can range-check (`20 <= code < 30`); one that wants the mode reads the
+exact value.
 
 A recovery mode nobody has classified falls through to *unsafe*, never to `0`.
 

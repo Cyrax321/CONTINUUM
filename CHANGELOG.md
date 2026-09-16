@@ -8,6 +8,29 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **`WAIT` and `ROLLBACK` no longer share an exit code with `REQUEST_HUMAN` and
+  `ABORT` (#1170).** The module docstring promised that distinct codes let a
+  script react proportionately, but `_MODE_CODES` collapsed two pairs onto the
+  same value: `WAIT` and `REQUEST_HUMAN` both exited 20, and `ROLLBACK` and
+  `ABORT` both exited 30. Those were exactly the pairs that need different
+  reactions. A consumer could not tell "the run went quiet, poll a clock" from
+  "a person must decide", or "roll back to a checkpoint" from "give up", from
+  the exit code alone. `WAIT` is now 25 and `ROLLBACK` is now 35; `REQUEST_HUMAN`
+  stays 20 and `ABORT` stays 30. The primary guarantee is untouched: only a
+  verified-safe run exits 0, and an unclassified mode still falls through to
+  `UNSAFE`.
+
+  This is a renumbering of a public machine contract. Scripts that range-check a
+  band (`20 <= code < 30`) keep working unchanged; scripts that matched the exact
+  values 20 or 30 to mean any non-human or any unsafe mode will now see 25 or 35
+  for the two split-out modes and should read the mode from `--json` instead. The
+  affected surfaces are updated in step: the `references/cli.md` exit-code table,
+  the liveness-watch guide (a breach exits 25), the `recovery/health.py`
+  docstring, and the literal `20` that `cmd_liveness` returned, which now routes
+  through `exit_code_for` so it cannot drift from the table again. The
+  `docs/assets/crash-recovery` transcript is unaffected: it shows the
+  `REQUEST_HUMAN` refusal path, which keeps 20.
+
 - **The advisory verdict contract is now stated where a reader can find it (#1031).**
   `RecoveryDecision` and its `permits()` method describe themselves as
   advisory, not enforcing, and name the four enforcement seams a caller can
