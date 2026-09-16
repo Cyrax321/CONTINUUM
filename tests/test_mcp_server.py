@@ -2572,3 +2572,127 @@ async def test_an_uncertain_action_still_refuses_at_budget(
     assert again["proceed"] is False
     assert again["status"] == ActionStatus.UNKNOWN.value
     assert "reconcile" in again["guidance"].lower()
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_action_still_reconciles_at_budget(
+    server_ctx: tuple[Any, Any],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An in-flight record re-claimed at an exhausted budget is not a retry.
+
+    The gate once decided this from an exact-key lookup alone, so a STARTED
+    record counted as unsettled, its own attempt counted against it, and the
+    tool answered "raise the retry budget" when the ledger's answer was that
+    the attempt was interrupted and its outcome is unknown (issue #1080). An
+    operator pointed at the budget is pointed at the wrong knob: nothing was
+    retried, and the work may already have happened.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".continuum").mkdir()
+    (tmp_path / ".continuum" / "budgets.json").write_text('{"default_max_attempts": 1}')
+    server, _ = server_ctx
+    await seed_run(server)
+
+    claimed = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="charge",
+        arguments={"card": "4242"},
+    )
+    assert claimed["proceed"] is True
+
+    # The process died between claim and complete, so the record is still
+    # STARTED. Its single attempt is the whole budget.
+    again = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="charge",
+        arguments={"card": "4242"},
+    )
+    assert again["proceed"] is False
+    assert again["status"] == ActionStatus.UNKNOWN.value
+    assert "reconcile" in again["guidance"].lower()
+    assert again["action_key"] == claimed["action_key"]
+
+    # The budget still holds for work that genuinely would open a slot, so the
+    # gate has not been switched off.
+    fresh = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="charge",
+        arguments={"card": "5454"},
+    )
+    assert fresh["proceed"] is True
+    await call(
+        server,
+        "continuum_fail_action",
+        run_id="run_1",
+        action_key=fresh["action_key"],
+        error="declined",
+        certain=True,
+    )
+    with pytest.raises(ToolError, match="retry budget exhausted"):
+        await server.call_tool(
+            "continuum_intercept_action",
+            {"run_id": "run_1", "action_type": "charge", "arguments": {"card": "5454"}},
+            context=_ctx(TEST_CLIENT),
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_drifted_reclaim_of_a_completed_action_answers_at_budget(
+    server_ctx: tuple[Any, Any],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate must resolve a claim the way claim does, not by derived key only.
+
+    The idempotency key hashes arguments verbatim, so a renamed field or a
+    reformed path derives a different key and the exact lookup misses the
+    completed record. The gate and claim now share one resolution, so the
+    drifted re-claim still answers with the stored result instead of consulting
+    a budget that has nothing to say about work already done (issue #1080).
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".continuum").mkdir()
+    (tmp_path / ".continuum" / "budgets.json").write_text('{"default_max_attempts": 1}')
+    server, _ = server_ctx
+    await seed_run(server)
+
+    done = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="send_invoice",
+        arguments={"invoice_id": "INV-001", "target": "/tmp/e2e-outbox/INV-001.sent"},
+    )
+    await call(
+        server,
+        "continuum_complete_action",
+        run_id="run_1",
+        action_key=done["action_key"],
+        external_id="INV-001.sent",
+        result={"cents": 500},
+    )
+
+    # Drifted spelling: a renamed field and the invoice id alone. It derives a
+    # different key, so an exact-key gate would see no settled record.
+    drifted = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="send_invoice",
+        arguments={"invoice": "INV-001"},
+    )
+    assert drifted["proceed"] is False
+    assert drifted["status"] == ActionStatus.COMPLETED.value
+    assert drifted["external_id"] == "INV-001.sent"
+    assert drifted["previous_result"] == {"cents": 500}
+    assert drifted["action_key"] == done["action_key"]

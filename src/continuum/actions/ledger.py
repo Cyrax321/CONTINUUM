@@ -49,7 +49,7 @@ from datetime import timedelta
 from functools import wraps
 from heapq import merge
 from pathlib import Path
-from typing import Any, Concatenate, ParamSpec, TypeVar
+from typing import Any, Concatenate, NamedTuple, ParamSpec, TypeVar
 
 from continuum.actions.grants import GrantDenied, normalize_grant, scan_grants
 from continuum.actions.idempotency import (
@@ -105,12 +105,47 @@ def fold_action_events(events: Any) -> dict[str, Action]:
 __all__ = [
     "ActionLedger",
     "ActionOutcome",
+    "ClaimResolution",
     "LedgerError",
     "DuplicateAction",
     "ClaimLockError",
     "fold_action_events",
     "forensic_join_across_runs",
 ]
+
+
+class ClaimResolution(NamedTuple):
+    """How :meth:`ActionLedger.claim` would resolve a claim, without recording.
+
+    The retry-budget gate needs the answer a claim *would* give before it
+    decides whether to allow one, so the two share this read-only resolution
+    rather than each keeping its own (issue #1080).
+    """
+
+    key: IdempotencyKey
+    existing: Action | None
+    foreign: Action | None
+
+    @property
+    def opens_slot(self) -> bool:
+        """Whether ``claim`` would record a new attempt slot for this resolution.
+
+        Nothing is opened when a record already answers (COMPLETED, returned as
+        a stored result) or waits on reconciliation (UNKNOWN, raised as
+        UnknownSideEffect), nor while another run is mid-flight on the same
+        unscoped identity (STARTED, foreign or local). A fresh key, and a
+        settled FAILED or COMPENSATED record whose effect may legitimately be
+        performed again, all open one. That set, and only it, is what a retry
+        budget may gate (issue #309).
+        """
+        # A record held by another run settles an unscoped claim the same way a
+        # local one does, so it gates the same way: only the run-local lookup
+        # having missed is what sent the resolution looking abroad.
+        record = self.existing if self.existing is not None else self.foreign
+        return record is None or record.status in (
+            ActionStatus.FAILED,
+            ActionStatus.COMPENSATED,
+        )
 
 
 def _stem(token: str) -> str:
@@ -610,6 +645,69 @@ class ActionLedger:
                 return stored_key
         return None
 
+    def resolve_claim(
+        self,
+        action_type: str,
+        arguments: Mapping[str, Any] | None = None,
+        *,
+        volatile: Sequence[str] = (),
+        scoped_to_run: bool = True,
+        key: str | None = None,
+    ) -> ClaimResolution:
+        """What :meth:`claim` would find, resolved without recording anything.
+
+        A claim decision is read by two places: ``claim`` itself, and the
+        run-level retry budget gate in the MCP intercept handler, which has to
+        refuse a new attempt *before* one is recorded rather than after. The
+        gate once ran its own exact-key-only lookup, so it could gate a state
+        ``claim`` would have answered with a stored result, and an exhausted
+        budget suppressed the dedup and reconciliation paths a recovering agent
+        depends on instead of letting the ledger speak (issue #1080). Both
+        readers now go through here, which is what keeps them from drifting
+        apart again.
+
+        The resolution order is :meth:`claim`'s own, and each later step runs
+        only when the earlier one found nothing: the exact argument-hash key,
+        then another run holding the same unscoped key, then drift-tolerant
+        identity matching. Identity matching is skipped when the foreign record
+        already answers or refuses the claim, so a claim that returns or raises
+        never resolves to a different key than it would have on its own.
+
+        ``opens_slot`` reports whether ``claim`` would record a new attempt slot
+        for this resolution, which is exactly the condition under which a retry
+        budget may gate it. Re-claiming an action that already completed, and an
+        interrupted attempt awaiting reconciliation, both leave the record where
+        it is and open nothing (issue #309).
+        """
+        explicit_key = key is not None
+        resolved = idempotency_key(
+            action_type,
+            arguments,
+            scope=self.run_id if scoped_to_run else None,
+            volatile=volatile,
+            key=key,
+        )
+        existing = self.get(resolved)
+        foreign: Action | None = None
+        if existing is None and not scoped_to_run:
+            foreign = self._foreign_action(resolved)
+        # A foreign record that completed, or that another run is still
+        # mid-flight on, already settles this claim. A foreign failure only
+        # means nothing stands in the way of this run's own slot, so the
+        # drift-tolerant lookup still gets its turn.
+        foreign_settles = foreign is not None and foreign.status not in (
+            ActionStatus.FAILED,
+            ActionStatus.COMPENSATED,
+        )
+        if existing is None and not explicit_key and not foreign_settles:
+            matched = self._identity_match(action_type, arguments, volatile)
+            if matched is not None:
+                # The caller reports completion or failure against the key in
+                # the outcome, so it must be the stored key of the record being
+                # deferred to, not the freshly-derived one.
+                return ClaimResolution(matched[0], matched[1], foreign)
+        return ClaimResolution(resolved, existing, foreign)
+
     def _identity_match(
         self,
         action_type: str,
@@ -843,53 +941,41 @@ class ActionLedger:
         its real-world outcome cannot be determined, unless ``on_unknown``
         resolves it.
         """
-        explicit_key = key is not None
         _explicit_rendered = key
-        idem = idempotency_key(
+        # The resolution is shared with the retry-budget gate in the MCP
+        # intercept handler, which has to decide *before* a slot is opened
+        # whether to allow it. Doing the lookup twice in two places let the two
+        # readers disagree about what a claim would find (issue #1080).
+        resolved = self.resolve_claim(
             action_type,
             arguments,
-            scope=self.run_id if scoped_to_run else None,
             volatile=volatile,
+            scoped_to_run=scoped_to_run,
             key=key,
         )
-        key = idem
+        key = resolved.key
         rendered_key = _explicit_rendered
-        existing = self.get(key)
+        existing = resolved.existing
+        foreign = resolved.foreign
 
-        if existing is None and not scoped_to_run:
+        if existing is None and foreign is not None:
             # The local log has no such action, but an unscoped key claims
             # global identity: another run may already hold it (issue 34).
-            foreign = self._foreign_action(key)
-            if foreign is not None:
-                if foreign.status is ActionStatus.COMPLETED:
-                    # The effect already happened under this identity, wherever
-                    # it happened. Report it instead of duplicating it.
-                    return ActionOutcome(key=key, action=foreign, fresh=False)
-                if foreign.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
-                    # Another run is mid-flight on the same identity and this
-                    # ledger cannot reconcile a foreign record (its outcome
-                    # belongs to that run's log), so refuse rather than guess.
-                    raise UnknownSideEffect(
-                        f"action {foreign.action_type!r} (key {key[:12]}...) has an "
-                        f"unresolved attempt recorded by another run; reconcile "
-                        f"that run before claiming the same unscoped identity."
-                    )
-                # FAILED or COMPENSATED elsewhere means no live effect stands
-                # in the way; this run may open its own slot.
-
-        if existing is None and not explicit_key:
-            # No explicit key was supplied (the caller did not assert an
-            # identity), and the exact argument-hash lookup missed. Recognise
-            # an already-recorded attempt by shared identity tokens before
-            # opening a brand-new slot, so argument drift between sessions does
-            # not turn a completed action into a fresh proceed=true.
-            matched = self._identity_match(action_type, arguments, volatile)
-            if matched is not None:
-                existing = matched[1]
-                # The caller will report completion or failure against the key
-                # returned in the outcome, so it must be the stored key of the
-                # record we are deferring to, not the freshly-derived one.
-                key = matched[0]
+            if foreign.status is ActionStatus.COMPLETED:
+                # The effect already happened under this identity, wherever
+                # it happened. Report it instead of duplicating it.
+                return ActionOutcome(key=key, action=foreign, fresh=False)
+            if foreign.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
+                # Another run is mid-flight on the same identity and this
+                # ledger cannot reconcile a foreign record (its outcome
+                # belongs to that run's log), so refuse rather than guess.
+                raise UnknownSideEffect(
+                    f"action {foreign.action_type!r} (key {key[:12]}...) has an "
+                    f"unresolved attempt recorded by another run; reconcile "
+                    f"that run before claiming the same unscoped identity."
+                )
+            # FAILED or COMPENSATED elsewhere means no live effect stands
+            # in the way; this run may open its own slot.
 
         # Single-use grants (#269): refuse resurrection of spent authority
         # before anything fires. A live attempt carrying the same grant under
