@@ -44,7 +44,7 @@ continuum export-evidence <run_id>               # export evidence as JSON lines
 continuum forget --tenant <id> [--dry-run]       # tombstone memory records for a tenant. mutates
 continuum watch <run_id>                         # watch run for liveness breach
 continuum serve                                  # run JSON sidecar over stdio
-continuum dashboard [--port 8080]                # serve web dashboard
+continuum dashboard [--port 8000]                # serve web dashboard
 continuum tui [--refresh N]                      # full-screen terminal dashboard
 continuum attest-keygen                          # generate Ed25519 signer key pair
 continuum attest <run_id>                        # sign run event-chain attestation
