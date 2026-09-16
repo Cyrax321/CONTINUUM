@@ -54,7 +54,7 @@ All of these are additive and the suite is the source of truth:
 
 ```bash
 pytest -q                         # full suite, skips vary by env (see STATUS.md)
-ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
+ruff check src/ tests/ examples/ scripts/ demo-run/ && ruff format --check src/ tests/ examples/ scripts/ demo-run/
 mypy src/continuum                # strict, as CI enforces
 
 python examples/recovery_walkthrough.py   # walkthrough, output matches docs/recovery_walkthrough.md

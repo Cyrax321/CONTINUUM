@@ -97,7 +97,7 @@ Verifique:
 continuum --help                 # ponto de entrada CLI
 continuum-mcp --help             # ponto de entrada do servidor MCP (precisa de [mcp] ou [dev])
 pytest -q                        # ~2,195 coletados, ~2,030 passando, ~23 pulados em um ambiente mínimo (as contagens exatas variam)
-ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
+ruff check src/ tests/ examples/ scripts/ demo-run/ && ruff format --check src/ tests/ examples/ scripts/ demo-run/
 mypy src/continuum               # os três portões que o CI exige
 ```
 
