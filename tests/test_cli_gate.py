@@ -387,7 +387,6 @@ def test_a_registry_error_names_an_absolute_path(
 def test_fuzzy_gate_wiring() -> None:
     # Test that gate.decide correctly parses similarity and delegates it
     from continuum.gate import decide
-    from continuum.replay_similarity import SimilarityKind
     
     config = {
         "send_invoice": {

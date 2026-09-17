@@ -1295,7 +1295,13 @@ def build_server(
         )
         existing = ledger.get(claim_key)
 
-        if existing is None and similarity_config is not None and similarity_config.kind != "exact" and arguments is not None:
+        from continuum.replay_similarity import SimilarityKind
+        if (
+            existing is None
+            and similarity_config is not None
+            and similarity_config.kind != SimilarityKind.EXACT
+            and arguments is not None
+        ):
             from continuum.replay_similarity import similarity
             best_score = 0.0
             best_action = None
@@ -1314,7 +1320,9 @@ def build_server(
             
             if best_action is not None and best_score >= similarity_config.replay_threshold:
                 existing = best_action
-                key = best_key.split(":")[-1] if ":" in str(best_key) else str(best_key)
+                key = (
+                    best_key.split(":")[-1] if ":" in str(best_key) else str(best_key)
+                )
                 claim_key = best_key
         settled = existing is not None and existing.status in (
             ActionStatus.COMPLETED,

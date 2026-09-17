@@ -22,7 +22,6 @@ from langgraph.graph import StateGraph  # noqa: E402
 from continuum.actions import ActionLedger  # noqa: E402
 from continuum.cli import ExitCode, main  # noqa: E402
 from continuum.events import EventType  # noqa: E402
-from continuum.models import ActionStatus, Run  # noqa: E402
 from continuum.replayguard import (  # noqa: E402
     GuardKind,
     ReplayBlocked,
@@ -330,7 +329,6 @@ def run(*argv: str) -> tuple[int, str, str]:
 
 def test_evaluate_with_fuzzy_similarity(db: str) -> None:
     from continuum.replay_similarity import SimilarityConfig, SimilarityKind
-    from continuum.models import ActionStatus
     
     # Prior action: "pay invoice INV-001"
     # New action: "settle outstanding amount for INV-001"
