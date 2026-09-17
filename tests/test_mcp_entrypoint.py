@@ -38,8 +38,8 @@ from typing import Any
 import pytest
 
 PROTOCOL_VERSION = "2024-11-05"
-#: Twelve tools: three read-only, nine mutating (``docs/api/mcp.md``).
-TOOL_COUNT = 12
+#: Thirteen tools: three read-only, ten mutating (``docs/api/mcp.md``).
+TOOL_COUNT = 13
 
 
 def _entrypoint() -> str | None:

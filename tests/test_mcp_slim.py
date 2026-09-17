@@ -17,4 +17,4 @@ def test_full_mode_exposes_all_tools(monkeypatch) -> None:
     names = {tool.name for tool in server._tool_manager._tools.values()}
     assert "continuum_record_progress" in names
     assert "continuum_checkpoint" in names
-    assert len(names) == 12
+    assert len(names) == 13

@@ -180,7 +180,7 @@ def test_slim_subset_lists_exactly_read_only_trio(monkeypatch) -> None:
     server2, _ = build_server(storage=SQLiteStorage(":memory:"))
     names2 = {tool.name for tool in server2._tool_manager._tools.values()}
     assert "continuum_record_progress" in names2
-    assert len(names2) == 12
+    assert len(names2) == 13
 
 
 def test_default_flows_unchanged_when_features_unused(tmp_path: Path) -> None:

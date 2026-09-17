@@ -26,7 +26,7 @@ uv pip install -e ".[dev]"
 uv pip install -e .
 
 # Composable extras
-uv pip install -e ".[mcp]"           # MCP server (12 stdio tools), requires mcp>=2.0
+uv pip install -e ".[mcp]"           # MCP server (13 stdio tools), requires mcp>=2.0
 uv pip install -e ".[otel]"          # OpenTelemetry bridge, opentelemetry-api>=1.20
 uv pip install -e ".[langgraph]"     # LangGraph adapter
 uv pip install -e ".[openai]"        # OpenAI Agents SDK adapter (also pulls mcp transitively)

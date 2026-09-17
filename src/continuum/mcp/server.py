@@ -1509,6 +1509,38 @@ def build_server(
         )
 
     @server.tool(
+        name="continuum_compensate_action",
+        description=(
+            "Record that a completed side effect was deliberately undone (for "
+            "example a refund or reversion). Call this after executing a compensating "
+            "action. Marks the action as COMPENSATED."
+        ),
+        annotations=mutating,
+    )
+    @guard
+    def continuum_compensate_action(
+        run_id: str,
+        action_key: str,
+        note: str = "",
+        by: str | None = None,
+    ) -> str:
+        """Record that a completed effect was deliberately undone."""
+        action = ctx.ledger(run_id).compensate(
+            action_key,
+            note=note,
+            by=by,
+        )
+        return _json(
+            {
+                "run_id": run_id,
+                "action_id": action.action_id,
+                "action_type": action.action_type,
+                "status": action.status.value,
+                "compensated_by": list(action.compensated_by),
+            }
+        )
+
+    @server.tool(
         name="continuum_list_actions",
         description=(
             "List external side effects recorded for a run. Each row carries "
