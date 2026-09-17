@@ -21,6 +21,15 @@ All notable changes to this project are documented here. The format follows
   no product caller and still has none, so this documents the existing
   contract rather than altering it.
 
+### Added
+
+- **Wired ActionLedger.compensate to MCP and sidecar transports (#1096).**
+  `ActionLedger.compensate` records compensating transactions and emits
+  `EventType.ACTION_COMPENSATED`, but had no transport. The verb is now
+  exposed as `continuum_compensate_action` over MCP and `compensate_action`
+  over the sidecar RPC server. Both mark the action `COMPENSATED`, append
+  the compensating event to the log, and surface in recovery summary briefings.
+
 ### Removed
 
 - **Dead `observations_evidence_lines` helper (#867).** The function in
@@ -858,7 +867,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,278 collected, ~2,253 passed, ~25 skipped on a minimal env).
+  (~2,319 collected, ~2,294 passed, ~25 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

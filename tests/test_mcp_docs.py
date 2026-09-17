@@ -110,7 +110,7 @@ async def test_the_audit_coverage_table_lists_every_served_tool(server: Any) -> 
     assert len(covered) == len(set(covered)), "a tool is audited twice"
     served = {tool.name for tool in await server.list_tools()}
     assert set(covered) == served
-    assert "All 12 tools were exercised" in text
+    assert "All 13 tools were exercised" in text
 
 
 def test_the_page_carries_no_em_dashes() -> None:

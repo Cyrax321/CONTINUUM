@@ -89,12 +89,13 @@ tools are gated by the allowlist (see Security).
 | `continuum_complete_action` | mutate | Record a side effect succeeded. |
 | `continuum_fail_action` | mutate | Record a side effect did not happen. |
 | `continuum_reconcile_action` | mutate | Resolve an uncertain side effect from outside evidence. |
+| `continuum_compensate_action` | mutate | Record a completed side effect was deliberately undone. |
 | `continuum_confirm` | mutate | Confirm a human-approved recovery step. |
 | `continuum_validate` | read | Check state against the current environment. |
 | `continuum_resume` | read | Assess and describe how the run may resume. Omit `run_id` to target the most recently active (interrupted) run. Returns the run's `goal` so a resumed session knows what to continue. |
 | `continuum_list_actions` | read | List recorded side effects and their outcomes. |
 
-Twelve tools: three read-only, nine mutating.
+Thirteen tools: three read-only, ten mutating.
 
 Read-only responses `continuum_resume` and `continuum_validate` include a
 `constraint_pins` block: per-pin status (`present`, `absent`, `unverifiable`), grace deadline, and flagged set derived from reconstruction accounting (hash-tagged markers in the recovery context, issue #419). The CLI renders flagged pins prominently with TTY-aware colour while piped output stays byte-identical modulo colour codes. No gating changes live here; strict escalation remains in the accounting layer.

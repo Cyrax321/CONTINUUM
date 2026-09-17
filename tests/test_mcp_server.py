@@ -122,6 +122,7 @@ async def test_every_tool_is_registered(server_ctx: tuple[Any, Any]) -> None:
         "continuum_complete_action",
         "continuum_fail_action",
         "continuum_reconcile_action",
+        "continuum_compensate_action",
         "continuum_list_actions",
         "continuum_confirm",
         "continuum_record_summary",
@@ -139,6 +140,7 @@ async def test_read_only_tools_are_annotated_as_such(server_ctx: tuple[Any, Any]
     assert hints["continuum_list_actions"] is True
     assert hints["continuum_checkpoint"] is False
     assert hints["continuum_intercept_action"] is False
+    assert hints["continuum_compensate_action"] is False
 
 
 @pytest.mark.asyncio
@@ -1419,6 +1421,62 @@ async def test_reconciling_an_unknown_outcome_records_that_it_was_a_correction(
     assert settled["side_effect_uncertain"] is False
     assert (await call(server, "continuum_list_actions", run_id="run_1"))["unresolved"] == 0
     assert EventType.ACTION_RECONCILED in [e.type for e in ctx.storage.read_events("run_1")]
+
+
+@pytest.mark.asyncio
+async def test_compensate_action_records_undo_and_emits_event(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """ActionLedger.compensate has an MCP transport (issue #1096).
+
+    Records a compensating settlement, marks the action COMPENSATED, emits
+    ACTION_COMPENSATED, and surfaces in recovery summary briefings.
+    """
+    from continuum.models import StateValidationResult
+    from continuum.recovery.summary import build_informed_retry, render_informed_retry
+
+    server, ctx = server_ctx
+    await seed_run(server)
+
+    claimed = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="stripe.charge",
+        arguments={"customer": "c_1", "amount": 5000},
+    )
+    await call(
+        server,
+        "continuum_complete_action",
+        run_id="run_1",
+        action_key=claimed["action_key"],
+        external_id="ch_123",
+    )
+
+    compensated = await call(
+        server,
+        "continuum_compensate_action",
+        run_id="run_1",
+        action_key=claimed["action_key"],
+        note="refunded full amount",
+        by="stripe.refund:ref_1",
+    )
+
+    assert compensated["status"] == "compensated"
+    assert compensated["compensated_by"] == ["stripe.refund:ref_1"]
+
+    events = ctx.storage.read_events("run_1")
+    assert EventType.ACTION_COMPENSATED in [e.type for e in events]
+
+    block = build_informed_retry(
+        ctx.storage,
+        "run_1",
+        validation_report=StateValidationResult(run_id="run_1", statuses=[]),
+    )
+    assert block is not None
+    assert block["compensations"] == 1
+    rendered = render_informed_retry(block)
+    assert any("compensations applied: 1" in line for line in rendered)
 
 
 @pytest.mark.asyncio

@@ -99,7 +99,7 @@ Verify:
 ```bash
 continuum --help                 # CLI entrypoint
 continuum-mcp --help             # MCP server entrypoint (needs [mcp] or [dev])
-pytest -q                        # ~2,278 collected, ~2,253 passed, ~25 skipped on a minimal env (exact counts vary)
+pytest -q                        # ~2,319 collected, ~2,294 passed, ~25 skipped on a minimal env (exact counts vary)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # the three gates CI enforces
 ```
@@ -192,7 +192,7 @@ Full walkthrough with code is in `docs/recovery_walkthrough.md` (`examples/recov
 | Environment revalidation | Every checkpoint component verified against the current world before resume |
 | Provenance-aware state | Agent-reported progress is marked `REQUIRES_REVIEW`, never self-certifying |
 | Recovery engine | Seven recovery modes with a deterministic, sealed next-action contract |
-| Deny-by-default MCP server | Twelve tools, read-only/mutating split, caller allowlist |
+| Deny-by-default MCP server | Thirteen tools, read-only/mutating split, caller allowlist |
 | Framework adapters | Generic Python, OpenAI Agents SDK, LangGraph, and LangChain integrations |
 | Secure planning loop | Two-signal observation verification escalates high-risk branches to REQUIRES_REVIEW |
 | Periodic revalidation | Environment re-checked on a schedule, catching mid-run drift within one cycle |
@@ -232,7 +232,7 @@ CONTINUUM is verified against real LLM agents, live protocol boundaries, and har
 - **Third-party clients**: Gemini CLI and Kilo Code connected over stdio JSON-RPC against the live SQLite store, validating multi-agent co-existence and authorization isolation.
 - **Protocol compliance**: driven end to end with `@modelcontextprotocol/inspector --cli` across process deaths; mutating tools deny by default behind `CONTINUUM_MCP_MUTATING_CLIENTS`; external claims degrade to `REQUIRES_REVIEW` (`safe: false`).
 - **Self-healing**: hard-killed servers recover from orphaned SQLite `-wal`/`-shm` sidecars via single-retry cleanup at startup.
-- **Scale**: roughly 2,278 tests collected (~2,253 passing; the rest skip without optional services) on Python 3.11, 3.12, and 3.13 (unit, `hypothesis` property-based, concurrency, adversarial). CONTINUUM-Bench runs five crash scenarios plus a dedicated argument-drift scenario, measuring 0 duplicate work and 0 duplicate side effects for CONTINUUM against full duplication for naive replay; a separate 14-scenario recovery-correctness suite (`continuum.benchmark.phase6`) encodes the crash points from the durable-execution survey as executable assertions, and an 8-fault risk-injection suite (`benchmarks/fault_injection/`) grades failure handling.
+- **Scale**: roughly 2,319 tests collected (~2,294 passing; the rest skip without optional services) on Python 3.11, 3.12, and 3.13 (unit, `hypothesis` property-based, concurrency, adversarial). CONTINUUM-Bench runs five crash scenarios plus a dedicated argument-drift scenario, measuring 0 duplicate work and 0 duplicate side effects for CONTINUUM against full duplication for naive replay; a separate 14-scenario recovery-correctness suite (`continuum.benchmark.phase6`) encodes the crash points from the durable-execution survey as executable assertions, and an 8-fault risk-injection suite (`benchmarks/fault_injection/`) grades failure handling.
 - **Adversarial audit**: the full MCP surface was audited over the live protocol; three defects were found and fixed. Method and reproduction steps in [test.md](test.md).
 
 <!-- BENCH:START -->
@@ -271,7 +271,7 @@ $env:CONTINUUM_MCP_MUTATING_CLIENTS = "your-client-name"
 continuum-mcp
 ```
 
-Twelve tools over stdio. Three are read-only (`continuum_validate`, `continuum_resume`, `continuum_list_actions`); nine mutate. Side effects are two-phase (claim, perform, complete), and mutating tools deny by default behind an allowlist. Agent-reported state is recorded with `Origin.EXTERNAL_AGENT` provenance and marked `REQUIRES_REVIEW`.
+Thirteen tools over stdio. Three are read-only (`continuum_validate`, `continuum_resume`, `continuum_list_actions`); ten mutate. Side effects are two-phase (claim, perform, complete), and mutating tools deny by default behind an allowlist. Agent-reported state is recorded with `Origin.EXTERNAL_AGENT` provenance and marked `REQUIRES_REVIEW`.
 
 Verification details, including crash recovery at startup and the end to end Claude Code test, are in [references/mcp.md](references/mcp.md). If a registered server reports `CONNECTION_CLOSED`, the cause is almost always `PATH` resolution rather than the server itself: [docs/api/mcp.md](docs/api/mcp.md#troubleshooting) has the diagnosis and two remedies.
 
@@ -359,7 +359,7 @@ Any harness plugs into the same hash chained log. The same run can be written by
 | Seam | How to connect | What it gives you |
 |:--|:--|:--|
 | 1 In-process | `GenericAgentAdapter.intercept_action(...)` and `wrap_tool(key_fn=...)` on LangChain, LangGraph, OpenAI Agents SDK | Python frameworks, trusted writes |
-| 2 MCP server | `continuum-mcp` 12 tools over stdio (`continuum_record_progress`, `continuum_intercept_action`, `continuum_complete_action`, etc.) | Any MCP capable client, 3 read-only + 9 mutating, allowlist `CONTINUUM_MCP_MUTATING_CLIENTS` |
+| 2 MCP server | `continuum-mcp` 13 tools over stdio (`continuum_record_progress`, `continuum_intercept_action`, `continuum_complete_action`, etc.) | Any MCP capable client, 3 read-only + 10 mutating, allowlist `CONTINUUM_MCP_MUTATING_CLIENTS` |
 | 3 CLI lifecycle hooks | `continuum hooks install claude-code --with-gate` also `gemini` and `codex` | Coding CLIs: `SessionStart briefing`, `PostToolUse observe`, `PreToolUse gate`; no CLAUDE.md needed |
 | 4 Enforcing HTTP gateway | `continuum gateway --port 8765` with `.continuum/gateway.json` | Any language, any outbound HTTP must have a claim, gateway settles from real status code |
 | 5 OpenTelemetry bridge | `make_span_processor(storage)` | Any traced app, spans become `TOOL_COMPLETED` evidence |
@@ -425,7 +425,7 @@ Schema v6. SQLite is primary, Postgres is CI verified. One log, many projections
 
 ### Module map: one library, many surfaces
 
-CONTINUUM is one library (`src/continuum`, 124 modules) plus a large test suite (161 test files, ~2,278 tests). All modules append to and replay one hash chained event log:
+CONTINUUM is one library (`src/continuum`, 124 modules) plus a large test suite (162 test files, ~2,319 tests). All modules append to and replay one hash chained event log:
 
 | Module | Role |
 |:--|:--|
@@ -444,7 +444,7 @@ CONTINUUM is one library (`src/continuum`, 124 modules) plus a large test suite 
 | `replay_similarity.py` | Semantic similarity backends exact/fuzzy/embedding for replay vs fork |
 | `reconcilers.py` | Probe registry `.continuum/reconcilers.json` for automatic settlement |
 | `adapters/` | 9 class adapters + thin hooks `thin.py` CrewAI AutoGen Pydantic AI + LangGraph store |
-| `mcp/` | 12 stdio tools plus authz `authz.py` token auth, allowlist, confirmation token |
+| `mcp/` | 13 stdio tools plus authz `authz.py` token auth, allowlist, confirmation token |
 | `serve/` | Sidecar stdio JSON wire + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Web dashboard `app.py` `hitl.py` with HITL buttons confirm/reconcile/complete, prefix trust advisory, pins |
 | `cli/` | 46 argparse commands, exit codes as verdict: `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
@@ -487,7 +487,7 @@ All wiring is host-side; the model's cooperation is optional:
 continuum hooks install claude-code --with-gate   # coding CLIs: evidence, briefing, gate
 continuum gateway --port 8765                     # enforcing HTTP proxy for everything else
 provider.add_span_processor(continuum.otel.make_span_processor(storage))  # OTel to evidence
-continuum-mcp                                     # anything MCP-capable: the twelve-tool server
+continuum-mcp                                     # anything MCP-capable: the thirteen-tool server
 continuum briefing                                # session-start context injection
 continuum budget <run_id>                         # retry-budget usage report
 continuum tree <parent_run_id>                    # multi-agent hierarchy view
@@ -561,7 +561,7 @@ CONTINUUM sits at the overlap of durable execution, idempotent side-effect track
 
 In early 2026 I saw long running agents fail on recovery, not reasoning. Checkpoints were treated as proof to continue, not evidence to verify. Surveying Temporal, LangGraph, ACRFence 2603.20625 and self conditioning 2509.09677, I found the gap was a portable verification substrate that asks, given the state at time T and the world as it is now, is it still safe to continue.
 
-Over three weeks I built CONTINUUM from one invariant, every fact carries its origin. The result is a hash chained log with `verify()`, a ledger with stable key deduplication, a gate and gateway that block unclaimed effects, and a recovery engine that seals a contract. Five seams expose the same log to Claude Code, LangGraph, LangChain, OpenAI, HTTP and OpenTelemetry. Validated with real kills and ~2,278 tests, it prints `0 duplicates` where naive replay prints `50`.
+Over three weeks I built CONTINUUM from one invariant, every fact carries its origin. The result is a hash chained log with `verify()`, a ledger with stable key deduplication, a gate and gateway that block unclaimed effects, and a recovery engine that seals a contract. Five seams expose the same log to Claude Code, LangGraph, LangChain, OpenAI, HTTP and OpenTelemetry. Validated with real kills and ~2,319 tests, it prints `0 duplicates` where naive replay prints `50`.
 
 CONTINUUM was created by **Anandhu P Shaji** ([@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/)) and is maintained by the original creator. It is open source under the [Apache-2.0](LICENSE) license. Community contributions are welcome via [CONTRIBUTING.md](CONTRIBUTING.md) and are credited in [AUTHORS.md](AUTHORS.md) and [graphs/contributors](https://github.com/Cyrax321/CONTINUUM/graphs/contributors).
 

@@ -505,7 +505,7 @@ continuum/
 |       |   +-- contract.py          Sealed, gated next action
 |       +-- mcp/
 |       |   +-- __init__.py
-|       |   +-- server.py            12 stdio tools, read-only/mutating split, auth gate
+|       |   +-- server.py            13 stdio tools, read-only/mutating split, auth gate
 |       +-- adapters/
 |       |   +-- __init__.py          AgentAdapter contract
 |       |   +-- base.py              Shared adapter plumbing

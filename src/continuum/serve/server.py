@@ -71,6 +71,7 @@ MUTATING = {
     "complete_action",
     "fail_action",
     "reconcile_action",
+    "compensate_action",
 }
 
 #: HTTP requests longer than this are refused with 413 before the body is read.
@@ -954,6 +955,23 @@ def _h_reconcile_action(server: SidecarServer, params: dict[str, Any]) -> dict[s
     }
 
 
+def _h_compensate_action(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]:
+    run_id = _require(params, "run_id")
+    action_key = _require(params, "action_key")
+    action = server._ledger(run_id).compensate(
+        action_key,
+        note=params.get("note", ""),
+        by=params.get("by"),
+    )
+    return {
+        "run_id": run_id,
+        "action_id": action.action_id,
+        "action_type": action.action_type,
+        "status": action.status.value,
+        "compensated_by": list(action.compensated_by),
+    }
+
+
 def _h_list_actions(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]:
     run_id = _require(params, "run_id")
     server.storage.get_run(run_id)
@@ -990,6 +1008,7 @@ _HANDLERS: dict[str, Any] = {
     "complete_action": _h_complete_action,
     "fail_action": _h_fail_action,
     "reconcile_action": _h_reconcile_action,
+    "compensate_action": _h_compensate_action,
     "list_actions": _h_list_actions,
 }
 
