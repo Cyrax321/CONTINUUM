@@ -82,6 +82,27 @@ def test_active_run_resolution_skips_terminal(storage: PostgresStorage) -> None:
     assert active.run_id == "pg_live"
 
 
+def test_fork_lineage_survives_the_round_trip(storage: PostgresStorage) -> None:
+    """A fork must persist and return parent_run_id (#1079).
+
+    ``children_of`` filters ``list_runs`` on this column, so a backend that
+    drops it makes the family resume block silently vacuous: no error, just a
+    parent that never learns its child is unsafe.
+    """
+    from continuum.recovery.family import children_of
+
+    make_run(storage, "pg_parent", "supervise")
+    storage.create_run_started(
+        Run(run_id="pg_child", goal="work", parent_run_id="pg_parent"),
+        source=Origin.HUMAN,
+    )
+
+    assert storage.get_run("pg_child").parent_run_id == "pg_parent"
+    assert storage.get_run("pg_parent").parent_run_id is None
+    # the query the family roll-up reads through, not just the column
+    assert [c.run_id for c in children_of(storage, "pg_parent")] == ["pg_child"]
+
+
 # --- events --------------------------------------------------------------------- #
 
 
