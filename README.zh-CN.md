@@ -480,7 +480,7 @@ continuum tree <parent_run_id>                   # 多智能体层级视图
 
 可选注册表位于代码旁且是数据而非代码：`.continuum/gate.json`（副作用工具 + 稳定键模板）、`.continuum/reconcilers.json`（检查外部系统的探针）、`.continuum/gateway.json`（上游路由）。
 
-每个命令都接受 `--json`，且只读命令永不写入，因此在智能体运行中对活跃数据库也是安全的。退出码是安全合约（只有经验证安全的 run 才以 0 退出）。完整命令列表、退出码表和状态差异输出见 [references/cli.md](references/cli.md)。
+每个命令都接受 `--json`（置于命令之前，例如 `continuum --json <command>`，而非 `continuum <command> --json`），且只读命令永不写入，因此在智能体运行中对活跃数据库也是安全的。退出码是安全合约（只有经验证安全的 run 才以 0 退出）。完整命令列表、退出码表和状态差异输出见 [references/cli.md](references/cli.md)。
 
 ## 路线图
 

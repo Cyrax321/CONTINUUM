@@ -465,7 +465,7 @@ continuum tree <parent_run_id>                   # 다중 에이전트 계층 �
 
 선택적 레지스트리는 코드 옆에 존재하며 데이터이지 코드가 아니다. `.continuum/gate.json`(사이드 이펙트 도구 + 안정적인 키 템플릿), `.continuum/reconcilers.json`(외부 시스템을 확인하는 프로브), `.continuum/gateway.json`(업스트림 라우트).
 
-각 명령은 `--json`을 받으며, 읽기 전용 명령은 절대 쓰지 않는다. 따라서 에이전트가 실행 중에도 라이브 데이터베이스에 대해 안전하다. 종료 코드는 안전성 계약이다(검증되어 안전한 실행만 0으로 종료한다). 전체 명령 목록, 종료 코드 표, 상태 차이 출력은 [references/cli.md](references/cli.md)에 있다.
+각 명령은 `--json`(명령 앞에 배치: `continuum --json <command>`, `continuum <command> --json`이 아님)을 받으며, 읽기 전용 명령은 절대 쓰지 않는다. 따라서 에이전트가 실행 중에도 라이브 데이터베이스에 대해 안전하다. 종료 코드는 안전성 계약이다(검증되어 안전한 실행만 0으로 종료한다). 전체 명령 목록, 종료 코드 표, 상태 차이 출력은 [references/cli.md](references/cli.md)에 있다.
 
 ## 로드맵
 

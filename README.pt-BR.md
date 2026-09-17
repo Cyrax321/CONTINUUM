@@ -466,7 +466,7 @@ continuum tree <parent_run_id>                   # visão de hierarquia multiage
 
 Registros opcionais vivem ao lado do seu código e são dados, não código: `.continuum/gate.json` (ferramentas de efeito colateral + templates de chave estável), `.continuum/reconcilers.json` (sondas que checam sistemas externos), `.continuum/gateway.json` (rotas upstream).
 
-Cada comando aceita `--json`, e comandos somente leitura nunca escrevem, de modo que são seguros contra um banco de dados vivo enquanto um agente está no meio da execução. Códigos de saída são um contrato de segurança (apenas uma execução verificada segura sai com 0). Lista completa de comandos, tabela de códigos de saída e saída de diff de estado em [references/cli.md](references/cli.md).
+Cada comando aceita `--json` (colocado antes do comando: `continuum --json <comando>`, não `continuum <comando> --json`), e comandos somente leitura nunca escrevem, de modo que são seguros contra um banco de dados vivo enquanto um agente está no meio da execução. Códigos de saída são um contrato de segurança (apenas uma execução verificada segura sai com 0). Lista completa de comandos, tabela de códigos de saída e saída de diff de estado em [references/cli.md](references/cli.md).
 
 ## Roteiro
 
