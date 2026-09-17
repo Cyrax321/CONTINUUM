@@ -421,8 +421,8 @@ class RecoveryEngine:
             except Exception:
                 risk_events = []
             best_mode = None
-            best_trigger = None
             triggering: list[str] = []
+            triggers: list[str] = []
             for risk_ev in risk_events:
                 trig = risk_ev.payload.get("trigger")
                 if not isinstance(trig, str):
@@ -436,14 +436,21 @@ class RecoveryEngine:
                     continue
                 if best_mode is None or SEVERITY[candidate] > SEVERITY[best_mode]:
                     best_mode = candidate
-                    best_trigger = trig
                     triggering = [risk_ev.event_id]
+                    triggers = [trig]
                 elif SEVERITY[candidate] == SEVERITY[best_mode]:
                     triggering.append(risk_ev.event_id)
+                    if trig not in triggers:
+                        triggers.append(trig)
             if best_mode is not None:
                 risk_mode = best_mode
                 triggering_risks = triggering
-                risk_rationale = f"risk {best_trigger} triggers {best_mode.value}"
+                # Name every trigger that proposed the winning mode, not just
+                # the first: the ids in triggering_risks are all contributors
+                # to the verdict the sealed reason justifies (issue #1057).
+                # Deduplicated by trigger so an equal-severity repeat does not
+                # duplicate the sentence the way #1042's double-append did.
+                risk_rationale = f"risk {', '.join(sorted(triggers))} triggers {best_mode.value}"
         except Exception:
             triggering_risks = []
             risk_mode = None
@@ -688,21 +695,6 @@ class RecoveryEngine:
             rationale_text = risk_rationale or f"risk triggers {risk_mode.value}"
             proposals.append((risk_mode, rationale_text))
 
-        # Liveness breach maps to WAIT, never auto-rollback (issue #302)
-        # Silence tells us nothing about what to roll back, only that a human
-        # or lease-recovery decision is needed. WAIT is the most cautious
-        # signal that still allows a lease to be recovered without human.
-        if liveness_advisory is not None and bool(liveness_advisory.get("breached")):
-            silence = liveness_advisory.get("silence_seconds")
-            threshold = liveness_advisory.get("threshold_seconds")
-            phase = liveness_advisory.get("phase") or "otherwise"
-            proposals.append(
-                (
-                    RecoveryMode.WAIT,
-                    f"liveness breach: silence {silence:.1f}s exceeds threshold {threshold}s (phase {phase})",
-                )
-            )
-
         # A goal that is no longer valid cannot be repaired by re-running work.
         if any(
             e.component.value == "goal" and e.status is not StateStatus.VALID
@@ -726,5 +718,11 @@ class RecoveryEngine:
         # entry. Both facts are asserted by tests rather than defended by dead
         # branches here.
         mode = max(proposals, key=lambda p: SEVERITY[p[0]])[0]
-        rationale = tuple(reason for proposed, reason in proposals if proposed is mode)
+        # dict.fromkeys dedups while preserving order: two proposals of the
+        # winning mode that carry the same sentence (the pasted-twice
+        # liveness block of #1042 did exactly that) must read as one reason,
+        # not as two observations that never happened.
+        rationale = tuple(
+            dict.fromkeys(reason for proposed, reason in proposals if proposed is mode)
+        )
         return mode, rationale

@@ -53,6 +53,10 @@ from continuum.storage.base import (
     Storage,
 )
 
+__all__ = [
+    "PostgresStorage",
+]
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS continuum_meta (
     key   TEXT PRIMARY KEY,

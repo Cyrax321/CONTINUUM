@@ -11,6 +11,11 @@ import concurrent.futures
 from collections.abc import Callable
 from typing import Any
 
+__all__ = [
+    "RecoveryTimeoutError",
+    "run_with_limits",
+]
+
 
 class RecoveryTimeoutError(TimeoutError):
     """Raised when a recovery operation exceeds its allotted time."""

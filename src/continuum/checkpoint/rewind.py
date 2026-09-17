@@ -12,7 +12,7 @@ from continuum.events import EventType
 from continuum.models import StateCheckpoint
 from continuum.recovery.engine import RecoveryEngine
 from continuum.state.semantic import project
-from continuum.storage.base import Storage
+from continuum.storage.base import CheckpointNotFound, CorruptedRecord, Storage
 
 __all__ = ["RewindResult", "RewindError", "rewind_to_checkpoint", "resolve_checkpoint"]
 
@@ -59,12 +59,22 @@ def resolve_checkpoint(storage: Storage, run_id: str, to: str) -> StateCheckpoin
     Attempts lookup by exact checkpoint ID, then by integer checkpoint version,
     and finally by event source sequence number. Raises :class:`RewindError`
     if no matching checkpoint exists for ``run_id``.
+
+    A checkpoint whose stored body fails validation or its integrity hash is
+    :class:`~continuum.storage.base.CorruptedRecord` evidence, not a lookup
+    miss, so it is surfaced instead of being retried as a version or sequence
+    number. Reporting it as missing would point an operator at a typo while
+    the storage layer is refusing to vouch for the record (#1059).
     """
     try:
         cp = storage.get_checkpoint(to)
         if cp.run_id == run_id:
             return cp
-    except Exception:
+    except CorruptedRecord as exc:
+        raise RewindError(
+            f"checkpoint {to!r} for run {run_id!r} is corrupted and cannot be trusted: {exc}"
+        ) from exc
+    except CheckpointNotFound:
         pass
     try:
         version = int(to)
