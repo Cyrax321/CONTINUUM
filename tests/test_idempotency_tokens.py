@@ -16,6 +16,7 @@ from continuum.actions.idempotency import (
 
 
 def test_leaf_and_location_tokens_partition_token_set() -> None:
+    """leaf_tokens and location_tokens partition a concrete token set disjointly."""
     tokens = frozenset(
         {
             "INV-001",
@@ -46,6 +47,7 @@ def test_leaf_and_location_tokens_partition_token_set() -> None:
 def test_leaf_and_location_tokens_always_form_disjoint_partition(
     tokens: frozenset[str],
 ) -> None:
+    """leaf_tokens and location_tokens partition any arbitrary string frozenset."""
     leaves = leaf_tokens(tokens)
     locations = location_tokens(tokens)
 
@@ -59,6 +61,7 @@ def test_leaf_and_location_tokens_always_form_disjoint_partition(
 
 
 def test_identity_tokens_extracts_strings_and_path_derivations() -> None:
+    """identity_tokens collects string values, basenames, and stems."""
     tokens = identity_tokens({"path": "/data/invoices/INV-5.pdf"})
     assert "/data/invoices/INV-5.pdf" in tokens
     assert "INV-5.pdf" in tokens
@@ -66,14 +69,14 @@ def test_identity_tokens_extracts_strings_and_path_derivations() -> None:
 
 
 def test_identity_tokens_renders_integer_scalar_as_token() -> None:
-    # Issue #36: row id or account number identifies a resource.
+    """identity_tokens renders integer scalars as string tokens (issue #36)."""
     tokens = identity_tokens({"row_id": 4821, "account": 100200})
     assert "4821" in tokens
     assert "100200" in tokens
 
 
 def test_identity_tokens_discards_boolean_values() -> None:
-    # Booleans are int subclasses in Python, but True/False name no resource.
+    """identity_tokens ignores boolean values because True/False name no resource."""
     tokens = identity_tokens({"active": True, "archived": False, "resource": "res-01"})
     assert "True" not in tokens
     assert "False" not in tokens
@@ -81,6 +84,7 @@ def test_identity_tokens_discards_boolean_values() -> None:
 
 
 def test_identity_tokens_traverses_nested_mappings_and_lists() -> None:
+    """identity_tokens recursively traverses nested mappings and sequences."""
     args = {
         "items": [
             {"id": 101, "name": "document-alpha.pdf"},
@@ -99,6 +103,7 @@ def test_identity_tokens_traverses_nested_mappings_and_lists() -> None:
 
 
 def test_identity_tokens_extracts_external_id() -> None:
+    """identity_tokens extracts tokens and path stems from external_id."""
     tokens = identity_tokens(
         {"action": "sync"},
         external_id="/logs/batch/job-42.log",
@@ -109,6 +114,7 @@ def test_identity_tokens_extracts_external_id() -> None:
 
 
 def test_identity_tokens_strips_volatile_arguments() -> None:
+    """identity_tokens omits arguments specified in the volatile set."""
     tokens = identity_tokens(
         {"request_id": "req-999", "target": "dataset-prod", "retry": 3},
         volatile=["request_id", "retry"],
@@ -119,7 +125,7 @@ def test_identity_tokens_strips_volatile_arguments() -> None:
 
 
 def test_identity_tokens_filters_weak_and_short_tokens() -> None:
-    # Tokens with length < 3, stopwords, and generic weak words are filtered out.
+    """identity_tokens filters short tokens, stopwords, and generic weak tokens."""
     tokens = identity_tokens(
         {
             "short": "ab",
@@ -135,6 +141,7 @@ def test_identity_tokens_filters_weak_and_short_tokens() -> None:
 
 
 def test_identity_tokens_empty_inputs() -> None:
+    """identity_tokens returns an empty frozenset for empty or None arguments."""
     assert identity_tokens(None) == frozenset()
     assert identity_tokens({}) == frozenset()
 
@@ -145,18 +152,16 @@ def test_identity_tokens_empty_inputs() -> None:
 @pytest.mark.parametrize(
     ("left", "right"),
     [
-        # Docstring drift case: invoices/INV-5.pdf inside /data/invoices/INV-5.pdf
         ("/data/invoices/INV-5.pdf", "invoices/INV-5.pdf"),
         ("/data/invoices/INV-5.pdf", "./invoices/INV-5.pdf"),
         ("/data/invoices/INV-5.pdf", "/data/invoices/INV-5.pdf"),
-        # Cross-platform separator rendering
         ("data\\invoices\\INV-5.pdf", "invoices/INV-5.pdf"),
         ("data/invoices/INV-5.pdf", "data\\invoices\\INV-5.pdf"),
-        # Relative prefix with dot segments
         ("a/b/c/report.csv", "./b/c/report.csv"),
     ],
 )
 def test_same_location_accepts_valid_path_drift(left: str, right: str) -> None:
+    """same_location accepts trailing-suffix path drift symmetrically."""
     assert same_location(left, right) is True
     assert same_location(right, left) is True, "same_location must be symmetric"
 
@@ -164,21 +169,21 @@ def test_same_location_accepts_valid_path_drift(left: str, right: str) -> None:
 @pytest.mark.parametrize(
     ("left", "right"),
     [
-        # Issue #365: same basename in different containers must not collapse
         ("/tenants/acme/report.csv", "/tenants/globex/report.csv"),
         ("a/report.csv", "b/report.csv"),
         ("/var/data/output.json", "/opt/data/output.json"),
-        # Basename shared with no directory in common
         ("dir1/file.txt", "dir2/file.txt"),
         ("x/y/z.dat", "a/b/z.dat"),
     ],
 )
 def test_same_location_rejects_distinct_containers_issue_365(left: str, right: str) -> None:
+    """same_location rejects same basenames in distinct directories (issue #365)."""
     assert same_location(left, right) is False
     assert same_location(right, left) is False, "same_location must be symmetric"
 
 
 def test_same_location_degenerate_and_empty_paths() -> None:
+    """same_location returns False for empty or unsegmentable paths."""
     assert same_location("", "") is False
     assert same_location("", "invoices/INV-5.pdf") is False
     assert same_location("invoices/INV-5.pdf", "") is False
@@ -198,6 +203,7 @@ _SEGMENT_STRATEGY = st.text(
     suffix=st.lists(_SEGMENT_STRATEGY, min_size=1, max_size=4),
 )
 def test_same_location_suffix_drift_property(prefix: list[str], suffix: list[str]) -> None:
+    """same_location always matches when one path is a valid trailing suffix of another."""
     full_path = "/".join(prefix + suffix)
     suffix_path = "/".join(suffix)
     assert same_location(full_path, suffix_path) is True
@@ -209,6 +215,7 @@ def test_same_location_suffix_drift_property(prefix: list[str], suffix: list[str
     segments_b=st.lists(_SEGMENT_STRATEGY, min_size=1, max_size=4),
 )
 def test_same_location_is_symmetric(segments_a: list[str], segments_b: list[str]) -> None:
+    """same_location evaluation is symmetric for any pair of segmented paths."""
     path_a = "/".join(segments_a)
     path_b = "/".join(segments_b)
     assert same_location(path_a, path_b) == same_location(path_b, path_a)
@@ -218,7 +225,7 @@ def test_same_location_is_symmetric(segments_a: list[str], segments_b: list[str]
 
 
 def test_locations_agree_when_one_or_both_sides_have_no_location_tokens() -> None:
-    # A side carrying no path-like token makes no location claim and cannot contradict one.
+    """locations_agree returns True when either side carries no location tokens."""
     has_location = frozenset({"/data/invoices/INV-5.pdf"})
     empty_location = frozenset()
 
@@ -228,6 +235,7 @@ def test_locations_agree_when_one_or_both_sides_have_no_location_tokens() -> Non
 
 
 def test_locations_agree_matches_on_reconcilable_pair() -> None:
+    """locations_agree returns True when at least one location pair agrees."""
     left = frozenset({"/data/invoices/INV-5.pdf", "/var/backup/log.txt"})
     right = frozenset({"invoices/INV-5.pdf"})
     assert locations_agree(left, right) is True
@@ -235,6 +243,7 @@ def test_locations_agree_matches_on_reconcilable_pair() -> None:
 
 
 def test_locations_agree_refuses_when_no_pair_reconciles_issue_365() -> None:
+    """locations_agree returns False when all location pairs disagree (issue #365)."""
     left = frozenset({"/tenants/acme/report.csv"})
     right = frozenset({"/tenants/globex/report.csv"})
     assert locations_agree(left, right) is False
@@ -242,6 +251,7 @@ def test_locations_agree_refuses_when_no_pair_reconciles_issue_365() -> None:
 
 
 def test_locations_agree_multiple_paths_distinct_containers() -> None:
+    """locations_agree returns False when sets of multiple paths share no matching pair."""
     left = frozenset({"tenant_a/report.csv", "tenant_a/summary.txt"})
     right = frozenset({"tenant_b/report.csv", "tenant_b/summary.txt"})
     assert locations_agree(left, right) is False
