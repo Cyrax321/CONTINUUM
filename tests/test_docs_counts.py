@@ -62,6 +62,10 @@ _COLLECTED_RES = (
         r"\bvalidado(?:\s+\w+){0,5}\s+y\s+~?([\d,]+)\s+tests\b",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"\bcerca\s+de\s+~?([\d,]+)\s+tests\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"^pytest\s+-q\s+#.*?([\d,]+)", re.MULTILINE),
 )
 
@@ -119,6 +123,7 @@ def test_documented_narrative_count_forms(tmp_path: Path) -> None:
         ("Validated with real kills and ~2,241 tests.", 2241),
         ("Validado con muertes reales y 1380 tests.", 1380),
         ("Validado con muertes reales y ~2,241 tests.", 2241),
+        ("cerca de 2,311 tests", 2311),
     )
     for index, (text, expected) in enumerate(cases):
         path = tmp_path / f"doc-{index}.md"
