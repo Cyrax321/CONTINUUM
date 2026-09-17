@@ -33,7 +33,15 @@ _COLLECTED_RES = (
     re.compile(r"~([\d,]+)`?\s+collected"),
     re.compile(r"roughly\s+([\d,]+)\s+tests\s+collected"),
     re.compile(r"~([\d,]+)\s+tests\b"),
-    re.compile(r"\b(?:with|validated(?:\s+\w+){0,3})\s+([\d,]+)\s+tests\b", re.IGNORECASE),
+    re.compile(r"\bwith\s+~?([\d,]+)\s+tests\b", re.IGNORECASE),
+    re.compile(
+        r"\bvalidated(?:\s+\w+){0,5}\s+and\s+~?([\d,]+)\s+tests\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bvalidado(?:\s+\w+){0,5}\s+y\s+~?([\d,]+)\s+tests\b",
+        re.IGNORECASE,
+    ),
 )
 
 
@@ -63,6 +71,23 @@ def live_total() -> int:
 def test_documented_counts_agree() -> None:
     totals = {f.name: documented_total(f) for f in COUNTED_FILES}
     assert len(set(totals.values())) == 1, f"documented counts disagree: {totals}"
+
+
+def test_documented_narrative_count_forms() -> None:
+    """Narrative English and Spanish count claims must remain detectable."""
+    cases = (
+        ("Validated with real kills and 1380 tests.", 1380),
+        ("Validated with real kills and ~2,241 tests.", 2241),
+        ("Validado con muertes reales y 1380 tests.", 1380),
+        ("Validado con muertes reales y ~2,241 tests.", 2241),
+    )
+    for index, (text, expected) in enumerate(cases):
+        path = ROOT / f".docs-count-regression-{index}.md"
+        path.write_text(text, encoding="utf-8")
+        try:
+            assert documented_total(path) == expected
+        finally:
+            path.unlink()
 
 
 @pytest.mark.slow
