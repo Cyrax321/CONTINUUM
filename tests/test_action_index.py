@@ -175,6 +175,28 @@ def test_spurious_rows_count_as_drift_and_are_removed(store: SQLiteStorage) -> N
     assert store.action_index_drift() == 0
 
 
+def test_rebuild_skips_an_unparsable_payload(store: SQLiteStorage) -> None:
+    """A row whose payload is not JSON must not abort the fold.
+
+    The CLI refuses to repair a store whose chain is broken, but the
+    storage-level fold reads raw rows with no chain check first, so one
+    corrupt payload has to degrade to a skipped row rather than raise out of
+    ``rebuild_action_index`` -- the repair path for every key in the store.
+    """
+    ledger = make_run(store, "run_1")
+    done = ledger.claim("send_invoice", {}, key="invoice:bad")
+    ledger.complete(done.key, external_id="INV-bad")
+
+    store._connection.execute("UPDATE events SET payload = 'not-json' WHERE type LIKE 'ACTION%'")
+
+    assert store._canonical_index_rows() == {}
+    # The removal is itself reported as a correction, and the store is then
+    # consistent with its (empty) truth.
+    assert store.rebuild_action_index() == 1
+    assert store.action_index_drift() == 0
+    assert store.foreign_action(done.key, exclude_run="nobody") is None
+
+
 # --- engines without an index ---------------------------------------------------- #
 
 

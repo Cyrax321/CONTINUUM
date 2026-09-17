@@ -112,7 +112,16 @@ jobs:
       - name: Run Postgres contract tests
         env:
           CONTINUUM_TEST_POSTGRES_DSN: postgresql://continuum:continuum@localhost:5432/continuum_test
-        run: pytest tests/test_storage_postgres.py tests/test_action_index.py --tb=short -q
+        run: pytest tests/test_storage_postgres.py tests/test_action_index.py --tb=short -q --cov=continuum --cov-report=xml --cov-report=term-missing
+
+      # The matrix job uploads without psycopg installed, so this suite skips
+      # there and the Postgres engine's lines would otherwise never reach the
+      # codecov patch report at all. Codecov merges the two uploads per line.
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v7.0.0
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
 
   lint:
     name: Lint & Type-check

@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from continuum.actions import ActionLedger
 from continuum.actions.idempotency import idempotency_key
 from continuum.checkpoint import CheckpointManager
 from continuum.cli import ExitCode, main
@@ -310,6 +311,62 @@ def test_action_index_covers_the_archive_after_rebuild(tmp_path: Path) -> None:
         foreign = store.foreign_action(key, exclude_run="r2")
     assert foreign is not None
     assert foreign.status is ActionStatus.COMPLETED
+
+
+def test_rebuild_keeps_an_archived_completion_above_an_earlier_live_failure(
+    tmp_path: Path,
+) -> None:
+    """Issue #1054: the fold ranked an archived completion below another run's
+    *earlier* live failure, because it appended the whole archive before the
+    live stream on the assumption that archived always means older. An
+    unscoped key lives in one store-wide namespace, so that assumption fails
+    the moment two runs touch the same key and one of them compacts. The
+    rebuild -- the repair path -- then overwrote the still-correct
+    incremental row with the folded failure, and the next claim saw
+    ``fresh: True`` against a completed side effect and re-fired it."""
+    path = str(tmp_path / "ord.db")
+    with SQLiteStorage(path) as store:
+        store.create_run(Run(run_id="rB", goal="g"))
+        store.append_event("rB", EventType.RUN_STARTED, {"goal": "g", "total": 1})
+        store.create_run(Run(run_id="rA", goal="g"))
+        store.append_event("rA", EventType.RUN_STARTED, {"goal": "g", "total": 1})
+
+        b = ActionLedger(store, "rB")
+        failed = b.claim("refund", {"invoice": "inv-1"}, scoped_to_run=False, key="shared-k")
+        b.fail(failed.key, "gateway 500")  # earlier in time, FAILED
+        a = ActionLedger(store, "rA")
+        done = a.claim("refund", {"invoice": "inv-1"}, scoped_to_run=False, key="shared-k")
+        a.complete(done.key, external_id="ext-1", result={"ok": True})  # later, COMPLETED
+
+        def index_row() -> dict[str, str] | None:
+            with store._read() as conn:
+                row = conn.execute(
+                    "SELECT run_id, status FROM action_index WHERE key = ?", (done.key,)
+                ).fetchone()
+            return dict(row) if row else None
+
+        assert index_row() == {"run_id": "rA", "status": "completed"}
+
+        store.compact_run("rA")
+        # The incremental index tracks the log, so it stays correct here.
+        assert index_row() == {"run_id": "rA", "status": "completed"}
+
+        store.rebuild_action_index()
+        assert store.action_index_drift() == 0
+        # The rebuild must not demote the later completion to the earlier failure.
+        assert index_row() == {"run_id": "rA", "status": "completed"}
+
+        foreign = store.foreign_action(done.key, exclude_run="rB")
+        assert foreign is not None
+        assert foreign.status is ActionStatus.COMPLETED
+        assert foreign.run_id == "rA"
+
+        # A third run claiming the same unscoped key must not re-fire it.
+        replayed = ActionLedger(store, "rC").claim(
+            "refund", {"invoice": "inv-1"}, scoped_to_run=False, key="shared-k"
+        )
+    assert replayed.fresh is False
+    assert replayed.action.external_id == "ext-1"
 
 
 # --- capability gate and projection hygiene -------------------------------------- #

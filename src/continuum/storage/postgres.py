@@ -711,30 +711,63 @@ class PostgresStorage(Storage):
     def _canonical_index_rows(self) -> dict[str, tuple[tuple[str, str, str, str, str], int]]:
         """Fold every run's action events; global last-write-per-key wins.
 
-        Compacted history (#239) folds too, archive first and live second:
-        everything in ``events_archive`` predates every live row of its run,
-        so folding the two tables in one shared stream would let an archived
-        action claimed long ago outrank a newer live write of the same key
-        (they number their rows independently). Archived rows receive
-        negative order positions below every possible live value, oldest
-        first, so last-write-per-key stays true after compaction.
+        Compacted history (#239) folds too, but the fold has to follow real
+        time across runs, not table order: an unscoped key lives in one
+        store-wide namespace, so an archived completion of it in run A can be
+        newer than a live failure of the same key in run B. Appending the
+        archive before the live stream let run B's stale failure outrank run
+        A's later completion, and ``rebuild_action_index``, the repair path,
+        was what wrote the wrong row: the next claim saw ``fresh: True``
+        against a completed side effect and re-fired it (#1054). Merging the
+        two streams on timestamp instead puts every row on one wall-clock
+        timeline, so last-write-per-key is true order.
+
+        ``order_seq`` stays table-relative for the stored ``updated_seq``
+        (live rows keep their ctid-stream index, archived rows keep a
+        negative position): the index holds one row per key, so the value
+        only has to agree with ``action_index_drift``, never to rank a live
+        row against an archived one.
         """
         with self._read():
-            archived = self._connection.execute(
-                "SELECT type, payload FROM events_archive ORDER BY ctid"
-            ).fetchall()
-            rows = self._connection.execute(
-                "SELECT type, payload FROM events ORDER BY ctid"
-            ).fetchall()
+            archived = [
+                (r["timestamp"], r["run_id"], r["sequence"], None, r["type"], r["payload"])
+                for r in self._connection.execute(
+                    "SELECT timestamp, run_id, sequence, type, payload FROM events_archive"
+                ).fetchall()
+            ]
+            rows = [
+                (r["timestamp"], r["run_id"], r["sequence"], i, r["type"], r["payload"])
+                for i, r in enumerate(
+                    self._connection.execute(
+                        "SELECT timestamp, run_id, sequence, type, payload"
+                        " FROM events ORDER BY ctid"
+                    ).fetchall()
+                )
+            ]
+        # Both streams arrive in their own insertion order; the merge is what
+        # interleaves them. Ties on the same instant break on (run_id,
+        # sequence) so the fold stays deterministic replay after replay.
+        timeline = sorted([*archived, *rows], key=lambda row: row[:3])
         canonical: dict[str, tuple[tuple[str, str, str, str, str], int]] = {}
         offset = len(archived)
-        for i, row in enumerate([*archived, *rows]):
-            payload = (
-                row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
-            )
-            entry = index_entry_from_payload(EventType(row["type"]), payload)
-            if entry is not None:
-                canonical[entry[0]] = (entry, i if i >= offset else i - offset)
+        archived_seen = 0
+        for _ts, _run_id, _seq, live_idx, event_type, payload in timeline:
+            # A row whose payload is not parseable is skipped, not fatal: the
+            # fold reads raw rows, and one corrupt entry must not abort the
+            # repair path for every key in the store.
+            try:
+                parsed = payload if isinstance(payload, dict) else json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            entry = index_entry_from_payload(EventType(event_type), parsed)
+            if entry is None:
+                continue
+            if live_idx is None:
+                order = archived_seen - offset
+                archived_seen += 1
+            else:
+                order = live_idx
+            canonical[entry[0]] = (entry, order)
         return canonical
 
     @staticmethod

@@ -269,3 +269,73 @@ def test_pg_action_index_covers_the_archive_after_rebuild(
     foreign = storage.foreign_action(key, exclude_run="some_other_run")
     assert foreign is not None
     assert foreign.status is ActionStatus.COMPLETED
+
+
+def test_pg_rebuild_keeps_an_archived_completion_above_an_earlier_live_failure(
+    storage: PostgresStorage,
+) -> None:
+    """Issue #1054 over Postgres: the fold appended the whole archive before
+    the live stream, so across two runs sharing an unscoped key the earlier
+    live failure outranked the later archived completion. ``rebuild_action_index``
+    then wrote that failure over the still-correct incremental row."""
+    make_run(storage, "pg_1054_a", "later completion")
+    make_run(storage, "pg_1054_b", "earlier failure")
+
+    b = ActionLedger(storage, "pg_1054_b")
+    failed = b.claim("refund", {"invoice": "inv-1"}, scoped_to_run=False, key="shared-k")
+    b.fail(failed.key, "gateway 500")
+    a = ActionLedger(storage, "pg_1054_a")
+    done = a.claim("refund", {"invoice": "inv-1"}, scoped_to_run=False, key="shared-k")
+    a.complete(done.key, external_id="ext-1", result={"ok": True})
+
+    def index_row() -> dict[str, str] | None:
+        row = storage._connection.execute(
+            "SELECT run_id, status FROM action_index WHERE key = %s", (done.key,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    assert index_row() == {"run_id": "pg_1054_a", "status": "completed"}
+    storage.compact_run("pg_1054_a")
+    assert index_row() == {"run_id": "pg_1054_a", "status": "completed"}
+
+    storage.rebuild_action_index()
+    assert storage.action_index_drift() == 0
+    assert index_row() == {"run_id": "pg_1054_a", "status": "completed"}
+
+    foreign = storage.foreign_action(done.key, exclude_run="pg_1054_b")
+    assert foreign is not None
+    assert foreign.status is ActionStatus.COMPLETED
+
+    replayed = ActionLedger(storage, "pg_1054_c").claim(
+        "refund", {"invoice": "inv-1"}, scoped_to_run=False, key="shared-k"
+    )
+    assert replayed.fresh is False
+    assert replayed.action.external_id == "ext-1"
+
+
+def test_pg_rebuild_skips_an_unparsable_payload(storage: PostgresStorage) -> None:
+    """A payload that is not JSON must skip the fold, not abort it.
+
+    The rebuild fold reads raw rows with no chain check first, and the whole
+    store's keys are repaired in one pass, so one corrupt entry has to degrade
+    to a skipped row rather than raise.
+    """
+    make_run(storage, "pg_bad", "corrupt payload")
+    ledger = ActionLedger(storage, "pg_bad")
+    done = ledger.claim("send_invoice", {}, key="invoice:pg-bad")
+    ledger.complete(done.key, external_id="INV-pg-bad")
+
+    storage._connection.execute(
+        "UPDATE events SET payload = 'not-json' WHERE run_id = 'pg_bad' AND type LIKE 'ACTION%'"
+    )
+    storage._connection.execute(
+        "UPDATE events_archive SET payload = 'not-json'"
+        " WHERE run_id = 'pg_bad' AND type LIKE 'ACTION%'"
+    )
+
+    assert done.key not in storage._canonical_index_rows()
+    # The rebuild drops the stale row rather than crashing on it, and the
+    # store is then consistent with its (reduced) truth.
+    storage.rebuild_action_index()
+    assert storage.action_index_drift() == 0
+    assert storage.foreign_action(done.key, exclude_run="nobody") is None

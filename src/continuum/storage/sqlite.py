@@ -640,34 +640,60 @@ class SQLiteStorage(Storage):
     def _canonical_index_rows(self) -> dict[str, tuple[tuple[str, str, str, str, str], int]]:
         """Fold the log into ``{key: ((entry...), order_seq)}``, last write wins.
 
-        Compacted history (#239) folds too, archive first and live second:
-        everything in ``events_archive`` predates every live row of its run,
-        so folding the two tables in one shared stream would let an archived
-        action claimed long ago outrank a newer live write of the same key
-        (they number their rows independently). Live rows keep their
-        insertion rowid, matching incremental index maintenance exactly;
-        archived rows receive negative order positions below every possible
-        rowid, oldest first, so last-write-per-key stays true after
-        compaction while uncompacted stores fold identically to before.
+        Compacted history (#239) folds too, but the fold has to follow real
+        time across runs, not table order. An unscoped key lives in one
+        store-wide namespace, so an archived completion of it in run A can be
+        newer than a live failure of the same key in run B. Appending the
+        archive before the live stream -- the split commit 3f7c480 added --
+        then let run B's stale failure outrank run A's later completion, and
+        ``rebuild_action_index``, the repair path, was what wrote the wrong
+        row: the next claim saw ``fresh: True`` against a completed side
+        effect and re-fired it (#1054). Merging the two streams on timestamp
+        instead puts every row on one wall-clock timeline, so
+        last-write-per-key is true order; within one run the archive still
+        precedes the live tail, so an uncompacted store folds identically to
+        before.
+
+        ``order_seq`` stays table-relative for the stored ``updated_seq``
+        (live rows keep their rowid, archived rows keep a negative position):
+        the index holds one row per key, so the value only has to agree with
+        ``action_index_drift``, never to rank a live row against an archived
+        one.
         """
         with self._read() as conn:
-            archived = conn.execute(
-                "SELECT type, payload FROM events_archive ORDER BY rowid"
-            ).fetchall()
-            rows = conn.execute(
-                "SELECT rowid AS rid, type, payload FROM events ORDER BY rowid"
-            ).fetchall()
+            archived = [
+                (r["timestamp"], r["run_id"], r["sequence"], None, r["type"], r["payload"])
+                for r in conn.execute(
+                    "SELECT timestamp, run_id, sequence, type, payload FROM events_archive"
+                )
+            ]
+            rows = [
+                (r["timestamp"], r["run_id"], r["sequence"], r["rid"], r["type"], r["payload"])
+                for r in conn.execute(
+                    "SELECT timestamp, run_id, sequence, rowid AS rid, type, payload FROM events"
+                )
+            ]
+        # Both streams arrive in their own insertion order; the merge is what
+        # interleaves them. Ties on the same instant break on (run_id,
+        # sequence) so the fold stays deterministic replay after replay.
+        timeline = sorted([*archived, *rows], key=lambda row: row[:3])
         canonical: dict[str, tuple[tuple[str, str, str, str, str], int]] = {}
         offset = len(archived)
-        for position, row in enumerate([*archived, *rows]):
+        archived_seen = 0
+        for _ts, _run_id, _seq, rid, event_type, payload in timeline:
             try:
-                payload = json.loads(row["payload"])
+                parsed = json.loads(payload)
             except json.JSONDecodeError:
                 continue
-            entry = index_entry_from_payload(EventType(row["type"]), payload)
-            if entry is not None:
-                order = int(row["rid"]) if position >= offset else position - offset
-                canonical[entry[0]] = (entry, order)
+            entry = index_entry_from_payload(EventType(event_type), parsed)
+            if entry is None:
+                continue
+            if rid is None:
+                order = archived_seen - offset
+                archived_seen += 1
+            else:
+                order = int(rid)
+            canonical[entry[0]] = (entry, order)
         return canonical
 
     @staticmethod
