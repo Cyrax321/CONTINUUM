@@ -217,6 +217,53 @@ def test_only_resume_maps_to_a_zero_exit() -> None:
         assert (code == ExitCode.OK) == (mode is RecoveryMode.RESUME)
 
 
+def test_human_and_wait_do_not_share_an_exit_code() -> None:
+    """#1170: REQUEST_HUMAN and WAIT need different reactions.
+
+    A script that pages a person on REQUEST_HUMAN must not also page one when
+    the run has merely gone quiet and is expected to recover on its own. For a
+    long time both modes mapped to 20, so the two were indistinguishable from
+    the exit code alone.
+    """
+    assert exit_code_for(RecoveryMode.REQUEST_HUMAN) == ExitCode.REQUIRES_HUMAN
+    assert exit_code_for(RecoveryMode.WAIT) == ExitCode.WAIT
+    assert exit_code_for(RecoveryMode.REQUEST_HUMAN) != exit_code_for(RecoveryMode.WAIT)
+
+
+def test_rollback_and_abort_do_not_share_an_exit_code() -> None:
+    """#1170: ROLLBACK and ABORT need different reactions.
+
+    ROLLBACK means there is a prior checkpoint worth returning to; ABORT means
+    there is not. A script that treats both as 30 cannot tell "roll it back"
+    from "give up".
+    """
+    assert exit_code_for(RecoveryMode.ROLLBACK) == ExitCode.ROLLBACK
+    assert exit_code_for(RecoveryMode.ABORT) == ExitCode.UNSAFE
+    assert exit_code_for(RecoveryMode.ROLLBACK) != exit_code_for(RecoveryMode.ABORT)
+
+
+def test_exit_codes_stay_within_their_reaction_bands() -> None:
+    """The band names the reaction; a consumer may range-check on it.
+
+    Anything in the 10s needs repair before resuming, the 20s need a person or
+    a clock, the 30s are unsafe as-is. A mode drifting into another band would
+    silently change what a range-check script does.
+    """
+    bands = {
+        RecoveryMode.RESUME: 0,
+        RecoveryMode.REPAIR_AND_RESUME: 10,
+        RecoveryMode.REPLAN: 10,
+        RecoveryMode.REQUEST_HUMAN: 20,
+        RecoveryMode.WAIT: 20,
+        RecoveryMode.ABORT: 30,
+        RecoveryMode.ROLLBACK: 30,
+    }
+    for mode, band in bands.items():
+        code = exit_code_for(mode)
+        assert band <= code < band + 10, f"{mode} code {code} left its band"
+        assert code != ExitCode.OK or mode is RecoveryMode.RESUME
+
+
 def test_an_unclassified_mode_is_never_mistaken_for_permission() -> None:
     """A mode added later, before anyone assigns it a code, must fail closed.
 
