@@ -33,6 +33,7 @@ _COLLECTED_RES = (
     re.compile(r"~([\d,]+)`?\s+collected"),
     re.compile(r"roughly\s+([\d,]+)\s+tests\s+collected"),
     re.compile(r"~([\d,]+)\s+tests\b"),
+    re.compile(r"\b(?:with|validated(?:\s+\w+){0,3})\s+([\d,]+)\s+tests\b", re.IGNORECASE),
 )
 
 
