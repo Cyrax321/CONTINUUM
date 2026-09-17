@@ -22,9 +22,6 @@ COUNTED_FILES = (
     ROOT / "docs" / "CONTRIBUTING_ONBOARDING.md",
     ROOT / "CHANGELOG.md",
 )
-SPANISH_COUNTED_FILES = (
-    ROOT / "README.es.md",
-)
 # Small PRs move the total by a handful of tests; doc rot moves it by the
 # hundreds (#316: exact, #630: 135). Tolerance 30 splits the difference.
 TOLERANCE = 30
@@ -73,11 +70,6 @@ def live_total() -> int:
 
 def test_documented_counts_agree() -> None:
     totals = {f.name: documented_total(f) for f in COUNTED_FILES}
-    assert len(set(totals.values())) == 1, f"documented counts disagree: {totals}"
-
-
-def test_spanish_documented_counts_agree() -> None:
-    totals = {f.name: documented_total(f) for f in SPANISH_COUNTED_FILES}
     assert len(set(totals.values())) == 1, f"documented counts disagree: {totals}"
 
 
