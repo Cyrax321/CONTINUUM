@@ -11,6 +11,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+__all__ = [
+    "ControlledScenario",
+    "SCENARIOS",
+    "by_name",
+]
+
 
 @dataclass(frozen=True, slots=True)
 class ControlledScenario:

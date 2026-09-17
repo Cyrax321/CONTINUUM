@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The TUI `tree` view fetches the run once instead of twice (#1157).**
+  `family_lines` in `src/continuum/tui/model.py` called
+  `storage.get_run(run_id)` twice and discarded the first result: the first
+  call was the run-existence guard, the second fetched the record the header
+  actually renders. Both hit storage for the same row, and on the SQLite and
+  Postgres backends that is a round trip on a view an operator re-renders
+  while watching a run tree. The assignment now does both jobs: `run =
+  storage.get_run(run_id)` raises `RunNotFound` for a missing run exactly as
+  the standalone guard did, so no behaviour changes beyond the spared query.
+  The neighbouring views (`checkpoint_rows`, `action_rows`, `event_rows`,
+  `budget_rows`) already fetched the row exactly once for the same guard
+  purpose, so this removes the outlier.
+
 - **The advisory verdict contract is now stated where a reader can find it (#1031).**
   `RecoveryDecision` and its `permits()` method describe themselves as
   advisory, not enforcing, and name the four enforcement seams a caller can
@@ -33,6 +46,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The docs-count guard now reads `references/` and the translated READMEs,
+  and the stale counts they held are re-synced (#1109, #1071).** The guard in
+  `tests/test_docs_counts.py` watched only three files, so `references/testing.md`
+  and `references/install.md` quietly stated a collected total of 2,241 while
+  `README.md` stated 2,278, and all five translated READMEs still reported 2,195
+  collected with a 1,380-test narrative. None of those files could fail the
+  guard. Its scope is now the three required docs plus every `README*.md` and
+  every `references/*.md`: a doc that states no total is skipped, and a doc
+  that states a wrong one fails. The collected total is also matched in the
+  `pytest -q` verify comment, whose shape every translation keeps even after
+  all its prose is rephrased, so that one pattern reads all six READMEs.
+  `references/testing.md`, `references/install.md`, and the translated READMEs
+  now carry the same figures as `README.md`.
+
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
   types at the top level (`{"send_invoice": {...}}`) instead of nesting them
@@ -56,6 +83,19 @@ All notable changes to this project are documented here. The format follows
   prepends it to the rendered steps rather than dropping the run's guidance
   entirely, and the MCP server raises it as a `ToolError` so the calling agent
   sees it.
+
+- **A tampered checkpoint is reported as corrupted, not as missing (#1059).**
+  Both checkpoint resolvers wrapped `storage.get_checkpoint` in a bare
+  `except Exception: pass`, so a record whose body failed validation or whose
+  sealed integrity hash no longer matched was silently retried as a version
+  number and finally reported as a lookup miss. `resolve_checkpoint` and
+  `_anchor_for` now let `CorruptedRecord` through, wrapping it in the same
+  `RewindError`/`ValueError` the resolvers already raise, but naming the
+  corruption instead of pointing the operator at a typo or a missing version.
+  The tamper-evidence the storage layer raises is the one signal an operator
+  most needs on this path, and it was the signal both resolvers converted into
+  noise. A genuine lookup miss still falls through to the version and
+  source-sequence strategies exactly as before.
 
 - **The horizon `abort_condition_year` scenario now reaches abort (#1028).**
   The scenario was labelled `correct_mode="abort"` but drove the abort through
@@ -845,7 +885,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,241 collected, ~2,216 passed, ~25 skipped on a minimal env).
+  (~2,278 collected, ~2,253 passed, ~25 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

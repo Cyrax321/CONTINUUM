@@ -1,7 +1,8 @@
-"""Guard the documented pytest counts against silent drift (#630).
+"""Guard the documented pytest counts against silent drift (#630, #1109).
 
-README.md, docs/CONTRIBUTING_ONBOARDING.md, and CHANGELOG.md each state the
-collected total. The guard asserts the three files agree with each other and
+README.md, the translated READMEs, CHANGELOG.md, docs/CONTRIBUTING_ONBOARDING.md,
+and every ``references/*.md`` doc can state the collected total. The guard
+asserts that every figure those files *do* state agrees with the others and
 with a live ``pytest --collect-only`` within tolerance. Skips vary by
 environment, so only collected totals are compared, never passed/skipped
 splits. Regenerate the figures with ``pytest --collect-only -q; pytest -q``.
@@ -17,21 +18,40 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-COUNTED_FILES = (
+
+# Docs that must state the total. If one of these stopped stating it the guard
+# would lose its spine, so absence here is an error.
+REQUIRED_FILES = (
     ROOT / "README.md",
     ROOT / "docs" / "CONTRIBUTING_ONBOARDING.md",
     ROOT / "CHANGELOG.md",
 )
+
+# Docs that may state it. references/ and the translated READMEs are
+# user-facing and used to drift unnoticed (#1109, #1071): a doc that states no
+# total is skipped, a doc that states a wrong one fails.
+OPTIONAL_FILES = (
+    *sorted(ROOT.glob("README.*.md")),  # translated READMEs
+    *sorted(ROOT.joinpath("references").glob("*.md")),
+)
+
+COUNTED_FILES = (*REQUIRED_FILES, *OPTIONAL_FILES)
 # Small PRs move the total by a handful of tests; doc rot moves it by the
 # hundreds (#316: exact, #630: 135). Tolerance 30 splits the difference.
 TOLERANCE = 30
 
-# Every prose form the three files use for the collected total (#664 review):
-# "~2,053 collected", "roughly 2,053 tests collected", "~2,053 tests".
-# Passed/skipped figures are deliberately unmatched: they vary by environment.
+# Every prose form the docs use for the collected total (#664 review):
+# "~2,053 collected", "roughly 2,053 tests collected", "approximately 2,053
+# tests" (references/testing.md), "~2,053 tests". Passed/skipped figures are
+# deliberately unmatched: they vary by environment.
+# The `pytest -q` verify comment is listed last and reads every README
+# regardless of language: translations rephrase all the prose but keep that
+# code comment's shape, and its first number is always the collected total
+# (#1071). `.` cannot cross the newline, so the figure stays on that line.
 _COLLECTED_RES = (
     re.compile(r"~([\d,]+)`?\s+collected"),
     re.compile(r"roughly\s+([\d,]+)\s+tests\s+collected"),
+    re.compile(r"approximately\s+([\d,]+)\s+tests\b"),
     re.compile(r"~([\d,]+)\s+tests\b"),
     re.compile(r"\bwith\s+~?([\d,]+)\s+tests\b", re.IGNORECASE),
     re.compile(
@@ -42,15 +62,22 @@ _COLLECTED_RES = (
         r"\bvalidado(?:\s+\w+){0,5}\s+y\s+~?([\d,]+)\s+tests\b",
         re.IGNORECASE,
     ),
+    re.compile(r"^pytest\s+-q\s+#.*?([\d,]+)", re.MULTILINE),
 )
 
 
-def documented_total(path: Path) -> int:
+def documented_total(path: Path) -> int | None:
+    """The collected total ``path`` states, or None if it states none.
+
+    Two different totals in one file is always an error, even for a doc that
+    is free to state none at all: a reader cannot tell which one to trust.
+    """
     text = path.read_text(encoding="utf-8")
     matches = [m for rx in _COLLECTED_RES for m in rx.findall(text)]
-    assert matches, f"{path.name} states no collected-total figure"
+    if not matches:
+        return None
     totals = {int(m.replace(",", "")) for m in matches}
-    assert len(totals) == 1, f"{path.name} states inconsistent figures: {sorted(totals)}"
+    assert len(totals) == 1, f"{path} states inconsistent figures: {sorted(totals)}"
     return totals.pop()
 
 
@@ -68,9 +95,19 @@ def live_total() -> int:
     return int(match.group(1).replace(",", ""))
 
 
+def test_required_files_state_a_total() -> None:
+    stated = {f.name: documented_total(f) for f in REQUIRED_FILES}
+    missing = [name for name, total in stated.items() if total is None]
+    assert not missing, f"no collected-total figure in: {missing}"
+
+
 def test_documented_counts_agree() -> None:
-    totals = {f.name: documented_total(f) for f in COUNTED_FILES}
-    assert len(set(totals.values())) == 1, f"documented counts disagree: {totals}"
+    stated: dict[str, int] = {}
+    for f in COUNTED_FILES:
+        total = documented_total(f)
+        if total is not None:
+            stated[f.name] = total
+    assert len(set(stated.values())) == 1, f"documented counts disagree: {stated}"
 
 
 def test_documented_narrative_count_forms(tmp_path: Path) -> None:
@@ -91,12 +128,14 @@ def test_documented_narrative_count_forms(tmp_path: Path) -> None:
 
 @pytest.mark.slow
 def test_documented_count_matches_suite() -> None:
-    documented = documented_total(COUNTED_FILES[0])
+    documented = documented_total(ROOT / "README.md")
+    assert documented is not None, "README.md states no collected-total figure"
     live = live_total()
     assert abs(live - documented) <= TOLERANCE, (
-        f"suite collects {live} tests but docs say ~{documented}: "
-        "re-sync README.md, docs/CONTRIBUTING_ONBOARDING.md, and CHANGELOG.md "
-        "(pytest --collect-only -q; pytest -q)"
+        f"suite collects {live} tests but docs say ~{documented}: re-sync "
+        "README.md, the translated READMEs, CHANGELOG.md, "
+        "docs/CONTRIBUTING_ONBOARDING.md, references/testing.md, and "
+        "references/install.md (pytest --collect-only -q; pytest -q)"
     )
 
 
