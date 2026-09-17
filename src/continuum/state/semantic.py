@@ -58,6 +58,10 @@ __all__ = [
     "first_unprojectable_event",
     "project",
     "project_incremental",
+    "account_pins_in_context",
+    "pin_markers_for_state",
+    "check_pin_accounting",
+    "constraint_pins_payload",
 ]
 
 
