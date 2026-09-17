@@ -8,6 +8,19 @@ a project register one probe per action type:
     .continuum/reconcilers.json
     {"probes": {"send_invoice": {"command": "check-outbox", "timeout": 10}}}
 
+Since issue #268 a probe is either a ``command`` (the shape above) or one of
+the built-in evidence probes, selected by ``type``:
+
+    {"probes": {
+        "write_report": {"type": "artifact_check", "path_key": "path"},
+        "tool.call":    {"type": "otel_span", "identity": ["path"]}
+    }}
+
+A spec without a ``type`` is a command probe, so an existing registry keeps
+working unchanged. :func:`load_reconcilers` validates each type's required
+keys and refuses unknown ones, because a typo in a probe spec should fail the
+operator loudly rather than register a probe that silently does nothing.
+
 The ``probes`` wrapper is the shape :func:`load_reconcilers` reads: a
 non-empty file that maps action types at the top level instead is valid
 JSON but the wrong shape, and is refused rather than silently registering
@@ -16,21 +29,25 @@ nothing (issue #1062). ``timeout`` is in seconds, optional, and defaults to
 an error rather than a verdict, so its action stays in the human queue
 (issue #322).
 
-A probe receives the full Action record as JSON on stdin and prints exactly
-one verdict on its last stdout line: ``occurred=true``, ``occurred=false`` or
-``occurred=unknown`` (a JSON object with an ``occurred`` field also works,
-with true/false/null/unknown). The verdict is applied through
-:meth:`ActionLedger.reconcile`, so it lands in the log like any other
-reconciliation and is auditable there.
+A command probe receives the full Action record as JSON on stdin and prints
+exactly one verdict on its last stdout line: ``occurred=true``,
+``occurred=false`` or ``occurred=unknown`` (a JSON object with an
+``occurred`` field also works, with true/false/null/unknown). The verdict is
+applied through :meth:`ActionLedger.reconcile`, so it lands in the log like
+any other reconciliation and is auditable there.
 
 Provenance stays conservative and deliberately narrower than what the ledger
 technically allows:
 
 - A definitive probe verdict is settled automatically; the event is sourced
-  ``DETERMINISTIC`` because a local, registered, auditable command produced
-  it.
+  ``DETERMINISTIC`` because a local, registered, auditable probe produced it,
+  and the evidence that produced it (span ids, file digest) rides in the
+  settlement's ``result`` and ``note``.
 - Anything else, missing probe, non-zero exit, timeout, unparseable output,
   explicit unknown, leaves the action untouched and the human queue intact.
+  In strict mode such an action escalates to ``REQUIRES_REVIEW`` instead, so
+  a run that tolerates no uncertainty degrades to a human rather than to a
+  silent retry.
 
 Auto-settlement therefore only ever shrinks the set of things a person must
 look at; it never widens what an agent may certify on its own.
@@ -43,10 +60,13 @@ import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from continuum.models import Action
 from continuum.storage.base import Storage
+
+if TYPE_CHECKING:
+    pass
 
 __all__ = [
     "DEFAULT_RECONCILERS_PATH",
@@ -70,14 +90,28 @@ class ReconcilerConfigError(ValueError):
     """The reconciler registry exists but cannot be honoured."""
 
 
+#: Keys each probe type accepts. ``type`` itself is stripped before storage.
+_COMMAND_KEYS = {"command", "timeout"}
+_BUILTIN_KEYS = {
+    "otel_span": {"tool", "identity"},
+    "artifact_check": {"path", "path_key", "expect_sha256"},
+}
+
+
 def load_reconcilers(path: Path) -> dict[str, dict[str, Any]]:
     """Read the registry. Empty dict when absent; raise when malformed.
 
-    Every returned spec carries a ``timeout``, 10 seconds when the file left it
+    Every command spec carries a ``timeout``, 10 seconds when the file left it
     out, so a caller never has to supply the default itself. A ``timeout`` that
     is not a positive number is refused rather than clamped: zero or negative
     expires every probe the moment it starts, which would look like an external
     system nobody can reach instead of a registry typo (issue #322).
+
+    A spec's ``type`` selects a command probe (the default when ``type`` is
+    absent, and the only type that runs a subprocess) or one of the built-in
+    evidence probes. Each type's required keys are checked, and keys it does not
+    accept are refused: a probe spec with a typo'd key would otherwise register
+    as a probe that never settles anything (issue #268).
     """
     if not path.exists():
         return {}
@@ -98,20 +132,57 @@ def load_reconcilers(path: Path) -> dict[str, dict[str, Any]]:
         )
     probes: dict[str, dict[str, Any]] = {}
     for action_type, spec in (raw.get("probes") or {}).items():
-        if not isinstance(spec, dict) or not isinstance(spec.get("command"), str):
+        if not isinstance(spec, dict):
+            raise ReconcilerConfigError(f"{location}: probe {action_type!r} must be an object")
+        kind = spec.get("type", "command")
+        if kind == "command" and "command" not in spec:
+            # A spec with neither a type nor a command registers a probe that
+            # cannot run; name the omission instead of letting reconcile report
+            # every action of this type as unprobed.
             raise ReconcilerConfigError(
-                f"{location}: probe {action_type!r} needs a string 'command'"
+                f"{location}: probe {action_type!r} needs a string 'command' or a 'type'"
             )
-        timeout = spec.get("timeout", _DEFAULT_TIMEOUT)
-        # ``bool`` subclasses ``int``, so a JSON ``true`` clears the numeric check
-        # and registers as a one second timeout. Every probe would then be killed
-        # just after it starts and its action would reach the human queue carrying
-        # a timeout detail, rather than the config error this arm promises.
-        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+        if kind == "command":
+            if not isinstance(spec.get("command"), str):
+                raise ReconcilerConfigError(
+                    f"{location}: probe {action_type!r} needs a string 'command'"
+                )
+            timeout = spec.get("timeout", _DEFAULT_TIMEOUT)
+            # ``bool`` subclasses ``int``, so a JSON ``true`` clears the numeric
+            # check and registers as a one second timeout. Every probe would then
+            # be killed just after it starts and its action would reach the human
+            # queue carrying a timeout detail, rather than the config error this
+            # arm promises.
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+                raise ReconcilerConfigError(
+                    f"{path}: probe {action_type!r} 'timeout' must be a positive number"
+                )
+            probes[action_type] = {
+                "command": spec["command"],
+                "timeout": float(timeout),
+            }
+            continue
+        allowed = _BUILTIN_KEYS.get(kind)
+        if allowed is None:
             raise ReconcilerConfigError(
-                f"{path}: probe {action_type!r} 'timeout' must be a positive number"
+                f"{location}: probe {action_type!r} has unknown type {kind!r} "
+                f"(expected command, {', '.join(sorted(_BUILTIN_KEYS))})"
             )
-        probes[action_type] = {"command": spec["command"], "timeout": float(timeout)}
+        unexpected = sorted(set(spec) - allowed - {"type"})
+        if unexpected:
+            raise ReconcilerConfigError(
+                f"{location}: probe {action_type!r} of type {kind!r} does not accept {unexpected!r}"
+            )
+        if kind == "artifact_check" and not (
+            isinstance(spec.get("path"), str) or isinstance(spec.get("path_key"), str)
+        ):
+            raise ReconcilerConfigError(
+                f"{location}: probe {action_type!r} of type 'artifact_check' needs "
+                "'path' or 'path_key'"
+            )
+        entry: dict[str, Any] = {"type": kind}
+        entry.update({k: v for k, v in spec.items() if k in allowed})
+        probes[action_type] = entry
     return probes
 
 
@@ -142,7 +213,11 @@ def _parse_verdict(text: str) -> bool | Literal["unknown"]:
 def probe_verdict(
     spec: Mapping[str, Any], action: Action
 ) -> tuple[bool | None | Literal["error"], str]:
-    """Run one probe. Returns ``(verdict, detail)``.
+    """Run one command probe. Returns ``(verdict, detail)``.
+
+    This is the subprocess half of the registry; built-in evidence probes
+    (``otel_span``, ``artifact_check``) resolve in process through
+    :func:`_resolve_spec` and never reach here.
 
     The verdict is True, False, None (probe ran but could not tell) or the
     string ``"error"`` (probe itself failed). ``detail`` carries whatever a
@@ -215,8 +290,17 @@ def settle_run(
     probes: dict[str, dict[str, Any]],
     *,
     dry_run: bool = False,
+    strict: bool = False,
 ) -> SettleReport:
-    """Probe every pending action of ``run_id`` and settle definitive ones."""
+    """Probe every pending action of ``run_id`` and settle definitive ones.
+
+    Dispatches on each spec's ``type``: a command probe runs its subprocess, a
+    built-in probe (``otel_span``, ``artifact_check``) resolves in process from
+    recorded observation or the filesystem. A verdict the probe could not reach
+    leaves the action pending, or escalates it to ``REQUIRES_REVIEW`` when
+    ``strict`` is set, so a run that tolerates no uncertainty degrades to a
+    human instead of to a silent retry (issue #268).
+    """
     from continuum.actions import ActionLedger  # local import: avoids a cycle at module load
 
     report = SettleReport()
@@ -227,23 +311,81 @@ def settle_run(
         if spec is None:
             report.skipped_no_probe.append(action.action_id)
             continue
-        verdict, detail = probe_verdict(spec, action)
+        verdict, detail, evidence = _resolve_spec(spec, action, storage, run_id)
         if verdict == "error":
             report.unresolved.append((action.action_type, detail))
+            _maybe_escalate(ledger, storage, run_id, action, detail, strict, dry_run)
             continue
         if verdict is None:
-            report.unresolved.append(
-                (action.action_type, detail or "probe could not determine the outcome")
-            )
+            reason = detail or "probe could not determine the outcome"
+            report.unresolved.append((action.action_type, reason))
+            _maybe_escalate(ledger, storage, run_id, action, reason, strict, dry_run)
             continue
         assert isinstance(verdict, bool), f"unexpected verdict {verdict!r}"
         label = f"{action.action_type}:{action.external_id or action.action_id[:12]}"
         if dry_run:
             (report.settled_true if verdict else report.settled_false).append(label)
             continue
-        ledger.reconcile(str(_key_for(storage, run_id, action)), occurred=verdict)
+        ledger.reconcile(
+            str(_key_for(storage, run_id, action)),
+            occurred=verdict,
+            external_id=evidence.get("external_id") if evidence else None,
+            result=evidence.get("result") if evidence else None,
+            note=(detail or "") if evidence else "",
+        )
         (report.settled_true if verdict else report.settled_false).append(label)
     return report
+
+
+def _maybe_escalate(
+    ledger: Any,
+    storage: Storage,
+    run_id: str,
+    action: Action,
+    reason: str,
+    strict: bool,
+    dry_run: bool,
+) -> None:
+    """In strict mode, an unsettled action goes to review rather than pending."""
+    if not strict or dry_run:
+        return
+    ledger.flag_for_review(str(_key_for(storage, run_id, action)), reason)
+
+
+def _resolve_spec(
+    spec: Mapping[str, Any],
+    action: Action,
+    storage: Storage,
+    run_id: str,
+) -> tuple[bool | None | Literal["error"], str, dict[str, Any] | None]:
+    """Run one probe of any type. Returns ``(verdict, detail, evidence)``.
+
+    ``evidence`` is what the settlement should carry for provenance: the
+    observation payload and the receipt a later audit needs. Command probes
+    produce none (their detail is the receipt), built-in ones do.
+    """
+    if spec.get("type", "command") == "command":
+        verdict, detail = probe_verdict(spec, action)
+        return verdict, detail, None
+    from continuum.evidence import ReconcilerConfigError, build_probe
+
+    try:
+        probe = build_probe(spec, storage, run_id)
+        resolution = probe.resolve(action)
+    except ReconcilerConfigError as exc:
+        return "error", str(exc), None
+    except Exception as exc:  # an unreachable evidence source decides nothing
+        return "error", f"{probe.name} probe failed: {exc}", None
+    if resolution is None:
+        return None, f"{probe.name} probe could not determine the outcome", None
+    return (
+        resolution.occurred,
+        resolution.note,
+        {
+            "external_id": resolution.external_id,
+            "result": dict(resolution.result) if resolution.result else None,
+        },
+    )
 
 
 def _key_for(storage: Storage, run_id: str, action: Action) -> Any:
