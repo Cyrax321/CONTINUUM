@@ -1227,7 +1227,6 @@ def build_server(
     ) -> str:
         """Claim an action in the ledger and report whether to proceed."""
         from continuum.actions.grants import GrantDenied, normalize_grant
-        from continuum.actions.idempotency import idempotency_key
         from continuum.actions.ledger import LedgerError
         from continuum.pinning import normalize_pinning
 
@@ -1265,39 +1264,34 @@ def build_server(
         # The budget may only gate a claim that would open a *new* attempt
         # slot. Re-claiming an action that already reached a terminal-or-frozen
         # state is not an attempt: a COMPLETED record returns the stored result
-        # (the whole point of idempotency), and an UNKNOWN one raises
-        # UnknownSideEffect asking for reconciliation. Gating either would make
-        # an exhausted budget suppress the dedup and reconciliation paths a
+        # (the whole point of idempotency), and an UNKNOWN or STARTED one raises
+        # UnknownSideEffect asking for reconciliation. Gating any of them would
+        # make an exhausted budget suppress the dedup and reconciliation paths a
         # recovering agent depends on, turning a safety limit into the cause of
         # a duplicate side effect (issue #309).
-        existing = ledger.get(
-            idempotency_key(
-                action_type,
-                arguments,
-                scope=run_id if scoped_to_run else None,
-                key=key,
-            )
-        )
-        settled = existing is not None and existing.status in (
-            ActionStatus.COMPLETED,
-            ActionStatus.UNKNOWN,
+        #
+        # The resolution is claim's own rather than a re-derivation of it. The
+        # gate once looked the action up under the derived key alone, but the
+        # drift-tolerant lookup claim falls back to can answer from a different
+        # stored key, so the two readers disagreed about what a claim would find
+        # and the gate refused states claim would have answered (issue #1080).
+        resolution = ledger.resolve_claim(
+            action_type,
+            arguments,
+            scoped_to_run=scoped_to_run,
+            key=key,
         )
 
-        if not settled:
+        if resolution.opens_slot:
             # Archive-aware (issue #734): attempts live in the event log, and
             # compaction moves failed attempts into the archive. Counting only
             # the live tail reset an exhausted budget after every compaction.
             events = ctx.storage.read_all_events(run_id)
             # Counted per key, so the budget caps retries of *this* operation
-            # rather than the run's distinct work of this type (issue #368).
-            claim_key = str(
-                idempotency_key(
-                    action_type,
-                    arguments,
-                    scope=run_id if scoped_to_run else None,
-                    key=key,
-                )
-            )
+            # rather than the run's distinct work of this type (issue #368). The
+            # key is the one claim would record under, which for a claim that
+            # opens a slot is the derived key.
+            claim_key = str(resolution.key)
             attempts = attempts_by_key(events, action_type).get(claim_key, 0)
             allowed, used, maximum = evaluate_budget(budgets, action_type, attempts)
             if not allowed:

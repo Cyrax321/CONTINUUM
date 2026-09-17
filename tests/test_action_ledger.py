@@ -1058,6 +1058,120 @@ def test_file_extension_shape_still_deduplicates(ledger: ActionLedger) -> None:
     assert not second.fresh, "report.csv is a known-suffix rendering of report"
 
 
+# --- the resolution the retry budget gate shares with claim (issue #1080) ---- #
+
+
+def test_resolve_claim_reports_no_slot_for_unattempted_work(ledger: ActionLedger) -> None:
+    """Work nothing has tried yet opens a slot, and that is all a budget gates."""
+    resolved = ledger.resolve_claim("send_invoice", {"invoice": "INV-020"})
+    assert resolved.opens_slot
+    assert resolved.existing is None
+    assert resolved.foreign is None
+
+
+def test_resolve_claim_reports_a_slot_for_settled_failures(ledger: ActionLedger) -> None:
+    """A FAILED record is work that may legitimately be performed again."""
+    first = ledger.claim("send_invoice", {"invoice": "INV-021"})
+    ledger.fail(first.key, "500 from upstream", certain=True)
+
+    resolved = ledger.resolve_claim("send_invoice", {"invoice": "INV-021"})
+    assert resolved.opens_slot
+    assert resolved.existing is not None
+    assert resolved.existing.status is ActionStatus.FAILED
+
+
+def test_resolve_claim_answers_a_completed_action_across_argument_drift(
+    ledger: ActionLedger,
+) -> None:
+    """The gate has to see what claim would see, or it gates the wrong states.
+
+    A completed action answers under its stored key even when the arguments
+    drifted, so no slot opens and a budget must not be consulted.
+    """
+    first = ledger.claim(
+        "send_invoice",
+        {"invoice_id": "INV-022", "target": "/tmp/e2e-outbox/INV-022.sent"},
+    )
+    ledger.complete(first.key, external_id="INV-022.sent")
+
+    resolved = ledger.resolve_claim("send_invoice", {"invoice": "INV-022"})
+    assert not resolved.opens_slot
+    assert resolved.existing is not None
+    assert resolved.existing.status is ActionStatus.COMPLETED
+    # The stored key of the record being deferred to, not the freshly-derived
+    # one, because that is the key a claim would answer against.
+    assert resolved.key == first.key
+
+
+def test_resolve_claim_does_not_open_a_slot_for_an_interrupted_attempt(
+    ledger: ActionLedger,
+) -> None:
+    """An interrupted attempt waits on reconciliation; it is not a retry.
+
+    This is the state the exact-key-only gate used to get wrong: an in-flight
+    record re-claimed at an exhausted budget was answered as a refused retry
+    instead of an uncertain outcome owed a reconciliation.
+    """
+    ledger.claim("send_invoice", {"invoice": "INV-023"})
+
+    resolved = ledger.resolve_claim("send_invoice", {"invoice": "INV-023"})
+    assert not resolved.opens_slot
+    assert resolved.existing is not None
+    assert resolved.existing.status is ActionStatus.STARTED
+
+
+def test_resolve_claim_does_not_fire_for_an_explicit_key(ledger: ActionLedger) -> None:
+    """An explicit key hashes verbatim, so the drift lookup cannot redirect it."""
+    first = ledger.claim("send_reminder", {"to": "x@y.z"}, key="reminder-monday")
+    ledger.complete(first.key, external_id="msg_1")
+
+    resolved = ledger.resolve_claim(
+        "send_reminder", {"to": "someone-else@y.z"}, key="reminder-monday"
+    )
+    assert not resolved.opens_slot
+    assert resolved.existing is not None
+    assert resolved.existing.external_id == "msg_1"
+
+
+def test_resolve_claim_recognises_a_record_held_by_another_run(
+    store: SQLiteStorage,
+) -> None:
+    """An unscoped claim answered from another run opens no slot here (issue 34).
+
+    The local lookup missed, so the resolution found the record abroad. Gating
+    that state would refuse a claim the ledger is about to answer with a stored
+    result, which is the failure mode the shared resolution exists to close.
+    """
+    _seed_run(store, "runA")
+    _seed_run(store, "runB")
+    first = ActionLedger(store, "runA")
+    outcome = first.claim("send.invoice", {"id": "INV-024"}, scoped_to_run=False)
+    first.complete(outcome.key, external_id="EXT-24")
+
+    resolved = ActionLedger(store, "runB").resolve_claim(
+        "send.invoice", {"id": "INV-024"}, scoped_to_run=False
+    )
+    assert not resolved.opens_slot
+    assert resolved.foreign is not None
+    assert resolved.foreign.external_id == "EXT-24"
+
+
+def test_resolve_claim_still_gates_when_only_another_run_failed(store: SQLiteStorage) -> None:
+    """A foreign failure leaves this run free to open its own slot."""
+    _seed_run(store, "runA")
+    _seed_run(store, "runB")
+    first = ActionLedger(store, "runA")
+    outcome = first.claim("send.invoice", {"id": "INV-025"}, scoped_to_run=False)
+    first.fail(outcome.key, "rejected before send", certain=True)
+
+    resolved = ActionLedger(store, "runB").resolve_claim(
+        "send.invoice", {"id": "INV-025"}, scoped_to_run=False
+    )
+    assert resolved.opens_slot
+    assert resolved.foreign is not None
+    assert resolved.foreign.status is ActionStatus.FAILED
+
+
 # --- confirming an effect must not erase the proof of it --------------------- #
 
 

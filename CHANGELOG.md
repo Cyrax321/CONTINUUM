@@ -33,6 +33,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The retry budget now gates only claims that would open a new attempt slot,
+  and reads the ledger through the same resolution `claim` does (#1080).**
+  `continuum_intercept_action` ran its budget gate against an exact-key lookup
+  of its own, so it could refuse a state `claim` would have answered. The
+  reachable case was an interrupted attempt: the record sits STARTED because
+  the process died between claim and complete, its own slot counts against it,
+  and a re-claim at an exhausted budget was answered "raise the retry budget"
+  when the ledger's answer was UnknownSideEffect, that the outcome is unknown
+  and a reconciliation is owed. An operator pointed at the budget is pointed at
+  the wrong knob, since nothing was retried and the work may already have
+  happened. The exact-key lookup also diverged in shape from `claim`'s
+  drift-tolerant resolution, which is what let the two readers disagree at all.
+
+  `ActionLedger.resolve_claim` is now that resolution, shared by `claim` and by
+  the gate: the exact argument-hash key, then another run holding the same
+  unscoped key, then the identity-token fallback for argument drift. It reports
+  whether `claim` would record a new attempt slot, and only that case is gated.
+  Callers passing an explicit key are unaffected: the key hashes verbatim, so
+  no drift is possible and the derived key is the stored key.
+
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
   types at the top level (`{"send_invoice": {...}}`) instead of nesting them
