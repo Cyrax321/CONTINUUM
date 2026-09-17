@@ -22,6 +22,9 @@ COUNTED_FILES = (
     ROOT / "docs" / "CONTRIBUTING_ONBOARDING.md",
     ROOT / "CHANGELOG.md",
 )
+SPANISH_COUNTED_FILES = (
+    ROOT / "README.es.md",
+)
 # Small PRs move the total by a handful of tests; doc rot moves it by the
 # hundreds (#316: exact, #630: 135). Tolerance 30 splits the difference.
 TOLERANCE = 30
@@ -73,21 +76,25 @@ def test_documented_counts_agree() -> None:
     assert len(set(totals.values())) == 1, f"documented counts disagree: {totals}"
 
 
-def test_documented_narrative_count_forms() -> None:
+def test_spanish_documented_counts_agree() -> None:
+    totals = {f.name: documented_total(f) for f in SPANISH_COUNTED_FILES}
+    assert len(set(totals.values())) == 1, f"documented counts disagree: {totals}"
+
+
+def test_documented_narrative_count_forms(tmp_path: Path) -> None:
     """Narrative English and Spanish count claims must remain detectable."""
     cases = (
+        ("Built with ~2,241 tests.", 2241),
+        ("Built with 2241 tests.", 2241),
         ("Validated with real kills and 1380 tests.", 1380),
         ("Validated with real kills and ~2,241 tests.", 2241),
         ("Validado con muertes reales y 1380 tests.", 1380),
         ("Validado con muertes reales y ~2,241 tests.", 2241),
     )
     for index, (text, expected) in enumerate(cases):
-        path = ROOT / f".docs-count-regression-{index}.md"
+        path = tmp_path / f"doc-{index}.md"
         path.write_text(text, encoding="utf-8")
-        try:
-            assert documented_total(path) == expected
-        finally:
-            path.unlink()
+        assert documented_total(path) == expected
 
 
 @pytest.mark.slow
