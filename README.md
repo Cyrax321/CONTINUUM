@@ -609,3 +609,8 @@ Deep reference material:
 - [references/e2e.md](references/e2e.md) - end to end autonomy test walkthrough
 - [references/testing.md](references/testing.md) - test suite layout and conventions
 - [references/related-work.md](references/related-work.md) - annotated related work and citation audit
+
+## Quick links
+
+- Issues for bugs/features
+- Discussions for design proposals
