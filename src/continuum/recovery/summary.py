@@ -33,8 +33,8 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from continuum.events import EventType
-from continuum.models import Origin, StateStatus
-from continuum.provenance_map import derived_provenance_for_events
+from continuum.models import StateStatus
+from continuum.recovery.derived import derived_label, stamp_derived
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -137,7 +137,6 @@ def build_informed_retry(
 
     avoid = _avoid_rules(failures, uncertain_actions)
 
-    derived_origin = derived_provenance_for_events(events)
     block: dict[str, Any] = {
         "attempts": len(starts),
         "completed_recoveries": len(completions),
@@ -148,9 +147,11 @@ def build_informed_retry(
         "settled_effects": settled_entries,
         "current_failures": current_failures,
         "avoid": avoid,
-        "derived_origin": derived_origin.value,
     }
-    return _fit(block)
+    # The block is a derived artifact of the whole log, so it is stamped
+    # through the shared non-amplification helper (#392) instead of each
+    # producer inlining its own origin lookup.
+    return _fit(stamp_derived(block, events))
 
 
 def _avoid_rules(failures: Sequence[Any], uncertain: Sequence[Action]) -> list[str]:
@@ -212,19 +213,6 @@ def _fit(block: dict[str, Any]) -> dict[str, Any]:
             # whatever fits least badly. Unreachable for realistic inputs.
             break
     return candidate
-
-
-def _derived_label(block: dict[str, Any]) -> str | None:
-    raw = block.get("derived_origin")
-    if raw is None:
-        return "unverified (derived from unverified sources)"
-    try:
-        origin = Origin(raw)
-    except ValueError:
-        return "unverified (derived from unverified sources)"
-    if origin.self_certified:
-        return f"unverified (derived from {origin.value})"
-    return f"derived from {origin.value}"
 
 
 def _truncate(text: str, cap: int = ATTEMPT_LESSON_FIELD_CAP) -> str:
@@ -410,7 +398,7 @@ def record_attempt_lesson(
 def render_informed_retry(block: dict[str, Any]) -> list[str]:
     """Human/agent-readable lines for briefing and resume output."""
     lines: list[str] = []
-    label = _derived_label(block)
+    label = derived_label(block)
     if label:
         lines.append(f"provenance: {label}")
     attempts = block.get("attempts", 0)
