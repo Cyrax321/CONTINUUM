@@ -67,7 +67,7 @@ from continuum.models import (
 from continuum.observability import render_dashboard
 from continuum.provenance.graph import build_provenance_graph, downstream_of
 from continuum.provenance_map import summarize
-from continuum.recovery import RecoveryEngine, render_contract
+from continuum.recovery import RecoveryDecision, RecoveryEngine, render_contract
 from continuum.security.attestation import (
     generate_keypair,
     sign_chain,
@@ -1344,6 +1344,32 @@ def cmd_notify_test(args: argparse.Namespace, storage: None, out: Any, err: Any)
     return ExitCode.OK
 
 
+def _anchor_on_recovery(
+    storage: Storage, run_id: str, decision: RecoveryDecision, err: Any
+) -> None:
+    """Record a recovery anchor after a non-RESUME verdict, best-effort.
+
+    The anchor is the checkpoint a later ``continuum restore
+    --to-recovery-anchor`` rolls back to: it marks the exact state the
+    decision judged unsafe to continue from. A failure here must never change
+    the verdict or its exit code, which is why it is swallowed and reported
+    rather than raised - the decision above is already final, and the caller
+    still has the repair plan and the exit code to act on.
+    """
+    rationale = "; ".join(decision.rationale) if decision.rationale else decision.mode.value
+    try:
+        anchor = CheckpointManager(storage).checkpoint_on_recovery(run_id, reason=rationale)
+    except Exception as exc:  # noqa: BLE001 - the verdict is final; anchoring is durability
+        print(f"warning: could not record a recovery anchor: {exc}", file=err)
+        return
+    print(
+        f"Recovery anchor recorded: v{anchor.version} ({anchor.checkpoint_id}). "
+        "Restore to it with: continuum restore "
+        f"{run_id} --reason <why> --to-recovery-anchor",
+        file=err,
+    )
+
+
 def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Report how a run may resume. Read-only unless ``--repair`` is given."""
     run_id = args.run_id
@@ -1492,6 +1518,19 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             "\nRun with --repair to record the repair plan, or resolve the items above first.",
             file=err,
         )
+
+    # Recovery anchors (#1097): when the caller acts on a non-RESUME verdict,
+    # pin the pre-failure state as a rollback point. This is the wiring
+    # ARCHITECTURE_EVOLUTION.md 15.5 calls out as a small, well-isolated
+    # change: the write lives here in the acting caller, never in
+    # `RecoveryEngine.assess`, which stays read-only (judging is separate from
+    # acting). The anchor precedes the RECOVERY_STARTED event below so it
+    # captures the state the verdict judged, not the state after this repair's
+    # bookkeeping landed in the log. Without --repair `resume` stays read-only
+    # (test_resume_without_repair_is_still_read_only), since a plain resume is
+    # an inquiry a caller may repeat while polling.
+    if args.repair and decision.mode is not RecoveryMode.RESUME:
+        _anchor_on_recovery(storage, run_id, decision, err)
 
     if args.repair and decision.plan:
         storage.append_event(
@@ -1940,7 +1979,27 @@ def cmd_restore(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     carry_forward = list(getattr(args, "carry_forward", None) or [])
     target = getattr(args, "target", None)
     anchor = getattr(args, "anchor", None)
-    anchor_seq = int(anchor) if anchor is not None else None
+    if bool(getattr(args, "to_recovery_anchor", False)):
+        # The rollback point a non-RESUME verdict pinned (#1097). Mutually
+        # exclusive with --to/--anchor: a restore discards (anchor, head], so
+        # the target must be unambiguous.
+        if target is not None or anchor is not None:
+            print(
+                "error: --to-recovery-anchor cannot be combined with --to or --anchor",
+                file=err,
+            )
+            return ExitCode.ERROR
+        found = CheckpointManager(storage).last_recovery_anchor(args.run_id)
+        if found is None:
+            print(
+                f"error: run {args.run_id!r} has no recovery anchor. Record one with: "
+                f"continuum resume {args.run_id} --repair",
+                file=err,
+            )
+            return ExitCode.ERROR
+        anchor_seq = found.state.source_sequence
+    else:
+        anchor_seq = int(anchor) if anchor is not None else None
     try:
         result = approve_restore(
             storage,
@@ -3931,6 +3990,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     restore_cmd.add_argument(
         "--anchor", type=int, default=None, help="anchor sequence to restore to."
+    )
+    restore_cmd.add_argument(
+        "--to-recovery-anchor",
+        dest="to_recovery_anchor",
+        action="store_true",
+        help="restore to the most recent RECOVERY anchor (recorded by `resume --repair`).",
     )
     restore_cmd.add_argument(
         "--carry-forward",

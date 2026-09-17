@@ -25,7 +25,7 @@ from continuum.cli import ExitCode, main
 from continuum.cli.exitcodes import exit_code_for
 from continuum.environment import StaticProvider, capture
 from continuum.events import EventType
-from continuum.models import Finding, RecoveryMode, Run
+from continuum.models import Finding, RecoveryMode, Run, StateCheckpoint
 from continuum.storage import SQLiteStorage
 
 
@@ -564,6 +564,107 @@ def test_resume_without_repair_is_still_read_only(db: str) -> None:
     code, _, _ = run("--db", db, "resume", "run_1", "--env", "dataset=v4")
     assert code == ExitCode.REQUIRES_REPAIR
     assert SQLiteStorage(db).last_sequence("run_1") == before
+
+
+def _recovery_anchors(db: str) -> list[str]:
+    with SQLiteStorage(db) as store:
+        return [c.checkpoint_id for c in store.list_checkpoints("run_1") if c.trigger == "recovery"]
+
+
+def test_repair_records_a_recovery_anchor(db: str) -> None:
+    """--repair pins the pre-failure state as a rollback anchor (#1097).
+
+    Without this the RECOVERY trigger, the anchor lookup and the anchor guards
+    in ``prune``/``cleanup_ephemeral_artifacts`` all protect a set that can
+    never be populated through any product path.
+    """
+    code, _, err = run("--db", db, "resume", "run_1", "--env", "dataset=v4", "--repair")
+    assert code == ExitCode.REQUIRES_REPAIR
+    assert "Recovery anchor recorded" in err
+    assert len(_recovery_anchors(db)) == 1
+
+    # The anchor precedes the repair bookkeeping: it must capture the state the
+    # verdict judged, not the state after RECOVERY_STARTED landed in the log.
+    with SQLiteStorage(db) as store:
+        started = [e for e in store.read_events("run_1") if e.type is EventType.RECOVERY_STARTED]
+    assert started, "no RECOVERY_STARTED event was written"
+    with SQLiteStorage(db) as store:
+        anchor = store.list_checkpoints("run_1")[-1]
+    assert anchor.state.source_sequence < started[0].sequence
+
+
+def test_resume_without_repair_records_no_anchor(db: str) -> None:
+    """An inquiry must not pin state: anchors land only when the caller acts."""
+    run("--db", db, "resume", "run_1", "--env", "dataset=v4")
+    assert _recovery_anchors(db) == []
+
+
+def test_restore_to_recovery_anchor_rolls_back_to_the_pinned_state(db: str) -> None:
+    """``restore --to-recovery-anchor`` returns to the state the verdict judged."""
+    run("--db", db, "resume", "run_1", "--env", "dataset=v4", "--repair")
+    with SQLiteStorage(db) as store:
+        expected = store.list_checkpoints("run_1")[-1].state.source_sequence
+
+    code, out, _ = run(
+        "--db", db, "restore", "run_1", "--reason", "dataset went stale", "--to-recovery-anchor"
+    )
+    assert code == ExitCode.OK
+    assert f"Restored run_1 to anchor {expected}." in out
+
+    with SQLiteStorage(db) as store:
+        restored = [e for e in store.read_events("run_1") if e.type is EventType.RUN_RESTORED]
+    assert restored[-1].payload["anchor_sequence"] == expected
+
+
+def test_restore_to_recovery_anchor_without_an_anchor_is_an_error(db: str) -> None:
+    """A run that was never repaired has nothing to roll back to."""
+    code, _, err = run(
+        "--db",
+        db,
+        "restore",
+        "run_1",
+        "--reason",
+        "nothing to roll back to",
+        "--to-recovery-anchor",
+    )
+    assert code == ExitCode.ERROR
+    assert "no recovery anchor" in err
+
+
+def test_restore_to_recovery_anchor_rejects_a_second_target(db: str) -> None:
+    """A restore discards (anchor, head], so the target must be unambiguous."""
+    code, _, err = run(
+        "--db", db, "restore", "run_1", "--reason", "ambiguous", "--to-recovery-anchor", "--to", "1"
+    )
+    assert code == ExitCode.ERROR
+    assert "cannot be combined" in err
+
+
+def test_an_anchor_failure_never_changes_the_verdict(
+    db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Durability must not reach back into the safety contract (#1097).
+
+    The verdict and its exit code are already final when the anchor is
+    attempted, so a checkpoint failure is reported and swallowed rather than
+    changing what `resume` returns - the caller still gets the repair plan and
+    the non-zero exit.
+    """
+    # `continuum.cli.main` the attribute is the entry-point function (the
+    # package rebinds the name), so fetch the submodule itself.
+    import importlib
+
+    cli_main = importlib.import_module("continuum.cli.main")
+
+    class _BrokenManager(CheckpointManager):
+        def checkpoint_on_recovery(self, *args: object, **kwargs: object) -> StateCheckpoint:
+            raise RuntimeError("storage is down")
+
+    monkeypatch.setattr(cli_main, "CheckpointManager", _BrokenManager)
+    code, _, err = run("--db", db, "resume", "run_1", "--env", "dataset=v4", "--repair")
+    assert code == ExitCode.REQUIRES_REPAIR, "a failed anchor must not change the exit code"
+    assert "could not record a recovery anchor: storage is down" in err
+    assert _recovery_anchors(db) == []
 
 
 def test_resume_surfaces_a_malformed_reconciler_registry(

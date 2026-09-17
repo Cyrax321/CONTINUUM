@@ -27,6 +27,7 @@ continuum tree <run_id> [--limit N]              # show parent run and child run
 continuum fork <run_id> --reason "..."           # approve divergent child continuation. mutates
 continuum merge <run_id> --reason "..."          # merge child run into parent at anchor. mutates
 continuum restore <run_id> --reason "..."        # restore run to anchor checkpoint. mutates
+                                                 #   [--to <id|version|seq> | --anchor N | --to-recovery-anchor]
 continuum compact <run_id>                       # archive pre-anchor log prefix. mutates
 continuum precompact <run_id>                    # checkpoint before context compaction. mutates
 continuum rewind <run_id> --to <checkpoint>      # revert workspace and projection [--force] [--dry-run]
@@ -57,7 +58,9 @@ Most commands accept global `--json` **before** the subcommand (e.g. `continuum 
 `gate`, `briefing`, `health`, `impact`, `provenance`, `export-evidence`, `watch`) do not mutate
 run state or checkpoints. **Exception:** plain `resume` (without `--repair`) may still append
 `NOTIFICATION_SENT` / `NOTIFICATION_FAILED` events when `.continuum/webhooks.json` is configured
-for a blocked decision — the recovery decision itself remains non-mutating. Mutating commands (`start`,
+for a blocked decision — the recovery decision itself remains non-mutating. With `--repair`, `resume`
+also records a `RECOVERY` anchor (`checkpoint_on_recovery`) after a non-RESUME verdict, which
+`restore --to-recovery-anchor` rolls back to. Mutating commands (`start`,
 `checkpoint`, `confirm`, `complete`, `fork`, `merge`, `restore`, `compact`, `precompact`, `rewind`,
 `observe`, `reconcile`, `gateway`, `record-plan`, `forget`) say so in their help.
 

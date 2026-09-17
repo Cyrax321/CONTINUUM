@@ -8,6 +8,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Recovery anchors are now produced by a product path (#1097).**
+  `CheckpointManager.checkpoint_on_recovery` and `last_recovery_anchor` had no
+  caller in `src/` — only tests — so the `RECOVERY` trigger, the `keep_anchors`
+  guard in `prune`, and the anchor branch in `cleanup_ephemeral_artifacts` all
+  protected a set that could never be populated. `continuum resume <run>
+  --repair` now records an anchor after a non-RESUME verdict, before the
+  `RECOVERY_STARTED` event so the pin covers the state the verdict judged rather
+  than the state after the repair bookkeeping landed, and `continuum restore
+  <run> --reason ... --to-recovery-anchor` rolls back to it (refusing with an
+  error when no anchor exists, and refusing a `--to`/`--anchor` given alongside).
+  A plain `resume` stays read-only and records nothing: judging is still
+  separate from acting, so the write lives in the CLI caller, never in
+  `RecoveryEngine.assess`. An anchor failure is reported on stderr and never
+  changes the verdict or its exit code.
+
 - **The advisory verdict contract is now stated where a reader can find it (#1031).**
   `RecoveryDecision` and its `permits()` method describe themselves as
   advisory, not enforcing, and name the four enforcement seams a caller can
@@ -858,7 +873,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,278 collected, ~2,253 passed, ~25 skipped on a minimal env).
+  (~2,312 collected, ~2,287 passed, ~25 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
