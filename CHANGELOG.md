@@ -33,6 +33,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The `run_with_limits` timeout now bounds when the caller regains control,
+  instead of after the runaway finishes (#1147).** The helper was written as
+  a `with ThreadPoolExecutor(...)` block, and leaving the block runs
+  `shutdown(wait=True)`, which joins the worker. `future.result(timeout=...)`
+  raised `TimeoutError` on time, but the caller only saw the
+  `RecoveryTimeoutError` once the probe had run to completion, so the error
+  message reported a 1s timeout after a 6s wait and nothing downstream could
+  tell the difference. A probe written to hang forever blocked the caller
+  forever through the very API that exists to bound it. The executor is now
+  managed by hand and detached with `shutdown(wait=False)` in a `finally`, so
+  the worker is left to finish on its own and the exception is raised at the
+  deadline. Python cannot kill the thread, so the probe still runs to
+  completion; what changed is that the caller is no longer held hostage to
+  it, which is the only thing the docstring advertises. `docs/threat_model.md`
+  now says that bound explicitly.
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
   types at the top level (`{"send_invoice": {...}}`) instead of nesting them

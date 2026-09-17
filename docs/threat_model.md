@@ -43,7 +43,7 @@ This document scopes what CONTINUUM protects against, what it detects, and what 
   CONTINUUM judges recovery validity, it does not judge model honesty. A model that fabricates evidence strings before they reach the event log is outside the recovery boundary. Provenance records who asserted a fact so the distinction is auditable, but it cannot prove correctness of model content.
 
 - **Unbounded resource exhaustion by adversarial probes**  
-  Resource limits via `run_with_limits` in `src/continuum/recovery/limits.py:1` are opt in. Without a timeout a probe that hangs can block recovery. Callers that run untrusted probes should pass an explicit timeout.
+  Resource limits via `run_with_limits` in `src/continuum/recovery/limits.py:1` are opt in. Without a timeout a probe that hangs can block recovery. Callers that run untrusted probes should pass an explicit timeout; the timeout bounds when the caller regains control, not when the probe stops running, because Python cannot kill the thread it runs in.
 
 - **Malicious local process impersonating another agent**  
   `MCP` authorization is by declared `clientInfo`, not authenticated identity. See `docs/CONTINUUM_MASTER_PLAN.md:6` for the explicit limitation. It keeps honestly named agents apart, it does not stop a deliberately impersonating local process.
