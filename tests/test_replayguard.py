@@ -328,6 +328,7 @@ def run(*argv: str) -> tuple[int, str, str]:
     code = main(list(argv), out=out, err=err)
     return code, out.getvalue(), err.getvalue()
 
+
 def test_evaluate_with_fuzzy_similarity(db: str) -> None:
     from continuum.replay_similarity import SimilarityConfig, SimilarityKind
     
@@ -391,7 +392,6 @@ def test_evaluate_with_fuzzy_similarity(db: str) -> None:
 
 def test_evaluate_fuzzy_blocks_started_match(db: str) -> None:
     from continuum.actions.idempotency import idempotency_key
-    from continuum.models import ActionStatus
     from continuum.replay_similarity import SimilarityConfig, SimilarityKind
     from continuum.actions.ledger import fold_action_events
 

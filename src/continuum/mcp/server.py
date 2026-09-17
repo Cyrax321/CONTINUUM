@@ -1324,58 +1324,50 @@ def build_server(
                     best_key = prior_key
             
             if best_action is not None and best_score >= similarity_config.replay_threshold:
-                existing = best_action
-                key = (
-                    best_key.split(":")[-1] if ":" in str(best_key) else str(best_key)
-                )
-                claim_key = best_key
-        settled_statuses = (
+                if best_action.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
+                    return _json(
+                        {
+                            "run_id": run_id,
+                            "action_type": action_type,
+                            "proceed": False,
+                            "status": ActionStatus.UNKNOWN.value,
+                            "action_key": best_key,
+                            "action_id": best_action.action_id,
+                            "reason": (
+                                f"action {action_type!r} (key {best_key[:12]}...) was interrupted "
+                                "before its outcome was recorded; the side effect may or may not "
+                                "have occurred. Reconcile it before retrying."
+                            ),
+                            "guidance": (
+                                "A previous attempt was interrupted and its outcome is "
+                                "unknown. Do not retry. Verify with the external system "
+                                "whether it happened, then report via "
+                                "continuum_reconcile_action with the action_key above."
+                            ),
+                        }
+                    )
+                if best_action.status is ActionStatus.COMPLETED:
+                    return _json(
+                        {
+                            "run_id": run_id,
+                            "action_type": action_type,
+                            "proceed": False,
+                            "action_key": best_key,
+                            "status": best_action.status.value,
+                            "external_id": best_action.external_id,
+                            "previous_result": (
+                                dict(best_action.result) if best_action.result else None
+                            ),
+                            "guidance": (
+                                "Already performed. Reuse the previous result; do not repeat it."
+                            ),
+                        }
+                    )
+
+        settled = existing is not None and existing.status in (
             ActionStatus.COMPLETED,
-            ActionStatus.STARTED,
             ActionStatus.UNKNOWN,
         )
-        if existing is not None and existing.status in settled_statuses:
-            if existing.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
-                return _json(
-                    {
-                        "run_id": run_id,
-                        "action_type": action_type,
-                        "proceed": False,
-                        "status": ActionStatus.UNKNOWN.value,
-                        "action_key": claim_key,
-                        "action_id": existing.action_id,
-                        "reason": (
-                            f"action {action_type!r} (key {claim_key[:12]}...) was interrupted "
-                            "before its outcome was recorded; the side effect may or may not "
-                            "have occurred. Reconcile it before retrying."
-                        ),
-                        "guidance": (
-                            "A previous attempt was interrupted and its outcome is "
-                            "unknown. Do not retry. Verify with the external system "
-                            "whether it happened, then report via "
-                            "continuum_reconcile_action with the action_key above."
-                        ),
-                    }
-                )
-
-            return _json(
-                {
-                    "run_id": run_id,
-                    "action_type": action_type,
-                    "proceed": False,
-                    "action_key": claim_key,
-                    "status": existing.status.value,
-                    "external_id": existing.external_id,
-                    "previous_result": (
-                        dict(existing.result) if existing.result else None
-                    ),
-                    "guidance": (
-                        "Already performed. Reuse the previous result; do not repeat it."
-                    ),
-                }
-            )
-
-        settled = False
         if not settled:
             # Archive-aware (issue #734): attempts live in the event log, and
             # compaction moves failed attempts into the archive. Counting only

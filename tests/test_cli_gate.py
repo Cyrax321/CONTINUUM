@@ -384,6 +384,7 @@ def test_a_registry_error_names_an_absolute_path(
     assert reported.name == filename, message
     assert reported == relative.resolve(), message
 
+
 def test_fuzzy_gate_wiring() -> None:
     # Test that gate.decide correctly parses similarity and delegates it
     from continuum.gate import decide

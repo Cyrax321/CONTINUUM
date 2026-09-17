@@ -174,7 +174,7 @@ def similarity_backend(name_or_config: str | dict[str, Any] | SimilarityConfig) 
         return name_or_config
     
     if not isinstance(name_or_config, (dict, str)):
-        raise TypeError(f"invalid similarity config type: {type(name_or_config).__name__}")
+        raise ValueError(f"invalid similarity config type: {type(name_or_config).__name__}")
         
     if isinstance(name_or_config, dict):
         kind_str = name_or_config.get("kind", "exact")
@@ -208,6 +208,11 @@ def similarity_backend(name_or_config: str | dict[str, Any] | SimilarityConfig) 
     kind = kind_map.get(name_or_config)
     if kind is None:
         raise ValueError(f"unknown similarity backend {name_or_config!r}")
+    if kind == SimilarityKind.EMBEDDING:
+        raise ValueError(
+            "embedding backend requires an embedder function instance; "
+            "configure it as a dict with an 'embedder', not a bare name"
+        )
     return SimilarityConfig(kind=kind)
 
 # Keep unused imports referenced for mypy strict
