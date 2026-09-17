@@ -8,11 +8,13 @@ import os
 from continuum.analysis.trajectory_report import (
     build_trajectory_report,
     health_maybe_generate_trajectory_report,
+    is_quiet_window,
     maybe_generate_trajectory_report,
     record_trajectory_report,
+    render_trajectory_report,
 )
 from continuum.checkpoint import CheckpointManager
-from continuum.events import EventType
+from continuum.events import Event, EventType
 from continuum.models import Origin, Run, TrajectoryReport
 from continuum.state.semantic import project
 from continuum.storage import SQLiteStorage
@@ -362,5 +364,214 @@ def test_health_idle_trigger_generates_for_quiet_and_not_for_busy() -> None:
         assert via_health is None
         direct = maybe_generate_trajectory_report(storage, run_id)
         assert direct is None
+    finally:
+        storage.close()
+
+
+# --- the trigger: is_quiet_window (issue #1235) ------------------------------ #
+
+
+def _event(type: EventType, payload: dict[str, object] | None = None, sequence: int = 1) -> Event:
+    """Build a bare, unsealed event for a pure predicate test (no storage)."""
+    return Event(run_id="run_1", sequence=sequence, type=type, payload=payload or {})
+
+
+def test_is_quiet_window_empty_window_is_quiet() -> None:
+    """An empty window counts as quiet: nothing happened, so nothing to report on."""
+    assert is_quiet_window([]) is True
+
+
+def test_is_quiet_window_records_only_facts_is_quiet() -> None:
+    """Recorded facts that signal neither progress nor a decision keep a window quiet.
+
+    Failed actions, tool calls and tool completions are audit trail: they say
+    work was attempted, never that it landed. Only the three progress/decision
+    types can break quietness, so a window of pure facts is the quiet case the
+    rest of the module reports on.
+    """
+    events = [
+        _event(EventType.TOOL_CALLED, {"tool_name": "edit"}, sequence=1),
+        _event(EventType.TOOL_COMPLETED, {"path": "/tmp/x", "sha256": "abc"}, sequence=2),
+        _event(EventType.TOOL_FAILED, {"tool_name": "edit"}, sequence=3),
+        _event(EventType.EVIDENCE_ADDED, {"kind": "log"}, sequence=4),
+        _event(EventType.LIVENESS_SILENCE_DETECTED, {"since": 1}, sequence=5),
+        _event(EventType.EVENT_LOG_ANCHORED, {"anchor_sequence": 5}, sequence=6),
+    ]
+    assert is_quiet_window(events) is True
+
+
+def test_is_quiet_window_unresolved_and_failed_actions_are_quiet() -> None:
+    """A window full of stalled work is exactly the window a trajectory report covers."""
+    events = [
+        _event(EventType.ACTION_RECORDED, {"key": "k1", "status": "failed"}, sequence=1),
+        _event(EventType.ACTION_RECONCILED, {"key": "k1", "status": "failed"}, sequence=2),
+        _event(EventType.ACTION_COMPENSATED, {"key": "k2"}, sequence=3),
+    ]
+    assert is_quiet_window(events) is True
+
+
+def test_is_quiet_window_work_completed_breaks_quiet() -> None:
+    """A completed unit of work is the signal that the window was productive."""
+    assert is_quiet_window([_event(EventType.WORK_COMPLETED, {"count": 1})]) is False
+    assert is_quiet_window([_event(EventType.WORK_COMPLETED, {"count": 5})]) is False
+    # Zero completed units is not progress, and neither is a batch that failed.
+    assert is_quiet_window([_event(EventType.WORK_COMPLETED, {"count": 0})]) is True
+    assert is_quiet_window([_event(EventType.WORK_COMPLETED, {"count": 3, "failed": True})]) is True
+    # A payload that cannot be parsed as a count is treated as one unit of work.
+    assert is_quiet_window([_event(EventType.WORK_COMPLETED, {"count": "many"})]) is False
+    assert is_quiet_window([_event(EventType.WORK_COMPLETED, {})]) is False
+
+
+def test_is_quiet_window_task_updated_breaks_quiet() -> None:
+    """A task that moved forward is progress; one that did not is not."""
+    assert is_quiet_window([_event(EventType.TASK_UPDATED, {"completed": 1})]) is False
+    assert is_quiet_window([_event(EventType.TASK_UPDATED, {"completed": 0})]) is True
+    # A completion field present but unparseable is not safe to read as zero progress.
+    assert is_quiet_window([_event(EventType.TASK_UPDATED, {"completed": "later"})]) is False
+    # Absent completion means the update carried no progress claim at all.
+    assert is_quiet_window([_event(EventType.TASK_UPDATED, {"title": "t"})]) is True
+
+
+def test_is_quiet_window_decision_created_breaks_quiet() -> None:
+    """A decision is deliberation, so the window was not idle regardless of payload."""
+    assert is_quiet_window([_event(EventType.DECISION_CREATED, {})]) is False
+    assert (
+        is_quiet_window(
+            [
+                _event(EventType.TOOL_FAILED, {"tool_name": "edit"}, sequence=1),
+                _event(EventType.DECISION_CREATED, {"summary": "retry"}, sequence=2),
+            ]
+        )
+        is False
+    )
+
+
+def test_quiet_window_boundaries_are_start_exclusive_end_inclusive() -> None:
+    """The window selector reads (start, end], so a busy event at start cannot suppress a report.
+
+    The trigger sees only what the window selector hands it, which makes the
+    boundary part of the trigger's contract: the event at ``window_start``
+    belonged to the previous window, and the event at ``window_end`` is the
+    anchor this report is named for.
+    """
+    storage = _make_storage()
+    try:
+        run_id = "run_1"
+        storage.append_event(
+            run_id,
+            EventType.WORK_COMPLETED,
+            {"count": 1, "task_id": "busy"},
+            source=Origin.DETERMINISTIC,
+        )
+        storage.append_event(
+            run_id,
+            EventType.TOOL_FAILED,
+            {"tool_name": "edit"},
+            source=Origin.DETERMINISTIC,
+        )
+        busy_seq = 2
+        quiet_seq = 3
+
+        # The busy event inside the window suppresses generation.
+        assert (
+            maybe_generate_trajectory_report(storage, run_id, window_start=1, window_end=quiet_seq)
+            is None
+        )
+        # window_end is inclusive, so a window ending on the busy event is busy.
+        assert (
+            maybe_generate_trajectory_report(storage, run_id, window_start=1, window_end=busy_seq)
+            is None
+        )
+        # The busy event sits exactly on window_start and is excluded, so the
+        # quiet event alone makes this window reportable. Run last: recording
+        # this report makes any later lookup of the same window_end dedupe to it.
+        report = maybe_generate_trajectory_report(
+            storage, run_id, window_start=busy_seq, window_end=quiet_seq
+        )
+        assert report is not None
+        assert report.window_start == busy_seq
+        assert report.window_end == quiet_seq
+    finally:
+        storage.close()
+
+
+# --- the renderer: render_trajectory_report (issue #1235) --------------------- #
+
+
+def _stall_and_scar_report(storage: SQLiteStorage, run_id: str) -> TrajectoryReport:
+    """Build a report over a window with two stalled actions and one unresolved scar."""
+    from continuum.actions import ActionLedger
+
+    for i in range(2):
+        _add_failed_action(storage, run_id, "test.stall", f"stall_{i}")
+    ledger = ActionLedger(storage, run_id)
+    ledger.claim("test.scar", {"y": 1}, key="scar_0")
+    end = storage.last_sequence(run_id)
+    return build_trajectory_report(storage, run_id, 0, end)
+
+
+def test_render_trajectory_report_names_top_stall_and_scar_rate() -> None:
+    """The rendered lines name the report id, the window, the top stall and the scar rate."""
+    storage = _make_storage()
+    try:
+        run_id = "run_1"
+        report = _stall_and_scar_report(storage, run_id)
+        assert report.stall_sites
+        assert report.scar_rate > 0.0
+
+        lines = render_trajectory_report(report)
+        text = "\n".join(lines)
+
+        assert lines[0].startswith("trajectory report ")
+        assert report.report_id in lines[0]
+        assert f"window {report.window_start}->{report.window_end}" in lines[0]
+        assert f"attempts {report.attempts}, scar_rate {report.scar_rate:.2f}" in text
+        assert "test.stall" in text
+        assert "top failures: test.stall" in text
+    finally:
+        storage.close()
+
+
+def test_render_trajectory_report_without_lessons_reports_honest_zero() -> None:
+    """A report with no lessons renders what is true rather than an empty string.
+
+    The briefing layer concatenates these lines, so a lesson-less window must
+    still yield a header and an explicit zero scar rate instead of vanishing.
+    """
+    storage = _make_storage()
+    try:
+        run_id = "run_1"
+        report = build_trajectory_report(storage, run_id, 0, storage.last_sequence(run_id))
+        assert report.stall_sites == []
+        assert report.top_failure_action_types == []
+        assert report.scar_rate == 0.0
+
+        lines = render_trajectory_report(report)
+
+        assert lines, "a lesson-less report must still render something"
+        text = "\n".join(lines)
+        assert report.report_id in text
+        assert "scar_rate 0.00" in text
+        assert "stall_sites" not in text
+        assert "top failures" not in text
+    finally:
+        storage.close()
+
+
+def test_render_trajectory_report_flags_self_certified_derivation() -> None:
+    """A report derived from agent-asserted events is labelled unverified, not trusted."""
+    storage = _make_storage()
+    try:
+        run_id = "run_1"
+        report = _stall_and_scar_report(storage, run_id)
+        agent = report.model_copy(update={"derived_origin": Origin.EXTERNAL_AGENT.value})
+        llm = report.model_copy(update={"derived_origin": Origin.LLM.value})
+        local = report.model_copy(update={"derived_origin": Origin.DETERMINISTIC.value})
+
+        assert "unverified (derived)" in "\n".join(render_trajectory_report(agent))
+        assert "unverified (derived)" in "\n".join(render_trajectory_report(llm))
+        local_text = "\n".join(render_trajectory_report(local))
+        assert "unverified (derived)" not in local_text
+        assert f"derived from {Origin.DETERMINISTIC.value}" in local_text
     finally:
         storage.close()
