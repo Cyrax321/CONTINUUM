@@ -8,11 +8,13 @@ import os
 from continuum.analysis.trajectory_report import (
     build_trajectory_report,
     health_maybe_generate_trajectory_report,
+    is_quiet_window,
     maybe_generate_trajectory_report,
     record_trajectory_report,
+    render_trajectory_report,
 )
 from continuum.checkpoint import CheckpointManager
-from continuum.events import EventType
+from continuum.events import Event, EventType
 from continuum.models import Origin, Run, TrajectoryReport
 from continuum.state.semantic import project
 from continuum.storage import SQLiteStorage
@@ -364,3 +366,112 @@ def test_health_idle_trigger_generates_for_quiet_and_not_for_busy() -> None:
         assert direct is None
     finally:
         storage.close()
+
+
+# --- the trigger and the renderer, directly (issue #1235) --------------------
+#
+# The tests above cover build/record/digest. is_quiet_window decides when the
+# module runs at all, and render_trajectory_report is what a human sees; neither
+# was named anywhere in the suite, so their own boundaries were unasserted.
+
+
+def _ev(event_type: EventType, payload: dict | None = None, sequence: int = 1) -> Event:
+    return Event(run_id="run_1", sequence=sequence, type=event_type, payload=payload or {})
+
+
+def test_is_quiet_window_empty_and_non_progressing_events_are_quiet() -> None:
+    """Only events that record progress or a decision break the window."""
+    assert is_quiet_window([]) is True
+    assert is_quiet_window([_ev(EventType.STATE_CHECKPOINTED, {"v": 1})]) is True
+    # An observation that carried no work is still quiet.
+    assert is_quiet_window([_ev(EventType.WORK_COMPLETED, {"count": 0})]) is True
+    # A completed unit that failed does not count as progress.
+    assert is_quiet_window([_ev(EventType.WORK_COMPLETED, {"count": 1, "failed": True})]) is True
+
+
+def test_is_quiet_window_progress_and_decisions_break_it() -> None:
+    assert is_quiet_window([_ev(EventType.WORK_COMPLETED, {"count": 1})]) is False
+    assert is_quiet_window([_ev(EventType.TASK_UPDATED, {"completed": 3})]) is False
+    assert is_quiet_window([_ev(EventType.DECISION_CREATED, {"id": "d1"})]) is False
+
+
+def test_is_quiet_window_ignores_progress_after_the_first_breaker() -> None:
+    """A window is busy as soon as one progress event appears, wherever it sits."""
+    quiet_then_busy = [
+        _ev(EventType.STATE_CHECKPOINTED, {}, sequence=1),
+        _ev(EventType.TASK_UPDATED, {"completed": 1}, sequence=2),
+        _ev(EventType.STATE_CHECKPOINTED, {}, sequence=3),
+    ]
+    assert is_quiet_window(quiet_then_busy) is False
+
+
+def test_is_quiet_window_rejects_an_unreadable_completed_counter() -> None:
+    """A completed field we cannot read as an integer is not evidence of quiet:
+    treating it as zero would call a busy window idle."""
+    assert is_quiet_window([_ev(EventType.TASK_UPDATED, {"completed": "many"})]) is False
+    assert is_quiet_window([_ev(EventType.TASK_UPDATED, {"completed": None})]) is True
+
+
+def test_render_trajectory_report_names_the_stall_sites_and_scar_rate() -> None:
+    """The renderer is the human-facing end of the feature: it must say what the
+    report records, not a summary that drops the two fields a reader acts on."""
+    storage = _make_storage()
+    try:
+        for i in range(3):
+            _add_failed_action(storage, "run_1", "test.stall", f"k{i}")
+        end = storage.last_sequence("run_1")
+        report = build_trajectory_report(storage, "run_1", window_start=1, window_end=end)
+        lines = render_trajectory_report(report)
+        text = "\n".join(lines)
+        assert text  # never an empty answer
+        assert report.report_id in text
+        assert f"window {report.window_start}->{report.window_end}" in text
+        # scar_rate is rendered to two decimals, matching the report's rounded value
+        assert f"scar_rate {report.scar_rate:.2f}" in text
+        # The stall sites are what the reader would act on, so they appear by name.
+        for site in report.stall_sites:
+            assert site in text
+    finally:
+        storage.close()
+
+
+def test_render_trajectory_report_is_honest_when_there_are_no_lessons() -> None:
+    """A clean window has no stall sites and no failure types. The header still
+    reports the window and the zero rate rather than emitting nothing, which
+    would read as 'no data' instead of 'nothing went wrong'."""
+    storage = _make_storage()
+    try:
+        end = storage.last_sequence("run_1")
+        report = build_trajectory_report(storage, "run_1", window_start=1, window_end=end)
+        assert report.stall_sites == []
+        assert report.top_failure_action_types == []
+        lines = render_trajectory_report(report)
+        assert lines, "a report with no lessons still renders its header"
+        text = "\n".join(lines)
+        assert report.report_id in text
+        assert "scar_rate 0.00" in text
+        assert "stall_sites" not in text
+        assert "top failures" not in text
+    finally:
+        storage.close()
+
+
+def test_render_trajectory_report_labels_a_derived_origin() -> None:
+    """The label distinguishes a report the machine distilled from one an agent
+    asserted, so a reader knows how much to trust the figures."""
+    report = TrajectoryReport(
+        report_id="rep-abc",
+        window_start=0,
+        window_end=9,
+        compaction_seq=9,
+        attempts=4,
+        scar_rate=0.5,
+        stall_sites=["fetch.invoice"],
+        top_failure_action_types=["fetch.invoice"],
+        derived_origin="external_agent",
+    )
+    text = "\n".join(render_trajectory_report(report))
+    assert "unverified (derived)" in text
+
+    report_machine = report.model_copy(update={"derived_origin": "checkpoint"})
+    assert "derived from checkpoint" in "\n".join(render_trajectory_report(report_machine))
