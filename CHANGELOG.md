@@ -33,6 +33,31 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`references/architecture-data.md` now matches the code it claims to be
+  verified against (#1108).** The file is the source-verified companion to
+  `references/architecture.md`, but it had drifted far enough to contradict
+  itself: section 15 documented 14 CLI commands where `build_parser` accepts 46,
+  section 7 listed 29 of the 51 `EventType` members and asserted the list was
+  complete, section 8 listed 7 of the 8 `ActionStatus` values, and the mode rank
+  table cited `_ORDER` at `engine.py:63`, a symbol that does not exist there,
+  had not for some time, and ranks repair steps, not recovery modes. The real
+  rank source is `SEVERITY` at `engine.py:69`. `tests/test_architecture_data.py`
+  now re-derives the countable claims from the live parser and enums and checks
+  that every cited symbol is still declared. No behaviour changes;
+  documentation and the documented test counts only.
+
+- **The 16 stale code pointers in `docs/GLOSSARY.md` now name the symbols
+  their entries describe (#1069).** Each definition is pinned to a
+  `src/.../file.py:LINE` citation so a claim can be verified in the code
+  rather than inferred, but 16 of the 25 pointers had not followed the code:
+  `RecoveryContract` was cited at `models.py:1060`, a line that holds
+  `EnvResource`, and `RecoveryLedger` at `recovery/ledger.py:205`, a line that
+  holds `_UNSAFE_FILENAME_CHARS`. This is the second such drift (#731 found
+  the first), so `tests/test_docs_glossary.py` now resolves every pointer in
+  the file against the source and fails when a citation no longer lands within
+  three lines of the symbol it names. No behaviour changes; documentation and
+  the documented test counts only.
+
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
   types at the top level (`{"send_invoice": {...}}`) instead of nesting them
@@ -858,7 +883,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,241 collected, ~2,216 passed, ~25 skipped on a minimal env).
+  (~2,299 collected, ~2,274 passed, ~25 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
