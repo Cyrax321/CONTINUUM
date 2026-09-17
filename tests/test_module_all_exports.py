@@ -35,6 +35,7 @@ import continuum.recovery.limits as recovery_limits
 import continuum.recovery.notify as recovery_notify
 import continuum.security.provenance as security_provenance
 import continuum.security.revalidation as security_revalidation
+import continuum.state.semantic as state_semantic
 import continuum.storage.postgres as storage_postgres
 import continuum.testing.fixtures as testing_fixtures
 
@@ -125,6 +126,7 @@ def test_all_symbols_exist_on_modules() -> None:
         recovery_notify,
         security_provenance,
         security_revalidation,
+        state_semantic,
         storage_postgres,
         testing_fixtures,
     ]
@@ -169,6 +171,7 @@ from continuum.recovery.limits import *
 from continuum.recovery.notify import *
 from continuum.security.provenance import *
 from continuum.security.revalidation import *
+from continuum.state.semantic import *
 from continuum.storage.postgres import *
 from continuum.testing.fixtures import *
 
@@ -182,6 +185,7 @@ assert callable(baseline_by_name)
 assert issubclass(RecoveryTimeoutError, Exception)
 assert callable(run_revalidation)
 assert callable(make_auto_checkpoint_hook)
+assert callable(pin_markers_for_state)
 """
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, (
@@ -212,3 +216,20 @@ def test_security_revalidation_exports_run_revalidation() -> None:
 def test_hooks_exports_make_auto_checkpoint_hook() -> None:
     assert "make_auto_checkpoint_hook" in hooks.__all__
     assert callable(hooks.make_auto_checkpoint_hook)
+
+
+def test_state_semantic_exports_pin_helpers() -> None:
+    """The pin-accounting cluster is public on its own module (issue #1099).
+
+    ``checkpoint/context.py`` builds the ACTIVE CONSTRAINTS section from
+    ``pin_markers_for_state``, and the resume/validate surfaces read the other
+    three, so all four must stay listed in ``__all__``.
+    """
+    for name in (
+        "account_pins_in_context",
+        "pin_markers_for_state",
+        "check_pin_accounting",
+        "constraint_pins_payload",
+    ):
+        assert name in state_semantic.__all__, f"{state_semantic.__name__} does not export {name!r}"
+        assert callable(getattr(state_semantic, name))

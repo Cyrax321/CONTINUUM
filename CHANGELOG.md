@@ -33,6 +33,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The pin-marker surface no longer contradicts itself (#1099).** The docs
+  name `pin_markers_for_state` as the emitter of the `[pin:<id>:<hash>]`
+  markers, but the code that actually builds the ACTIVE CONSTRAINTS section
+  (`checkpoint/context.py:_pins_section`) reached across modules for the
+  private twin `_pin_marker` instead, and the public helper had no caller
+  outside its own module. `_pins_section` now builds its markers through
+  `pin_markers_for_state`, so the section and the accounting that reads it
+  cannot spell a pin two different ways, and the two doc sentences are true as
+  written. The four pin helpers (`account_pins_in_context`,
+  `pin_markers_for_state`, `check_pin_accounting`, `constraint_pins_payload`)
+  are added to `state/semantic.py`'s `__all__`, where three test modules and
+  `checkpoint/context.py` already import them by name.
+  `tests/test_module_all_exports.py` now covers that module, so the `__all__`
+  half cannot silently regress. Rendered output is unchanged.
+
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
   types at the top level (`{"send_invoice": {...}}`) instead of nesting them

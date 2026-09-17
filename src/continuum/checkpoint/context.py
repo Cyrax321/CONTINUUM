@@ -31,7 +31,10 @@ from continuum.models import (
     SemanticState,
     StateStatus,
 )
-from continuum.state.semantic import account_pins_in_context
+from continuum.state.semantic import (
+    account_pins_in_context,
+    pin_markers_for_state,
+)
 
 __all__ = [
     "RecoveryContext",
@@ -138,12 +141,13 @@ def _pins_section(state: SemanticState) -> ContextSection:
     """
     if not state.pins:
         return ContextSection("ACTIVE CONSTRAINTS", (), priority=1)
-    from continuum.state.semantic import _pin_marker
-
-    lines = []
-    for pin in sorted(state.pins.values(), key=lambda p: p.constraint_id):
-        marker = _pin_marker(pin)
-        lines.append(f"{pin.constraint_id}:{pin.sha256[:8]} {marker}")
+    # Markers come from the shared public emitter, so the section and the
+    # accounting that reads it agree on how a pin is spelled (issue #1099).
+    markers = dict(zip(state.pins, pin_markers_for_state(state), strict=True))
+    lines = [
+        f"{pin.constraint_id}:{pin.sha256[:8]} {markers[pin.constraint_id]}"
+        for pin in sorted(state.pins.values(), key=lambda p: p.constraint_id)
+    ]
     return ContextSection("ACTIVE CONSTRAINTS", tuple(lines), priority=1)
 
 
