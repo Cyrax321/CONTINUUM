@@ -22,6 +22,7 @@ from langgraph.graph import StateGraph  # noqa: E402
 from continuum.actions import ActionLedger  # noqa: E402
 from continuum.cli import ExitCode, main  # noqa: E402
 from continuum.events import EventType  # noqa: E402
+from continuum.models import ActionStatus, Run  # noqa: E402
 from continuum.replayguard import (  # noqa: E402
     GuardKind,
     ReplayBlocked,
@@ -387,14 +388,12 @@ def test_evaluate_with_fuzzy_similarity(db: str) -> None:
     )
     assert v_divergent.kind is GuardKind.DENY_UNCLAIMED
 
+
 def test_evaluate_fuzzy_blocks_started_match(db: str) -> None:
     from continuum.actions.idempotency import idempotency_key
     from continuum.models import ActionStatus
     from continuum.replay_similarity import SimilarityConfig, SimilarityKind
-    from continuum.replayguard import evaluate, GuardKind
-    from continuum.storage import SQLiteStorage
     from continuum.actions.ledger import fold_action_events
-    from continuum.events import EventType
 
     key_prior = idempotency_key("pay", None, scope="run_1", key="pay_1")
     payload = {

@@ -117,7 +117,6 @@ def evaluate(
                     best_key = prior_key
                     
             if best_action is not None and best_score >= similarity_config.replay_threshold:
-                from continuum.models import ActionStatus
                 if best_action.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
                     return GuardDecision(
                         GuardKind.BLOCK_UNCERTAIN,
