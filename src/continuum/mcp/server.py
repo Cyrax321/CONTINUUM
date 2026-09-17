@@ -1272,7 +1272,11 @@ def build_server(
         # a duplicate side effect (issue #309).
         from continuum.gate import DEFAULT_GATE_CONFIG_PATH, load_gate_config
         
-        gate_config = load_gate_config(_Path(DEFAULT_GATE_CONFIG_PATH))
+        if not hasattr(ctx, "_gate_cache"):
+            ctx._gate_cache = {}
+        if run_id not in ctx._gate_cache:
+            ctx._gate_cache[run_id] = load_gate_config(_Path(DEFAULT_GATE_CONFIG_PATH))
+        gate_config = ctx._gate_cache[run_id]
         similarity_config = None
         if gate_config:
             spec = None
@@ -1284,8 +1288,9 @@ def build_server(
                 from continuum.replay_similarity import similarity_backend
                 try:
                     similarity_config = similarity_backend(spec["similarity"])
-                except ValueError:
-                    pass
+                except (ValueError, TypeError) as exc:
+                    from mcp.server.mcpserver.exceptions import ToolError
+                    raise ToolError(f"invalid gate configuration: {exc}")
 
         claim_key = idempotency_key(
             action_type,
@@ -1324,11 +1329,53 @@ def build_server(
                     best_key.split(":")[-1] if ":" in str(best_key) else str(best_key)
                 )
                 claim_key = best_key
-        settled = existing is not None and existing.status in (
+        settled_statuses = (
             ActionStatus.COMPLETED,
+            ActionStatus.STARTED,
             ActionStatus.UNKNOWN,
         )
+        if existing is not None and existing.status in settled_statuses:
+            if existing.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
+                return _json(
+                    {
+                        "run_id": run_id,
+                        "action_type": action_type,
+                        "proceed": False,
+                        "status": ActionStatus.UNKNOWN.value,
+                        "action_key": claim_key,
+                        "action_id": existing.action_id,
+                        "reason": (
+                            f"action {action_type!r} (key {claim_key[:12]}...) was interrupted "
+                            "before its outcome was recorded; the side effect may or may not "
+                            "have occurred. Reconcile it before retrying."
+                        ),
+                        "guidance": (
+                            "A previous attempt was interrupted and its outcome is "
+                            "unknown. Do not retry. Verify with the external system "
+                            "whether it happened, then report via "
+                            "continuum_reconcile_action with the action_key above."
+                        ),
+                    }
+                )
 
+            return _json(
+                {
+                    "run_id": run_id,
+                    "action_type": action_type,
+                    "proceed": False,
+                    "action_key": claim_key,
+                    "status": existing.status.value,
+                    "external_id": existing.external_id,
+                    "previous_result": (
+                        dict(existing.result) if existing.result else None
+                    ),
+                    "guidance": (
+                        "Already performed. Reuse the previous result; do not repeat it."
+                    ),
+                }
+            )
+
+        settled = False
         if not settled:
             # Archive-aware (issue #734): attempts live in the event log, and
             # compaction moves failed attempts into the archive. Counting only

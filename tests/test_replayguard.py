@@ -365,7 +365,7 @@ def test_evaluate_with_fuzzy_similarity(db: str) -> None:
     assert v_exact.kind is GuardKind.DENY_UNCLAIMED
     
     # Test fuzzy matching succeeds and classifies as SKIP_DUPLICATE
-    config = SimilarityConfig(kind=SimilarityKind.FUZZY, replay_threshold=0.3)
+    config = SimilarityConfig(kind=SimilarityKind.FUZZY, replay_threshold=0.2)
     v_fuzzy = evaluate(
         action_type="pay",
         rendered_key="pay_2",
@@ -386,3 +386,40 @@ def test_evaluate_with_fuzzy_similarity(db: str) -> None:
         similarity_config=config,
     )
     assert v_divergent.kind is GuardKind.DENY_UNCLAIMED
+
+def test_evaluate_fuzzy_blocks_started_match(db: str) -> None:
+    from continuum.actions.idempotency import idempotency_key
+    from continuum.models import ActionStatus
+    from continuum.replay_similarity import SimilarityConfig, SimilarityKind
+    from continuum.replayguard import evaluate, GuardKind
+    from continuum.storage import SQLiteStorage
+    from continuum.actions.ledger import fold_action_events
+    from continuum.events import EventType
+
+    key_prior = idempotency_key("pay", None, scope="run_1", key="pay_1")
+    payload = {
+        "key": key_prior,
+        "action": {
+            "action_id": "a_pay_1",
+            "action_type": "pay",
+            "run_id": "run_1",
+            "status": ActionStatus.STARTED.value,
+            "external_id": "x-1",
+            "arguments": {"intent": "pay invoice INV-001"},
+        },
+    }
+
+    with SQLiteStorage(db) as store:
+        store.append_event("run_1", EventType.ACTION_RECORDED, payload)
+        folded = fold_action_events(store.read_events("run_1"))
+
+    config = SimilarityConfig(kind=SimilarityKind.FUZZY, replay_threshold=0.2)
+    v_fuzzy = evaluate(
+        action_type="pay",
+        rendered_key="pay_2",
+        run_id="run_1",
+        actions_by_key=folded,
+        tool_input={"intent": "settle outstanding amount for INV-001"},
+        similarity_config=config,
+    )
+    assert v_fuzzy.kind is GuardKind.BLOCK_UNCERTAIN
