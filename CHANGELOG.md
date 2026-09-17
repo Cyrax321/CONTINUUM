@@ -33,6 +33,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The docs-count guard now reads `references/` and the translated READMEs,
+  and the stale counts they held are re-synced (#1109, #1071).** The guard in
+  `tests/test_docs_counts.py` watched only three files, so `references/testing.md`
+  and `references/install.md` quietly stated a collected total of 2,241 while
+  `README.md` stated 2,278, and all five translated READMEs still reported 2,195
+  collected with a 1,380-test narrative. None of those files could fail the
+  guard. Its scope is now the three required docs plus every `README*.md` and
+  every `references/*.md`: a doc that states no total is skipped, and a doc
+  that states a wrong one fails. The collected total is also matched in the
+  `pytest -q` verify comment, whose shape every translation keeps even after
+  all its prose is rephrased, so that one pattern reads all six READMEs.
+  `references/testing.md`, `references/install.md`, and the translated READMEs
+  now carry the same figures as `README.md`.
+
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
   types at the top level (`{"send_invoice": {...}}`) instead of nesting them
