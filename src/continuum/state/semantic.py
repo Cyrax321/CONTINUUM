@@ -765,6 +765,34 @@ _NON_PROJECTING = frozenset(
         EventType.LIVENESS_RECOVERED,
         # risk (issue #303): real-time risk signal, never state
         EventType.RISK_OBSERVED,
+        # restore/merge lineage (issue #1169): markers that a run's history was
+        # spliced, read by the CLI lineage views; the splice itself replays
+        # events that carry the state change, the marker carries none.
+        EventType.RUN_RESTORED,
+        EventType.RUN_MERGED,
+        # review (issue #1169): recorded by the HITL confirm verb and read by
+        # the engine as a gate fact; confirming is an audit trail entry, not a
+        # state mutation.
+        EventType.REVIEW_CONFIRMED,
+        # authority (issue #1169): consumed/reconciled authorities are read by
+        # the gate and the probe path; the verdict is a fact about the world,
+        # not a field of the run's state.
+        EventType.AUTHORITY_CONSUMED,
+        EventType.AUTHORITY_RECONCILED,
+        # perception/branch (issue #1169): the trust gate's ledger of what was
+        # observed and how a branch resolved.
+        EventType.PERCEPTION_OBSERVED,
+        EventType.BRANCH_RESOLVED,
+        # briefing (issue #1169): the summary surface reads these back; they
+        # describe reasoning that happened, they do not alter projected state.
+        EventType.REASONING_SUMMARY,
+        # notifications (issue #1169): delivery receipts, used by the webhook
+        # observer. Success or failure of a side channel is not state.
+        EventType.NOTIFICATION_SENT,
+        EventType.NOTIFICATION_FAILED,
+        # memory (issue #1169): a tombstone records that a memory entry was
+        # retired; it is a deletion record, not a projection input.
+        EventType.MEMORY_TOMBSTONED,
     }
 )
 

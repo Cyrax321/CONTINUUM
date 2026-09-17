@@ -36,9 +36,9 @@ No code class needed; these are the callers.
 
 | Class | File:line | Notes |
 |--|--|--|
-| `GenericAgentAdapter` | `generic.py:23` | In-process facade; trusted as `Origin.DETERMINISTIC` |
-| `OpenAIAgentAdapter` | `openai.py:113` | Wraps the OpenAI Agents SDK |
-| `LangGraphAgentAdapter` | `langgraph.py:102` | Subclasses `GenericAgentAdapter`; wraps a LangGraph `StateGraph` |
+| `GenericAgentAdapter` | `generic.py:33` | In-process facade; trusted as `Origin.DETERMINISTIC` |
+| `OpenAIAgentAdapter` | `openai.py:129` | Wraps the OpenAI Agents SDK |
+| `LangGraphAgentAdapter` | `langgraph.py:105` | Subclasses `GenericAgentAdapter`; wraps a LangGraph `StateGraph` |
 
 Optional installs. An agent may also call the SDK or MCP server directly.
 
@@ -47,30 +47,31 @@ Optional installs. An agent may also call the SDK or MCP server directly.
 ## 4. MCP server (stdio, deny by default) `src/continuum/mcp/`
 
 Server name: `continuum-mcp` (`server.py`). Twelve tools, all names prefixed,
-recounted from the tool registrations on 2026-08-24.
+recounted from the tool registrations on 2026-09-16.
 
 | Tool (exact name) | Kind | Source |
 |--|--|--|
-| `continuum_validate` | read-only | `server.py:618`, annotation `read_only` at `:625` |
-| `continuum_resume` | read-only | `server.py:662`, annotation `read_only` at `:671` |
-| `continuum_list_actions` | read-only | `server.py:1041`, annotation `read_only` at `:1047` |
-| `continuum_record_progress` | mutating | `server.py:468` |
-| `continuum_checkpoint` | mutating | `server.py:516` |
-| `continuum_record_summary` | mutating | `server.py:556` |
-| `continuum_confirm` | mutating | `server.py:763` |
-| `continuum_intercept_action` | mutating | `server.py:804` |
-| `continuum_complete_action` | mutating | `server.py:951` |
-| `continuum_fail_action` | mutating | `server.py:980` |
-| `continuum_reconcile_action` | mutating | `server.py:1009` |
+| `continuum_validate` | read-only | `server.py:937`, annotation `read_only` at `:944` |
+| `continuum_resume` | read-only | `server.py:997`, annotation `read_only` at `:1006` |
+| `continuum_list_actions` | read-only | `server.py:1512`, annotation `read_only` at `:1518` |
+| `continuum_record_progress` | mutating | `server.py:683` |
+| `continuum_checkpoint` | mutating | `server.py:743` |
+| `continuum_record_summary` | mutating | `server.py:790` |
+| `continuum_record_plan` | mutating | `server.py:857` |
+| `continuum_confirm` | mutating | `server.py:1133` |
+| `continuum_intercept_action` | mutating | `server.py:1200` |
+| `continuum_complete_action` | mutating | `server.py:1400` |
+| `continuum_fail_action` | mutating | `server.py:1435` |
+| `continuum_reconcile_action` | mutating | `server.py:1464` |
 
 Read-only annotation is `ToolAnnotations(read_only_hint=True)`
-(`server.py:386`); mutating is `read_only_hint=False` (`server.py:387`).
-Read-only count = 3, mutating count = 8.
+(`server.py:599`); mutating is `read_only_hint=False` (`server.py:600`).
+Read-only count = 3, mutating count = 9.
 
 Auth gate (allowlist for mutating tools):
-- Primary env var: `CONTINUUM_MCP_ALLOW` (`authz.py:57`).
-- Backward-compatible alias: `CONTINUUM_MCP_MUTATING_CLIENTS` (`authz.py:59`).
-- Per-project file: `.continuum/mcp-policy.json` (`authz.py`, `POLICY_FILENAME`).
+- Primary env var: `CONTINUUM_MCP_ALLOW` (`authz.py:72`, `POLICY_ENV_VAR`).
+- Backward-compatible alias: `CONTINUUM_MCP_MUTATING_CLIENTS` (`authz.py:79`, `POLICY_ENV_VAR_ALIAS`).
+- Per-project file: `.continuum/mcp-policy.json` (`authz.py:81`, `POLICY_FILENAME`).
 - Without explicit permission, no mutating call succeeds. This is the
   "DENY BY DEFAULT. WORKS WITH CLAUDE CODE." boundary.
 
@@ -102,8 +103,8 @@ source of truth, and events persist to storage.
 
 | Class | File:line | Notes |
 |--|--|--|
-| `DeterministicExtractor` | `extractor.py:75` | Default; folds the event log, no model |
-| `LLMExtractor` | `extractor.py:106` | Optional; adds info tagged `Origin.LLM`, flagged `REQUIRES_REVIEW` |
+| `DeterministicExtractor` | `extractor.py:81` | Default; folds the event log, no model |
+| `LLMExtractor` | `extractor.py:119` | Optional; adds info tagged `Origin.LLM`, flagged `REQUIRES_REVIEW` |
 
 ---
 
@@ -111,18 +112,24 @@ source of truth, and events persist to storage.
 
 - Append-only, hash-chained: each event stores the digest of the prior event.
 - `EventLog.verify()` re-walks the chain and localizes the first corrupted
-  event (`events.py:304`).
-- 29 event types (`EventType` StrEnum, `events.py:46`). Complete list:
+  event (`events.py:401`).
+- 51 event types (`EventType` StrEnum, `events.py:47`). Complete list:
 
-```
-RUN_STARTED, RUN_COMPLETED, RUN_ABORTED, TASK_UPDATED, TOOL_CALLED,
-TOOL_COMPLETED, TOOL_FAILED, DECISION_CREATED, DECISION_INVALIDATED,
-EVIDENCE_ADDED, FINDING_ADDED, FINDING_INVALIDATED, WORK_ADDED,
-WORK_COMPLETED, DEPENDENCY_DECLARED, APPROVAL_REQUESTED, APPROVAL_GRANTED,
-APPROVAL_REVOKED, MODEL_CHANGED, MODEL_ASSUMPTION_RECORDED,
-STATE_CHECKPOINTED, STATE_VALIDATED, ENVIRONMENT_CHANGED, RECOVERY_STARTED,
-RECOVERY_COMPLETED, RECOVERY_BLOCKED, ACTION_RECORDED, ACTION_RECONCILED,
-ACTION_COMPENSATED
+```text
+RUN_STARTED, RUN_COMPLETED, RUN_ABORTED, TASK_UPDATED, RUN_FORKED,
+RUN_RESTORED, RUN_MERGED, TOOL_CALLED, TOOL_COMPLETED, TOOL_FAILED,
+DECISION_CREATED, DECISION_INVALIDATED, EVIDENCE_ADDED, FINDING_ADDED,
+FINDING_INVALIDATED, WORK_ADDED, WORK_COMPLETED, DEPENDENCY_DECLARED,
+CONSTRAINT_PINNED, CONSTRAINT_RETRACTED, APPROVAL_REQUESTED,
+APPROVAL_GRANTED, APPROVAL_REVOKED, MODEL_CHANGED,
+MODEL_ASSUMPTION_RECORDED, STATE_CHECKPOINTED, STATE_VALIDATED,
+ENVIRONMENT_CHANGED, RECOVERY_STARTED, RECOVERY_COMPLETED,
+RECOVERY_BLOCKED, REVIEW_CONFIRMED, REASONING_SUMMARY, EVENT_LOG_ANCHORED,
+PERCEPTION_OBSERVED, BRANCH_RESOLVED, ACTION_RECORDED, ACTION_RECONCILED,
+ACTION_COMPENSATED, GRANT_DENIED, LIVENESS_SILENCE_DETECTED,
+LIVENESS_RECOVERED, RISK_OBSERVED, AUTHORITY_CONSUMED,
+AUTHORITY_RECONCILED, ATTEMPT_LESSON, TRAJECTORY_REPORT, PLAN_UPSERT,
+MEMORY_TOMBSTONED, NOTIFICATION_SENT, NOTIFICATION_FAILED
 ```
 
 ---
@@ -139,14 +146,15 @@ ACTION_COMPENSATED
 | Reconciler | File:line | Behavior |
 |--|--|--|
 | `ProbeReconciler` | `:73` | Asks the external system; only strategy that produces evidence |
-| `ManualReconciler` | `:120` | Escalates to a human |
-| `AssumeNotOccurredReconciler` | `:96` | Retries; only when caller explicitly asserts `idempotent=True` |
+| `ManualReconciler` | `:131` | Escalates to a human |
+| `AssumeNotOccurredReconciler` | `:102` | Retries; only when caller explicitly asserts `idempotent=True` |
 
 There is deliberately **no** `AssumeOccurred` strategy (assuming success without
 evidence silently drops work).
 
-Action states (`ActionStatus`, `models.py:94`): `PLANNED`, `STARTED`,
-`COMPLETED`, `FAILED`, `UNKNOWN`, `COMPENSATED`, `REQUIRES_REVIEW` (7 values).
+Action states (`ActionStatus`, `models.py:109`): `PLANNED`, `STARTED`,
+`COMPLETED`, `FAILED`, `UNKNOWN`, `COMPENSATED`, `REQUIRES_REVIEW`, `EXPIRED`
+(8 values).
 
 ---
 
@@ -156,16 +164,16 @@ Six policies (`policy.py`):
 
 | Policy | File:line |
 |--|--|
-| `ManualPolicy` | `:130` |
-| `IntervalPolicy` | `:141` |
-| `EventPolicy` | `:165` |
-| `SemanticPolicy` | `:200` |
-| `ContextPressurePolicy` | `:299` |
-| `HybridPolicy` | `:277` |
+| `ManualPolicy` | `:135` |
+| `IntervalPolicy` | `:147` |
+| `EventPolicy` | `:172` |
+| `SemanticPolicy` | `:208` |
+| `ContextPressurePolicy` | `:312` |
+| `HybridPolicy` | `:289` |
 
 Default policy is `HybridPolicy` (with `max_interval_seconds=300`), returned by
-`default_policy()` (`policy.py:329`) and used when none is supplied
-(`manager.py:83`).
+`default_policy()` (`policy.py:343`) and used when none is supplied
+(`manager.py:92`).
 
 Restore replays events recorded after the checkpoint, so a crash between
 checkpoints loses no work. Recovery context renders the minimum sufficient
@@ -190,10 +198,10 @@ Model switches are never assumed safe: state under a different model is marked
 
 ## 11. Recovery Engine `src/continuum/recovery/engine.py`
 
-Seven modes. Most cautious wins (highest rank). Ranks from `_ORDER`
-(`engine.py:63`):
+Seven modes. Most cautious wins (highest rank). Ranks from `SEVERITY`
+(`engine.py:69`), which orders `RecoveryMode` (`models.py:122`):
 
-| Mode | Rank | Safety class (`engine.py:73`) |
+| Mode | Rank | Safety class (`_SAFETY_FOR_MODE`, `engine.py:79`) |
 |--|--|--|
 | `RESUME` | 0 | `SAFE_TO_RESUME` |
 | `REPAIR_AND_RESUME` | 1 | `REQUIRES_REPAIR` |
@@ -214,7 +222,7 @@ the run.
 
 ---
 
-## 12. SemanticState data model `src/continuum/models.py:398`
+## 12. SemanticState data model `src/continuum/models.py:740`
 
 Ten semantic fields (exact attribute names):
 
@@ -231,12 +239,15 @@ Ten semantic fields (exact attribute names):
 | `external_dependencies` | `list[ExternalDependency]` |
 | `model` | `ModelState | None` |
 
-Plus metadata: `run_id`, `version`, `source_sequence`, `created_at`,
+Plus the recovery bookkeeping fields `pins`, `unmatched_pin_retractions`,
+`attempt_lessons`, and `trajectory_reports`, and the metadata `run_id`,
+`version`, `source_sequence`, `status`, `unprojectable_at_sequence`,
+`unprojectable_event_type`, `unprojectable_reason`, `created_at`,
 `updated_at`.
 
-Provenance / origin enum (`models.py:171`): `DETERMINISTIC`, `LLM` (`:181`),
-`EXTERNAL_AGENT` (`:184`). `EXTERNAL_AGENT` is flagged `REQUIRES_REVIEW`;
-`LLM` is also flagged `REQUIRES_REVIEW`.
+Provenance / origin enum (`models.py:192`): `DETERMINISTIC` (`:201`), `HUMAN`
+(`:210`), `LLM` (`:213`), `EXTERNAL_AGENT` (`:216`). `EXTERNAL_AGENT` is
+flagged `REQUIRES_REVIEW`; `LLM` is also flagged `REQUIRES_REVIEW`.
 
 ---
 
@@ -244,11 +255,11 @@ Provenance / origin enum (`models.py:171`): `DETERMINISTIC`, `LLM` (`:181`),
 
 | Class / behavior | Source |
 |--|--|
-| `SQLiteStorage` | `sqlite.py:125` |
-| WAL journaling; `synchronous=FULL` | `sqlite.py:144-145`, `:202` |
+| `SQLiteStorage` | `sqlite.py:94` |
+| WAL journaling; `synchronous=FULL` | `sqlite.py:121-122` |
 | Atomic sequence allocation for event IDs | `sqlite.py` |
-| Integrity verified on read; corruption refused | `CorruptedRecord` (`base.py:90`) |
-| Concurrent writes fail loudly | `ConcurrentWriteError` (`base.py:83`) |
+| Integrity verified on read; corruption refused | `CorruptedRecord` (`base.py:91`) |
+| Concurrent writes fail loudly | `ConcurrentWriteError` (`base.py:84`) |
 
 No exactly-once semantics; the ledger reconciles the gap.
 
@@ -262,11 +273,16 @@ gap.
 
 ---
 
-## 15. CLI commands (14) `src/continuum/cli/main.py:578-614`
+## 15. CLI commands (46) `src/continuum/cli/main.py:3688` (`build_parser`)
 
-`init`, `runs`, `inspect`, `history`, `events`, `diff`, `validate`, `resume`,
-`checkpoint`, `verify`, `actions`, `show-contract`, `replay`, `benchmark`.
-All accept `--json`.
+`init`, `runs`, `start`, `inspect`, `status`, `history`, `provenance`,
+`impact`, `events`, `diff`, `validate`, `health`, `resume`, `notify-test`,
+`confirm`, `complete`, `budget`, `tree`, `fork`, `restore`, `merge`,
+`compact`, `checkpoint`, `rewind`, `record-plan`, `observe`, `gateway`,
+`briefing`, `precompact`, `gate`, `hooks`, `verify`, `forget`, `reconcile`,
+`actions`, `show-contract`, `replay`, `export-evidence`, `benchmark`,
+`attest-keygen`, `attest`, `attest-verify`, `serve`, `dashboard`, `tui`,
+`watch`. All accept `--json`.
 
 ---
 
@@ -275,10 +291,10 @@ All accept `--json`.
 - `canonical()` returns a sorted, JSON-native representation (`:72`).
 - Serialization uses `json.dumps(..., sort_keys=True, separators=(",", ":"),
   ensure_ascii=True)` (`:79`).
-- Enums are serialized by value (`:36`).
+- Enums are serialized by value (`:33-36`).
 - Non-finite floats (`NaN`/`Infinity`) are rejected (`:42-43`).
 - `datetime`/`date` serialize as ISO-8601 normalized to UTC
-  (`:47-51`).
+  (`:47-52`).
 - Hash-chained events form a tamper-evident audit trail (`events.py`).
 - Credentials are referenced, never serialized into state.
 
