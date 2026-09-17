@@ -304,6 +304,16 @@ def decide(
         return Decision(True, "tool is not gated")
 
     action_type = spec.get("action_type") or tool_name
+    
+    similarity_spec = spec.get("similarity")
+    similarity_config = None
+    if similarity_spec is not None:
+        from continuum.replay_similarity import similarity_backend
+        try:
+            similarity_config = similarity_backend(similarity_spec)
+        except ValueError as exc:
+            return Decision(False, f"gate configuration error: {exc}")
+
     try:
         rendered = render_key(spec["key_template"], tool_input)
         _expected_key(action_type, run_id, rendered)
@@ -383,6 +393,8 @@ def decide(
         rendered_key=rendered,
         run_id=run_id,
         actions_by_key=actions_by_key,
+        tool_input=tool_input,
+        similarity_config=similarity_config,
     )
     action = actions_by_key.get(decision.key) if decision.key else None
 

@@ -168,10 +168,29 @@ def classify_call(
     return "fresh", None
 
 
-def similarity_backend(name_or_config: str | SimilarityConfig) -> SimilarityConfig:
+def similarity_backend(name_or_config: str | dict[str, Any] | SimilarityConfig) -> SimilarityConfig:
     """Build a SimilarityConfig from a registry entry name or explicit config."""
     if isinstance(name_or_config, SimilarityConfig):
         return name_or_config
+    
+    if isinstance(name_or_config, dict):
+        kind_str = name_or_config.get("kind", "exact")
+        kind_map: dict[str, SimilarityKind] = {
+            "exact": SimilarityKind.EXACT,
+            "fuzzy": SimilarityKind.FUZZY,
+            "embedding": SimilarityKind.EMBEDDING,
+        }
+        kind = kind_map.get(kind_str)
+        if kind is None:
+            raise ValueError(f"unknown similarity backend {kind_str!r}")
+        
+        kwargs = {"kind": kind}
+        if "replay_threshold" in name_or_config:
+            kwargs["replay_threshold"] = float(name_or_config["replay_threshold"])
+        if "fork_threshold" in name_or_config:
+            kwargs["fork_threshold"] = float(name_or_config["fork_threshold"])
+        return SimilarityConfig(**kwargs)
+
     kind_map: dict[str, SimilarityKind] = {
         "exact": SimilarityKind.EXACT,
         "fuzzy": SimilarityKind.FUZZY,
@@ -181,7 +200,6 @@ def similarity_backend(name_or_config: str | SimilarityConfig) -> SimilarityConf
     if kind is None:
         raise ValueError(f"unknown similarity backend {name_or_config!r}")
     return SimilarityConfig(kind=kind)
-
 
 # Keep unused imports referenced for mypy strict
 _ = json

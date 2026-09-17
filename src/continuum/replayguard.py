@@ -84,13 +84,42 @@ def evaluate(
     rendered_key: str,
     run_id: str,
     actions_by_key: Mapping[str, Any],
+    tool_input: Mapping[str, Any] | None = None,
+    similarity_config: Any | None = None,
 ) -> GuardDecision:
     """Classify one intended side effect against the folded ledger."""
     from continuum.actions.idempotency import idempotency_key
     from continuum.models import ActionStatus
 
+    from continuum.replay_similarity import SimilarityConfig, SimilarityKind, similarity
+
+    if similarity_config is None:
+        similarity_config = SimilarityConfig(kind=SimilarityKind.EXACT)
+
     key = str(idempotency_key(action_type, None, scope=run_id, key=rendered_key))
     action = actions_by_key.get(key)
+    
+    if action is None or action.action_type != action_type:
+        if similarity_config.kind != SimilarityKind.EXACT and tool_input is not None:
+            best_score = 0.0
+            best_action = None
+            best_key = None
+            for prior_key, prior_action in actions_by_key.items():
+                if prior_action.action_type != action_type:
+                    continue
+                prior_args_raw = getattr(prior_action, "arguments", None) or {}
+                if not isinstance(prior_args_raw, dict):
+                    continue
+                score = similarity(tool_input, prior_args_raw, similarity_config)
+                if score > best_score:
+                    best_score = score
+                    best_action = prior_action
+                    best_key = prior_key
+                    
+            if best_action is not None and best_score >= similarity_config.replay_threshold:
+                action = best_action
+                key = best_key
+
     if action is None or action.action_type != action_type:
         return GuardDecision(
             GuardKind.DENY_UNCLAIMED,

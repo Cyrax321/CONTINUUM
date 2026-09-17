@@ -1270,14 +1270,52 @@ def build_server(
         # an exhausted budget suppress the dedup and reconciliation paths a
         # recovering agent depends on, turning a safety limit into the cause of
         # a duplicate side effect (issue #309).
-        existing = ledger.get(
-            idempotency_key(
-                action_type,
-                arguments,
-                scope=run_id if scoped_to_run else None,
-                key=key,
-            )
+        from continuum.gate import DEFAULT_GATE_CONFIG_PATH, load_gate_config
+        
+        gate_config = load_gate_config(_Path(DEFAULT_GATE_CONFIG_PATH))
+        similarity_config = None
+        if gate_config:
+            spec = None
+            for tool_name, s in gate_config.items():
+                if s.get("action_type", tool_name) == action_type:
+                    spec = s
+                    break
+            if spec and spec.get("similarity"):
+                from continuum.replay_similarity import similarity_backend
+                try:
+                    similarity_config = similarity_backend(spec["similarity"])
+                except ValueError:
+                    pass
+
+        claim_key = idempotency_key(
+            action_type,
+            arguments,
+            scope=run_id if scoped_to_run else None,
+            key=key,
         )
+        existing = ledger.get(claim_key)
+
+        if existing is None and similarity_config is not None and similarity_config.kind != "exact" and arguments is not None:
+            from continuum.replay_similarity import similarity
+            best_score = 0.0
+            best_action = None
+            best_key = None
+            for prior_key, prior_action in ledger.folded().items():
+                if prior_action.action_type != action_type:
+                    continue
+                prior_args = getattr(prior_action, "arguments", None) or {}
+                if not isinstance(prior_args, dict):
+                    continue
+                score = similarity(arguments, prior_args, similarity_config)
+                if score > best_score:
+                    best_score = score
+                    best_action = prior_action
+                    best_key = prior_key
+            
+            if best_action is not None and best_score >= similarity_config.replay_threshold:
+                existing = best_action
+                key = best_key.split(":")[-1] if ":" in str(best_key) else str(best_key)
+                claim_key = best_key
         settled = existing is not None and existing.status in (
             ActionStatus.COMPLETED,
             ActionStatus.UNKNOWN,
