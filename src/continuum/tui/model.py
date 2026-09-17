@@ -28,6 +28,7 @@ from continuum.events import EventType
 from continuum.models import Action, ActionStatus, Origin, RunStatus, StateStatus
 from continuum.recovery import RecoveryEngine
 from continuum.recovery.family import children_of, roll_up_children
+from continuum.runs import close_run
 from continuum.storage.base import Storage
 
 __all__ = [
@@ -395,21 +396,11 @@ def reconcile_action(storage: Storage, run_id: str, ledger_key: str, *, occurred
 def complete_run(storage: Storage, run_id: str) -> str:
     """`complete`: close the run from the keyboard, mirroring cmd_complete
     (REVIEW_CONFIRMED plus RUN_COMPLETED, both Origin.HUMAN, and the run row
-    flips so finished work stops surfacing as the active run)."""
+    flips so finished work stops surfacing as the active run). The shared tail
+    also clears the instant-resume file (issue #1153), so closing a run here
+    stops it hijacking the next session's resume the way the CLI always has."""
     run = storage.get_run(run_id)
     if run.status is RunStatus.COMPLETED:
         return f"run {run_id} is already completed"
-    storage.append_event(
-        run_id,
-        EventType.REVIEW_CONFIRMED,
-        {"components": ["goal", "progress"]},
-        source=Origin.HUMAN,
-    )
-    storage.append_event(
-        run_id,
-        EventType.RUN_COMPLETED,
-        {"closed_by": "tui"},
-        source=Origin.HUMAN,
-    )
-    storage.update_run(run.touch(status=RunStatus.COMPLETED))
+    close_run(storage, run_id, closed_by="tui")
     return f"run {run_id} completed"
