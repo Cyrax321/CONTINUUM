@@ -85,7 +85,7 @@
   <rect class="card"  x="268" y="330" width="156" height="120" rx="10"/>
   <text x="284" y="358" class="ttl" font-size="14">Event Log</text>
   <text x="284" y="380" class="sub" font-size="10">hash-chained</text>
-  <text x="284" y="398" class="sub" font-size="10">32 event types</text>
+  <text x="284" y="398" class="sub" font-size="10">51 event types</text>
   <text x="284" y="416" class="sub" font-size="10">+ perception events</text>
 
   <rect class="card"  x="456" y="330" width="156" height="120" rx="10"/>

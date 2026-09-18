@@ -36,7 +36,7 @@ e3.prev_hash = e2.hash       e3.hash = H(content(e3))
 
 Tamper detection built in. `EventLog.verify()` recomputes every digest and re-walks the chain, localizing damage.
 
-29 event types covering the full lifecycle: `RUN_STARTED`, `TOOL_CALLED`, `DECISION_CREATED`, `STATE_CHECKPOINTED`, `ENVIRONMENT_CHANGED`, `RECOVERY_STARTED`, `ACTION_RECONCILED`, and more.
+51 event types covering the full lifecycle: `RUN_STARTED`, `TOOL_CALLED`, `DECISION_CREATED`, `STATE_CHECKPOINTED`, `ENVIRONMENT_CHANGED`, `RECOVERY_STARTED`, `ACTION_RECONCILED`, and more.
 
 ### Semantic State Projection (Phase 2 - Complete)
 

@@ -69,7 +69,7 @@ Inside, a 3x3 grid of cards:
 
 Row 1:
 - Extractors  (subtitle: Deterministic, LLM optional)
-- Event Log   (subtitle: hash-chained, 29 event types)  <- HIGHLIGHT this card
+- Event Log   (subtitle: hash-chained, 51 event types)  <- HIGHLIGHT this card
   with an orange border; it is the source of truth
 - Action Ledger (subtitle: claim, perform, complete)
 
@@ -128,15 +128,21 @@ Do not draw arrows between every pair of cards; only the relationships above.
   SemanticPolicy, ContextPressurePolicy, HybridPolicy (Hybrid is the default).
 - The 3 reconcilers: ProbeReconciler, ManualReconciler, AssumeNotOccurredReconciler.
   There is no "AssumeOccurred".
-- The 29 event types (do not list them all on the diagram; this is just to
+- The 51 event types (do not list them all on the diagram; this is just to
   prevent invention): RUN_STARTED, RUN_COMPLETED, RUN_ABORTED, TASK_UPDATED,
-  TOOL_CALLED, TOOL_COMPLETED, TOOL_FAILED, DECISION_CREATED,
-  DECISION_INVALIDATED, EVIDENCE_ADDED, FINDING_ADDED, FINDING_INVALIDATED,
-  WORK_ADDED, WORK_COMPLETED, DEPENDENCY_DECLARED, APPROVAL_REQUESTED,
-  APPROVAL_GRANTED, APPROVAL_REVOKED, MODEL_CHANGED, MODEL_ASSUMPTION_RECORDED,
-  STATE_CHECKPOINTED, STATE_VALIDATED, ENVIRONMENT_CHANGED, RECOVERY_STARTED,
-  RECOVERY_COMPLETED, RECOVERY_BLOCKED, ACTION_RECORDED, ACTION_RECONCILED,
-  ACTION_COMPENSATED.
+  RUN_FORKED, RUN_RESTORED, RUN_MERGED, TOOL_CALLED, TOOL_COMPLETED,
+  TOOL_FAILED, DECISION_CREATED, DECISION_INVALIDATED, EVIDENCE_ADDED,
+  FINDING_ADDED, FINDING_INVALIDATED, WORK_ADDED, WORK_COMPLETED,
+  DEPENDENCY_DECLARED, CONSTRAINT_PINNED, CONSTRAINT_RETRACTED,
+  APPROVAL_REQUESTED, APPROVAL_GRANTED, APPROVAL_REVOKED, MODEL_CHANGED,
+  MODEL_ASSUMPTION_RECORDED, STATE_CHECKPOINTED, STATE_VALIDATED,
+  ENVIRONMENT_CHANGED, RECOVERY_STARTED, RECOVERY_COMPLETED, RECOVERY_BLOCKED,
+  REVIEW_CONFIRMED, REASONING_SUMMARY, EVENT_LOG_ANCHORED,
+  PERCEPTION_OBSERVED, BRANCH_RESOLVED, ACTION_RECORDED, ACTION_RECONCILED,
+  ACTION_COMPENSATED, GRANT_DENIED, LIVENESS_SILENCE_DETECTED,
+  LIVENESS_RECOVERED, RISK_OBSERVED, AUTHORITY_CONSUMED, AUTHORITY_RECONCILED,
+  ATTEMPT_LESSON, TRAJECTORY_REPORT, PLAN_UPSERT, MEMORY_TOMBSTONED,
+  NOTIFICATION_SENT, NOTIFICATION_FAILED.
 - The SemanticState fields (do not all need to appear; for correctness): goal,
   progress, plan, decisions, findings, evidence, pending_work, approvals,
   external_dependencies, model.
