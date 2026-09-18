@@ -587,13 +587,22 @@ def test_wrap_function_tool_invocation_binds_args_and_intercepts(
         seen_ctx.append(ctx)
         return {"endpoint": endpoint, "method": method}
 
+    payload = '{"endpoint": "https://x", "method": "POST"}'
+
     class FakeTC(ToolContext):
         def __init__(self) -> None:
-            self.tool_name = "api_call"
-            self.context = ContinuumContext(continuum_run_id=run_id, goal="g")
-            self.tool_input = {"continuum_run_id": run_id}
+            # Construct through the SDK's own __init__ rather than assigning
+            # fields after the fact: from openai-agents 0.22.3 the invocation
+            # path reads ctx._function_tool_arguments, which __init__ sets and
+            # bare assignment leaves missing.
+            super().__init__(
+                context=ContinuumContext(continuum_run_id=run_id, goal="g"),
+                tool_name="api_call",
+                tool_call_id="call_oa_37",
+                tool_arguments=payload,
+                tool_input={"continuum_run_id": run_id},
+            )
 
-    payload = '{"endpoint": "https://x", "method": "POST"}'
     first = asyncio.run(api_call.on_invoke_tool(FakeTC(), payload))
     second = asyncio.run(api_call.on_invoke_tool(FakeTC(), payload))
 
