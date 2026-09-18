@@ -16,6 +16,7 @@ import continuum.adapters.filesystem as adapters_filesystem
 import continuum.adapters.kubernetes as adapters_kubernetes
 import continuum.adapters.python_inproc as adapters_python_inproc
 import continuum.adapters.registry as adapters_registry
+import continuum.analysis as analysis
 import continuum.analysis.depends as analysis_depends
 import continuum.benchmark.baselines as benchmark_baselines
 import continuum.benchmark.controlled_failures as benchmark_controlled_failures
@@ -23,18 +24,23 @@ import continuum.benchmark.phase6.harness as phase6_harness
 import continuum.benchmark.phase6.metrics as phase6_metrics
 import continuum.benchmark.phase6.scenarios as phase6_scenarios
 import continuum.dashboard.app as dashboard_app
+import continuum.dashboard.hitl as dashboard_hitl
 import continuum.gate as gate
 import continuum.hooks as hooks
 import continuum.pinning as pinning
 import continuum.plugins.registry as plugins_registry
+import continuum.reconcilers as reconcilers
 import continuum.recovery.cleanup as recovery_cleanup
 import continuum.recovery.contract as recovery_contract
 import continuum.recovery.gate as recovery_gate
 import continuum.recovery.impact as recovery_impact
 import continuum.recovery.limits as recovery_limits
 import continuum.recovery.notify as recovery_notify
+import continuum.replayguard as replayguard
 import continuum.security.provenance as security_provenance
 import continuum.security.revalidation as security_revalidation
+import continuum.serve as serve
+import continuum.serve.server as serve_server
 import continuum.storage.postgres as storage_postgres
 import continuum.testing.fixtures as testing_fixtures
 
@@ -123,6 +129,10 @@ def test_all_symbols_exist_on_modules() -> None:
         recovery_impact,
         recovery_limits,
         recovery_notify,
+        replayguard,
+        dashboard_hitl,
+        reconcilers,
+        serve_server,
         security_provenance,
         security_revalidation,
         storage_postgres,
@@ -154,6 +164,7 @@ from continuum.adapters.filesystem import *
 from continuum.adapters.kubernetes import *
 from continuum.adapters.python_inproc import *
 from continuum.adapters.registry import *
+from continuum.analysis import *
 from continuum.analysis.depends import *
 from continuum.benchmark.baselines import *
 from continuum.benchmark.controlled_failures import *
@@ -161,14 +172,19 @@ from continuum.benchmark.phase6.harness import *
 from continuum.benchmark.phase6.metrics import *
 from continuum.benchmark.phase6.scenarios import *
 from continuum.dashboard.app import *
+from continuum.dashboard.hitl import *
 from continuum.hooks import *
 from continuum.plugins.registry import *
+from continuum.reconcilers import *
 from continuum.recovery.cleanup import *
 from continuum.recovery.impact import *
 from continuum.recovery.limits import *
 from continuum.recovery.notify import *
+from continuum.replayguard import *
 from continuum.security.provenance import *
 from continuum.security.revalidation import *
+from continuum.serve import *
+from continuum.serve.server import *
 from continuum.storage.postgres import *
 from continuum.testing.fixtures import *
 
@@ -182,6 +198,15 @@ assert callable(baseline_by_name)
 assert issubclass(RecoveryTimeoutError, Exception)
 assert callable(run_revalidation)
 assert callable(make_auto_checkpoint_hook)
+assert issubclass(ReplayBlocked, Exception)
+assert issubclass(HitlUnauthorized, Exception)
+assert isinstance(SettleReport, type)
+assert isinstance(SidecarHTTP, type)
+assert isinstance(SubprocessClient, type)
+assert isinstance(DependencyGraph, type)
+assert AGENT_SOURCE is not None
+assert MAX_SIDECAR_BODY_BYTES > 0
+assert SIDECAR_DRAIN_LIMIT_BYTES > 0
 """
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, (
@@ -212,3 +237,40 @@ def test_security_revalidation_exports_run_revalidation() -> None:
 def test_hooks_exports_make_auto_checkpoint_hook() -> None:
     assert "make_auto_checkpoint_hook" in hooks.__all__
     assert callable(hooks.make_auto_checkpoint_hook)
+
+
+def test_replayguard_exports_replay_blocked() -> None:
+    assert "ReplayBlocked" in replayguard.__all__
+    assert issubclass(replayguard.ReplayBlocked, RuntimeError)
+
+
+def test_dashboard_hitl_exports_hitl_unauthorized() -> None:
+    assert "HitlUnauthorized" in dashboard_hitl.__all__
+    assert issubclass(dashboard_hitl.HitlUnauthorized, Exception)
+
+
+def test_reconcilers_exports_settle_report() -> None:
+    assert "SettleReport" in reconcilers.__all__
+    assert isinstance(reconcilers.SettleReport, type)
+
+
+def test_serve_server_exports_sidecar_http_and_constants() -> None:
+    for name in (
+        "SidecarHTTP",
+        "AGENT_SOURCE",
+        "MAX_SIDECAR_BODY_BYTES",
+        "SIDECAR_DRAIN_LIMIT_BYTES",
+    ):
+        assert name in serve_server.__all__
+    assert isinstance(serve_server.SidecarHTTP, type)
+
+
+def test_serve_exports_subprocess_client() -> None:
+    assert "SubprocessClient" in serve.__all__
+    assert isinstance(serve.SubprocessClient, type)
+
+
+def test_analysis_exports_no_private_names() -> None:
+    assert "_normalize_dep" not in analysis.__all__
+    assert "_STDLIB" not in analysis.__all__
+    assert "DependencyGraph" in analysis.__all__
