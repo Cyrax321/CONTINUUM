@@ -53,6 +53,7 @@ __all__ = [
     "ReconcilerConfigError",
     "load_reconcilers",
     "probe_verdict",
+    "SettleReport",
     "settle_run",
     "probe_authority_verdict",
     "settle_authority",
