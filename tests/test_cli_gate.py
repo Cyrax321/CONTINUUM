@@ -388,7 +388,7 @@ def test_a_registry_error_names_an_absolute_path(
 def test_fuzzy_gate_wiring() -> None:
     # Test that gate.decide correctly parses similarity and delegates it
     from continuum.gate import decide
-    
+
     config = {
         "send_invoice": {
             "key_template": "{invoice_id}",
@@ -399,7 +399,7 @@ def test_fuzzy_gate_wiring() -> None:
             }
         }
     }
-    
+
     # We can test that deciding with no actions returns DENY_UNCLAIMED
     # Wait, we just want to ensure it doesn't crash on parsing the similarity dict
     decision = decide(
@@ -412,4 +412,3 @@ def test_fuzzy_gate_wiring() -> None:
     # Without any prior claims, it should be DENY_UNCLAIMED
     assert decision.allow is False
     assert "has no ledger claim" in decision.reason
-

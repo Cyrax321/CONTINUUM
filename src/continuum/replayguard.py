@@ -98,7 +98,7 @@ def evaluate(
 
     key = str(idempotency_key(action_type, None, scope=run_id, key=rendered_key))
     action = actions_by_key.get(key)
-    
+
     if action is None or action.action_type != action_type:
         if similarity_config.kind != SimilarityKind.EXACT and tool_input is not None:
             best_score = 0.0
@@ -115,7 +115,7 @@ def evaluate(
                     best_score = score
                     best_action = prior_action
                     best_key = prior_key
-                    
+
             if best_action is not None and best_score >= similarity_config.replay_threshold:
                 if best_action.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
                     return GuardDecision(

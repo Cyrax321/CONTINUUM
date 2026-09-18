@@ -172,10 +172,10 @@ def similarity_backend(name_or_config: str | dict[str, Any] | SimilarityConfig) 
     """Build a SimilarityConfig from a registry entry name or explicit config."""
     if isinstance(name_or_config, SimilarityConfig):
         return name_or_config
-    
+
     if not isinstance(name_or_config, (dict, str)):
         raise ValueError(f"invalid similarity config type: {type(name_or_config).__name__}")
-        
+
     if isinstance(name_or_config, dict):
         kind_str = name_or_config.get("kind", "exact")
         kind_map: dict[str, SimilarityKind] = {
@@ -186,18 +186,18 @@ def similarity_backend(name_or_config: str | dict[str, Any] | SimilarityConfig) 
         kind = kind_map.get(kind_str)
         if kind is None:
             raise ValueError(f"unknown similarity backend {kind_str!r}")
-        
+
         kwargs = {"kind": kind}
         if "replay_threshold" in name_or_config:
             kwargs["replay_threshold"] = float(name_or_config["replay_threshold"])
         if "fork_threshold" in name_or_config:
             kwargs["fork_threshold"] = float(name_or_config["fork_threshold"])
-            
+
         if kind == SimilarityKind.EMBEDDING:
             if "embedder" not in name_or_config or name_or_config["embedder"] is None:
                 raise ValueError("embedding backend requires an embedder function instance")
             kwargs["embedder"] = name_or_config["embedder"]
-            
+
         return SimilarityConfig(**kwargs)
 
     kind_map: dict[str, SimilarityKind] = {

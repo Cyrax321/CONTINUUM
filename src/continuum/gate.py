@@ -304,7 +304,7 @@ def decide(
         return Decision(True, "tool is not gated")
 
     action_type = spec.get("action_type") or tool_name
-    
+
     similarity_spec = spec.get("similarity")
     similarity_config = None
     if similarity_spec is not None:

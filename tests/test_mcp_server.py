@@ -2584,12 +2584,15 @@ async def test_fuzzy_similarity_deduplicates_paraphrased_action(
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".continuum").mkdir()
     gate_json = {
-        "send_payment": {
-            "action_type": "pay",
-            "similarity": {
-                "kind": "fuzzy",
-                "replay_threshold": 0.2,
-            },
+        "tools": {
+            "send_payment": {
+                "key_template": "pay:{intent}",
+                "action_type": "pay",
+                "similarity": {
+                    "kind": "fuzzy",
+                    "replay_threshold": 0.2,
+                },
+            }
         }
     }
     (tmp_path / ".continuum" / "gate.json").write_text(json.dumps(gate_json))
@@ -2625,4 +2628,3 @@ async def test_fuzzy_similarity_deduplicates_paraphrased_action(
     assert second["external_id"] == "tx_123"
     assert second["previous_result"] == {"receipt": "rcpt_abc"}
     assert "do not repeat" in second["guidance"].lower()
-

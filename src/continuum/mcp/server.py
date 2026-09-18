@@ -1270,12 +1270,16 @@ def build_server(
         # an exhausted budget suppress the dedup and reconciliation paths a
         # recovering agent depends on, turning a safety limit into the cause of
         # a duplicate side effect (issue #309).
-        from continuum.gate import DEFAULT_GATE_CONFIG_PATH, load_gate_config
-        
+        from continuum.gate import DEFAULT_GATE_CONFIG_PATH, GateConfigError, load_gate_config
+
         if not hasattr(ctx, "_gate_cache"):
             ctx._gate_cache = {}
         if run_id not in ctx._gate_cache:
-            ctx._gate_cache[run_id] = load_gate_config(_Path(DEFAULT_GATE_CONFIG_PATH))
+            try:
+                ctx._gate_cache[run_id] = load_gate_config(_Path(DEFAULT_GATE_CONFIG_PATH))
+            except GateConfigError as exc:
+                from mcp.server.mcpserver.exceptions import ToolError
+                raise ToolError(f"invalid gate configuration: {exc}") from exc
         gate_config = ctx._gate_cache[run_id]
         similarity_config = None
         if gate_config:
@@ -1290,7 +1294,7 @@ def build_server(
                     similarity_config = similarity_backend(spec["similarity"])
                 except (ValueError, TypeError) as exc:
                     from mcp.server.mcpserver.exceptions import ToolError
-                    raise ToolError(f"invalid gate configuration: {exc}")
+                    raise ToolError(f"invalid gate configuration: {exc}") from exc
 
         claim_key = idempotency_key(
             action_type,
@@ -1322,7 +1326,7 @@ def build_server(
                     best_score = score
                     best_action = prior_action
                     best_key = prior_key
-            
+
             if best_action is not None and best_score >= similarity_config.replay_threshold:
                 if best_action.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
                     return _json(

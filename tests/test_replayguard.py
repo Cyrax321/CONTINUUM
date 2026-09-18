@@ -331,10 +331,10 @@ def run(*argv: str) -> tuple[int, str, str]:
 
 def test_evaluate_with_fuzzy_similarity(db: str) -> None:
     from continuum.replay_similarity import SimilarityConfig, SimilarityKind
-    
+
     # Prior action: "pay invoice INV-001"
     # New action: "settle outstanding amount for INV-001"
-    
+
     # 1. Seed the old action as COMPLETED
     from continuum.actions.idempotency import idempotency_key
     key_prior = idempotency_key("pay", None, scope="run_1", key="pay_1")
@@ -365,7 +365,7 @@ def test_evaluate_with_fuzzy_similarity(db: str) -> None:
         tool_input={"intent": "settle outstanding amount for INV-001"},
     )
     assert v_exact.kind is GuardKind.DENY_UNCLAIMED
-    
+
     # Test fuzzy matching succeeds and classifies as SKIP_DUPLICATE
     config = SimilarityConfig(kind=SimilarityKind.FUZZY, replay_threshold=0.2)
     v_fuzzy = evaluate(
@@ -377,7 +377,7 @@ def test_evaluate_with_fuzzy_similarity(db: str) -> None:
         similarity_config=config,
     )
     assert v_fuzzy.kind is GuardKind.SKIP_DUPLICATE
-    
+
     # Test divergent call falls through to DENY_UNCLAIMED
     v_divergent = evaluate(
         action_type="pay",
