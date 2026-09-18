@@ -125,7 +125,12 @@ def test_existing_serialized_contract_still_deserializes() -> None:
 
 
 def test_legacy_sealed_contract_verifies() -> None:
-    """A contract sealed before evidence/reason existed must still verify."""
+    """A contract sealed before evidence/reason existed must still verify.
+
+    Such a contract also predates ``contract_version`` (#764), so the legacy
+    digest excludes it too: the version selects the digest rules, it is not
+    one of the covered terms.
+    """
     contract = RecoveryContract(
         run_id="r",
         checkpoint_version=2,
@@ -137,7 +142,14 @@ def test_legacy_sealed_contract_verifies() -> None:
     )
     legacy_hash = stable_hash(
         contract.model_dump(
-            mode="json", exclude={"integrity_hash", "created_at", "evidence", "reason"}
+            mode="json",
+            exclude={
+                "integrity_hash",
+                "created_at",
+                "contract_version",
+                "evidence",
+                "reason",
+            },
         )
     )
     legacy = contract.model_copy(update={"integrity_hash": legacy_hash})

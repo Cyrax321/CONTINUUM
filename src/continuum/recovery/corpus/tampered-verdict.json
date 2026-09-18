@@ -1,0 +1,37 @@
+{
+  "category": "tampering",
+  "contract": {
+    "checkpoint_version": 3,
+    "contract_version": 1,
+    "created_at": "2026-09-18T05:28:51.312712Z",
+    "evidence": [
+      "external_dependency:dataset: version drift v3 -> v4"
+    ],
+    "integrity_hash": "239091cc4be4b40c067cba8cb60900cca5fec127deebfc80c37f192ab8c54eba",
+    "invalidated": [
+      "external_dependency:dataset (CONFLICTED)"
+    ],
+    "liveness": null,
+    "next_allowed_action": "revalidate_dependency:dataset",
+    "post_checkpoint_observations": [],
+    "reason": "dataset changed after the last checkpoint; repair before resume",
+    "recovery_status": "safe_to_resume",
+    "required_actions": [
+      "revalidate_dependency:dataset"
+    ],
+    "run_id": "run_compat_1",
+    "triggering_risks": [],
+    "verified": [
+      "goal",
+      "plan:step-2"
+    ]
+  },
+  "contract_version": 1,
+  "digest_input": "{\"checkpoint_version\":3,\"evidence\":[\"external_dependency:dataset: version drift v3 -> v4\"],\"invalidated\":[\"external_dependency:dataset (CONFLICTED)\"],\"liveness\":null,\"next_allowed_action\":\"revalidate_dependency:dataset\",\"post_checkpoint_observations\":[],\"reason\":\"dataset changed after the last checkpoint; repair before resume\",\"recovery_status\":\"safe_to_resume\",\"required_actions\":[\"revalidate_dependency:dataset\"],\"run_id\":\"run_compat_1\",\"triggering_risks\":[],\"verified\":[\"goal\",\"plan:step-2\"]}",
+  "expected": {
+    "reason": "the recomputed digest disagrees with the stored hash",
+    "verified": false
+  },
+  "name": "tampered-verdict",
+  "note": "The recovery verdict was flipped to safe_to_resume after sealing. This is exactly the forgery the integrity hash exists to catch."
+}

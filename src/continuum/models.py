@@ -27,8 +27,18 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from continuum.security.hashing import make_id, stable_hash
 
+#: The recovery-contract compatibility version this build speaks (issue #764).
+#:
+#: It names the field set a sealed contract's integrity hash covers, and it is
+#: carried on every contract so a verifier can pick the right digest input
+#: without guessing. See ``continuum.recovery.contract`` for the version table
+#: and the forward/backward compatibility rules. Bump it only when a field
+#: changes whether it is hash-covered, never for a content change.
+CONTRACT_VERSION = 1
+
 __all__ = [
     "RunStatus",
+    "CONTRACT_VERSION",
     "StateStatus",
     "ActionStatus",
     "RecoveryMode",
@@ -1125,6 +1135,14 @@ class RecoveryContract(BaseModel):
 
     run_id: str
     checkpoint_version: int = 0
+    #: The compatibility version whose digest rules this contract was sealed
+    #: under (issue #764). ``build_contract`` always writes the current one.
+    #: An absent key on the wire means the payload predates versioning, so the
+    #: field defaults to 0 and verifies against the pre-Phase-1 digest rules
+    #: rather than being read as a claim about the current field set.
+    #: Excluded from the hash payload: it selects the payload, it is not part
+    #: of it.
+    contract_version: int = Field(default=0)
     recovery_status: RecoverySafety
     verified: list[str] = Field(default_factory=list)
     invalidated: list[str] = Field(default_factory=list)
