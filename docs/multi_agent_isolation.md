@@ -68,7 +68,7 @@ ownership model for the state itself.
 
 - **Key shape and scoping.** Tenant isolation applies to memory-store routes
   matching the `is_memory_key` predicate (`mem:` prefix, defined in
-  `src/continuum/gate.py:67`). Memory keys follow the canonical template
+  `src/continuum/gate.py:66`). Memory keys follow the canonical template
   `mem:{store_id}:{tenant}:{record_key}`, where the tenant segment is the third
   colon-delimited segment (`parts[2]`).
 

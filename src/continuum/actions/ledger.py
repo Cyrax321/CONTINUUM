@@ -106,7 +106,6 @@ __all__ = [
     "ActionLedger",
     "ActionOutcome",
     "LedgerError",
-    "DuplicateAction",
     "ClaimLockError",
     "fold_action_events",
     "forensic_join_across_runs",
@@ -246,10 +245,6 @@ def _normalize_consumed_inputs(
 
 class LedgerError(RuntimeError):
     """The ledger was used in a way that cannot be made safe."""
-
-
-class DuplicateAction(LedgerError):
-    """A second attempt was made while the first is still in flight."""
 
 
 class ClaimLockError(LedgerError):

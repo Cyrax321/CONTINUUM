@@ -596,6 +596,14 @@ class PostgresStorage(Storage):
         reached the archive, so verify would trust a genesis that was never
         earned. The connection runs in autocommit mode, so the explicit
         ``transaction()`` block is what makes the three writes atomic.
+
+        ``through_sequence`` must stay below the anchor marker's sequence:
+        the live log always retains its anchor, so a value at or above it is
+        rejected (issue #705) instead of silently deleting the anchor and
+        every live row, which would leave the next append minting a fresh
+        genesis and fork the hash chain away from the archive. The check is
+        shared with the SQLite backend so the two cannot drift apart again
+        (issue #1078).
         """
         from continuum.checkpoint.manager import CheckpointManager
 
@@ -611,6 +619,13 @@ class PostgresStorage(Storage):
         storage_version = lv
         if storage_version is None:
             raise ValueError(f"run {run_id!r} could not be anchored: no projectable state")
+        # The anchor marker is appended at the head of the log in the
+        # transaction below, so its sequence is the current head + 1. Without
+        # this bound the DELETE below would take the marker and every live
+        # row after it, and the next append would mint a fresh genesis that
+        # forks the live chain from the archive.
+        anchor_sequence = self.last_sequence(run_id) + 1
+        self._validate_compaction_bound(through_sequence, anchor_sequence)
         through = (
             through_sequence
             if through_sequence is not None
