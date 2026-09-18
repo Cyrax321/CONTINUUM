@@ -158,6 +158,13 @@ class Component(StrEnum):
     APPROVAL = "approval"
     ENVIRONMENT = "environment"
     PIN = "pin"
+    VALIDATION_RULE = "validation_rule"
+    """A finding reported by a registered domain rule, not a state component.
+
+    Used when a rule fails closed (issue #761): the entry then names the rule
+    itself, because that is what needs attention. Well-behaved rules report
+    against the component they examined and never use this value.
+    """
 
 
 class DiffKind(StrEnum):
@@ -1095,6 +1102,11 @@ class ComponentValidationEntry(BaseModel):
     component_id: str | None = None
     status: StateStatus
     detail: str = ""
+    #: Identifier of the registered rule that produced this entry, or None
+    #: when built-in validation produced it (issue #761). Findings a rule
+    #: reports are namespaced by this identifier in the contract and every
+    #: diagnostic surface, and are covered by the contract's integrity seal.
+    rule: str | None = None
 
 
 class StateValidationResult(BaseModel):

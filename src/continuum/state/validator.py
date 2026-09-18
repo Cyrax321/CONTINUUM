@@ -23,7 +23,7 @@ abort) is the recovery engine's job in Phase 7.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC
 from typing import Any
@@ -50,6 +50,7 @@ __all__ = [
     "validate_state",
     "AdmissibilityResult",
     "check_admissibility",
+    "blocking_reason",
 ]
 
 
@@ -71,6 +72,34 @@ _UNUSABLE = frozenset(
         StateStatus.REQUIRES_REVIEW,
     }
 )
+
+
+def _is_blocking(status: StateStatus, *, strict_unknown: bool) -> bool:
+    """Whether a component with this status withholds a clean resume.
+
+    Every status other than VALID withholds one; ``strict_unknown`` is the one
+    opt-out, and it applies only to UNKNOWN, the status that means "cannot
+    tell" rather than "wrong". Equivalent to membership in ``_UNUSABLE``, kept
+    as a predicate so the rule-merge path (#761) reports blocking components
+    in exactly this layer's words instead of re-deriving the set.
+    """
+    if status is StateStatus.VALID:
+        return False
+    return strict_unknown or status is not StateStatus.UNKNOWN
+
+
+def blocking_reason(blocking: Sequence[ComponentValidationEntry]) -> str:
+    """The report sentence for ``blocking``, the entries that withhold resume.
+
+    Shared by the validator and the rule merge so a rule-driven downgrade is
+    described in the same voice as a built-in one (issue #761).
+    """
+    if not blocking:
+        return "all components verified against the current environment"
+    return "; ".join(
+        f"{e.component.value}{f' {e.component_id}' if e.component_id else ''} is {e.status}"
+        for e in blocking[:5]
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,7 +240,10 @@ class ValidationOutcome:
             label = entry.component.value.replace("_", " ")
             identifier = f" {entry.component_id}" if entry.component_id else ""
             detail = f" - {entry.detail}" if entry.detail else ""
-            lines.append(f"{mark} {label}{identifier}: {entry.status}{detail}")
+            # A rule's finding is namespaced by its identifier (#761) so the
+            # two kinds of finding stay distinguishable in text.
+            rule = f" [rule:{entry.rule}]" if entry.rule else ""
+            lines.append(f"{mark} {label}{identifier}: {entry.status}{detail}{rule}")
         lines.append("")
         lines.append(f"Safe to resume: {'yes' if self.safe else 'no'}")
         if self.report.reason:
@@ -314,20 +346,10 @@ class StateValidator:
             self._check_derived(state, entries)
 
         blocking = [
-            e
-            for e in entries
-            if e.status in _UNUSABLE
-            and (self.strict_unknown or e.status is not StateStatus.UNKNOWN)
+            e for e in entries if _is_blocking(e.status, strict_unknown=self.strict_unknown)
         ]
         safe = not blocking
-        reason = (
-            "all components verified against the current environment"
-            if safe
-            else "; ".join(
-                f"{e.component.value}{f' {e.component_id}' if e.component_id else ''} is {e.status}"
-                for e in blocking[:5]
-            )
-        )
+        reason = blocking_reason(blocking)
 
         report = StateValidationResult(
             run_id=state.run_id,

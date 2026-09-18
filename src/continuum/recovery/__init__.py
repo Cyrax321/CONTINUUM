@@ -37,6 +37,13 @@ from continuum.recovery.preconditions import (
     derive,
 )
 from continuum.recovery.restore import RestorePreconditionError, approve_restore
+from continuum.recovery.rules import (
+    STATUS_CAUTION,
+    active_rules,
+    apply_rule_findings,
+    merge_validation_entries,
+    run_validation_rules,
+)
 
 __all__ = [
     "RecoveryTimeoutError",
@@ -77,4 +84,9 @@ __all__ = [
     "render_contract",
     "seal_contract",
     "verify_contract",
+    "STATUS_CAUTION",
+    "active_rules",
+    "apply_rule_findings",
+    "merge_validation_entries",
+    "run_validation_rules",
 ]
