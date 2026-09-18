@@ -8,6 +8,24 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The `__all__` guard now walks the installed package instead of five
+  hand-listed modules (#1228).** `tests/test_module_all_exports.py` asserted
+  that names in `__all__` resolve by importing five modules by name, so a
+  rename that forgot `__all__` stayed green on the other 117 modules that
+  declare one. `test_all_symbols_exist_on_modules` now enumerates the package
+  with `pkgutil.walk_packages` and checks every module it finds (122 today,
+  against a floor of 90 so a walk that silently shrank to nothing fails
+  instead of passing vacuously), and `test_star_import_execution` covers the
+  same set, catching a module whose import has a side effect or a name that
+  shadows an earlier one. A second check, `__all__` equals the public names a
+  leaf module defines itself, is added per-module on a curated list: it
+  cannot hold package-wide, because aggregator modules (`continuum.actions`
+  re-exports all 15 of its entries from submodules) legitimately list names
+  they do not define and some modules hold a public name back on purpose
+  (`continuum.budgets` keeps `FALLBACK_MAX_ATTEMPTS` private to its own
+  defaulting). Both are per-module policy, so only modules that define their
+  whole surface are pinned.
+
 - **The TUI `tree` view fetches the run once instead of twice (#1157).**
   `family_lines` in `src/continuum/tui/model.py` called
   `storage.get_run(run_id)` twice and discarded the first result: the first
