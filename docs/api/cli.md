@@ -51,6 +51,8 @@ continuum --json <command>                    # machine-readable output
 | `attest-keygen` | Generate an Ed25519 signer key pair (PEM files). |
 | `attest <run_id>` | Sign a run's event chain into an attestation document. |
 | `attest-verify <run_id> --attest <file>` | Verify a signed attestation against the live chain. |
+| `lineage-issue <run_id> --key <file> --purpose <text>` | Issue a portable lineage token delegating a run's provenance. Read-only. |
+| `lineage-verify [<run_id>] --token <file>` | Verify a lineage token; exits 0 only when VALID. Read-only. |
 | `serve` | Run the Tier 0 newline-delimited JSON sidecar (no MCP dependency). |
 | `dashboard` | Serve the dashboard (presentation over run data). Listens on port 8000 by default (`--port`). |
 | `tui [--refresh <seconds>]` | Full-screen terminal dashboard: monitor and control runs, read-only until an action is confirmed (`q` quits). |
