@@ -42,7 +42,18 @@ from continuum.clienthooks import (
     remove_claude_code_hook,
     remove_client_hook,
 )
-from continuum.environment import StaticProvider, capture
+from continuum.environment import (
+    BUILTIN_PROVIDER_NAMES,
+    UNKNOWN_VERSION,
+    ProviderConfig,
+    ProviderSpec,
+    StaticProvider,
+    capture,
+    config_from_events,
+    parse_params,
+    record_provider_config,
+    resolve_and_capture,
+)
 from continuum.events import EventType
 from continuum.gate import (
     DEFAULT_GATE_CONFIG_PATH,
@@ -750,6 +761,259 @@ def _page_bounds(
     start = min(offset, total)
     end = total if limit is None else min(total, start + limit)
     return start, end, total - (end - start)
+
+
+def _cli_provenance() -> str:
+    """Who recorded a configuration from the CLI, for the audit trail.
+
+    The event already carries its Origin and sequence; this is the short human
+    answer to "who turned this on", which is what an operator reads first when
+    a provider starts failing closed.
+    """
+    import getpass
+
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = "unknown"
+    return f"cli:{user}"
+
+
+def cmd_providers(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Configure the environment providers a run trusts at resume time.
+
+    The configuration lives in the event log, so it is append-only, hashed and
+    auditable: every invocation records the whole set, and the newest record is
+    authoritative. ``list`` and ``check`` are read-only; ``check`` resolves the
+    providers exactly as resume would and reports what each one said, so an
+    operator can see a failing observer before it gates a recovery.
+    """
+    action = args.providers_command
+    try:
+        storage.get_run(args.run_id)
+    except RunNotFound:
+        print(f"error: run {args.run_id!r} does not exist", file=err)
+        return ExitCode.NOT_FOUND
+
+    if action == "list":
+        return _providers_list(args, storage, out)
+    if action == "check":
+        return _providers_check(args, storage, out, err)
+    if action == "add":
+        return _providers_add(args, storage, out, err)
+    if action == "remove":
+        return _providers_remove(args, storage, out, err)
+    print(f"error: unknown providers action {action!r}", file=err)
+    return ExitCode.ERROR
+
+
+def _providers_config(storage: Storage, run_id: str) -> ProviderConfig:
+    """The run's current configuration, empty when it has never configured one."""
+    return config_from_events(storage.read_all_events(run_id)) or ProviderConfig()
+
+
+def _providers_list(args: argparse.Namespace, storage: Storage, out: Any) -> int:
+    config = _providers_config(storage, args.run_id)
+    specs: list[dict[str, Any]] = [
+        {
+            "provider": spec.provider,
+            "resources": sorted(spec.declared_resources()),
+            "enabled": spec.enabled,
+            "params": dict(spec.params),
+            "provenance": spec.provenance,
+        }
+        for spec in config.specs
+    ]
+    conflicts = {
+        key: sorted(s.provider for s in specs_) for key, specs_ in config.conflicts().items()
+    }
+    text = (
+        f"{len(specs)} provider(s) configured for run {args.run_id}"
+        if specs
+        else f"No providers configured for run {args.run_id}"
+    )
+    if not specs:
+        text += (
+            "; resume validates only what a caller supplies, and a run with no "
+            "configuration behaves exactly as it does without this command"
+        )
+    if conflicts:
+        text += f" ({len(conflicts)} resource key(s) claimed by more than one provider)"
+    _emit(
+        {
+            "run_id": args.run_id,
+            "schema_version": config.schema_version,
+            "providers": specs,
+            "conflicts": conflicts,
+            "builtins": sorted(BUILTIN_PROVIDER_NAMES),
+        },
+        text,
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    if args.json:
+        # JSON stays parseable: the detail lines below are prose for a human.
+        return ExitCode.OK
+    for spec in specs:
+        state = "enabled" if spec["enabled"] else "disabled"
+        keys = ", ".join(spec["resources"]) or "(derives none)"
+        print(f"  {spec['provider']} [{state}]: {keys}", file=out)
+    for key, names in sorted(conflicts.items()):
+        print(
+            f"  warning: {key} is claimed by {', '.join(names)}; both fail closed "
+            "at resume rather than one silently winning",
+            file=out,
+        )
+    return ExitCode.OK
+
+
+def _providers_check(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Resolve and capture with the configured providers, as resume would."""
+    config = _providers_config(storage, args.run_id)
+    if not config.specs:
+        _emit(
+            {"run_id": args.run_id, "providers": [], "resources": {}, "diagnostics": []},
+            f"No providers configured for run {args.run_id}; nothing to check.",
+            as_json=args.json,
+            stream=out,
+            palette=getattr(args, "_palette", None),
+        )
+        return ExitCode.OK
+    result = resolve_and_capture(args.run_id, config)
+    resources = {
+        key: {
+            "version": resource.version,
+            "kind": resource.kind,
+            "provider": resource.metadata.get("provider"),
+            "unknown": resource.version is None or resource.version == UNKNOWN_VERSION,
+        }
+        for key, resource in sorted(result.snapshot.resources.items())
+    }
+    diagnostics = [
+        {
+            "provider": d.provider,
+            "status": d.status.value,
+            "resources": sorted(d.resources),
+            "detail": d.detail,
+        }
+        for d in result.diagnostics
+    ]
+    text = f"Captured {len(resources)} resource(s) from {len(config.specs)} provider(s)."
+    if result.fail_closed:
+        failed = [d for d in result.diagnostics if d.status.blocking]
+        text = (
+            f"{len(failed)} provider(s) could not report their resources; those "
+            "resources are unknown, not assumed unchanged."
+        )
+    _emit(
+        {
+            "run_id": args.run_id,
+            "providers": [s.provider for s in config.specs],
+            "resources": resources,
+            "diagnostics": diagnostics,
+            "fail_closed": result.fail_closed,
+        },
+        text,
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    if not args.json:
+        for d in diagnostics:
+            print(f"  {d['provider']} [{d['status']}]: {d['detail']}", file=out)
+    return ExitCode.OK
+
+
+def _providers_add(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    resources = list(getattr(args, "resource", None) or [])
+    params = parse_params(getattr(args, "param", None) or [])
+    provider = args.provider
+    if provider not in BUILTIN_PROVIDER_NAMES and not resources:
+        # A built-in can derive its scope from its parameters; anything else is
+        # a registered name the resolver looks up, and only the caller knows
+        # what it owns, so its scope must be declared explicitly.
+        print(
+            f"error: --resource is required for {provider!r}, which is not a "
+            f"built-in ({', '.join(sorted(BUILTIN_PROVIDER_NAMES))})",
+            file=err,
+        )
+        return ExitCode.ERROR
+    if provider == "file" and "paths" not in params and resources:
+        # The file provider's resources are its paths; declaring them twice
+        # would be noise, so the resource keys stand in for the parameter.
+        params["paths"] = resources
+    try:
+        spec = ProviderSpec(
+            provider=provider,
+            resources=frozenset(resources),
+            params=params,
+            enabled=not bool(getattr(args, "disable", False)),
+            provenance=f"continuum providers add ({_cli_provenance()})",
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=err)
+        return ExitCode.ERROR
+
+    config = _providers_config(storage, args.run_id)
+    if any(s.provider == spec.provider and s.resources == spec.resources for s in config.specs):
+        print(
+            f"error: provider {spec.provider!r} already declares those resources",
+            file=err,
+        )
+        return ExitCode.ERROR
+    updated = ProviderConfig(specs=(*config.specs, spec))
+    record_provider_config(storage, args.run_id, updated, provenance=spec.provenance)
+    keys = ", ".join(sorted(spec.declared_resources())) or "(derives scope)"
+    _emit(
+        {
+            "run_id": args.run_id,
+            "provider": spec.provider,
+            "resources": sorted(spec.declared_resources()),
+            "enabled": spec.enabled,
+            "providers": [s.provider for s in updated.specs],
+        },
+        f"Configured {spec.provider} for run {args.run_id}: {keys}",
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK
+
+
+def _providers_remove(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    config = _providers_config(storage, args.run_id)
+    name = args.provider
+    if getattr(args, "all", False):
+        removed = config.specs
+        kept: tuple[ProviderSpec, ...] = ()
+    else:
+        if not name:
+            print("error: pass --provider or --all", file=err)
+            return ExitCode.ERROR
+        removed = tuple(s for s in config.specs if s.provider == name)
+        kept = tuple(s for s in config.specs if s.provider != name)
+    if not removed:
+        print(f"error: no configured provider named {name!r}", file=err)
+        return ExitCode.NOT_FOUND
+    record_provider_config(
+        storage,
+        args.run_id,
+        ProviderConfig(specs=kept),
+        provenance=f"continuum providers remove ({_cli_provenance()})",
+    )
+    _emit(
+        {
+            "run_id": args.run_id,
+            "removed": [s.provider for s in removed],
+            "providers": [s.provider for s in kept],
+        },
+        f"Removed {len(removed)} provider record(s); {len(kept)} remain.",
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK
 
 
 def cmd_provenance(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
@@ -3828,6 +4092,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     # health is advisory only; it never gates, never moves mode, never changes exit code
     # (issue #401). It reports trust_score with per-dimension breakdown.
+
+    providers = add(
+        "providers",
+        cmd_providers,
+        "Configure the environment providers a run trusts at resume. Mutates storage.",
+    )
+    providers.add_argument(
+        "providers_command",
+        choices=["add", "remove", "list", "check"],
+        metavar="ACTION",
+        help="add, remove, list or check configured providers.",
+    )
+    providers.add_argument("run_id", help="the run to configure.")
+    providers.add_argument(
+        "--provider",
+        help="provider name: a built-in "
+        f"({', '.join(sorted(BUILTIN_PROVIDER_NAMES))}) or one registered in-process.",
+    )
+    providers.add_argument(
+        "--resource",
+        action="append",
+        metavar="KEY",
+        help="a resource key this provider owns (repeatable); required for a "
+        "registered provider, derived for a built-in when omitted.",
+    )
+    providers.add_argument(
+        "--param",
+        action="append",
+        metavar="KEY=VALUE",
+        help="a provider parameter, JSON where it parses else text (repeatable); "
+        "a file provider takes paths and max_bytes, a git provider takes path.",
+    )
+    providers.add_argument(
+        "--disable",
+        action="store_true",
+        help="record the provider disabled: its resources report unknown at "
+        "resume rather than being assumed unchanged.",
+    )
+    providers.add_argument("--all", action="store_true", help="with remove: clear every provider.")
 
     resume = with_env(add("resume", cmd_resume, "Decide how a run may resume."))
     resume.add_argument(

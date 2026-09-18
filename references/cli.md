@@ -37,6 +37,10 @@ continuum briefing                               # session-start context injecti
 continuum gateway --port 8765                    # enforcing proxy for registered upstreams. mutates
 continuum hooks install <client> [--with-gate]   # wire a coding CLI (claude-code, gemini, codex)
 continuum health <run_id>                        # advisory prefix-trust health check
+continuum providers list <run_id>                # configured resume-time observers
+continuum providers check <run_id>               # resolve them as resume would [--json]
+continuum providers add <run_id> --provider <n>  # trust an observer at resume. mutates
+continuum providers remove <run_id> [--all]      # retract configured observers. mutates
 continuum impact <run_id> --evidence <id>        # downstream impact of an evidence item
 continuum provenance <run_id>                    # show provenance DAG
 continuum record-plan <run_id> --plan-id <id>    # record structured plan upsert. mutates

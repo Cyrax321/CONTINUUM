@@ -283,9 +283,19 @@ class StateValidator:
         # Only this frame knows which it was, so the distinction is passed down.
         observed = current_environment is not None
 
+        # Which observer supplied each resource's evidence (issue #762), so a
+        # validation entry names the provider that vouched for it. Resources a
+        # provider could not report carry their status in metadata instead.
+        provider_of: dict[str, str] = {}
+        if current_environment is not None:
+            for key, resource in current_environment.resources.items():
+                name = resource.metadata.get("provider")
+                if isinstance(name, str) and name:
+                    provider_of[key] = name
+
         if scope is None:
             state = self._apply_dependency_status(
-                state, environment_diff, entries, observed=observed
+                state, environment_diff, entries, observed=observed, provider_of=provider_of
             )
             state = self._propagate(state, broken, entries)
             if events is not None:
@@ -306,7 +316,12 @@ class StateValidator:
             scope_set = set(scope)
             broken = {r: c for r, c in broken.items() if r in scope_set}
             state = self._apply_dependency_status(
-                state, environment_diff, entries, scope=scope_set, observed=observed
+                state,
+                environment_diff,
+                entries,
+                scope=scope_set,
+                observed=observed,
+                provider_of=provider_of,
             )
             state = self._propagate(state, broken, entries)
             if events is not None:
@@ -352,6 +367,7 @@ class StateValidator:
         entries: list[ComponentValidationEntry],
         scope: set[str] | None = None,
         observed: bool = True,
+        provider_of: Mapping[str, str] | None = None,
     ) -> SemanticState:
         if not state.external_dependencies:
             return state
@@ -405,11 +421,30 @@ class StateValidator:
                     component=Component.EXTERNAL_DEPENDENCY,
                     component_id=dependency.resource,
                     status=status,
-                    detail=detail,
+                    detail=self._label_provenance(detail, dependency.resource, provider_of),
                 )
             )
 
         return state.model_copy(update={"external_dependencies": updated})
+
+    @staticmethod
+    def _label_provenance(
+        detail: str,
+        resource: str,
+        provider_of: Mapping[str, str] | None,
+    ) -> str:
+        """Name the observer behind one resource's evidence (issue #762).
+
+        A validation entry that says "verified unchanged" is answerable only if
+        it also says who vouched for it, so a reader can tell a configured
+        provider's observation from a caller's assertion.
+        """
+        if not provider_of:
+            return detail
+        provider = provider_of.get(resource)
+        if not provider:
+            return detail
+        return f"{detail} (provider: {provider})"
 
     # -- propagation ------------------------------------------------------ #
 

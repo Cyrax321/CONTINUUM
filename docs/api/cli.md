@@ -66,6 +66,7 @@ continuum --json <command>                    # machine-readable output
 | `rewind` | Rewind workspace and projection to a checkpoint. |
 | `watch` | Watch a run for liveness breach, optionally notify via webhook. See [liveness watch](../guides/liveness-watch.md). |
 | `notify-test [run_id]` | POST a test notification to every endpoint in the webhook registry. Verifies wiring without a real blockage. See [webhooks](../guides/webhooks.md). |
+| `providers <ACTION> <run_id>` | Configure the environment providers a run trusts at resume (`add`, `remove`, `list`, `check`). `add`/`remove` mutate storage; `check` resolves exactly as resume would. See [configured providers](../guides/environment-providers.md). |
 
 ## Examples
 

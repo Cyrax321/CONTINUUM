@@ -6,7 +6,50 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **A run can configure the environment providers it trusts at resume (#762).**
+  Providers for files, git, values and static inputs existed, but a resume only
+  applied the ones a caller remembered to pass to `assess`, so an integration
+  could wire a reliable world-observer and still resume through a path that
+  validated only what was supplied by hand, with nothing in the output saying
+  so. A run now records provider descriptors and their bounded resource scopes
+  in the event log (`ENVIRONMENT_PROVIDERS_CONFIGURED`, append-only, newest
+  record authoritative); at resume `RecoveryEngine.assess` resolves them when no
+  environment was supplied, captures, and feeds the result to the validator that
+  already existed. New `continuum providers <add|remove|list|check>` manages the
+  configuration, and `check` resolves exactly as resume would so a failing
+  observer is visible before it gates a recovery.
+
+  The trust boundary is the design. A provider name is a lookup key matching
+  `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`, never a path or import; only the four
+  built-ins and names handed to a `ProviderRegistry` resolve, and an unknown
+  name is reported unavailable rather than autoloaded. Parameters must be
+  JSON-native, so a callable cannot mean one thing in memory and another after
+  a restart, and a parameter whose name looks like a secret is refused so it
+  never reaches the hashed log. `CallableProvider` is not configurable at all:
+  it registers by name and the configuration references the name.
+
+  Fail-closed everywhere. A disabled, unavailable, malformed, conflicting or
+  failing provider emits `UNKNOWN_VERSION` for every resource it declared
+  instead of leaving it out, and `UNKNOWN` is what the validator already
+  downgrades on. Two specs claiming one resource key fail closed for both
+  rather than letting one win by order. A provider reporting beyond its scope
+  has those keys marked unknown too. Unconfigured runs behave exactly as
+  before, and a caller-supplied environment still wins. Captured resources
+  carry the provider that produced them, so a validation entry reads
+  `verified unchanged (provider: git)` and the recovery contract inherits that
+  evidence. See `docs/guides/environment-providers.md`.
+
 ### Changed
+
+- **A compaction anchor keeps the environment it was validated against (#762).**
+  `compact_run` writes a forced anchor checkpoint, which becomes the newest one
+  and the resume comparison point. It was written with no environment, so a
+  compacted run had no snapshot to diff a resumed capture against and every
+  resource read as unknown. The anchor now inherits the previous checkpoint's
+  environment. Both the SQLite and Postgres paths changed, since they carry
+  identical anchor logic.
 
 - **The TUI `tree` view fetches the run once instead of twice (#1157).**
   `family_lines` in `src/continuum/tui/model.py` called
@@ -885,7 +928,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,311 collected, ~2,253 passed, ~25 skipped on a minimal env).
+  (~2,344 collected, ~2,285 passed, ~25 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
