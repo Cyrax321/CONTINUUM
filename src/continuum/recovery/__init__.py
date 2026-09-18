@@ -15,6 +15,7 @@ from continuum.recovery.gate import (
 )
 from continuum.recovery.impact import DependencyGraph, ImpactedSet
 from continuum.recovery.ledger import (
+    BudgetStatus,
     FileLedgerBackend,
     LedgerBackend,
     LedgerEntryKind,
@@ -24,6 +25,7 @@ from continuum.recovery.ledger import (
     ReconcileReport,
     RecoveryLedger,
     RecoveryLedgerEntry,
+    resolve_scope,
 )
 from continuum.recovery.limits import RecoveryTimeoutError, run_with_limits
 from continuum.recovery.merge import MergePreconditionError, approve_merge
@@ -56,6 +58,7 @@ __all__ = [
     "DependencyGraph",
     "summary_payload",
     "ImpactedSet",
+    "BudgetStatus",
     "LedgerBackend",
     "LedgerEntryKind",
     "LedgerError",
@@ -75,6 +78,7 @@ __all__ = [
     "derive",
     "plan_repairs",
     "render_contract",
+    "resolve_scope",
     "seal_contract",
     "verify_contract",
 ]

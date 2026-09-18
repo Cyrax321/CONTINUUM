@@ -6,6 +6,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
+  `RecoveryLedger` records an optional dependency scope on each attempt, so a
+  repeatedly failing integration spends its own allowance instead of the run's:
+  exhausting dependency A leaves dependency B's repair path open, which is what
+  `docs/research/human_gate_minimization.md` asked for. `record_attempt`,
+  `attempts`, `requires_human` and the new `budget` all take a scope; callers
+  who never pass one get the previous run-wide behaviour unchanged, including
+  the entries already on disk, whose sealed content omits the key when it is
+  unset and therefore still verifies. The escalation marker is anchored and
+  scoped, so it survives compaction and stops at its own dependency.
+  Ownership is fail-closed by construction. `resolve_scope` accepts every
+  signal the system already carries, an action's `dep_scope`, a dependency
+  finding's component id, the resource set a scoped assessment was confined
+  to, and charges the run-wide bucket whenever they are absent, malformed, or
+  disagree. A scoped limit is additionally capped at the run-wide ceiling, so
+  a per-dependency allowance can never buy more attempts than the run was ever
+  allowed. `RepairStep` carries the scope the plan derived, and the contract's
+  evidence names the budget scope with its remaining or exhausted allowance;
+  the line carries counts and a dependency name only, never arguments, files
+  or failure detail. `RecoveryEngine` takes an optional ledger and reads the
+  budget read-only; without one every decision is unchanged.
+
 ### Changed
 
 - **The advisory verdict contract is now stated where a reader can find it (#1031).**
@@ -845,7 +869,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,241 collected, ~2,216 passed, ~25 skipped on a minimal env).
+  (~2,308 collected, ~2,283 passed, ~25 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
