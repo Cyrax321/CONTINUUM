@@ -1365,11 +1365,16 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         RunStatus.FAILED,
         RunStatus.CRASHED,
     ):
-        print(
-            f"Run {run_id} is terminal ({run.status.value}); nothing to resume.",
-            file=err,
-        )
-        return 2
+        msg = f"Run {run_id} is terminal ({run.status.value}); nothing to resume."
+        payload = {
+            "run_id": run_id,
+            "status": run.status.value,
+            "error": "terminal_run",
+            "message": msg,
+        }
+        _emit(payload, msg, as_json=args.json, stream=err)
+        # UNSAFE (30): run exists but resuming is not safe — distinct from NOT_FOUND (2)
+        return ExitCode.UNSAFE
     engine = RecoveryEngine(storage, strict_unknown=not args.tolerate_unknown)
     decision = engine.assess(
         run_id,
