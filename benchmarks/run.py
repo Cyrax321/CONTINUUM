@@ -40,6 +40,24 @@ from continuum.benchmark import run_benchmark as run_continuum_benchmark
 from continuum.benchmark.phase6 import run_benchmark, scenarios, write_report
 
 
+def _mean_rate(results: Any, key: str) -> Any:
+    """Mean of a suite-level rate over the results that actually report it.
+
+    The fault-injection suite copies its suite-level rates onto every fault
+    scenario's metrics, but the clean control scenario carries only its own
+    false-positive rate, so dividing by ``len(results)`` would average the
+    suite against a scenario that never measured it. Results without the key
+    are skipped rather than counted as zero, which is what keeps the control
+    out of the detection average. ``summary()`` does not carry these keys at
+    all (#1060): the shared envelope counts outcomes only, so the rates have
+    to be read off the results the way the horizon columns above are.
+    """
+    values = [r.metrics[key] for r in results if key in r.metrics]
+    if not values:
+        return 0
+    return round(sum(values) / len(values), 3)
+
+
 def _bench_table_lines(horizon_report: Any, fault_report: Any | None = None) -> list[str]:
     """Build the bench table body from real runner numbers (no invented numbers)."""
     # Build table from real numbers
@@ -102,10 +120,11 @@ def _bench_table_lines(horizon_report: Any, fault_report: Any | None = None) -> 
         a = r.metrics.get("accuracy", "")
         lines.append(f"| {r.scenario} | {cycles} | {years} | {correct} | {actual} | {a} |")
     if fault_report is not None:
-        f_summary = fault_report.summary()
         lines.append("")
         lines.append(
-            f"Fault-injection: {f_summary.get('total', 0)} scenarios, detection {f_summary.get('detection_rate', 0)}, unsafe {f_summary.get('unsafe_resume_rate', 0)}"
+            f"Fault-injection: {len(fault_report.results)} scenarios, "
+            f"detection {_mean_rate(fault_report.results, 'detection_rate')}, "
+            f"unsafe {_mean_rate(fault_report.results, 'unsafe_resume_rate')}"
         )
     return lines
 
