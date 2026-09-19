@@ -70,6 +70,12 @@ __all__ = [
     "DiffEntry",
     "StateDiff",
     "UnknownSideEffect",
+    "Frozen",
+    "Origin",
+    "Provenance",
+    "TrajectoryReport",
+    "validate_caused_by",
+    "PROJECTION_BOOKKEEPING",
 ]
 
 Frozen = ConfigDict(frozen=True, extra="forbid")

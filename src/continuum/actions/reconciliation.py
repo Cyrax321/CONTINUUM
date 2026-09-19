@@ -43,6 +43,7 @@ __all__ = [
     "ManualReconciler",
     "reconcile_pending",
     "ReconciliationReport",
+    "unresolved_actions",
 ]
 
 
