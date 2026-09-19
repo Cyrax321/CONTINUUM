@@ -336,3 +336,53 @@ def test_rewind_precondition_unexpected_error_raises_rewind_error(
 
     assert isinstance(exc_info.value.__cause__, RuntimeError)
     storage.close()
+
+
+def test_rewind_reports_a_poisoned_digest_rather_than_following_it(
+    tmp_path: Path,
+) -> None:
+    # Issue #1268: a TOOL_COMPLETED payload that records a digest its writer did
+    # not compute reaches snapshot_path on the read side, and a traversal string
+    # there names a file outside .continuum/file-snapshots. Rewind must report
+    # that as unrecoverable instead of copying whatever the path points at over
+    # a workspace file -- the command whose purpose is to restore trusted content
+    # must not become a file-read primitive.
+    db = str(tmp_path / "rewind.db")
+    run_id = "run_poisoned_digest"
+    storage = SQLiteStorage(db)
+    storage.create_run(Run(run_id=run_id, goal="poisoned digest"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    file_a = workdir / "a.txt"
+    file_a.write_text("at checkpoint", encoding="utf-8")
+    from continuum.clienthooks import observe_event_payload
+    from continuum.environment.file_snapshot import snapshot_file
+
+    payload_before = observe_event_payload(
+        {"tool_name": "Write", "tool_input": {"file_path": str(file_a)}}
+    )
+    poison = "../../../../evil"
+    # The write side already refuses to file content under a key that is not its
+    # digest, so a poisoned payload can only live in the log, never in the store.
+    assert snapshot_file(file_a, sha256=poison) is None
+    payload_before["sha256"] = poison
+    storage.append_event(run_id, EventType.TOOL_COMPLETED, payload_before)
+    from continuum.checkpoint.manager import CheckpointManager
+
+    cp = CheckpointManager(storage).checkpoint(run_id)
+    # The file is unchanged after the checkpoint, so the observed digest matches
+    # the payload and no conflict diverts the flow away from the restore branch.
+    payload_after = observe_event_payload(
+        {"tool_name": "Edit", "tool_input": {"file_path": str(file_a)}}
+    )
+    storage.append_event(run_id, EventType.TOOL_COMPLETED, payload_after)
+
+    result = rewind_to_checkpoint(storage, run_id, cp.checkpoint_id, force=True)
+
+    assert any("not a SHA-256 digest" in m for m in result.unrecoverable), (
+        f"poisoned digest should be reported, got {result.unrecoverable}"
+    )
+    # The workspace file was never overwritten with out-of-store content.
+    assert file_a.read_text(encoding="utf-8") == "at checkpoint"
+    storage.close()

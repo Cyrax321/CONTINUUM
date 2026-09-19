@@ -194,7 +194,13 @@ def rewind_to_checkpoint(
             except OSError as exc:
                 conflicts.append(f"{path}: delete failed: {exc}")
         else:
-            snapshot = snapshot_path(before_digest)
+            try:
+                snapshot = snapshot_path(before_digest)
+            except ValueError as exc:
+                # A stored digest that is not a digest names a path, not a key;
+                # report it rather than copying whatever it points at (#1268).
+                unrecoverable.append(f"{path}: {exc}")
+                continue
             if not snapshot.exists():
                 unrecoverable.append(
                     f"{path}: no snapshot for digest {before_digest[:12]} (file may have been too large or unreadable at checkpoint)"
