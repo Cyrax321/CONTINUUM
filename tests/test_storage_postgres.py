@@ -300,3 +300,47 @@ def test_pg_action_index_covers_the_archive_after_rebuild(
     foreign = storage.foreign_action(key, exclude_run="some_other_run")
     assert foreign is not None
     assert foreign.status is ActionStatus.COMPLETED
+
+
+def test_pg_rebuild_action_index_reports_the_rows_it_corrected(storage: PostgresStorage) -> None:
+    # Issue #1267: rebuild_action_index ended in an unconditional `return 0`,
+    # so `verify --repair-index` reported "0 corrected rows" on Postgres even
+    # after repairing real drift. The count must match the SQLite engine's:
+    # a correction is any key whose stored row was missing, stale, or spurious.
+    ledger = ActionLedger(storage, "pg_corr")
+    make_run(storage, "pg_corr", "index target")
+    outcome = ledger.claim("send_invoice", {}, key="invoice:42")
+    assert storage.action_index_drift() == 0
+
+    # Corrupt the projection, not the truth: the stored status is a lie.
+    storage._connection.execute("UPDATE action_index SET status = 'completed'")
+    assert storage.action_index_drift() > 0
+
+    corrections = storage.rebuild_action_index()
+    assert corrections >= 1, "a stale row the rebuild overwrote must be counted"
+    assert storage.action_index_drift() == 0
+
+    # A clean rebuild corrects nothing, so it reports nothing.
+    assert storage.rebuild_action_index() == 0
+    # The rebuilt row reflects the truth: still STARTED, not 'completed'.
+    refreshed = storage.foreign_action(outcome.key, exclude_run="other_run")
+    assert refreshed is not None
+    assert refreshed.status is ActionStatus.STARTED
+
+
+def test_pg_rebuild_action_index_counts_spurious_rows_as_corrections(
+    storage: PostgresStorage,
+) -> None:
+    # A row the log never authorized is still a correction: the rebuild deletes
+    # it, and the deleted row is counted, not silently absorbed.
+    make_run(storage, "pg_spurious", "index target")
+    storage._connection.execute(
+        "INSERT INTO action_index(key, run_id, action_id, status, updated_seq, action_json) "
+        "VALUES ('pg_ghost', 'pg_spurious', 'a', 'started', 999, '{}')"
+    )
+    assert storage.action_index_drift() >= 1
+
+    corrections = storage.rebuild_action_index()
+
+    assert corrections >= 1, "a spurious row the rebuild removed must be counted"
+    assert storage.action_index_drift() == 0
