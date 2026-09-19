@@ -144,6 +144,133 @@ def test_documented_count_matches_suite() -> None:
     )
 
 
+# The landing page's meta description is what search engines and link previews
+# render, and it is HTML, so the markdown-only guards above never open it. It
+# drifted three times before #1283 (9 tools/14 commands/675 tests in fd25b87,
+# flagged by #724, resynced by #927 to figures that then went stale again)
+# because each resync was a hand edit with nothing to catch the next one.
+_META_DESCRIPTION = re.compile(
+    r'<meta\s+name="description"\s+content="([^"]*)"',
+    re.IGNORECASE,
+)
+
+
+def _landing_page_meta() -> str:
+    path = ROOT / "docs" / "index.html"
+    text = path.read_text(encoding="utf-8")
+    match = _META_DESCRIPTION.search(text)
+    assert match, f"{path} has no meta description for the guard to read"
+    return match.group(1)
+
+
+def test_landing_page_cli_command_count() -> None:
+    """The meta description's CLI-command count matches the built parser.
+
+    Counted in-process rather than by parsing ``--help`` output: the parser is
+    the ground truth, and reading it needs no subprocess.
+    """
+    from continuum.cli.main import build_parser
+
+    parser = build_parser()
+    subparsers = next(
+        action for action in parser._subparsers._group_actions if hasattr(action, "choices")
+    )
+    match = re.search(r"(\d+)\s+CLI commands", _landing_page_meta())
+    assert match, "the landing page meta description states no CLI-command count"
+    assert int(match.group(1)) == len(subparsers.choices), (
+        f"the landing page says {int(match.group(1))} CLI commands but "
+        f"build_parser() registers {len(subparsers.choices)}"
+    )
+
+
+@pytest.mark.slow
+def test_landing_page_test_count() -> None:
+    """The meta description's test figure matches the collected total."""
+    match = re.search(r"([\d,]+)\s+tests", _landing_page_meta())
+    assert match, "the landing page meta description states no test count"
+    documented = int(match.group(1).replace(",", ""))
+    live = live_total()
+    assert abs(live - documented) <= TOLERANCE, (
+        f"suite collects {live} tests but the landing page says {documented}: "
+        "re-sync docs/index.html (pytest --collect-only -q)"
+    )
+
+
+# The metrics card is the page a visitor actually reads, unlike the meta
+# description, which only search engines and previews render. #1283 corrected
+# the meta and missed the card entirely: it kept rendering 2,163 tests and 45
+# commands while the meta said 2,323 and 46, so the landing page contradicted
+# itself in the one place people look. The card pairs each metric-value span
+# with the metric-label that follows it, and the file's own refresh note names
+# the ground truth for each: parser choices, the @server.tool count, and
+# pytest --collect-only.
+_METRIC_VALUE = re.compile(r'<span class="metric-value">(.*?)</span>', re.DOTALL)
+_METRIC_LABEL = re.compile(r'<span class="metric-label">(.*?)</span>', re.DOTALL)
+_INLINE_TAGS = re.compile(r"<[^>]+>")
+
+
+def _landing_page_metrics() -> dict[str, int]:
+    """The landing page metrics card, keyed by its own labels."""
+    text = (ROOT / "docs" / "index.html").read_text(encoding="utf-8")
+    values = [_INLINE_TAGS.sub("", v) for v in _METRIC_VALUE.findall(text)]
+    labels = [_INLINE_TAGS.sub("", label) for label in _METRIC_LABEL.findall(text)]
+    assert len(values) == len(labels), (
+        f"metrics card has {len(values)} values but {len(labels)} labels; the "
+        "pairing the guard relies on no longer holds"
+    )
+    return {
+        label.strip(): int(re.sub(r"[^\d]", "", value))
+        for label, value in zip(labels, values, strict=True)
+    }
+
+
+def _mcp_tool_count() -> int:
+    """The ``@server.tool`` registrations, counted in source."""
+    server = (ROOT / "src" / "continuum" / "mcp" / "server.py").read_text(encoding="utf-8")
+    return len(re.findall(r"@server\.tool\(", server))
+
+
+@pytest.mark.slow
+def test_landing_page_metric_card() -> None:
+    """The visible metrics card agrees with the parser, the MCP server, and the suite.
+
+    The three figures are checked against the same sources the file's refresh
+    comment names, so the card cannot drift from any of them again.
+    """
+    from continuum.cli.main import build_parser
+
+    metrics = _landing_page_metrics()
+    parser = build_parser()
+    subparsers = next(
+        action for action in parser._subparsers._group_actions if hasattr(action, "choices")
+    )
+
+    assert metrics["CLI COMMANDS"] == len(subparsers.choices), (
+        f"the metrics card says {metrics['CLI COMMANDS']} CLI commands but "
+        f"build_parser() registers {len(subparsers.choices)}"
+    )
+    tools = _mcp_tool_count()
+    assert metrics["MCP TOOLS"] == tools, (
+        f"the metrics card says {metrics['MCP TOOLS']} MCP tools but "
+        f"server.py registers {tools} @server.tool decorators"
+    )
+    documented = metrics["TESTS PASSING"]
+    live = live_total()
+    assert abs(live - documented) <= TOLERANCE, (
+        f"suite collects {live} tests but the metrics card says {documented}: "
+        "re-sync docs/index.html (pytest --collect-only -q)"
+    )
+
+    # The hero strip states the test figure a second time; it must not disagree
+    # with the card, or the page argues with itself above the fold.
+    text = (ROOT / "docs" / "index.html").read_text(encoding="utf-8")
+    hero = re.search(r">([\d,]+)\s+TESTS PASSING\s*<", text)
+    assert hero, "the hero strip states no TESTS PASSING figure for the guard to read"
+    assert int(hero.group(1).replace(",", "")) == documented, (
+        f"the hero strip says {hero.group(1)} tests but the metrics card says {documented}"
+    )
+
+
 def test_documented_extras_exist_in_pyproject() -> None:
     """No doc installs an extra that pyproject.toml does not declare.
 
