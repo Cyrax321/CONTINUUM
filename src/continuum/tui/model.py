@@ -16,16 +16,15 @@ from pathlib import Path
 from typing import Any
 
 from continuum.actions import ActionLedger
-from continuum.actions.ledger import fold_action_events
 from continuum.budgets import (
     DEFAULT_BUDGETS_PATH,
     attempts_for_type,
     evaluate_budget,
     load_budgets,
 )
-from continuum.checkpoint import CheckpointManager
+from continuum.checkpoint import CheckpointManager, clear_resume_pointer
 from continuum.events import EventType
-from continuum.models import Action, ActionStatus, Origin, RunStatus, StateStatus
+from continuum.models import ActionStatus, Origin, Run, RunStatus, StateStatus
 from continuum.recovery import RecoveryEngine
 from continuum.recovery.family import children_of, roll_up_children
 from continuum.storage.base import Storage
@@ -136,6 +135,12 @@ def run_rows(storage: Storage) -> list[RunRow]:
             )
         )
     return rows
+
+
+def _children(storage: Storage, run_id: str) -> list[Run]:
+    """Children resolved the way the recovery roll-up resolves them, so the
+    tree tab can never show a child the aggregate verdict ignored."""
+    return list(children_of(storage, run_id))
 
 
 def overview_lines(storage: Storage, run_id: str) -> list[str]:
@@ -271,11 +276,13 @@ def checkpoint_rows(storage: Storage, run_id: str) -> list[CheckpointRow]:
 def action_rows(storage: Storage, run_id: str) -> list[ActionRow]:
     """The `actions` view, each row carrying the key a reconciliation needs.
 
-    Folded from the live log the same way the dashboard HITL buttons fold it,
-    so the key offered here is the key that would settle the action.
+    Folded through the ledger's own archive-aware ``folded()`` view, the same
+    one the dashboard HITL buttons use, so a compacted run still shows its
+    archived unresolved actions and the key offered here is the key that
+    would settle the action.
     """
     storage.get_run(run_id)
-    folded: dict[str, Action] = fold_action_events(storage.read_events(run_id))
+    folded = ActionLedger(storage, run_id).folded()
     return [
         ActionRow(
             key=key,
@@ -306,7 +313,7 @@ def family_lines(storage: Storage, run_id: str) -> list[str]:
     """The `tree` view: the parent verdict and every child's, read-only."""
     run = storage.get_run(run_id)
     lines = [f"{run_id}  [{run.status.value}]  {run.goal[:60]}"]
-    children = children_of(storage, run_id)
+    children = _children(storage, run_id)
     if not children:
         lines.append("  (no children)")
     for child in children:
@@ -325,23 +332,34 @@ def family_lines(storage: Storage, run_id: str) -> list[str]:
 
 def budget_rows(storage: Storage, run_id: str) -> list[BudgetRow]:
     """The `budget` view, archive-aware: attempts are counted over the whole
-    log, so compaction does not hand a run a fresh budget (#734)."""
+    log, so compaction does not hand a run a fresh budget (#734).
+
+    Configured action types appear even with no recorded attempts, so the
+    dashboard never hides an allowance the next claim would not have. Limits
+    come from the budget registry, the same one the claim sites enforce
+    through ``evaluate_budget``.
+    """
     storage.get_run(run_id)
     try:
         raw = load_budgets(Path(DEFAULT_BUDGETS_PATH))
     except Exception:
-        raw = {}
+        raw = {}  # a broken registry must not take the dashboard down with it
     events = storage.read_all_events(run_id)
-    types_seen = sorted(
-        {
-            e.payload.get("action", {}).get("action_type")
-            for e in events
-            if e.type is EventType.ACTION_RECORDED and isinstance(e.payload.get("action"), dict)
-        }
-        | set((raw.get("action_types") or {}).keys())
-    )
+    types_seen: set[str] = set()
+    for event in events:
+        if event.type is not EventType.ACTION_RECORDED:
+            continue
+        action = event.payload.get("action")
+        if not isinstance(action, dict):
+            continue
+        action_type = action.get("action_type")
+        if isinstance(action_type, str):
+            types_seen.add(action_type)
+    configured = raw.get("action_types") or {}
+    if isinstance(configured, dict):
+        types_seen |= {str(name) for name in configured}
     rows: list[BudgetRow] = []
-    for action_type in types_seen:
+    for action_type in sorted(types_seen):
         used = attempts_for_type(events, action_type)
         _, _, maximum = evaluate_budget(raw, action_type, 0)
         rows.append(
@@ -411,4 +429,7 @@ def complete_run(storage: Storage, run_id: str) -> str:
         source=Origin.HUMAN,
     )
     storage.update_run(run.touch(status=RunStatus.COMPLETED))
+    # Same cleanup the CLI performs: a closed run is no longer interrupted, so
+    # the resume banner must not keep naming it as the active run.
+    clear_resume_pointer(run_id)
     return f"run {run_id} completed"
