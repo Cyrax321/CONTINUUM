@@ -69,6 +69,10 @@ _COLLECTED_RES = (
     re.compile(r"^pytest\s+-q\s+#.*?([\d,]+)", re.MULTILINE),
 )
 
+# The README's "N event types" rows. `references/` also states a count (29),
+# but that file is stale pending #1100, so only README.md is guarded here.
+_EVENT_TYPES_RES = re.compile(r"(\d+)\s+event types")
+
 
 def documented_total(path: Path) -> int | None:
     """The collected total ``path`` states, or None if it states none.
@@ -177,3 +181,24 @@ def test_documented_extras_exist_in_pyproject() -> None:
                         f"{path} installs the [{extra}] extra, but pyproject.toml "
                         f"declares only {sorted(declared)}"
                     )
+
+
+def test_readme_event_type_count_matches_enum() -> None:
+    """README's stated event count equals ``len(EventType)`` (#1171).
+
+    The README stated 36 event types in one table and "44 ... in v0.2" in
+    another while the enum held 51, and nothing caught it: this module pinned
+    only the pytest totals. The count is a live enum length, not a version
+    snapshot, so it must be read from ``EventType`` rather than pinned here.
+    """
+    from continuum.events import EventType
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    documented = {int(m) for m in _EVENT_TYPES_RES.findall(readme)}
+    assert documented, "README.md states no event-type count"
+    actual = len(EventType)
+    assert documented == {actual}, (
+        f"README.md states {sorted(documented)} event types but EventType has "
+        f"{actual}: re-sync README.md "
+        "(python -c 'from continuum.events import EventType; print(len(EventType))')"
+    )
