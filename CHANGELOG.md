@@ -52,6 +52,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`replay --upto` works on a compacted run instead of failing for every value
+  of `N` and blaming the operator for it (#1172).** `cmd_replay` read only the
+  live event tail, where `RUN_STARTED` no longer lives once a run is compacted,
+  so its guard rejected every `--upto` request and advised "increase `--upto`"
+  -- the one fix that cannot help, because the event had moved into the archive
+  rather than being excluded by the window. `--upto 999` failing on a run whose
+  head was 13 is what proved the message was wrong about the cause. The command
+  now windows the full history, archived prefix included, the way `cmd_events`
+  already does; `--upto` remains the bisection tool it is documented as, on the
+  long-lived runs compaction exists to serve. `_verify_against_stored` had the
+  same blind spot one function down: it re-derived the stored version's prefix
+  from `read_events(upto=source_sequence)`, which reads an empty log on a
+  compacted run because the prefix starts at sequence 1 and compaction moves
+  exactly that range. Left alone it would have reported every healthy
+  checkpoint as corrupt once the primary read was corrected, so both sites now
+  window `read_all_events`. `STATE_CHECKPOINTED` and `EVENT_LOG_ANCHORED` are
+  both non-projecting, so folding the archived prefix from genesis reaches the
+  same state the anchored path already produced. The guard is unchanged and
+  still fires when a window genuinely excludes `RUN_STARTED`.
+
 - **The docs-count guard now reads `references/` and the translated READMEs,
   and the stale counts they held are re-synced (#1109, #1071).** The guard in
   `tests/test_docs_counts.py` watched only three files, so `references/testing.md`

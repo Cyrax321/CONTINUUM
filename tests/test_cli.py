@@ -756,6 +756,64 @@ def test_replay_verification_is_independent_of_upto(db: str) -> None:
     assert "matches stored version" in out
 
 
+@pytest.fixture
+def compacted_db(tmp_path: Path) -> Iterator[str]:
+    """The same seeded run after compaction: the genesis prefix has moved into
+    ``events_archive``, which is the state ``--upto`` has to work over (#1172)."""
+    path = str(tmp_path / "compacted.db")
+    with SQLiteStorage(path) as store:
+        store.create_run(Run(run_id="run_1", goal="Analyze 100 documents"))
+        store.append_event(
+            "run_1", EventType.RUN_STARTED, {"goal": "Analyze 100 documents", "total": 100}
+        )
+        store.append_event(
+            "run_1", EventType.DEPENDENCY_DECLARED, {"resource": "dataset", "version": "v3"}
+        )
+        for i in range(10):
+            store.append_event("run_1", EventType.WORK_COMPLETED, {"doc": i})
+        store.append_event(
+            "run_1",
+            EventType.FINDING_ADDED,
+            {"finding_id": "finding_17", "claim": "X holds", "evidence": []},
+        )
+        store.compact_run("run_1")
+    yield path
+
+
+def test_replay_upto_survives_compaction(compacted_db: str) -> None:
+    """A compacted run replays under --upto like one that was never compacted.
+
+    ``RUN_STARTED`` lives in the archive after compaction, so a replay reading
+    only the live tail rejected every value of ``--upto`` and told the operator
+    to raise it -- the one action that cannot help, since the event had moved
+    rather than been excluded.
+    """
+    with SQLiteStorage(compacted_db) as store:
+        assert not any(e.type is EventType.RUN_STARTED for e in store.read_events("run_1"))
+        assert any(e.type is EventType.RUN_STARTED for e in store.read_archived_events("run_1"))
+
+    for upto, completed in (("4", 2), ("13", 10), ("999", 10)):
+        code, out, err = run("--db", compacted_db, "replay", "run_1", "--upto", upto)
+        assert code == ExitCode.OK, f"--upto {upto}: {err}"
+        # The window narrows the fold; 999 is past the head (13) and reads as
+        # the whole run, which is what proves the failure was about the archive
+        # rather than about the value of N.
+        assert f"{completed} completed" in out, f"--upto {upto} folded the wrong prefix: {out}"
+        assert "matches stored version" in out, f"--upto {upto}: {out}"
+
+
+def test_replay_upto_still_names_a_genuinely_excluded_genesis(compacted_db: str) -> None:
+    """The guard is not dead weight once it reads the right log: a window that
+    really does exclude ``RUN_STARTED`` is still refused, with the fix it can
+    actually suggest."""
+    code, _, err = run("--db", compacted_db, "replay", "run_1", "--upto", "0")
+    assert code == ExitCode.ERROR
+    assert (
+        "--upto 0 excludes the RUN_STARTED event for run 'run_1'; "
+        "increase --upto or omit it to replay from the beginning"
+    ) in err
+
+
 # --- event-chain attestation ------------------------------------------------ #
 
 
