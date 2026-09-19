@@ -6,6 +6,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Recovery-contract compatibility is now a published, versioned, tested promise (#764).**
+  The integrity hash used to cover "whatever the model defines today", so a
+  contract sealed by one build could only be verified by a build with the same
+  field set, and the compatibility path was a comment in `verify_contract`
+  rather than something an external verifier could implement against. Three
+  things now pin it. `CONTRACT_VERSIONS` in `src/continuum/recovery/contract.py`
+  publishes the field set each version covers; version 0 is the pre-Phase-1
+  contract (no `evidence`/`reason`), version 1 is current. A checked-in corpus
+  at `src/continuum/recovery/corpus/` carries fixtures for every category the
+  policy depends on -- current, legacy, forward-extension, malformed and
+  tampering -- each stating its version, canonical digest input and expected
+  outcome. `continuum.recovery.conformance` is an independent checker that
+  recomputes each digest from the published rules without ever calling
+  `verify_contract`, so the production verifier and the spec remain two things
+  that can disagree. `verify_contract_detailed` reports which version accepted
+  and why; an unknown version fails closed naming the versions this build
+  knows instead of hashing whatever fields happen to be present.
+  `RecoveryContract` carries `contract_version`, excluded from the digest
+  because it selects the payload rather than being part of it.
+  `docs/contract_compatibility.md` is the spec an external verifier implements
+  against, including how to add a field or a version.
+
 ### Changed
 
 - **The TUI `tree` view fetches the run once instead of twice (#1157).**
