@@ -516,13 +516,11 @@ class SQLiteStorage(Storage):
         if storage_version is None:
             raise ValueError(f"run {run_id!r} could not be anchored: no projectable state")
         # The anchor marker is appended at the head of the log in the
-        # transaction below, so its sequence is the current head + 1.
+        # transaction below, so its sequence is the current head + 1. The
+        # guard lives on the shared base so the Postgres backend cannot drop
+        # it again (issue #1078).
         anchor_sequence = self.last_sequence(run_id) + 1
-        if through_sequence is not None and through_sequence >= anchor_sequence:
-            raise ValueError(
-                f"through_sequence {through_sequence} would archive the anchor marker"
-                f" at sequence {anchor_sequence}: the live log must retain its anchor"
-            )
+        self._validate_compaction_bound(through_sequence, anchor_sequence)
         through = (
             through_sequence
             if through_sequence is not None

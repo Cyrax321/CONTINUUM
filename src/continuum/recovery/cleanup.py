@@ -16,6 +16,10 @@ from continuum.checkpoint.policy import CheckpointTrigger
 from continuum.recovery.ledger import RecoveryLedger
 from continuum.storage.base import Storage
 
+__all__ = [
+    "cleanup_ephemeral_artifacts",
+]
+
 
 def cleanup_ephemeral_artifacts(
     storage: Storage,
