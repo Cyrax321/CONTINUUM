@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 continuum --help                 # CLI 入口
 continuum-mcp --help             # MCP 服务器入口（需要 [mcp] 或 [dev]）
 pytest -q                        # 最小环境中约 2,397 个收集，约 2,320 个通过，约 27 个跳过（具体数量因环境而异）
-ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
+ruff check src/ tests/ examples/ benchmarks/ && ruff format --check src/ tests/ examples/ benchmarks/
 mypy src/continuum               # CI 强制的三扇门禁
 ```
 
