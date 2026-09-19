@@ -1411,7 +1411,12 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
         try:
             current = normalize_pinning(json.loads(args.pinning))
-            recorded = latest_pinning(storage.read_events(run_id))
+            # The newest pinning is usually an archived ACTION_RECORDED: the
+            # fold must see the prefix compaction moved, or a compacted run
+            # reads {} as its recorded pinning and reports every key as newly
+            # pinned (#1126). Mirrors the assess (#1050) and watch (#1072)
+            # folds over the same history.
+            recorded = latest_pinning(storage.read_all_events(run_id))
             drift_lines = compute_drift(recorded, current)
             if drift_lines:
                 text += "\n\nPinning drift (informational):\n" + "\n".join(

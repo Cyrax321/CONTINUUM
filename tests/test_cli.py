@@ -608,6 +608,106 @@ def test_a_model_switch_can_be_declared(db: str) -> None:
     assert "no model recorded" in out
 
 
+# --- pinning drift across compaction (issue #1126) -------------------------- #
+
+
+_PINNING = {"prompt_sha256": "a" * 64, "model_id": "m-2024-09"}
+
+
+@pytest.fixture
+def compacted_pinning_db(tmp_path: Path) -> Iterator[str]:
+    """A run whose recorded pinning is known, after compaction moved the
+    ``ACTION_RECORDED`` carrying it into ``events_archive``.
+
+    The anchor marker that replaces the prefix carries no pinning, so a fold
+    over the live tail alone reads ``{}`` as the run's recorded identity.
+    """
+    path = str(tmp_path / "pinned.db")
+    with SQLiteStorage(path) as store:
+        store.create_run(Run(run_id="run_1", goal="Analyze 100 documents"))
+        store.append_event(
+            "run_1", EventType.RUN_STARTED, {"goal": "Analyze 100 documents", "total": 100}
+        )
+        # No declared dependency: compaction mints an environment-blind anchor
+        # checkpoint (#1049), which would gate resume on REQUEST_HUMAN before
+        # the drift display is reached. The pinning fold does not need one.
+        ledger = ActionLedger(store, "run_1")
+        outcome = ledger.claim("external.deploy", {}, key="deploy-1", pinning=_PINNING)
+        ledger.complete(str(outcome.key))
+        store.compact_run("run_1")
+    yield path
+
+
+def _assert_really_compacted(db: str) -> None:
+    with SQLiteStorage(db) as store:
+        assert not any(e.type is EventType.ACTION_RECORDED for e in store.read_events("run_1"))
+        assert any(e.type is EventType.ACTION_RECORDED for e in store.read_archived_events("run_1"))
+
+
+def test_resume_pinning_drift_is_not_invented_by_compaction(compacted_pinning_db: str) -> None:
+    """An unchanged pinning reports no drift, even when compaction archived the
+    only event that records it.
+
+    Before the fix the fold read ``{}`` and reported every key as newly pinned
+    -- a false alarm on a run whose identity provably did not change.
+    """
+    _assert_really_compacted(compacted_pinning_db)
+    code, out, err = run(
+        "--db",
+        compacted_pinning_db,
+        "resume",
+        "run_1",
+        "--pinning",
+        json.dumps(_PINNING),
+    )
+    assert code == ExitCode.OK, err
+    assert "Pinning drift" not in out
+
+
+def test_resume_pinning_drift_names_a_changed_hash_after_compaction(
+    compacted_pinning_db: str,
+) -> None:
+    """A genuinely changed hash renders as *changed*, with the old value.
+
+    Compaction-blind reading rendered this as "newly pinned", which hides the
+    previous hash -- the one fact that tells an operator what actually moved.
+    """
+    changed = {**_PINNING, "prompt_sha256": "b" * 64}
+    code, out, _ = run(
+        "--db",
+        compacted_pinning_db,
+        "resume",
+        "run_1",
+        "--pinning",
+        json.dumps(changed),
+    )
+    assert code == ExitCode.OK
+    assert "prompt_sha256 changed (" in out
+    assert f"{'a' * 16}..." in out  # the archived value, not "newly pinned"
+    assert "newly pinned" not in out
+
+
+def test_resume_pinning_drift_reports_an_unpinned_key_after_compaction(
+    compacted_pinning_db: str,
+) -> None:
+    """A key dropped from the request still renders, naming what was there.
+
+    The ``unpinned (was ...)`` line needs the old value, which only the archived
+    prefix holds once the run is compacted.
+    """
+    dropped = {"model_id": "m-2024-09"}
+    code, out, _ = run(
+        "--db",
+        compacted_pinning_db,
+        "resume",
+        "run_1",
+        "--pinning",
+        json.dumps(dropped),
+    )
+    assert code == ExitCode.OK
+    assert "prompt_sha256 unpinned (was" in out
+
+
 # --- invoked as a real process ---------------------------------------------- #
 
 
