@@ -13,10 +13,16 @@ adapter = GenericAgentAdapter(SQLiteStorage("continuum.db"))
 
 ## GenericAgentAdapter
 
-`continuum.adapters.GenericAgentAdapter(storage, *, engine=None)`
+`continuum.adapters.GenericAgentAdapter(storage, *, engine=None, auto_file=None, auto_total=None)`
 
 The concrete adapter for standard Python agent loops. Construct it with a
 `Storage` implementation; it owns a `CheckpointManager` and a `RecoveryEngine`.
+
+`engine` injects a pre-built `RecoveryEngine`; omit it and the adapter
+constructs one from the storage. `auto_file` and `auto_total` together turn on
+automatic progress recording: when both are set, the adapter records file
+progress on every `capture_state` and `resume` rather than asking the loop to
+call `record_progress` itself. Either one alone does nothing.
 
 ### `start_run(goal, *, run_id=None, metadata=None) -> Run`
 
@@ -50,9 +56,15 @@ changing anything. The decision's `mode` is one of the seven `RecoveryMode` valu
 
 ## LangGraphAgentAdapter
 
-`continuum.adapters.LangGraphAgentAdapter(storage, *, engine=None)`
+`continuum.adapters.LangGraphAgentAdapter(storage, *, graph=None, state_to_semantic=None, auto_file=None, auto_total=None)`
 
-Subclass of `GenericAgentAdapter` for LangGraph `StateGraph` workflows. Adds:
+Subclass of `GenericAgentAdapter` for LangGraph `StateGraph` workflows. Unlike
+`GenericAgentAdapter`, it does **not** accept `engine`: it builds its own
+`RecoveryEngine` from the storage, so a pre-built one cannot be injected. Point
+it at the compiled graph with `graph`, and translate LangGraph state into a
+`SemanticState` with `state_to_semantic` -- the two customization points the
+adapter exists to carry. `auto_file`/`auto_total` behave as on
+`GenericAgentAdapter`. Adds:
 
 ### `revalidate_environment(run_id, *, current_environment=None, expected_model=None) -> RecoveryDecision`
 
@@ -63,9 +75,12 @@ environment changed (issue #25).
 
 ## OpenAIAgentAdapter
 
-`continuum.adapters.OpenAIAgentAdapter(storage, *, engine=None)`
+`continuum.adapters.OpenAIAgentAdapter(storage, *, state_to_semantic=None, auto_file=None, auto_total=None)`
 
-Subclass of `GenericAgentAdapter` for the OpenAI Agents SDK. Wraps
+Subclass of `GenericAgentAdapter` for the OpenAI Agents SDK. As with the
+LangGraph adapter, `engine` is not accepted: the adapter builds its own
+`RecoveryEngine` from the storage. `state_to_semantic` translates the
+`ContinuumContext` into a `SemanticState`. Wraps
 `function_tool` so tool arguments are bound and idempotency is preserved, and
 exposes `ContinuumContext` to tools.
 
@@ -76,10 +91,13 @@ can capture state or intercept its own side effects.
 
 ## LangChainAgentAdapter
 
-`continuum.adapters.LangChainAgentAdapter(storage, *, engine=None)`
+`continuum.adapters.LangChainAgentAdapter(storage, *, state_to_semantic=None, auto_file=None, auto_total=None)`
 
 Subclass of `GenericAgentAdapter` wrapping LCEL runnable pipelines and the
-`langchain.agents.create_agent` tool-calling loop.
+`langchain.agents.create_agent` tool-calling loop. As with the other framework
+adapters, `engine` is not accepted and the adapter builds its own
+`RecoveryEngine` from the storage; `state_to_semantic` translates the LangChain
+state dict into a `SemanticState`.
 
 ## BrowserAdapter
 
