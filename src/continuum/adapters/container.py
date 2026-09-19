@@ -17,6 +17,10 @@ from continuum.adapters.generic import GenericAgentAdapter
 from continuum.recovery.engine import RecoveryEngine
 from continuum.storage.base import Storage
 
+__all__ = [
+    "ContainerAdapter",
+]
+
 
 class ContainerAdapter(GenericAgentAdapter):
     """Runs commands inside a docker container, recorded as an action."""
