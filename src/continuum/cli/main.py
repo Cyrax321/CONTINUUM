@@ -3511,7 +3511,7 @@ def cmd_export_evidence(args: argparse.Namespace, storage: Storage, out: Any, er
 
     primitives = export_evidence(storage, args.run_id)
     for prim in primitives:
-        print(json.dumps(prim, sort_keys=True, default=str), file=out)
+        print(json.dumps(prim.model_dump(mode="json"), sort_keys=True, default=str), file=out)
     if hasattr(out, "flush"):
         out.flush()
     return ExitCode.OK

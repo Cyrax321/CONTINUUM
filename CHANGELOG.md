@@ -6,6 +6,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **The evidence export builds its own models instead of untyped dicts (#1155).**
+  `src/continuum/interchange/evidence.py` declared `EvidencePrimitive` plus the
+  four subclasses `Transition`, `Observation`, `Relation` and `Checkpoint`,
+  exported all of them, and then constructed none of them: `export_evidence`
+  hand-rolled `dict[str, Any]` values and returned `list[dict[str, Any]]`. So
+  every subclass field existed only in a class the producing function never
+  touched, and a field could be added, renamed or dropped with nothing
+  breaking, because the dict keys were spelled separately in the function
+  body. `content()` and `digest()` were unreachable, and `verify_export` had
+  no typed shape to work against. The exporter now routes every primitive
+  through the models and returns `list[EvidencePrimitive]`; pydantic's
+  `extra="forbid"` makes a missing or stray field an immediate error at
+  export instead of a silent shape drift, and `Relation.from_event` hosts the
+  one piece of construction that inspects a payload (dependency endpoints are
+  spelled `resource` for a declaration and `decision_id` / `finding_id` for
+  those families) next to the fields it fills. `Checkpoint` now declares
+  `event_id` and `event_type`, which the dict it replaced always emitted, so
+  the wire format is unchanged; `cmd_export_evidence` serialises with
+  `model_dump(mode="json")`. `verify_export` accepts the models or the
+  mappings a JSON-lines receiver produces after `json.loads`, so both paths
+  run the same check.
+
 ### Changed
 
 - **The TUI `tree` view fetches the run once instead of twice (#1157).**
