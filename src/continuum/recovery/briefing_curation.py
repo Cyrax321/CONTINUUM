@@ -195,13 +195,24 @@ def curate_briefing(storage: Storage, run_id: str, decision: RecoveryDecision) -
         )
     if getattr(state, "trajectory_reports", None):
         from continuum.analysis.trajectory_report import render_trajectory_report
+        from continuum.recovery.derived import is_derived_unverified
 
         trajectory_lines: list[str] = []
+        any_unverified = False
         for report in state.trajectory_reports:
             trajectory_lines += render_trajectory_report(report)
+            # The distillation is always mechanical, but its *sources* may be
+            # self-reported, and one such source makes the content unverified
+            # no matter who projected it (#392). The title, not the reason, is
+            # what renders, so the caveat has to live there to be seen.
+            any_unverified = any_unverified or is_derived_unverified(report.model_dump())
         sections.append(
             {
-                "title": "trajectory reports (sleep-time, system-derived)",
+                "title": (
+                    "trajectory reports (sleep-time, derived from unverified sources)"
+                    if any_unverified
+                    else "trajectory reports (sleep-time, system-derived)"
+                ),
                 "provenance": _PROVENANCE_SYSTEM,
                 "reason": "distilled from archived history between sessions (issue #393)",
                 "lines": trajectory_lines,

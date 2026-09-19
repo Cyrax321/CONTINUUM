@@ -8,6 +8,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The non-amplification invariant for derived artifacts now has consumers (#1098).**
+  `src/continuum/recovery/derived.py` (built for #392) exported
+  `stamp_derived`, `derived_label` and `is_derived_unverified` but was imported
+  by nothing in `src/`: both producers of derived artifacts inlined the
+  stamping, and each renderer labelled provenance its own way. Both producers
+  (`build_informed_retry` in `recovery/summary.py` and
+  `build_trajectory_report` in `analysis/trajectory_report.py`) now stamp
+  through the shared helper, and both renderers label through
+  `derived_label`. `is_derived_unverified` marks the trajectory-report section
+  of the curated briefing: its title read "system-derived" even when every
+  source the report was distilled from was self-reported, and the title, not
+  the section's `reason`, is what the briefing renders. The shared label also
+  closes a gap in the trajectory renderer, which hard-coded
+  `external_agent`/`llm` as the unverified set and so rendered an `imported`
+  origin, and a report with no recorded origin at all, as "derived from ...".
+  Output for runs whose sources are trusted is unchanged byte for byte.
+
 - **The TUI `tree` view fetches the run once instead of twice (#1157).**
   `family_lines` in `src/continuum/tui/model.py` called
   `storage.get_run(run_id)` twice and discarded the first result: the first
