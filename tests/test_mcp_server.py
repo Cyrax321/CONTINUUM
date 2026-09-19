@@ -2572,3 +2572,59 @@ async def test_an_uncertain_action_still_refuses_at_budget(
     assert again["proceed"] is False
     assert again["status"] == ActionStatus.UNKNOWN.value
     assert "reconcile" in again["guidance"].lower()
+
+
+@pytest.mark.asyncio
+async def test_fuzzy_similarity_deduplicates_paraphrased_action(
+    server_ctx: tuple[Any, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paraphrased call deduplicates against a completed action with fuzzy similarity."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".continuum").mkdir()
+    gate_json = {
+        "tools": {
+            "send_payment": {
+                "key_template": "pay:{intent}",
+                "action_type": "pay",
+                "similarity": {
+                    "kind": "fuzzy",
+                    "replay_threshold": 0.2,
+                },
+            }
+        }
+    }
+    (tmp_path / ".continuum" / "gate.json").write_text(json.dumps(gate_json))
+
+    server, _ = server_ctx
+    await seed_run(server)
+
+    first = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="pay",
+        arguments={"intent": "pay invoice INV-001"},
+    )
+    assert first["proceed"] is True
+    await call(
+        server,
+        "continuum_complete_action",
+        run_id="run_1",
+        action_key=first["action_key"],
+        external_id="tx_123",
+        result={"receipt": "rcpt_abc"},
+    )
+
+    second = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="pay",
+        arguments={"intent": "settle outstanding amount for INV-001"},
+    )
+    assert second["proceed"] is False
+    assert second["external_id"] == "tx_123"
+    assert second["previous_result"] == {"receipt": "rcpt_abc"}
+    assert "do not repeat" in second["guidance"].lower()

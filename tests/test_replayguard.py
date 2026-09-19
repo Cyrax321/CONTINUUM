@@ -327,3 +327,98 @@ def run(*argv: str) -> tuple[int, str, str]:
     out, err = io.StringIO(), io.StringIO()
     code = main(list(argv), out=out, err=err)
     return code, out.getvalue(), err.getvalue()
+
+
+def test_evaluate_with_fuzzy_similarity(db: str) -> None:
+    from continuum.replay_similarity import SimilarityConfig, SimilarityKind
+
+    # Prior action: "pay invoice INV-001"
+    # New action: "settle outstanding amount for INV-001"
+
+    # 1. Seed the old action as COMPLETED
+    from continuum.actions.idempotency import idempotency_key
+    key_prior = idempotency_key("pay", None, scope="run_1", key="pay_1")
+    payload = {
+        "key": key_prior,
+        "action": {
+            "action_id": "a_pay_1",
+            "action_type": "pay",
+            "run_id": "run_1",
+            "status": "completed",
+            "external_id": "x-1",
+            "arguments": {"intent": "pay invoice INV-001"}
+        },
+    }
+    with SQLiteStorage(db) as store:
+        store.append_event("run_1", EventType.ACTION_RECORDED, payload)
+
+    from continuum.actions.ledger import fold_action_events
+    with SQLiteStorage(db) as store:
+        folded = fold_action_events(store.read_events("run_1"))
+
+    # Test exact matching fails (returns DENY_UNCLAIMED)
+    v_exact = evaluate(
+        action_type="pay",
+        rendered_key="pay_2",
+        run_id="run_1",
+        actions_by_key=folded,
+        tool_input={"intent": "settle outstanding amount for INV-001"},
+    )
+    assert v_exact.kind is GuardKind.DENY_UNCLAIMED
+
+    # Test fuzzy matching succeeds and classifies as SKIP_DUPLICATE
+    config = SimilarityConfig(kind=SimilarityKind.FUZZY, replay_threshold=0.2)
+    v_fuzzy = evaluate(
+        action_type="pay",
+        rendered_key="pay_2",
+        run_id="run_1",
+        actions_by_key=folded,
+        tool_input={"intent": "settle outstanding amount for INV-001"},
+        similarity_config=config,
+    )
+    assert v_fuzzy.kind is GuardKind.SKIP_DUPLICATE
+
+    # Test divergent call falls through to DENY_UNCLAIMED
+    v_divergent = evaluate(
+        action_type="pay",
+        rendered_key="pay_3",
+        run_id="run_1",
+        actions_by_key=folded,
+        tool_input={"intent": "unrelated intent text"},
+        similarity_config=config,
+    )
+    assert v_divergent.kind is GuardKind.DENY_UNCLAIMED
+
+
+def test_evaluate_fuzzy_blocks_started_match(db: str) -> None:
+    from continuum.actions.idempotency import idempotency_key
+    from continuum.replay_similarity import SimilarityConfig, SimilarityKind
+    from continuum.actions.ledger import fold_action_events
+
+    key_prior = idempotency_key("pay", None, scope="run_1", key="pay_1")
+    payload = {
+        "key": key_prior,
+        "action": {
+            "action_id": "a_pay_1",
+            "action_type": "pay",
+            "run_id": "run_1",
+            "status": ActionStatus.STARTED.value,
+            "external_id": "x-1",
+            "arguments": {"intent": "pay invoice INV-001"},
+        },
+    }
+
+    with SQLiteStorage(db) as store:
+        store.append_event("run_1", EventType.ACTION_RECORDED, payload)
+        folded = fold_action_events(store.read_events("run_1"))
+
+    config = SimilarityConfig(kind=SimilarityKind.FUZZY, replay_threshold=0.2)
+    v_fuzzy = evaluate(
+        action_type="pay",
+        rendered_key="pay_2",
+        run_id="run_1",
+        actions_by_key=folded,
+        tool_input={"intent": "settle outstanding amount for INV-001"},
+        similarity_config=config,
+    )
+    assert v_fuzzy.kind is GuardKind.BLOCK_UNCERTAIN

@@ -1270,19 +1270,108 @@ def build_server(
         # an exhausted budget suppress the dedup and reconciliation paths a
         # recovering agent depends on, turning a safety limit into the cause of
         # a duplicate side effect (issue #309).
-        existing = ledger.get(
-            idempotency_key(
-                action_type,
-                arguments,
-                scope=run_id if scoped_to_run else None,
-                key=key,
-            )
+        from continuum.gate import DEFAULT_GATE_CONFIG_PATH, GateConfigError, load_gate_config
+
+        if not hasattr(ctx, "_gate_cache"):
+            ctx._gate_cache = {}
+        if run_id not in ctx._gate_cache:
+            try:
+                ctx._gate_cache[run_id] = load_gate_config(_Path(DEFAULT_GATE_CONFIG_PATH))
+            except GateConfigError as exc:
+                from mcp.server.mcpserver.exceptions import ToolError
+                raise ToolError(f"invalid gate configuration: {exc}") from exc
+        gate_config = ctx._gate_cache[run_id]
+        similarity_config = None
+        if gate_config:
+            spec = None
+            for tool_name, s in gate_config.items():
+                if s.get("action_type", tool_name) == action_type:
+                    spec = s
+                    break
+            if spec and spec.get("similarity"):
+                from continuum.replay_similarity import similarity_backend
+                try:
+                    similarity_config = similarity_backend(spec["similarity"])
+                except (ValueError, TypeError) as exc:
+                    from mcp.server.mcpserver.exceptions import ToolError
+                    raise ToolError(f"invalid gate configuration: {exc}") from exc
+
+        claim_key = idempotency_key(
+            action_type,
+            arguments,
+            scope=run_id if scoped_to_run else None,
+            key=key,
         )
+        existing = ledger.get(claim_key)
+
+        from continuum.replay_similarity import SimilarityKind
+        if (
+            existing is None
+            and similarity_config is not None
+            and similarity_config.kind != SimilarityKind.EXACT
+            and arguments is not None
+        ):
+            from continuum.replay_similarity import similarity
+            best_score = 0.0
+            best_action = None
+            best_key = None
+            for prior_key, prior_action in ledger.folded().items():
+                if prior_action.action_type != action_type:
+                    continue
+                prior_args = getattr(prior_action, "arguments", None) or {}
+                if not isinstance(prior_args, dict):
+                    continue
+                score = similarity(arguments, prior_args, similarity_config)
+                if score > best_score:
+                    best_score = score
+                    best_action = prior_action
+                    best_key = prior_key
+
+            if best_action is not None and best_score >= similarity_config.replay_threshold:
+                if best_action.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
+                    return _json(
+                        {
+                            "run_id": run_id,
+                            "action_type": action_type,
+                            "proceed": False,
+                            "status": ActionStatus.UNKNOWN.value,
+                            "action_key": best_key,
+                            "action_id": best_action.action_id,
+                            "reason": (
+                                f"action {action_type!r} (key {best_key[:12]}...) was interrupted "
+                                "before its outcome was recorded; the side effect may or may not "
+                                "have occurred. Reconcile it before retrying."
+                            ),
+                            "guidance": (
+                                "A previous attempt was interrupted and its outcome is "
+                                "unknown. Do not retry. Verify with the external system "
+                                "whether it happened, then report via "
+                                "continuum_reconcile_action with the action_key above."
+                            ),
+                        }
+                    )
+                if best_action.status is ActionStatus.COMPLETED:
+                    return _json(
+                        {
+                            "run_id": run_id,
+                            "action_type": action_type,
+                            "proceed": False,
+                            "action_key": best_key,
+                            "status": best_action.status.value,
+                            "external_id": best_action.external_id,
+                            "previous_result": (
+                                dict(best_action.result) if best_action.result else None
+                            ),
+                            "guidance": (
+                                "Already performed. Reuse the previous result; do not repeat it."
+                            ),
+                        }
+                    )
+
         settled = existing is not None and existing.status in (
             ActionStatus.COMPLETED,
             ActionStatus.UNKNOWN,
         )
-
         if not settled:
             # Archive-aware (issue #734): attempts live in the event log, and
             # compaction moves failed attempts into the archive. Counting only
