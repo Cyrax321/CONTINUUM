@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A padded argument token can no longer reset the authorization-bound retry
+  budget (#1052).** The bucket was derived from every argument token, and the
+  arguments are caller-controlled noise plus the real resource, so keeping the
+  idempotency key fixed while varying one throwaway field (a `trace_id`, a
+  request id) moved every retry into a fresh bucket at its full allowance. A
+  `budgets.json` cap of 2 that refused a third identical attempt stayed open
+  indefinitely while each retry carried a new token. `ActionLedger.claim` now
+  derives the bucket from the record the claim defers to when one exists, which
+  is the identity the ledger itself has already decided the attempt is, and
+  settlement paths already derived from those same stored arguments, so a retry
+  and its confirmation share one bucket by construction. Fresh-key minting for
+  a fixed resource still shares the bucket as before (#390, #413). A caller
+  minting both a fresh key and fresh noise per attempt presents no identity the
+  ledger can see and remains on the token fallback -- the documented residual,
+  since declaring such fields `volatile` at every call site is not a fix: a
+  caller that wants around the cap simply forgets to declare them.
+
 ### Changed
 
 - **The TUI `tree` view fetches the run once instead of twice (#1157).**
@@ -937,7 +956,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,397 collected, ~2,320 passed, ~27 skipped on a minimal env).
+  (~2,402 collected, ~2,361 passed, ~41 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
