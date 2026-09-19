@@ -32,6 +32,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from typing import Any
 
+from continuum.environment.snapshot import EnvironmentSnapshot
 from continuum.events import CAUSED_BY_TYPES, Event, EventType, IntegrityReport, IntegrityViolation
 from continuum.models import (
     Action,
@@ -584,7 +585,13 @@ class PostgresStorage(Storage):
         row = self._connection.execute("SELECT nextval('action_index_ord_seq') AS v").fetchone()
         return int(row["v"])
 
-    def compact_run(self, run_id: str, *, through_sequence: int | None = None) -> dict[str, int]:
+    def compact_run(
+        self,
+        run_id: str,
+        *,
+        through_sequence: int | None = None,
+        environment: EnvironmentSnapshot | None = None,
+    ) -> dict[str, int]:
         """Archive the pre-anchor prefix of a run's log (issue #239).
 
         A forced anchor checkpoint first records state at the boundary (its
@@ -604,6 +611,11 @@ class PostgresStorage(Storage):
         genesis and fork the hash chain away from the archive. The check is
         shared with the SQLite backend so the two cannot drift apart again
         (issue #1078).
+
+        The anchor carries ``environment`` when supplied, else the environment
+        the run's newest checkpoint already recorded (#1049): an
+        environment-blind anchor makes every pinned dependency UNKNOWN at the
+        next assessment and silently downgrades a clean run.
         """
         from continuum.checkpoint.manager import CheckpointManager
 
@@ -612,7 +624,11 @@ class PostgresStorage(Storage):
         needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
         if needs_fresh_anchor:
             try:
-                CheckpointManager(self).checkpoint(run_id, force_version=True)
+                CheckpointManager(self).checkpoint(
+                    run_id,
+                    force_version=True,
+                    environment=self._anchor_environment(run_id, environment),
+                )
             except Exception as exc:
                 raise ValueError(f"run {run_id!r} could not be anchored: {exc}") from exc
             lv = self.latest_version(run_id)

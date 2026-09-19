@@ -30,6 +30,7 @@ from continuum.security.hashing import stable_hash
 
 __all__ = [
     "EnvironmentProvider",
+    "EnvironmentSnapshot",
     "StaticProvider",
     "FileProvider",
     "ValueProvider",

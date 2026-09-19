@@ -31,6 +31,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from continuum.environment.snapshot import EnvironmentSnapshot
 from continuum.events import CAUSED_BY_TYPES, Event, EventType, IntegrityReport, IntegrityViolation
 from continuum.models import Action, Origin, Run, RunStatus, SemanticState, StateCheckpoint, utcnow
 from continuum.security.hashing import make_id
@@ -483,7 +484,13 @@ class SQLiteStorage(Storage):
             ) from exc
         _maintain_action_index(conn, event, int(cursor.lastrowid or 0))
 
-    def compact_run(self, run_id: str, *, through_sequence: int | None = None) -> dict[str, int]:
+    def compact_run(
+        self,
+        run_id: str,
+        *,
+        through_sequence: int | None = None,
+        environment: EnvironmentSnapshot | None = None,
+    ) -> dict[str, int]:
         """Archive the pre-anchor prefix of a run's log (issue #239).
 
         A forced anchor checkpoint first records state at the boundary (its
@@ -500,6 +507,11 @@ class SQLiteStorage(Storage):
         rejected (issue #705) instead of silently deleting the anchor and
         every live row, which would leave the next append minting a fresh
         genesis and fork the hash chain away from the archive.
+
+        The anchor carries ``environment`` when supplied, else the environment
+        the run's newest checkpoint already recorded (#1049): an
+        environment-blind anchor makes every pinned dependency UNKNOWN at the
+        next assessment and silently downgrades a clean run.
         """
         from continuum.checkpoint.manager import CheckpointManager
 
@@ -508,7 +520,11 @@ class SQLiteStorage(Storage):
         needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
         if needs_fresh_anchor:
             try:
-                CheckpointManager(self).checkpoint(run_id, force_version=True)
+                CheckpointManager(self).checkpoint(
+                    run_id,
+                    force_version=True,
+                    environment=self._anchor_environment(run_id, environment),
+                )
             except Exception as exc:
                 raise ValueError(f"run {run_id!r} could not be anchored: {exc}") from exc
             lv = self.latest_version(run_id)

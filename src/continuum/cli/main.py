@@ -1756,7 +1756,7 @@ def cmd_compact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
             file=err,
         )
         return ExitCode.ERROR
-    report = storage.compact_run(args.run_id)
+    report = storage.compact_run(args.run_id, environment=_environment(args, args.run_id))
     payload = {"run_id": args.run_id, **report}
     _emit(
         payload,
