@@ -61,6 +61,94 @@ def test_unknown_event_types_are_counted_not_fatal() -> None:
     assert not report.complete
 
 
+def test_every_event_type_is_projected_or_recorded() -> None:
+    """No ``EventType`` falls through the fold unnamed (issue #1169).
+
+    ``_dispatch`` has an explicit case for the types that change state and
+    ``_NON_PROJECTING`` names the ones that are recorded facts; the two sets are
+    written by hand in the same module, and 11 of the 51 enum members landed in
+    neither. They reached ``case _: return False`` and were booked into
+    ``ignored_types``, which ``ProjectionReport.complete`` defines as the fold
+    *not understanding every event type it consumed* -- so any run that
+    restored, merged, settled a review or sent a webhook reported as partly
+    unprojectable on events the codebase legitimately emits.
+
+    Parsing the module keeps this honest against future enum growth: a new type
+    added without a home in either list fails here rather than waiting for a
+    compaction fixture to brush against it.
+    """
+    import ast
+    import importlib
+    import pathlib
+
+    semantic = pathlib.Path(importlib.import_module("continuum.state.semantic").__file__)
+    tree = ast.parse(semantic.read_text(encoding="utf-8"))
+    projected: set[str] = set()
+    recorded: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Match):
+            for case in node.cases:
+                pattern = case.pattern
+                if isinstance(pattern, ast.MatchValue) and isinstance(pattern.value, ast.Attribute):
+                    projected.add(pattern.value.attr)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "frozenset":
+            for arg in node.args:
+                if isinstance(arg, ast.List | ast.Set):
+                    for element in arg.elts:
+                        if isinstance(element, ast.Attribute):
+                            recorded.add(element.attr)
+
+    unaccounted = {
+        member.name
+        for member in EventType
+        if member.name not in projected and member.name not in recorded
+    }
+    assert not unaccounted, (
+        "every EventType must either be projected by _dispatch or listed in "
+        f"_NON_PROJECTING; these are neither: {sorted(unaccounted)}"
+    )
+
+
+#: The types the codebase emits as recorded facts rather than state. Each has no
+#: handler in _Accumulator, so the fold is right to skip them -- the defect was
+#: that it then counted them as not understood (#1169).
+_RECORDED_FACT_TYPES = [
+    EventType.RUN_RESTORED,
+    EventType.RUN_MERGED,
+    EventType.REVIEW_CONFIRMED,
+    EventType.AUTHORITY_CONSUMED,
+    EventType.AUTHORITY_RECONCILED,
+    EventType.NOTIFICATION_SENT,
+    EventType.NOTIFICATION_FAILED,
+    EventType.PERCEPTION_OBSERVED,
+    EventType.BRANCH_RESOLVED,
+    EventType.REASONING_SUMMARY,
+    EventType.MEMORY_TOMBSTONED,
+]
+
+
+def test_recorded_facts_are_not_reported_as_unprojectable() -> None:
+    """Folding the recorded-fact types leaves the report clean (#1169).
+
+    The fold's *behaviour* was already correct -- none of these mutate state --
+    so the assertion is on the bookkeeping: they must not land in
+    ``ignored_types``, which the degraded-mode and compaction paths read as a
+    signal the log contained something the fold could not handle.
+    """
+    log = started(EventLog())
+    for offset, event_type in enumerate(_RECORDED_FACT_TYPES):
+        log.append("run_1", event_type, {"offset": offset})
+
+    state, report = project_incremental("run_1", log.events("run_1"))
+
+    assert report.ignored_types == {}
+    assert report.complete
+    # RUN_STARTED is the only state change in the stream
+    assert report.applied == 1
+    assert report.consumed == len(_RECORDED_FACT_TYPES) + 1
+    assert state.goal.description == "g"
+
+
 # --- partial and unusual payloads ------------------------------------------ #
 
 

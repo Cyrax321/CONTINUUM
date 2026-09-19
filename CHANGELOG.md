@@ -52,6 +52,30 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The projection fold no longer counts 11 of its own event types as not
+  understood (#1169).** `_dispatch` in `src/continuum/state/semantic.py` has an
+  explicit case for every type that changes state and `_NON_PROJECTING` names
+  every type that is a recorded fact, but the two hand-written lists did not
+  cover the enum between them. `AUTHORITY_CONSUMED`,
+  `AUTHORITY_RECONCILED`, `BRANCH_RESOLVED`, `MEMORY_TOMBSTONED`,
+  `NOTIFICATION_FAILED`, `NOTIFICATION_SENT`, `PERCEPTION_OBSERVED`,
+  `REASONING_SUMMARY`, `REVIEW_CONFIRMED`, `RUN_MERGED` and `RUN_RESTORED`
+  fell through to `case _: return False` and were booked into
+  `report.ignored_types`, the field `ProjectionReport.complete` defines as "the
+  fold understood every event type it consumed". Any run that restored, merged,
+  settled a review, consumed an authority or sent a webhook therefore reported
+  as partly unprojectable on events the codebase legitimately emits, and a
+  compaction fixture touching any of them would have eroded the
+  `not report.ignored_types` assertion at `tests/test_compaction.py:346`. All
+  11 are now in `_NON_PROJECTING`, grouped with the reason each is a recorded
+  fact. The fold's behaviour is unchanged — none of them have an
+  `_Accumulator` handler, so none were ever applied — but the report now reads
+  `complete=True` with `ignored_types` empty. `tests/test_projection_edges.py`
+  gains a guard that parses the module and fails on any `EventType` in neither
+  list, so a future type added to the enum without a home in either is caught
+  here rather than waiting for a fixture to brush against it, plus a runtime
+  test that folding the 11 leaves the report clean.
+
 - **The docs-count guard now reads `references/` and the translated READMEs,
   and the stale counts they held are re-synced (#1109, #1071).** The guard in
   `tests/test_docs_counts.py` watched only three files, so `references/testing.md`

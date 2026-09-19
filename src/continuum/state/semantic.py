@@ -765,6 +765,31 @@ _NON_PROJECTING = frozenset(
         EventType.LIVENESS_RECOVERED,
         # risk (issue #303): real-time risk signal, never state
         EventType.RISK_OBSERVED,
+        # recovery markers (issue #1169): record that an edit happened, not state.
+        # RUN_FORKED sits above for the same reason; the accumulator has no
+        # handler for either, so leaving these out counted a legitimate event
+        # the codebase emits as "not understood" and flipped report.complete.
+        EventType.RUN_RESTORED,
+        EventType.RUN_MERGED,
+        # hitl (issue #1169): the settle record. Pending work comes from the
+        # claim and the review request, not from the confirmation.
+        EventType.REVIEW_CONFIRMED,
+        # authority (issue #1169): consumption and reconciliation are audit --
+        # GRANT_DENIED is in this set for the same reason -- not state.
+        EventType.AUTHORITY_CONSUMED,
+        EventType.AUTHORITY_RECONCILED,
+        # notifications (issue #1169): receipts the dedup window reads, never state
+        EventType.NOTIFICATION_SENT,
+        EventType.NOTIFICATION_FAILED,
+        # perception/branch ledger (issue #1169): observed inputs and resolved
+        # branches are recorded facts the fold does not project.
+        EventType.PERCEPTION_OBSERVED,
+        EventType.BRANCH_RESOLVED,
+        # briefing (issue #1169): the curated summary is re-read off the event,
+        # not folded into state
+        EventType.REASONING_SUMMARY,
+        # memory governance (issue #1169): a tombstone marks a forgotten key
+        EventType.MEMORY_TOMBSTONED,
     }
 )
 
