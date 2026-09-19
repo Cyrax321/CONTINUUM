@@ -26,7 +26,6 @@ from continuum.budgets import (
     _StagedAttributes,
     attempts_by_key,
     attempts_for_type,
-    backoff_delay,
     evaluate_budget,
     get_remaining,
     increment,
@@ -927,20 +926,6 @@ def test_budget_evaluation_math() -> None:
     assert (allowed, used, maximum) == (True, 0, 3)
 
 
-def test_backoff_delay_is_exponential_with_cap() -> None:
-    assert backoff_delay(1) == 1.0
-    assert backoff_delay(2) == 2.0
-    assert backoff_delay(3) == 4.0
-    assert backoff_delay(10) == 60.0  # capped
-    with pytest.raises(ValueError):
-        backoff_delay(0)
-
-
-def test_backoff_delay_rejects_zero() -> None:
-    with pytest.raises(ValueError, match="got 0"):
-        backoff_delay(0)
-
-
 # --- enforcement through the real ledger path --------------------------------------- #
 
 
@@ -1133,3 +1118,48 @@ def test_hand_built_action_type_object_int_is_used() -> None:
     }
 
     assert _max_for("send_invoice", raw) == 5
+
+
+def test_budgets_public_surface_has_no_dead_exports() -> None:
+    """Every exported name has a wired consumer (issue #1095).
+
+    ``backoff_delay`` shipped in ``__all__`` with no caller for the whole life
+    of the module: the refusal sites refuse and return, and the module's own
+    docstring states CONTINUUM never retries anything itself, it counts and
+    gates. A pacing helper with nothing to pace is a promise the API does not
+    keep, so this fails if a name lands in ``__all__`` that nothing outside
+    budgets imports.
+    """
+    import ast
+    import pathlib
+
+    import continuum.budgets as budgets
+
+    tree = ast.parse(pathlib.Path(budgets.__file__).read_text(encoding="utf-8"))
+    public_defs = set()
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            if not node.name.startswith("_"):
+                public_defs.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and not target.id.startswith("_"):
+                    public_defs.add(target.id)
+
+    assert set(budgets.__all__) <= public_defs, "an __all__ entry is not defined in budgets"
+
+    # The consumers named in the module docstring: the claim sites and the CLI.
+    # budgets.py itself is excluded, otherwise a name only ever mentioned in its
+    # own definition would read as consumed -- that is exactly how
+    # backoff_delay went undetected.
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    consumers = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in repo.glob("src/continuum/**/*.py")
+        if p.resolve() != pathlib.Path(budgets.__file__).resolve()
+    )
+    for name in budgets.__all__:
+        if name == "AUTHORIZATION_BOUND_KEY":
+            # Re-exported under that exact name only inside budgets itself.
+            continue
+        assert name in consumers, f"{name} is exported but nothing outside budgets imports it"

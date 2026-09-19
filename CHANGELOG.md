@@ -36,6 +36,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Removed
 
+- **Dead `backoff_delay` export (#1095).** The exponential-with-cap pacing
+  helper in `src/continuum/budgets.py` was the only member of
+  `budgets.__all__` with no consumer anywhere in the repo. Every refusal site
+  (`cli/main.py`, `mcp/server.py`, `actions/ledger.py`) refuses and returns;
+  none computes or applies a delay, and the module's own docstring states
+  CONTINUUM never retries anything itself — it counts and gates. The helper
+  shipped speculatively with #240 ("ships as a pure exponential+cap helper;
+  CONTINUUM never retries itself") and no caller arrived in the year since.
+  Removed with its tests. Recoverable from history (6217a65) if a real
+  retry-pacing surface ever needs it.
+
 - **Dead `DuplicateAction` and `LeaseError` exception classes (#1115).**
   `DuplicateAction` (`continuum.actions.ledger`) and `LeaseError`
   (`continuum.concurrency.lease`) were exported exceptions that no code path
