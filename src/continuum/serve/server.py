@@ -30,19 +30,20 @@ import json
 import os
 import sys
 import threading
+from collections.abc import Mapping
 from typing import Any, TextIO, cast
 
 from continuum.actions.ledger import ActionLedger
 from continuum.adapters.generic import GenericAgentAdapter
 from continuum.environment import StaticProvider, capture
-from continuum.events import EventType
+from continuum.events import Event, EventType
 from continuum.models import (
     ActionStatus,
     EnvironmentSnapshot,
     EnvResource,
     Origin,
     Run,
-    StateStatus,
+    SemanticState,
     UnknownSideEffect,
 )
 from continuum.recovery.contract import render_contract
@@ -281,6 +282,89 @@ class SidecarServer:
 
     def _ledger(self, run_id: str) -> ActionLedger:
         return ActionLedger(self.storage, run_id, source=AGENT_SOURCE)
+
+    def _append_projectable(
+        self,
+        run_id: str,
+        event_type: EventType,
+        payload: Mapping[str, Any],
+        *,
+        attempts: int = 3,
+    ) -> SemanticState:
+        """Commit ``payload`` only if the fold accepts it against the state it lands on.
+
+        Mirrors ``ContinuumMCP._append_projectable`` (issue #364), which closed
+        the same ordering gap on the MCP transport. ``record_progress`` used to
+        append first and project afterwards (#1221), so an update the fold
+        refused was already durable when the refusal arrived: the response
+        carried a ``projection_failed_at`` block describing a break the caller
+        could no longer correct. Because the fold validates every intermediate
+        state, no later event could repair it, and every projecting surface for
+        that run stayed dead permanently -- ``status``, ``resume``,
+        ``briefing`` and ``replay`` -- while the action tools kept working, so
+        the run could still authorise real side effects that recovery could not
+        vouch for. That inversion is what makes an unprojectable log worse than
+        a rejected call, so a refused call writes nothing here.
+
+        The candidate is folded in memory rather than written and rolled back:
+        there is no transaction spanning the append, and a rollback that failed
+        would leave behind precisely the state this prevents.
+
+        ``expected_sequence`` closes the gap between validating and committing.
+        They are two statements, so a second writer can advance the run in
+        between and two individually-legal payloads compose into a log neither
+        would have been allowed to produce (for example ``total=50`` landing
+        between the read and the write of a ``completed=75`` that omits
+        ``total``). Losing that race says nothing about whether this update is
+        valid, so it re-validates against the new head rather than failing;
+        bounded, so a permanently busy run answers instead of spinning.
+        """
+        from continuum.storage import ConcurrentWriteError
+
+        for remaining in range(attempts - 1, -1, -1):
+            history = list(self.storage.read_events(run_id))
+            head = history[-1].sequence if history else 0
+            candidate = Event(
+                run_id=run_id,
+                sequence=head + 1,
+                type=event_type,
+                payload=dict(payload),
+                source=AGENT_SOURCE,
+            )
+            try:
+                state = project(run_id, [*history, candidate])
+            except ValueError as exc:
+                # pydantic's ValidationError is a ValueError, so this covers both
+                # the model invariants and the projector's own checks. Re-raised
+                # as bad_params with the payload named, because the bare pydantic
+                # message reports the folded figures without saying which call
+                # produced them.
+                raise BadParams(
+                    f"{event_type.value} {dict(payload)} would leave run {run_id!r} "
+                    f"unprojectable and was not recorded: {exc}"
+                ) from exc
+            try:
+                self.storage.append_event(
+                    run_id,
+                    event_type,
+                    payload,
+                    expected_sequence=head,
+                    source=AGENT_SOURCE,
+                )
+            except ConcurrentWriteError:
+                if remaining:
+                    continue
+                raise BadParams(
+                    f"run {run_id!r} is being written concurrently and this update lost the "
+                    f"race {attempts} times; nothing was recorded. One run is meant to have "
+                    f"one owner at a time, so check whether another agent holds this run."
+                ) from None
+            return state
+        # Unreachable: every iteration either returns, raises on the
+        # unprojectable candidate, or raises once the retries are spent.
+        raise BadParams(  # pragma: no cover - the loop always returns or raises
+            f"run {run_id!r} update retried {attempts} times without committing"
+        )
 
     def dispatch(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Authenticate, then route to the handler for ``method``.
@@ -687,13 +771,17 @@ def _h_record_progress(server: SidecarServer, params: dict[str, Any]) -> dict[st
     if total is not None:
         payload["total"] = total
         payload["pending"] = max(total - completed - failed, 0)
-    server.storage.append_event(run_id, EventType.TASK_UPDATED, payload, source=AGENT_SOURCE)
-    # Degrade, not raise (issue #383): the event is already committed by the
-    # time this fold runs, so dying here would report an error while leaving
-    # the write in place. Reporting the last-good figures plus the break is the
-    # honest answer; the caller can see the log needs attention.
-    state = project(run_id, server.storage.read_events(run_id), on_unprojectable="degrade")
-    response = {
+    # Validate before committing, not after (issue #1221): a payload is legal or
+    # not relative to the state it lands on, so the guards above -- which see
+    # only this call's own arguments -- are blind to the total already on record.
+    # An agent reports ``total`` once and then sends ``completed``/``failed``
+    # updates, so the accumulated figure is visible to the fold alone. Appending
+    # first and degrading afterwards (#383) left the refused event durable while
+    # reporting the break, and no later event could correct it. The MCP transport
+    # refuses the same call and records nothing (#364); the two transports that
+    # expose one tool now agree.
+    state = server._append_projectable(run_id, EventType.TASK_UPDATED, payload)
+    return {
         "run_id": run_id,
         "completed": state.progress.completed,
         "pending": state.progress.pending,
@@ -701,13 +789,6 @@ def _h_record_progress(server: SidecarServer, params: dict[str, Any]) -> dict[st
         "total": state.progress.total,
         "source_sequence": state.source_sequence,
     }
-    if state.status is StateStatus.INVALID:
-        response["projection_failed_at"] = {
-            "sequence": state.unprojectable_at_sequence,
-            "type": state.unprojectable_event_type,
-            "reason": state.unprojectable_reason,
-        }
-    return response
 
 
 def _h_checkpoint(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]:

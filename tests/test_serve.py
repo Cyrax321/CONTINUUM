@@ -21,7 +21,8 @@ from continuum.serve import (
     list_methods,
     serve_subprocess,
 )
-from continuum.serve.server import MUTATING
+from continuum.serve.server import MUTATING, BadParams
+from continuum.storage import ConcurrentWriteError
 
 
 def make_server() -> SidecarServer:
@@ -55,6 +56,87 @@ def test_record_progress_rejects_over_total() -> None:
     srv = make_server()
     with pytest.raises(BadParams, match="exceeds total"):
         srv.dispatch("record_progress", {"run_id": "r1", "completed": 5, "total": 4})
+
+
+def test_record_progress_refuses_an_update_the_fold_rejects_and_records_nothing() -> None:
+    """The write path must reject what the read path rejects, before committing
+    (issue #1221). The pre-write guards see only this call's own arguments, so
+    they are blind to the ``total`` already on record -- the ordinary case, since
+    an agent reports ``total`` once and then sends ``completed``/``failed``
+    updates. Only the fold sees the accumulated figures."""
+    from continuum.events import EventType
+    from continuum.serve.server import BadParams
+    from continuum.state.semantic import project
+
+    srv = make_server()
+    srv.dispatch("record_progress", {"run_id": "r1", "completed": 0, "total": 5, "goal": "g"})
+    # completed(4) + failed(4) = 8 exceeds the recorded total of 5, but the
+    # payload itself carries no total, so the same-payload guard cannot see it.
+    with pytest.raises(BadParams, match="would leave run 'r1' unprojectable"):
+        srv.dispatch("record_progress", {"run_id": "r1", "completed": 4, "failed": 4})
+
+    events = srv.storage.read_events("r1")
+    updates = [e for e in events if e.type is EventType.TASK_UPDATED]
+    assert len(updates) == 1, "the refused update must not be recorded"
+    assert updates[0].payload["total"] == 5
+    # The run is still usable: every projecting surface still resolves.
+    state = project("r1", events)
+    assert state.progress.total == 5
+    assert state.progress.completed == 0
+
+
+def test_record_progress_reports_the_accepted_figures_from_the_new_state() -> None:
+    """A legal update lands and the response carries the folded figures,
+    including the pending count derived from the recorded total."""
+    srv = make_server()
+    srv.dispatch("record_progress", {"run_id": "r1", "completed": 1, "total": 5, "goal": "g"})
+    out = srv.dispatch("record_progress", {"run_id": "r1", "completed": 3, "failed": 1})
+    assert (out["completed"], out["failed"], out["total"], out["pending"]) == (3, 1, 5, 1)
+    assert out["source_sequence"] == 3
+
+
+def test_record_progress_retries_past_a_won_concurrency_race() -> None:
+    """``expected_sequence`` spans the validate/commit gap, and a second writer
+    can advance the run between them (#1221). Losing that race says nothing
+    about whether this update is valid, so it is re-read, re-validated against
+    the new head and committed rather than failed."""
+    srv = make_server()
+    srv.dispatch("record_progress", {"run_id": "r1", "completed": 0, "total": 5, "goal": "g"})
+    real_append = srv.storage.append_event
+    lost = {"once": False}
+
+    def racing_append(*args: object, **kwargs: object) -> object:
+        if not lost["once"]:
+            lost["once"] = True
+            raise ConcurrentWriteError("simulated")
+        return real_append(*args, **kwargs)
+
+    srv.storage.append_event = racing_append
+    out = srv.dispatch("record_progress", {"run_id": "r1", "completed": 2})
+    assert out["completed"] == 2
+    assert out["total"] == 5
+    # The retried write landed exactly once.
+    assert srv.storage.last_sequence("r1") == out["source_sequence"]
+
+
+def test_record_progress_refuses_when_it_loses_every_concurrency_race() -> None:
+    """A run that loses the race on every attempt answers with a bad_params
+    naming the competing owner and records nothing, rather than spinning or
+    leaving a half-applied update (#1221)."""
+    from continuum.events import EventType
+
+    srv = make_server()
+    srv.dispatch("record_progress", {"run_id": "r1", "completed": 0, "total": 5, "goal": "g"})
+    recorded_before = [e for e in srv.storage.read_events("r1") if e.type is EventType.TASK_UPDATED]
+
+    def always_racing(*args: object, **kwargs: object) -> object:
+        raise ConcurrentWriteError("simulated")
+
+    srv.storage.append_event = always_racing
+    with pytest.raises(BadParams, match="is being written concurrently"):
+        srv.dispatch("record_progress", {"run_id": "r1", "completed": 2})
+    recorded_after = [e for e in srv.storage.read_events("r1") if e.type is EventType.TASK_UPDATED]
+    assert recorded_after == recorded_before, "the losing update must not be recorded"
 
 
 def test_checkpoint_and_resume_round_trip() -> None:
