@@ -219,6 +219,8 @@ Full walkthrough with code is in `docs/recovery_walkthrough.md` (`examples/recov
 
 Two additive security extensions sit on top of the recovery and checkpoint substrate. They do not change resume, replay, or the existing crash-time revalidation path.
 
+> **Status: specified and tested, not shipped** (issue [#1030](https://github.com/Cyrax321/CONTINUUM/issues/1030)). The modules below are complete and pass their tests, but nothing in the engine or any seam invokes them yet — CONTINUUM revalidates at crash/resume only. Wiring them is a roadmap decision; read the present tense below as the design, not the shipped behaviour.
+
 - **Secure Planning Loop**: observations carry provenance and are verified by two independent signals (`verified` / `unverified` / `contested`). A plan branch gated on an unverified or contested observation is escalated to `REQUIRES_REVIEW`. Decisions are appended to the ledger as `PERCEPTION_OBSERVED` and `BRANCH_RESOLVED` events.
 - **Periodic Revalidation**: reuses the recovery engine on a step interval (default 25) and on app switch, so mid-run environment drift is caught within one cycle instead of only at the next crash.
 
