@@ -842,15 +842,15 @@ reproducible evidence. It rests on two layers:
 
 ### 17.3 Tests
 
-- `tests/test_phase6.py` (15 tests): every scenario runs green under the harness,
+- `tests/test_phase6.py` (17 tests): every scenario runs green under the harness,
   plus harness self-checks (recorded failure, recorded exception, report +
-  summary). `benchmarks/run.py` executes all 12 scenarios and emits a report.
+  summary). `benchmarks/run.py` executes all 14 scenarios and emits a report.
 - The pre-existing `tests/test_benchmark.py` (CONTINUUM-Bench) continues to pass.
 
 ### 17.4 Baseline vs final test result
 
 - Before Phase 6: 937 passed, 9 skipped, 0 failed.
-- After Phase 6: 952 passed, 9 skipped, 0 failed (15 new tests).
+- After Phase 6: 952 passed, 9 skipped, 0 failed (17 new tests).
 - `ruff check` / `ruff format --check` clean on changed files; `mypy src/continuum`
   reports no issues.
 
