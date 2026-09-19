@@ -103,7 +103,7 @@ def make_continuum_checkpointer(storage: Any) -> Any:
                         event.event_id,
                         event.type.value,
                         event.timestamp.isoformat(),
-                        "{}",
+                        json.dumps(dict(event.payload), sort_keys=True),
                         event.source.value,
                         event.prev_hash,
                         event.hash,
