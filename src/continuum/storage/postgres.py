@@ -686,9 +686,21 @@ class PostgresStorage(Storage):
             ) from exc
 
     def rebuild_action_index(self) -> int:
-        """Recompute the whole index from the log (global key space)."""
+        """Recompute the whole index from the log; returns corrected rows.
+
+        Always global by design: keys live in one store-wide namespace, so a
+        per-run rewrite could collide with another run's legitimate row of the
+        same key. A correction is any key whose stored row was missing, stale
+        or spurious, counted against the rows present before the rewrite.
+        """
         canonical = self._canonical_index_rows()
         with self._write():
+            before = {
+                r["key"]: (r["updated_seq"], r["status"])
+                for r in self._connection.execute(
+                    "SELECT key, updated_seq, status FROM action_index"
+                )
+            }
             self._connection.execute("DELETE FROM action_index")
             # psycopg's Connection has no executemany; the cursor does.
             with self._connection.cursor() as cur:
@@ -700,7 +712,13 @@ class PostgresStorage(Storage):
                         for key, (entry, seq) in canonical.items()
                     ],
                 )
-        return 0
+        corrections = sum(
+            1
+            for k, val in ((k, (seq, entry[3])) for k, (entry, seq) in canonical.items())
+            if before.get(k) != val
+        )
+        corrections += len(set(before) - set(canonical))
+        return corrections
 
     def action_index_drift(self) -> int:
         """Count index rows that disagree with the log. Read-only.

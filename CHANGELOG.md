@@ -699,6 +699,18 @@ All notable changes to this project are documented here. The format follows
   callable), and the existing answers for genuinely malformed JSON are
   unchanged.
 
+- **`PostgresStorage.rebuild_action_index` reports the rows it corrected (#1267).**
+  It ended in an unconditional `return 0` while the `Storage` contract
+  declares "returns corrected rows" and the SQLite engine honours it, so
+  `continuum verify --index --repair-index` always printed
+  `action index repaired from the log (0 row(s) corrected)` on Postgres even
+  when the rebuild rewrote every row. An operator repairing a drifted index
+  could not tell "nothing was wrong" from "I just fixed N rows", which is the
+  only distinction the count exists to carry. The repair itself was always
+  correct. Postgres now computes the same before/canonical comparison SQLite
+  does — keys missing, stale or spurious relative to the fold — and its
+  docstring states the contract the base class already declares.
+
 ## [0.1.2] - 2026-08-31
 
 ### Fixed

@@ -294,7 +294,11 @@ def test_pg_action_index_covers_the_archive_after_rebuild(
     storage.compact_run("pg_ki")
 
     assert storage.action_index_drift() > 0
-    storage.rebuild_action_index()
+    drift = storage.action_index_drift()
+    fixed = storage.rebuild_action_index()
+    # The count an operator reads from `verify --repair-index` must match the
+    # drift the engine itself reported, not a hardcoded 0 (issue #1267).
+    assert fixed == drift
     assert storage.action_index_drift() == 0
     key = str(idempotency_key("process_doc", None, scope="pg_ki", key="doc:1"))
     foreign = storage.foreign_action(key, exclude_run="some_other_run")
