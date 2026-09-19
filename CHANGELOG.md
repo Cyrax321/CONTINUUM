@@ -139,6 +139,27 @@ All notable changes to this project are documented here. The format follows
   provenance labels, quarantine, omission, determinism and the size caps;
   recovery verdicts and safety semantics are unchanged.
 
+### Tests
+
+- **Every target-resolution and input-validation branch of `approve_restore` is
+  now covered (#1292).** `tests/test_restore_merge_gate.py` drove restore
+  through one entry point only, `approve_restore(..., anchor_sequence=0)`, so
+  the `target` ladder in `_anchor_for` and the two input checks that guard it
+  had no test: a change to any of them would have shipped green.
+  `tests/test_restore_target_resolution.py` drives each branch directly -
+  passing both `target` and `anchor_sequence`, a whitespace-only `reason`, no
+  target with and without checkpoints, a target given as a checkpoint id, a
+  version, a source sequence, and a numeric string, and the three miss shapes
+  (unknown string, blank target, unknown number). Each error message was
+  recorded by hand in the issue before the test was written, so the asserts
+  match observed behaviour rather than a guess. `restore_to_anchor`, exported
+  in `__all__` but called from nowhere, is exercised too. Coverage of
+  `src/continuum/recovery/restore.py` rises from 55% to 90%; the three lines
+  still uncovered are the corrupted-checkpoint rung (covered by
+  `tests/test_checkpoint_corruption.py`) and a checkpoint-id ladder rung that
+  no input can reach, since `get_checkpoint` resolves any of the run's own ids
+  before that loop runs. No behaviour changes; restore.py is untouched.
+
 ### Fixed
 
 - **MCP and sidecar ledger writes now carry `EXTERNAL_AGENT` (#653).**
@@ -891,7 +912,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,311 collected, ~2,253 passed, ~25 skipped on a minimal env).
+  (~2,335 collected, ~2,253 passed, ~25 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
