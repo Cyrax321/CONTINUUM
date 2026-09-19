@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import io
+from pathlib import Path
+
+from continuum.cli import ExitCode, main
 from continuum.events import Event, EventType
 from continuum.models import Finding, Goal, Origin, Progress, Provenance, SemanticState, StateStatus
 from continuum.provenance_map import derived_origin, derived_provenance_for_events, min_canonical
@@ -10,6 +14,12 @@ from continuum.recovery.summary import render_informed_retry
 from continuum.state.semantic import project
 from continuum.state.validator import validate_state
 from continuum.storage import SQLiteStorage
+
+
+def _run_cli(*argv: str) -> tuple[int, str, str]:
+    out, err = io.StringIO(), io.StringIO()
+    code = main(list(argv), out=out, err=err)
+    return code, out.getvalue(), err.getvalue()
 
 
 def test_lesson_sourced_only_from_external_agent_is_unverified() -> None:
@@ -189,3 +199,111 @@ def test_trusted_only_sources_yield_verified_derived() -> None:
     payload = stamp_derived({}, events)
     assert not is_derived_unverified(payload)
     assert "derived from deterministic" in derived_label(payload)
+
+
+def test_trajectory_report_from_imported_sources_renders_unverified() -> None:
+    """IMPORTED sources were missed by the renderer's hardcoded origin set (#1098).
+
+    ``render_trajectory_report`` treated only ``external_agent`` and ``llm`` as
+    unverified, so an IMPORTED origin read as "derived from imported" and lost
+    the caveat. The shared ``derived_label`` keys off ``Origin.self_certified``,
+    which includes IMPORTED.
+    """
+    from continuum.analysis.trajectory_report import (
+        build_trajectory_report,
+        render_trajectory_report,
+    )
+    from continuum.models import Run
+
+    storage = SQLiteStorage(":memory:")
+    try:
+        storage.create_run(Run(run_id="r", goal="g"))
+        storage.append_event("r", EventType.RUN_STARTED, {"goal": "g"}, source=Origin.HUMAN)
+        window_start = storage.last_sequence("r")
+        storage.append_event(
+            "r",
+            EventType.TOOL_COMPLETED,
+            {"path": "/tmp/x", "sha256": "ab"},
+            source=Origin.IMPORTED,
+        )
+        window_end = storage.last_sequence("r")
+        report = build_trajectory_report(storage, "r", window_start, window_end)
+        assert report.derived_origin == Origin.IMPORTED.value
+        assert is_derived_unverified(report.model_dump())
+        assert "unverified" in derived_label(report.model_dump())
+        rendered = render_trajectory_report(report)
+        assert any("unverified" in line for line in rendered)
+    finally:
+        storage.close()
+
+
+def test_unstamped_trajectory_report_renders_unverified() -> None:
+    """A derived artifact with no provenance fails closed, not silently trusted.
+
+    Reports recorded before the field existed have ``derived_origin == ""``; the
+    previous renderer printed "derived from " for them (#1098).
+    """
+    from continuum.analysis.trajectory_report import render_trajectory_report
+    from continuum.models import TrajectoryReport
+
+    report = TrajectoryReport(
+        report_id="legacy_1",
+        window_start=0,
+        window_end=1,
+        compaction_seq=1,
+        attempts=1,
+        scar_rate=0.0,
+    )
+    assert report.derived_origin == ""
+    assert is_derived_unverified(report.model_dump())
+    assert "unverified" in derived_label(report.model_dump())
+    rendered = render_trajectory_report(report)
+    assert any("unverified" in line for line in rendered)
+
+
+def _record_trajectory_report(db: str, derived_origin: str) -> None:
+    from continuum.models import Run
+
+    with SQLiteStorage(db) as store:
+        store.create_run(Run(run_id="run_1", goal="g"))
+        store.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"}, source=Origin.HUMAN)
+        store.append_event(
+            "run_1",
+            EventType.TRAJECTORY_REPORT,
+            {
+                "report_id": "rep_1",
+                "window_start": 0,
+                "window_end": 1,
+                "compaction_seq": 1,
+                "attempts": 1,
+                "scar_rate": 0.0,
+                "stall_sites": [],
+                "top_failure_action_types": [],
+                "created_at": "2026-01-01T00:00:00Z",
+                "derived_origin": derived_origin,
+            },
+            source=Origin.DETERMINISTIC,
+        )
+
+
+def test_briefing_marks_trajectory_section_from_unverified_sources(tmp_path: Path) -> None:
+    """The section title carries the caveat, because the title is what renders (#1098).
+
+    A report projected from self-reported sources is not system-derived in
+    authority, even though the projection itself is mechanical.
+    """
+    db = str(tmp_path / "brief.db")
+    _record_trajectory_report(db, Origin.IMPORTED.value)
+    code, out, err = _run_cli("--db", db, "briefing")
+    assert code is ExitCode.OK, err
+    assert "trajectory reports (sleep-time, derived from unverified sources)" in out
+
+
+def test_briefing_trajectory_section_stays_system_derived_when_verified(tmp_path: Path) -> None:
+    """The unverified title is not applied to a report from trusted sources."""
+    db = str(tmp_path / "brief.db")
+    _record_trajectory_report(db, Origin.DETERMINISTIC.value)
+    code, out, err = _run_cli("--db", db, "briefing")
+    assert code is ExitCode.OK, err
+    assert "trajectory reports (sleep-time, system-derived)" in out
+    assert "derived from unverified sources" not in out
