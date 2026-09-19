@@ -52,6 +52,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The translated docs no longer tell users to pass `--json` after the subcommand, where argparse rejects it (#1144).**
+  `--json` is a global flag on the top-level parser, so `continuum resume RUN --json` exits 2 with "unrecognized arguments" — the trailing position is not a valid invocation anywhere. Five translated READMEs still claimed every command accepts it there, and `docs/guides/memory_governance.md` built two shell pipelines on the failing form, so the whole tenant-enumeration section it belongs to produced nothing: the command never ran and `python -m json.tool` read an empty pipe. The guides now state the placement and the failure, matching `docs/api/cli.md`, which already documented the rule correctly. The translated READMEs also picked up the webhook caveat the English README gained when read-only-ness was qualified, so they describe the same CLI the canonical docs do rather than a stale version of it.
+
 - **The docs-count guard now reads `references/` and the translated READMEs,
   and the stale counts they held are re-synced (#1109, #1071).** The guard in
   `tests/test_docs_counts.py` watched only three files, so `references/testing.md`

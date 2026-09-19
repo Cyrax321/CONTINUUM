@@ -52,7 +52,7 @@ continuum attest-verify <run_id> --attest <file> # verify signed attestation aga
 continuum benchmark [--total N]                  # run CONTINUUM-Bench harness
 ```
 
-Most commands accept global `--json` **before** the subcommand (e.g. `continuum --json resume RUN`). Read-only commands (`inspect`, `status`, `history`, `events`,
+Most commands accept global `--json` **before** the subcommand (e.g. `continuum --json resume RUN`), not after it — `continuum resume RUN --json` exits 2 with an argument error. Read-only commands (`inspect`, `status`, `history`, `events`,
 `diff`, `validate`, `resume`, `verify`, `actions`, `show-contract`, `replay`, `budget`, `tree`,
 `gate`, `briefing`, `health`, `impact`, `provenance`, `export-evidence`, `watch`) do not mutate
 run state or checkpoints. **Exception:** plain `resume` (without `--repair`) may still append

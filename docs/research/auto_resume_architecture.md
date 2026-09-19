@@ -18,7 +18,7 @@ These reduce avoidable overhead but do not change the fundamental cost structure
 
 ## Problems and where they landed
 
-- **P2 Instant detection** Issue 83. A session only acts after a user message, so detection costs a message plus inference plus tool call. Proposal is a `SessionStart` hook that runs `continuum resume --json` out of band and injects a pre rendered prompt, plus wrapper and precomputed banner paths. See `docs/research/instant_detection.md`.
+- **P2 Instant detection** Issue 83. A session only acts after a user message, so detection costs a message plus inference plus tool call. Proposal is a `SessionStart` hook that runs `continuum --json resume` out of band and injects a pre rendered prompt, plus wrapper and precomputed banner paths. See `docs/research/instant_detection.md`.
 
 - **P3 Confirm tax** Issue 84. Self certified runs return `request_human` until `REVIEW_CONFIRMED`. Proposal is scoped confirm that only clears `REQUIRES_REVIEW` due to `Origin.EXTERNAL_AGENT`, or same client auto confirm with an audit record. See `docs/research/confirm_tax.md`.
 

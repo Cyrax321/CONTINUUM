@@ -466,7 +466,7 @@ continuum tree <parent_run_id>                   # vista de jerarquía multiagen
 
 Los registros opcionales viven junto a tu código y son datos, no código: `.continuum/gate.json` (herramientas de efecto secundario + plantillas de clave estable), `.continuum/reconcilers.json` (sondas que comprueban sistemas externos), `.continuum/gateway.json` (rutas ascendentes).
 
-Cada comando acepta `--json`, y los comandos de solo lectura nunca escriben, por lo que son seguros contra una base de datos viva mientras un agente está a mitad de ejecución. Los códigos de salida son un contrato de seguridad (solo una ejecución verificada segura sale con 0). Lista completa de comandos, tabla de códigos de salida y salida de diff de estado en [references/cli.md](references/cli.md).
+La mayoría de los comandos aceptan el modificador global `--json` **antes** del subcomando (por ejemplo, `continuum --json resume RUN`); situarlo después del subcomando se rechaza. Los comandos de solo lectura no modifican el estado de la ejecución; `resume` sin `--repair` todavía puede añadir eventos `NOTIFICATION_SENT` / `NOTIFICATION_FAILED` cuando `.continuum/webhooks.json` está configurado. Los códigos de salida son un contrato de seguridad (solo una ejecución verificada segura sale con 0). Lista completa de comandos, tabla de códigos de salida y salida de diff de estado en [references/cli.md](references/cli.md).
 
 ## Hoja de ruta
 
