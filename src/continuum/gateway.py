@@ -183,25 +183,19 @@ def match_route(
 ) -> Decision:
     """The gateway's verdict for one request, mirroring gate's table."""
     from continuum.actions.idempotency import idempotency_key
+    from continuum.gate import consumed_authority_reason, find_consumed_authority
     from continuum.models import ActionStatus
 
-    # Authority resurrection check (issue #289b): refuse if body carries a consumed authority.
+    # Authority resurrection check (issue #289b): refuse if body carries a
+    # consumed authority, at any depth in the argument structure (issue #1074).
     if consumed_authorities:
-        for _v in body.values():
-            if isinstance(_v, str) and _v in consumed_authorities:
-                ev = consumed_authorities[_v]
-                if hasattr(ev, "payload"):
-                    seq = ev.sequence
-                    payload = ev.payload or {}
-                else:
-                    seq = ev.get("sequence", "?")
-                    payload = ev.get("payload", {})
-                consumer = payload.get("consumer_run_id", "?")
-                return Decision(
-                    False,
-                    f"Authority {_v!r} consumed at seq {seq} by run {consumer!r}. Obtain a fresh authority.",
-                    route=None,
-                )
+        spent_id, ev = find_consumed_authority(body, consumed_authorities)
+        if spent_id is not None:
+            return Decision(
+                False,
+                consumed_authority_reason(spent_id, ev),
+                route=None,
+            )
 
     candidates = [r for r in routes if r.host == host]
     if not candidates:

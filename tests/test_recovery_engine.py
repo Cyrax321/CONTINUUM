@@ -319,6 +319,46 @@ def test_the_contract_refuses_out_of_order_work(store: SQLiteStorage) -> None:
     assert decision.permits(decision.contract.next_allowed_action or "")
 
 
+def test_an_aborted_contract_advertises_no_next_action(store: SQLiteStorage) -> None:
+    """Issue #1058: a run the engine declared unsafe must not simultaneously
+    name a permitted action, even though a repair plan still exists."""
+    seed(store)
+    store.append_event(
+        "run_1",
+        EventType.RISK_OBSERVED,
+        {"trigger": "side_effect_duplicate", "score": 1.0},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v4"))
+
+    assert decision.mode is RecoveryMode.ABORT
+    assert decision.contract.recovery_status is RecoverySafety.UNSAFE
+    # The plan is real -- the drift did produce repair steps -- but under
+    # ABORT none of them is permitted.
+    assert decision.plan.first is not None
+    assert decision.contract.next_allowed_action is None
+    assert decision.permits("revalidate_dependency:dataset") is False
+    # An auditor still sees the work that exists; only the permission is gone.
+    assert decision.contract.required_actions
+
+
+def test_a_rollback_contract_advertises_no_next_action(store: SQLiteStorage) -> None:
+    """The same rule as ABORT holds for risk-driven ROLLBACK (issue #1058)."""
+    seed(store)
+    store.append_event(
+        "run_1",
+        EventType.RISK_OBSERVED,
+        {"trigger": "meltdown", "score": 1.0},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v4"))
+
+    assert decision.mode is RecoveryMode.ROLLBACK
+    assert decision.contract.recovery_status is RecoverySafety.BLOCKED
+    assert decision.contract.next_allowed_action is None
+    assert decision.permits("revalidate_dependency:dataset") is False
+
+
 def test_contracts_are_deterministic(store: SQLiteStorage) -> None:
     seed(store)
     engine = RecoveryEngine(store)
