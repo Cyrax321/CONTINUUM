@@ -605,6 +605,59 @@ class ActionLedger:
                 return stored_key
         return None
 
+    def resolve_prior(
+        self,
+        action_type: str,
+        arguments: Mapping[str, Any] | None = None,
+        *,
+        volatile: Sequence[str] = (),
+        scoped_to_run: bool = True,
+        key: str | None = None,
+    ) -> tuple[IdempotencyKey, Action] | None:
+        """The record a claim for these inputs would defer to, or None.
+
+        The three lookups :meth:`claim` performs, extracted so a gate that runs
+        *before* claim answers the same question claim will act on. The run-level
+        retry budget (issue #240) is evaluated at the intercept site, before
+        claim opens a slot; resolving under the derived key while claim answers
+        from another one let an exhausted budget suppress the very dedup and
+        reconciliation answers the gate exists to pass through (issue #1080).
+
+        In order: the exact idempotency key; then, for an unscoped claim, another
+        run's record under the same run-global key (issue 34); then, only when the
+        caller asserted no identity of its own, the drift-tolerant
+        :meth:`_identity_match`. An explicit key *is* the identity, so the
+        fallbacks are skipped for it: no drift is possible, and the derived key is
+        the stored key.
+
+        Returns ``(stored_key, action)``. For an identity match the key is the
+        *stored* key rather than the freshly-derived one, because that is the key
+        claim records and the caller settles against. None when nothing
+        identifies a prior attempt, which is the only case a fresh slot opens.
+        """
+        explicit_key = key is not None
+        idem = idempotency_key(
+            action_type,
+            arguments,
+            scope=self.run_id if scoped_to_run else None,
+            volatile=volatile,
+            key=key,
+        )
+        existing = self.get(idem)
+        if existing is None and not scoped_to_run:
+            # The local log has no such action, but an unscoped key claims
+            # global identity, so another run may already hold it.
+            foreign = self._foreign_action(idem)
+            if foreign is not None:
+                return IdempotencyKey(idem), foreign
+        if existing is not None:
+            return IdempotencyKey(idem), existing
+        if not explicit_key:
+            matched = self._identity_match(action_type, arguments, volatile)
+            if matched is not None:
+                return matched
+        return None
+
     def _identity_match(
         self,
         action_type: str,
@@ -838,8 +891,7 @@ class ActionLedger:
         its real-world outcome cannot be determined, unless ``on_unknown``
         resolves it.
         """
-        explicit_key = key is not None
-        _explicit_rendered = key
+        rendered_key = key
         idem = idempotency_key(
             action_type,
             arguments,
@@ -848,43 +900,35 @@ class ActionLedger:
             key=key,
         )
         key = idem
-        rendered_key = _explicit_rendered
-        existing = self.get(key)
 
-        if existing is None and not scoped_to_run:
-            # The local log has no such action, but an unscoped key claims
-            # global identity: another run may already hold it (issue 34).
-            foreign = self._foreign_action(key)
-            if foreign is not None:
-                if foreign.status is ActionStatus.COMPLETED:
-                    # The effect already happened under this identity, wherever
-                    # it happened. Report it instead of duplicating it.
-                    return ActionOutcome(key=key, action=foreign, fresh=False)
-                if foreign.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
-                    # Another run is mid-flight on the same identity and this
-                    # ledger cannot reconcile a foreign record (its outcome
-                    # belongs to that run's log), so refuse rather than guess.
+        existing: Action | None = None
+        resolved_prior = self.resolve_prior(
+            action_type,
+            arguments,
+            volatile=volatile,
+            scoped_to_run=scoped_to_run,
+            key=rendered_key,
+        )
+        if resolved_prior is not None:
+            # The key claim will record against, and the record it defers to.
+            # For an identity match this is the *stored* key, not the derived one.
+            key, existing = resolved_prior
+            if existing.run_id != self.run_id:
+                # An unscoped key is honoured store-wide (issue 34): the effect
+                # already happened under this identity elsewhere, so report it
+                # instead of duplicating it; an unresolved foreign attempt cannot
+                # be reconciled from this run's log, so refuse rather than guess.
+                if existing.status is ActionStatus.COMPLETED:
+                    return ActionOutcome(key=key, action=existing, fresh=False)
+                if existing.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
                     raise UnknownSideEffect(
-                        f"action {foreign.action_type!r} (key {key[:12]}...) has an "
+                        f"action {existing.action_type!r} (key {key[:12]}...) has an "
                         f"unresolved attempt recorded by another run; reconcile "
                         f"that run before claiming the same unscoped identity."
                     )
                 # FAILED or COMPENSATED elsewhere means no live effect stands
                 # in the way; this run may open its own slot.
-
-        if existing is None and not explicit_key:
-            # No explicit key was supplied (the caller did not assert an
-            # identity), and the exact argument-hash lookup missed. Recognise
-            # an already-recorded attempt by shared identity tokens before
-            # opening a brand-new slot, so argument drift between sessions does
-            # not turn a completed action into a fresh proceed=true.
-            matched = self._identity_match(action_type, arguments, volatile)
-            if matched is not None:
-                existing = matched[1]
-                # The caller will report completion or failure against the key
-                # returned in the outcome, so it must be the stored key of the
-                # record we are deferring to, not the freshly-derived one.
-                key = matched[0]
+                existing = None
 
         # Single-use grants (#269): refuse resurrection of spent authority
         # before anything fires. A live attempt carrying the same grant under

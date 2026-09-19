@@ -34,6 +34,28 @@ All notable changes to this project are documented here. The format follows
   no product caller and still has none, so this documents the existing
   contract rather than altering it.
 
+- **The retry-budget gate now answers the same question `claim` does (#1080).**
+  `continuum_intercept_action` guards the run-level retry budget (#240) before
+  it calls `claim`, and the guard decided whether a claim needed a slot from the
+  *derived* idempotency key alone. `claim` can answer from a different key: the
+  drift-tolerant identity lookup recognises an already-recorded action when the
+  argument hash misses, and an unscoped key can be held by another run. Whenever
+  the two disagreed, the budget was counted against a key `claim` never records
+  under, and an exhausted allowance refused with "raise the limit" in front of
+  an answer that needed no retry at all. The settled set also omitted STARTED,
+  so a claim interrupted mid-flight -- the case a recovery is most likely to
+  meet first -- was gated as an attempt once its one slot was spent, and the run
+  was told to raise a budget that was working as intended instead of being told
+  an outcome is owed and unknown.
+
+  The three lookups `claim` performs are extracted into
+  `ActionLedger.resolve_prior` (exact key, then another run's record for an
+  unscoped key, then the identity fallback, skipped when the caller asserted its
+  own key), and the gate resolves through it. A claim is only counted as an
+  attempt when it opens a slot, and the count uses the stored key `claim`
+  settles against. Callers passing an explicit `key` are unaffected: no drift is
+  possible and the derived key is the stored key.
+
 ### Removed
 
 - **Dead `DuplicateAction` and `LeaseError` exception classes (#1115).**

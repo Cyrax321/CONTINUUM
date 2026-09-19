@@ -1265,37 +1265,51 @@ def build_server(
         # The budget may only gate a claim that would open a *new* attempt
         # slot. Re-claiming an action that already reached a terminal-or-frozen
         # state is not an attempt: a COMPLETED record returns the stored result
-        # (the whole point of idempotency), and an UNKNOWN one raises
-        # UnknownSideEffect asking for reconciliation. Gating either would make
-        # an exhausted budget suppress the dedup and reconciliation paths a
+        # (the whole point of idempotency), and an UNKNOWN or STARTED one raises
+        # UnknownSideEffect asking for reconciliation. Gating any of them would
+        # make an exhausted budget suppress the dedup and reconciliation paths a
         # recovering agent depends on, turning a safety limit into the cause of
         # a duplicate side effect (issue #309).
-        existing = ledger.get(
-            idempotency_key(
-                action_type,
-                arguments,
-                scope=run_id if scoped_to_run else None,
-                key=key,
-            )
+        #
+        # The resolution here must be the same one claim performs, not the exact
+        # idempotency key alone: claim recognises an already-recorded action by
+        # shared identity tokens when the argument hash misses (argument drift),
+        # and an unscoped key by another run's record. A gate that settles under
+        # the derived key while claim answers from a different stored key sees a
+        # budget the claim never draws on, and refuses with "raise the limit" in
+        # front of an answer that needs no retry at all (issue #1080).
+        prior = ledger.resolve_prior(
+            action_type,
+            arguments,
+            scoped_to_run=scoped_to_run,
+            key=key,
         )
-        settled = existing is not None and existing.status in (
-            ActionStatus.COMPLETED,
-            ActionStatus.UNKNOWN,
+        # Only a claim that opens a slot is an attempt. Everything else answers
+        # from the record it resolved to, whatever that record's status.
+        opens_slot = prior is None or prior[1].status in (
+            ActionStatus.FAILED,
+            ActionStatus.COMPENSATED,
         )
 
-        if not settled:
+        if opens_slot:
             # Archive-aware (issue #734): attempts live in the event log, and
             # compaction moves failed attempts into the archive. Counting only
             # the live tail reset an exhausted budget after every compaction.
             events = ctx.storage.read_all_events(run_id)
             # Counted per key, so the budget caps retries of *this* operation
             # rather than the run's distinct work of this type (issue #368).
-            claim_key = str(
-                idempotency_key(
-                    action_type,
-                    arguments,
-                    scope=run_id if scoped_to_run else None,
-                    key=key,
+            # The key is the one claim will record under, which for a resolved
+            # prior is the stored key rather than the derived one.
+            claim_key = (
+                str(prior[0])
+                if prior is not None
+                else str(
+                    idempotency_key(
+                        action_type,
+                        arguments,
+                        scope=run_id if scoped_to_run else None,
+                        key=key,
+                    )
                 )
             )
             attempts = attempts_by_key(events, action_type).get(claim_key, 0)
