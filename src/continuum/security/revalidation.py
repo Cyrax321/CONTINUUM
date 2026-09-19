@@ -17,6 +17,14 @@ from pydantic import BaseModel, ConfigDict
 
 from continuum.recovery import RecoveryDecision, RecoveryEngine
 
+__all__ = [
+    "RevalidationPolicy",
+    "RevalidationResult",
+    "RevalidationTrigger",
+    "maybe_revalidate",
+    "run_revalidation",
+]
+
 
 class RevalidationTrigger(StrEnum):
     """Why a revalidation ran. ``CRASH_RESUME`` is the pre-existing path."""

@@ -20,6 +20,14 @@ from continuum.models import EnvironmentSnapshot
 from continuum.recovery.engine import RecoveryDecision
 from continuum.storage import Storage
 
+__all__ = [
+    "AdapterRegistry",
+    "get_adapter",
+    "list_adapters",
+    "recover",
+    "register_adapter",
+]
+
 
 class AdapterRegistry:
     """Maps adapter names to lazy factories that return adapter classes."""

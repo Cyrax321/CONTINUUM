@@ -16,6 +16,18 @@ from typing import Any
 from continuum.benchmark.phase6.metrics import BenchmarkReport
 
 
+def _mean_over(values: list[Any]) -> Any:
+    """Mean of a collected metric, or 0 when nothing reported it.
+
+    The envelope documents these summary keys unconditionally, so a suite where
+    no scenario carried a given metric still answers 0 rather than dropping the
+    key. Rounded to three places to match the rates the runner itself rounds.
+    """
+    if not values:
+        return 0
+    return round(sum(values) / len(values), 3)
+
+
 def emit_fault_injection_report(
     report: BenchmarkReport, out_path: str | Path, benchmark_name: str = "fault-injection"
 ) -> tuple[Path, Path]:
@@ -66,17 +78,19 @@ def emit_fault_injection_report(
             fp_rates.append(r.metrics["false_positive_rate"])
         if "propagation_distance" in r.metrics:
             prop_distances.append(r.metrics["propagation_distance"])
-    # Use the first result's aggregates as the suite-level (they are all same)
-    if report.results:
-        first = report.results[0].metrics
-        fault_summary["detection_rate"] = first.get("detection_rate", 0)
-        fault_summary["unsafe_resume_rate"] = first.get("unsafe_resume_rate", 0)
-        fault_summary["false_positive_rate"] = first.get("false_positive_rate", 0)
-        # Average propagation distance
-        if prop_distances:
-            fault_summary["propagation_distance"] = round(
-                sum(prop_distances) / len(prop_distances), 3
-            )
+    # The suite-level rates are the mean over the scenarios that reported them,
+    # not a copy of results[0]. The premise "they are all same" does not hold:
+    # every fault scenario carries the suite's own aggregate, but the clean
+    # control scenario reports only its false-positive rate, so reading the
+    # first result made the published figure depend on result order -- a
+    # control placed first rendered a detection rate of 0 for a suite that
+    # detected every fault (#1061). Scenarios that never measured a rate are
+    # skipped rather than counted as zero, which is what keeps the control out
+    # of the detection average.
+    fault_summary["detection_rate"] = _mean_over(detection_rates)
+    fault_summary["unsafe_resume_rate"] = _mean_over(unsafe_rates)
+    fault_summary["false_positive_rate"] = _mean_over(fp_rates)
+    fault_summary["propagation_distance"] = _mean_over(prop_distances)
 
     envelope = {
         "benchmark": benchmark_name,

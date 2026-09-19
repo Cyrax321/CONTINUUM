@@ -120,6 +120,25 @@ class Storage(ABC):
         """
         raise NotImplementedError
 
+    def _validate_compaction_bound(
+        self, through_sequence: int | None, anchor_sequence: int
+    ) -> None:
+        """Reject an explicit ``through_sequence`` that would eat the anchor.
+
+        The live log must always retain its anchor marker (issue #705): a
+        bound at or above the marker's sequence archives and deletes the
+        marker and every live row after it, so the next append mints a fresh
+        genesis and the live chain forks away from the archive. Both
+        compaction backends call this with the sequence their transaction is
+        about to assign the marker, so the guard is defined once and cannot
+        drift between the two again (issue #1078).
+        """
+        if through_sequence is not None and through_sequence >= anchor_sequence:
+            raise ValueError(
+                f"through_sequence {through_sequence} would archive the anchor marker"
+                f" at sequence {anchor_sequence}: the live log must retain its anchor"
+            )
+
     def read_archived_events(self, run_id: str) -> Sequence[Event]:
         """Read events moved into ``events_archive``, oldest first.
 
