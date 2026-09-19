@@ -103,6 +103,55 @@ All notable changes to this project are documented here. The format follows
   noise. A genuine lookup miss still falls through to the version and
   source-sequence strategies exactly as before.
 
+- **The gateway now enforces a route's configured prefix (#1051).** The gateway
+  read a route's `prefix`, stored it on the `Route` record, and never compared
+  the request path against it: `match_route` narrowed candidates by host and
+  then by method, so every path on a registered host was treated as the
+  registered operation. A caller holding a live claim for `invoice:I-1`, an
+  authorization to post one invoice, could spend it on `/v1/refunds`, on
+  `/internal/admin/purge`, or on any other path that host served. The gateway
+  forwarded the request, settled the claim as completed, and wrote a
+  `TOOL_COMPLETED` event whose `path` recorded the off-prefix URL, so the run's
+  evidence said the invoice was sent while the upstream saw something else
+  entirely. The prefix is a route's only per-path scope, so there was no
+  workaround: an operator cannot register "host plus one path" because the host
+  match is whole-host. The request path is now compared against `route.prefix`
+  before the key is rendered, so an off-prefix call is refused fail-closed with
+  a 403 naming the configured prefix and can neither consume nor settle a
+  claim. Matching is by prefix, not exact path, so `/v1/invoices/I-1` stays in
+  scope for `/v1/invoices`; a segment boundary is required, so
+  `/v1/invoices-archive` is not; and an empty prefix or `/` keeps its
+  whole-host meaning. The path is normalised before it is compared, because the
+  request is forwarded in that same resolved form, and an upstream may
+  otherwise resolve what it received into a path the gate never measured: the
+  query string is kept out of the scope comparison (a raw-path check is
+  bypassable with `?x=/v1/invoices`) but is re-attached to the request line
+  when the call is forwarded, percent-encodings are decoded, and dot segments
+  are resolved (`/v1/invoices/../refunds` reaches `/v1/refunds` upstream while
+  reading as an invoices path to a `startswith` check). The wire form is the
+  resolved path percent-encoded again, so a decoded character that would end
+  the request line early or start a query the caller never sent is put back
+  into a form the transport accepts. Normalising is
+  deliberately aggressive, so a request a lenient upstream would have served
+  can be refused; that is the fail-closed side of the trade-off. Decoding is
+  repeated to a fixed point rather than applied once, because an upstream or
+  intermediary proxy may decode it again: `/v1/invoices/..%252frefunds`
+  decodes once to a single opaque segment a `normpath` call cannot collapse,
+  so one pass would approve it while a proxy that decodes twice resolves it
+  to `/v1/refunds`. The same resolved form is what the run's evidence records,
+  so an upstream that normalizes dot segments or
+  decodes percent-encodings resolves the exact path the gate measured, and
+  the `TOOL_COMPLETED` event cannot disagree with the path that was
+  authorised. Route
+  selection is now prefix-aware: when several routes share a host and method,
+  the request picks the route whose prefix it is under, rather than taking the
+  first candidate and checking only that one's prefix, so a request for a
+  later-configured prefix is not refused against a route it never asked about
+  and is never measured against the wrong route's key template. Where those
+  prefixes overlap, the longest one wins, so `/v1/invoices/I-1` is measured
+  against the `/v1/invoices` route whether or not a broader `/v1` route was
+  listed first, and the rendered key does not depend on registration order.
+
 - **The horizon `abort_condition_year` scenario now reaches abort (#1028).**
   The scenario was labelled `correct_mode="abort"` but drove the abort through
   `DECISION_INVALIDATED`, an event the recovery engine never routes to `ABORT`
@@ -891,7 +940,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,311 collected, ~2,253 passed, ~25 skipped on a minimal env).
+  (~2,362 collected, ~2,253 passed, ~25 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

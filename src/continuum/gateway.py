@@ -169,6 +169,108 @@ def render_key(template: str, body: dict[str, Any]) -> str:
     return template.format(**{f: normalize_key_value(body[f]) for f in fields})
 
 
+def _resolved_request_path(path: str) -> str:
+    """The canonical form of a request path, for checking and forwarding alike.
+
+    A request is checked in this resolved form and forwarded in it too, so the
+    path an upstream resolves is the same one the gate measured (#1051).
+    Forwarding the raw path instead would let a normalizing upstream reach a
+    path the check never evaluated.
+    """
+    from posixpath import normpath
+    from urllib.parse import unquote, urlsplit
+
+    raw_path = urlsplit(path).path
+    if not raw_path.strip():
+        return "/"
+    decoded = unquote(raw_path)
+    while True:
+        again = unquote(decoded)
+        if again == decoded:
+            break
+        decoded = again
+    resolved = normpath(decoded)
+    if not resolved.startswith("/"):
+        resolved = "/" + resolved
+    return resolved
+
+
+def _path_under_prefix(path: str, prefix: str) -> bool:
+    """Whether a request path falls under a route's configured prefix.
+
+    Matching is by prefix, not exact path, so ``/v1/invoices/I-1`` stays in
+    scope for a ``/v1/invoices`` route. A segment boundary is required, so
+    ``/v1/invoices-archive`` does not match ``/v1/invoices``: without it an
+    operator who registered ``/v1/invoices`` would be exposing every path that
+    merely shares its spelling. An empty prefix or ``/`` means the whole host,
+    the registry's own default when no prefix is configured.
+
+    The path is normalised before it is compared, because the request is
+    forwarded as sent and an upstream is free to resolve what it received:
+
+    - the query string is stripped, since a raw-path check is bypassable with
+      ``?x=/v1/invoices``;
+    - percent-encodings are decoded, since ``/v1/invoices/..%2frefunds`` is
+      past the segment boundary and only the decoding exposes it as a
+      refunds path;
+    - dot segments are resolved, since ``/v1/invoices/../refunds`` reaches
+      ``/v1/refunds`` upstream while reading as an invoices path to a
+      startswith check.
+
+    Decoding is repeated to a fixed point rather than applied once. The request
+    is forwarded as sent, and nothing stops an upstream or an intermediary
+    proxy from decoding it again: ``/v1/invoices/..%252frefunds`` decodes once
+    to ``/v1/invoices/..%2frefunds``, one opaque segment ``normpath`` cannot
+    collapse, so a single pass would pass it while a proxy that decodes twice
+    resolves it to ``/v1/refunds``. Decoding until the path stops changing
+    closes that at every depth, and a path that unquotes differently on each
+    pass is exactly the shape of a smuggling attempt.
+
+    Normalising is deliberately aggressive, so a request a lenient upstream
+    would have been willing to serve can be refused here. That is the
+    fail-closed side of the trade-off, and it is the right side for a check
+    that gates a claim (#1051).
+    """
+    from posixpath import normpath
+
+    resolved = _resolved_request_path(path)
+
+    scope = normpath(prefix) if prefix.strip() else ""
+    if not scope or scope == "/":
+        return True
+    if not scope.startswith("/"):
+        scope = "/" + scope
+    if resolved == scope:
+        return True
+    return resolved.startswith(scope if scope.endswith("/") else scope + "/")
+
+
+def _wire_request_target(resolved: str, raw: str) -> str:
+    """The request-line target to forward for a request measured as ``resolved``.
+
+    The gate checks and records ``resolved`` (#1051), and the wire form has to
+    carry that same path, not the raw one. Two things keep it transport-legal
+    while it does:
+
+    - the resolved path is percent-encoded again, because resolving decodes it
+      and a decoded character can end the request line early or start a query
+      the caller never sent: ``/v1/invoices/I 2`` is a single path segment to
+      the scope check but a malformed request line on the wire, and encoding
+      restores ``/v1/invoices/I%202``;
+    - the query string the resolution stripped is re-attached from ``raw``. A
+      query is not part of a route's prefix scope, so restoring it cannot move
+      a verdict, but dropping it would silently alter the call the caller made.
+
+    The evidence keeps recording ``resolved``; the wire target is how the path
+    is carried, not a second form of it that could drift from what was checked.
+    """
+    from urllib.parse import quote, urlsplit
+
+    target = quote(resolved, safe="/")
+    query = urlsplit(raw).query
+    return f"{target}?{query}" if query else target
+
+
 def match_route(
     routes: list[Route],
     *,
@@ -177,11 +279,24 @@ def match_route(
     body: dict[str, Any],
     actions_by_key: dict[str, Any],
     run_id: str,
+    path: str | None = None,
     bound_tenant: str | None = None,
     storage: Any | None = None,
     consumed_authorities: Any | None = None,
 ) -> Decision:
-    """The gateway's verdict for one request, mirroring gate's table."""
+    """The gateway's verdict for one request, mirroring gate's table.
+
+    ``path`` is the request's path with any query string stripped
+    (:func:`urllib.parse.urlsplit`). A route's ``prefix`` is the only per-path
+    scope it has, so a request outside it is refused before the key is
+    rendered: otherwise a claim for ``/v1/invoices`` would be spendable on
+    ``/v1/refunds`` and settle as completed against evidence that records the
+    off-prefix URL (#1051). When several routes share the host and method, the
+    path selects which one is in play, so a request for a later-configured
+    prefix is not measured against the first route in the list. ``None``
+    preserves the caller's existing whole-host behaviour for callers that
+    supply no path.
+    """
     from continuum.actions.idempotency import idempotency_key
     from continuum.models import ActionStatus
 
@@ -207,13 +322,55 @@ def match_route(
     if not candidates:
         return Decision(False, f"no upstream registered for host {host!r}")
 
-    route = next((r for r in candidates if method.upper() in r.methods), None)
-    if route is None:
+    method_candidates = [r for r in candidates if method.upper() in r.methods]
+    if not method_candidates:
         return Decision(
             False,
             f"host {host!r} is registered but {method} is not among its allowed "
             f"methods {[m.lower() for m in candidates[0].methods]}",
         )
+
+    # Prefix scope (issue #1051): the prefix is a route's only per-path scope,
+    # so a request outside it is refused fail-closed here, before the key is
+    # rendered. Checking any later would let an off-prefix call consume a claim
+    # and settle as completed against evidence recording the wrong URL.
+    #
+    # Several routes can share a host and method and differ only in prefix, so
+    # the request selects the route whose prefix it is actually under rather
+    # than taking the first candidate and checking only that one's prefix.
+    # Otherwise a request for a later-configured prefix would be refused against
+    # a route it was never asking about, and a claim would be evaluated against
+    # the wrong route's key template. A path under none of the configured
+    # prefixes is refused outright.
+    #
+    # When prefixes overlap, the most specific one wins. ``/v1/invoices/I-1`` is
+    # under both a ``/v1`` and a ``/v1/invoices`` route, and whichever was
+    # listed first is an accident of configuration: the key template that
+    # renders is the longest prefix's, so the choice does not depend on
+    # registration order. Two routes sharing one prefix tie, and the sort is
+    # stable, so they keep their configuration order.
+    #
+    # ``path=None`` is the whole-host behaviour callers had before the fix, so
+    # an in-process caller that supplies no path is not silently broken.
+    scoped = method_candidates
+    if path is not None:
+        scoped = [r for r in method_candidates if _path_under_prefix(path, r.prefix)]
+        if not scoped:
+            prefixes = [r.prefix or "/" for r in method_candidates]
+            if len(prefixes) == 1:
+                reason = (
+                    f"host {host!r} is registered for prefix {prefixes[0]!r} but "
+                    f"the request path {path!r} is outside it"
+                )
+            else:
+                reason = (
+                    f"host {host!r} serves {method} under prefixes {prefixes} "
+                    f"but the request path {path!r} is outside all of them"
+                )
+            return Decision(False, reason, route=method_candidates[0])
+        scoped.sort(key=lambda r: len(r.prefix or ""), reverse=True)
+
+    route = scoped[0]
 
     try:
         rendered = render_key(route.key_template, body)
@@ -460,6 +617,15 @@ class GatewayServer:
                     from continuum.gate import collect_consumed_authorities
 
                     consumed = collect_consumed_authorities(history)
+                    from urllib.parse import urlsplit
+
+                    # The query string is not part of the prefix scope: leaving
+                    # it in would let ``?x=/v1/invoices`` satisfy the check
+                    # (#1051). The request is also forwarded in this resolved
+                    # form, so an upstream that normalizes dot segments or
+                    # decodes percent-encodings resolves the same path the gate
+                    # measured rather than one it never checked.
+                    request_path = _resolved_request_path(self.path)
                     decision = match_route(
                         server._routes,
                         host=host.split(":")[0],
@@ -467,6 +633,7 @@ class GatewayServer:
                         body=body,
                         actions_by_key=actions,
                         run_id=run_id,
+                        path=request_path,
                         bound_tenant=getattr(server, "_bound_tenant", None),
                         storage=storage,
                         consumed_authorities=consumed,
@@ -477,12 +644,12 @@ class GatewayServer:
                         )
                         return
 
-                    from urllib.parse import urlsplit
-
                     from continuum.actions.ledger import ActionLedger
 
-                    parts = urlsplit(f"https://{decision.route.host}{self.path}")
+                    parts = urlsplit(f"https://{decision.route.host}{request_path}")
                     import http.client as http_client
+
+                    target = _wire_request_target(request_path, self.path)
 
                     scheme = "https"
                     conn: Any = http_client.HTTPSConnection(parts.netloc, timeout=30)
@@ -496,13 +663,21 @@ class GatewayServer:
                         headers["Content-Type"] = "application/json"
                         headers["Content-Length"] = str(len(payload))
                     try:
-                        conn.request(method, self.path, body=payload, headers=headers)
+                        conn.request(method, target, body=payload, headers=headers)
                         resp = conn.getresponse()
                         resp_body = resp.read()
                         status = resp.status
-                    except OSError as exc:
+                    except (OSError, http_client.InvalidURL) as exc:
+                        # An unparseable target is refused before the request
+                        # line is ever written, so the effect certainly did not
+                        # land. A failure mid-flight may have, and stays UNKNOWN.
+                        certain = isinstance(exc, http_client.InvalidURL)
                         ledger = ActionLedger(storage, run_id)
-                        ledger.fail(decision.key, f"network error: {exc}", certain=False)
+                        ledger.fail(
+                            decision.key,
+                            f"bad request target: {exc}" if certain else f"network error: {exc}",
+                            certain=certain,
+                        )
                         self._respond(
                             502, {"error": "upstream unreachable", "detail": str(exc)[:200]}
                         )
@@ -515,14 +690,14 @@ class GatewayServer:
                     ledger = ActionLedger(storage, run_id)
                     if status < 400:
                         ledger.complete(
-                            decision.key, external_id=f"{method} {self.path} -> {status}"
+                            decision.key, external_id=f"{method} {request_path} -> {status}"
                         )
                         storage.append_event(
                             run_id,
                             EventType.TOOL_COMPLETED,
                             {
                                 "tool": "http",
-                                "path": f"{scheme}://{parts.netloc}{self.path}",
+                                "path": f"{scheme}://{parts.netloc}{request_path}",
                                 "status": status,
                                 "via": "gateway",
                             },
