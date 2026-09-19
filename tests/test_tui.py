@@ -116,6 +116,41 @@ def test_action_rows_flag_uncertain_actions_with_their_ledger_key(
     assert rows[0].action_type == "send_invoice"
 
 
+def test_action_rows_survive_compaction_when_the_action_stays_unresolved(
+    db: str, store: SQLiteStorage
+) -> None:
+    """An unresolved action whose events were archived must still be listed.
+
+    Compaction moves an uncertain action's events into the archive without
+    settling the action, so folding only the live tail would hide it while the
+    run row above still reports the run as blocked (#1182). The row must also
+    keep the key a reconciliation needs to settle it.
+    """
+    run("--db", db, "start", "r1", "--goal", "g")
+    ledger = ActionLedger(SQLiteStorage(db), "r1")
+    key = str(idempotency_key("send_invoice", None, scope="r1", key="invoice:I-1"))
+    ledger.claim("send_invoice", {}, key="invoice:I-1")
+    ledger.fail(key, "timeout: response lost", certain=False)
+    assert [a.status.value for a in ledger.all()] == ["unknown"]
+
+    # anchor after the action events, then compact: both events are archived
+    run("--db", db, "checkpoint", "r1", "--trigger", "manual", "--reason", "anchor")
+    store.compact_run("r1")
+    assert not any(
+        e.type == EventType.ACTION_RECORDED for e in store.read_events("r1")
+    )  # the live tail no longer holds the action
+
+    rows = tui_model.action_rows(store, "r1")
+    assert len(rows) == 1
+    assert rows[0].key == key
+    assert rows[0].status == "unknown"
+    assert rows[0].uncertain is True
+    # it agrees with the ledger an operator would cross-check against
+    assert [r.status for r in rows] == [
+        a.status.value for a in ActionLedger(SQLiteStorage(db), "r1").all()
+    ]
+
+
 def test_event_rows_include_the_archived_prefix_after_compaction(
     db: str, store: SQLiteStorage
 ) -> None:

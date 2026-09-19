@@ -276,6 +276,16 @@ def checkpoint_rows(storage: Storage, run_id: str) -> list[CheckpointRow]:
 def action_rows(storage: Storage, run_id: str) -> list[ActionRow]:
     """The `actions` view, each row carrying the key a reconciliation needs.
 
+    Folded over the full log including the archived prefix, the same history
+    the dashboard HITL buttons and ``continuum actions`` fold, so the key
+    offered here is the key that would settle the action.
+    """
+    storage.get_run(run_id)
+    # The archived prefix included, matching event_rows and budget_rows in this
+    # module: compaction moves an unresolved action into the archive without
+    # settling it, so the live tail alone would hide the one thing an operator
+    # could settle from the keyboard (#1182).
+    folded: dict[str, Action] = fold_action_events(storage.read_all_events(run_id))
     Folded through the ledger's own archive-aware ``folded()`` view, the same
     one the dashboard HITL buttons use, so a compacted run still shows its
     archived unresolved actions and the key offered here is the key that
