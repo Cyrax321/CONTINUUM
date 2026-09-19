@@ -41,13 +41,19 @@ def merge_to_anchor(
     run_id: str,
     anchor: int,
     *,
-    reason: str,
     carry_forward: Collection[str] | None = None,
     source_run_id: str | None = None,
     source_anchor: int | None = None,
     source_anchor_sequence: int | None = None,
 ) -> tuple[Any, set[str], dict[str, Any]]:
     """Check preconditions for merging into ``run_id`` at ``anchor``.
+
+    Read-only: derives the refused set without appending anything, so a
+    caller can ask whether a merge would be blocked against a live database
+    while an agent is mid-run. The mutating half is :func:`approve_merge`,
+    which routes its own target-side check through here and records
+    ``reason`` on the ``RUN_MERGED`` event it appends; a precondition check
+    has no event to put a reason on, so it takes none.
 
     When ``source_run_id`` is given both sides are derived: target
     ``(anchor, target_head]`` and source
@@ -56,6 +62,8 @@ def merge_to_anchor(
     absent. Merge refuses if either side has unaccounted preconditions (union).
     ``carry_forward`` may name items from either side (key, action_id or
     sequence). Per-edit filtering keeps fork semantics for depended_results.
+    The union form drops the per-side summaries; ``approve_merge`` needs those
+    on its payload and derives them itself.
     """
     if source_anchor is None and source_anchor_sequence is not None:
         source_anchor = int(source_anchor_sequence)
@@ -115,11 +123,10 @@ def approve_merge(
         anchor = int(anchor_sequence)
 
     if source_run_id is None:
-        derivation, carry_set, summary = check_preconditions(
+        derivation, carry_set, summary = merge_to_anchor(
             storage,
             run_id,
             anchor,
-            edit_type="merge",
             carry_forward=carry_forward,
         )
         payload: dict[str, Any] = {

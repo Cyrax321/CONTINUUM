@@ -8,6 +8,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The precondition check wrappers are wired to the approve paths they were written for, and no longer take a `reason` they discarded (#1094).**
+  `restore_to_anchor` (`src/continuum/recovery/restore.py`) was exported in
+  `__all__` with zero callers and a keyword-only `reason` parameter it never
+  read, while the live restore path (`approve_restore`) spelled
+  `check_preconditions` directly. Its sibling `merge_to_anchor` was in the
+  same state minus the test coverage. Both wrappers are the read-only half of
+  their edit — a caller asks "would this be blocked?" against a live database
+  while an agent is mid-run — so the mutating half now routes through them
+  instead of duplicating the call, and the discarded `reason` is removed
+  outright: a precondition check appends no event to carry a reason on, and a
+  caller who passed one was writing an audit string that went nowhere.
+  `approve_merge`'s source-side branch still calls `check_merge_preconditions`
+  directly, because the union form drops the per-side summaries its lineage
+  payload stamps.
+
 - **The TUI `tree` view fetches the run once instead of twice (#1157).**
   `family_lines` in `src/continuum/tui/model.py` called
   `storage.get_run(run_id)` twice and discarded the first result: the first
