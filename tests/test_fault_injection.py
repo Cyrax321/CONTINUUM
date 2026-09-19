@@ -12,6 +12,8 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from benchmarks.fault_injection.emitter import emit_fault_injection_report
 from benchmarks.fault_injection.faults import CI_FAULTS, FAULT_CLASSES
 from benchmarks.fault_injection.runner import (
@@ -160,3 +162,51 @@ def test_emitter_rate_is_order_independent() -> None:
     for _ in range(len(report.results)):
         report.results.append(report.results.pop(0))
         assert published(report) == baseline
+
+
+def test_published_detection_rate_reads_the_results_not_a_summary_default() -> None:
+    """The README bench line reports the suite's real rates (#1060).
+
+    ``BenchmarkReport.summary()`` counts outcomes only -- it never returns
+    ``detection_rate`` or ``unsafe_resume_rate`` -- so reading them off it
+    silently rendered a detection rate of ``0`` for a suite that detects every
+    fault, in both ``README.md`` and ``references/bench.md``. The renderer now
+    averages the rates the scenarios actually carry, like the horizon columns
+    do, so this is the guard that the published number can never fall back to
+    the default again.
+    """
+    from benchmarks.run import _mean_rate
+
+    report = run_benchmark_suite()
+    # The reason the old read returned 0: the key is not on summary() at all.
+    assert "detection_rate" not in report.summary()
+    # The clean control carries only its own false-positive rate, so it must
+    # stay out of the detection average rather than counting as a zero.
+    control = report.results[-1]
+    assert "detection_rate" not in control.metrics
+    assert _mean_rate(report.results, "detection_rate") == 1.0
+    assert _mean_rate(report.results, "unsafe_resume_rate") == 0.0
+    # A scenario set that reports nothing still answers 0 rather than raising.
+    assert _mean_rate([], "detection_rate") == 0
+
+
+@pytest.mark.slow
+def test_published_bench_line_carries_the_real_detection_rate() -> None:
+    """The rendered bench table line matches the suite's own summary figures."""
+    from benchmarks.horizon.runner import run_horizon_suite
+    from benchmarks.run import _bench_table_lines
+
+    report = run_benchmark_suite()
+    _, suite_summary = run_fault_injection_suite()
+    line = next(
+        line
+        for line in _bench_table_lines(run_horizon_suite(), report)
+        if line.startswith("Fault-injection:")
+    )
+    assert "detection 1.0" in line, line
+    assert "unsafe 0.0" in line, line
+    assert f"{len(report.results)} scenarios" in line
+    # The published rates must agree with the suite's own summary, not just
+    # happen to look right.
+    assert suite_summary["detection_rate"] == 1.0
+    assert suite_summary["unsafe_resume_rate"] == 0.0
