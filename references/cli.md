@@ -53,13 +53,21 @@ continuum benchmark [--total N]                  # run CONTINUUM-Bench harness
 ```
 
 Most commands accept global `--json` **before** the subcommand (e.g. `continuum --json resume RUN`). Read-only commands (`inspect`, `status`, `history`, `events`,
-`diff`, `validate`, `resume`, `verify`, `actions`, `show-contract`, `replay`, `budget`, `tree`,
-`gate`, `briefing`, `health`, `impact`, `provenance`, `export-evidence`, `watch`) do not mutate
-run state or checkpoints. **Exception:** plain `resume` (without `--repair`) may still append
-`NOTIFICATION_SENT` / `NOTIFICATION_FAILED` events when `.continuum/webhooks.json` is configured
-for a blocked decision — the recovery decision itself remains non-mutating. Mutating commands (`start`,
+`diff`, `validate`, `verify`, `actions`, `show-contract`, `replay`, `budget`, `tree`,
+`gate`, `briefing`, `health`, `impact`, `provenance`, `export-evidence`) never write, so
+they are safe against a live database while an agent is mid-run. Mutating commands (`start`,
 `checkpoint`, `confirm`, `complete`, `fork`, `merge`, `restore`, `compact`, `precompact`, `rewind`,
 `observe`, `reconcile`, `gateway`, `record-plan`, `forget`) say so in their help.
+
+`resume` and `watch` are not in that list: they append to the event log when the run is
+already parked, never while an agent is mid-run and healthy. `resume` records its webhook
+delivery outcome, `NOTIFICATION_SENT` or `NOTIFICATION_FAILED`, when the verdict is
+`REQUEST_HUMAN` and `.continuum/webhooks.json` subscribes an endpoint to that mode
+(issue #305); `watch` appends `LIVENESS_SILENCE_DETECTED` or `LIVENESS_RECOVERED` when the
+liveness verdict flips. Both are hash-chained audit records: the state projection ignores them,
+so they cannot change a recovery verdict or an exit code, and dedup on `(run_id, mode,
+contract hash)` keeps `resume` from re-ringing on the same verdict across processes. Both stay
+safe to run against a live database.
 
 #### Registries are executable configuration
 

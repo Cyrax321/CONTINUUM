@@ -10,7 +10,10 @@ Two principles shape the surface:
 **Read-only by default.** ``inspect``, ``history``, ``validate``, ``diff`` and
 ``show-contract`` never write. They are safe against a live database while an
 agent is mid-run. Only ``init``, ``start``, ``checkpoint``, ``confirm`` and
-``resume --repair`` mutate, and they say so.
+``resume --repair`` mutate, and they say so. Plain ``resume`` changes no state
+either, but a blocked run appends its webhook delivery outcome to the event log
+(issue #305): an audit record the projection ignores, deduped per verdict, and
+never written for a run an agent is still working.
 
 **Exit codes carry the verdict.** ``continuum resume $RUN && ./start-agent.sh``
 must not launch an agent onto stale state, so only a verified-safe run exits 0.
@@ -1360,7 +1363,18 @@ def cmd_notify_test(args: argparse.Namespace, storage: None, out: Any, err: Any)
 
 
 def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
-    """Report how a run may resume. Read-only unless ``--repair`` is given."""
+    """Report how a run may resume.
+
+    Read-only unless ``--repair`` is given, with one documented exception
+    (issue #305): when the verdict is ``REQUEST_HUMAN`` and
+    ``.continuum/webhooks.json`` subscribes an endpoint to that mode, the
+    delivery outcome is appended to the event log as ``NOTIFICATION_SENT`` or
+    ``NOTIFICATION_FAILED``. That append is an audit record, not state: the
+    projection ignores it, so it cannot change this verdict or the exit code,
+    and it fires only for a run that is already parked, never for one an agent
+    is actively working. Dedup on ``(run_id, mode, contract hash)`` means it
+    happens once per distinct verdict, even across processes.
+    """
     run_id = args.run_id
     if not run_id:
         active = storage.get_active_run()
