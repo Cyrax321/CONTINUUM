@@ -1001,6 +1001,7 @@ def list_methods() -> list[str]:
 
 __all__ = [
     "SidecarServer",
+    "SidecarHTTP",
     "SidecarAuth",
     "SidecarError",
     "MethodNotFound",
@@ -1008,6 +1009,9 @@ __all__ = [
     "BadParams",
     "BadRequest",
     "MalformedRunLog",
+    "AGENT_SOURCE",
     "MUTATING",
+    "MAX_SIDECAR_BODY_BYTES",
+    "SIDECAR_DRAIN_LIMIT_BYTES",
     "list_methods",
 ]
