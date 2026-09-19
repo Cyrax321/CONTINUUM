@@ -447,19 +447,25 @@ class ActionLedger:
         except Exception:
             return None
 
-    def _budget_consume_claim(
+    def _budget_refuse_if_exhausted(
         self,
         action_type: str,
         authorization_id: str,
     ) -> None:
-        """Consume one authorization-bound budget slot for a fresh attempt.
+        """Refuse an over-cap attempt before anything is recorded (issue #413).
 
-        Fail closed: an unreadable or malformed registry refuses the claim
-        rather than letting it proceed with no accounting. All writes go
-        through the pure helpers from ``budgets.py``.
+        The gate half of the claim drawdown, and it must stay ahead of
+        ``_record``: an attempt beyond the cap must never reach the event log.
+        Fail closed here: an unreadable or malformed registry refuses the claim
+        rather than letting it proceed with no accounting.
+
+        The counter is left untouched by this half. It is advanced by
+        ``_budget_commit_claim`` once the ACTION_RECORDED event is durable, so
+        a claim rejected by validation after this point consumes no slot and
+        the counter and the log agree on how many attempts exist (issue #1168).
 
         When the registry file does not exist, budgets are treated as
-        unconfigured and no drawdown happens. This keeps runs and tests
+        unconfigured and no refusal happens. This keeps runs and tests
         without authorization data byte-identical to today while still
         enforcing caps once an operator creates the file.
         """
@@ -487,8 +493,37 @@ class ActionLedger:
                 f"({counter} of {max_attempts} used, {remaining} remaining; "
                 f"{reason})"
             )
-        increment(raw, action_type, authorization_id)
-        save_budgets(path, raw)
+
+    def _budget_commit_claim(
+        self,
+        action_type: str,
+        authorization_id: str,
+    ) -> None:
+        """Advance the counter once the attempt is durably recorded (issue #1168).
+
+        The complement to ``_budget_refuse_if_exhausted``, and the mirror of
+        the settlement drawdown, which also records first and counts
+        afterwards. By the time this runs an ACTION_RECORDED event is already
+        in the log, so a failure to increment or save must not surface to the
+        caller: the event is the audit record and the counter is accounting
+        that follows it, never the other way round. Losing the accounting is
+        bad; losing a claim the ledger has already recorded is worse, so this
+        half is fail-open where the gate half is fail-closed.
+
+        A claim refused at the gate, or rejected by validation before this
+        point, never reaches here and consumes no slot.
+        """
+        path = self._budget_path()
+        if not path.exists():
+            return
+        try:
+            raw = load_budgets(path)
+            ensure_authorization_entry(raw, action_type, authorization_id)
+            increment(raw, action_type, authorization_id)
+            save_budgets(path, raw)
+        except Exception:
+            # The attempt is already recorded; the accounting is best effort.
+            pass
 
     def _budget_consume_settlement(
         self,
@@ -972,8 +1007,12 @@ class ActionLedger:
         budget_auth_id = self._budget_authorization_id(action_type, None, arguments, volatile)
 
         if existing is None:
+            # Refuse an over-cap attempt before anything is recorded, then
+            # count it only once the record is durable: a claim rejected by
+            # the digest check below must consume no slot, or the counter and
+            # the log disagree on how many attempts exist (issue #1168).
             if budget_auth_id is not None:
-                self._budget_consume_claim(action_type, budget_auth_id)
+                self._budget_refuse_if_exhausted(action_type, budget_auth_id)
             # Origin digest (issue #566): optional 64 hex, validated by Action.
             # Fail closed on bad digest rather than storing garbage that
             # forensic joins would then misattribute.
@@ -1002,6 +1041,8 @@ class ActionLedger:
                 origin_digest=origin_digest,
                 rendered_key=rendered_key,
             )
+            if budget_auth_id is not None:
+                self._budget_commit_claim(action_type, budget_auth_id)
             self._count_claim()
             return ActionOutcome(key=key, action=action, fresh=True)
 
@@ -1010,8 +1051,10 @@ class ActionLedger:
 
         if existing.status is ActionStatus.COMPENSATED:
             # The effect was undone, so performing it again is legitimate.
+            # Same ordering as a fresh claim: refuse first, count once the
+            # record is durable (issue #1168).
             if budget_auth_id is not None:
-                self._budget_consume_claim(action_type, budget_auth_id)
+                self._budget_refuse_if_exhausted(action_type, budget_auth_id)
             action = existing.model_copy(
                 update={
                     "status": ActionStatus.STARTED,
@@ -1022,16 +1065,20 @@ class ActionLedger:
                 }
             )
             self._record(key, action)
+            if budget_auth_id is not None:
+                self._budget_commit_claim(action_type, budget_auth_id)
             self._count_claim()
             return ActionOutcome(key=key, action=action, fresh=True)
 
         if existing.status is ActionStatus.FAILED:
             if budget_auth_id is not None:
-                self._budget_consume_claim(action_type, budget_auth_id)
+                self._budget_refuse_if_exhausted(action_type, budget_auth_id)
             action = existing.model_copy(
                 update={"status": ActionStatus.STARTED, "started_at": utcnow()}
             )
             self._record(key, action)
+            if budget_auth_id is not None:
+                self._budget_commit_claim(action_type, budget_auth_id)
             self._count_claim()
             return ActionOutcome(key=key, action=action, fresh=True)
 

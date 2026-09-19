@@ -18,6 +18,7 @@ import pytest
 
 from continuum.actions import ActionLedger
 from continuum.actions.idempotency import resolve_authorization_id
+from continuum.actions.ledger import LedgerError
 from continuum.budgets import get_remaining, load_budgets
 from continuum.events import EventType
 from continuum.models import Run
@@ -65,6 +66,57 @@ def test_n_distinct_fresh_keys_for_one_authorization_exhaust(
     auth_id = resolve_authorization_id("send_invoice", None, {"invoice": "INV-001"})
     assert auth_id is not None
     assert get_remaining(raw, "send_invoice", auth_id) == 0
+
+
+def test_a_rejected_claim_consumes_no_budget_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claim rejected by validation draws no slot (issue #1168).
+
+    The counter must advance only once an ACTION_RECORDED event is durable, so
+    a claim that fails validation after the budget gate leaves the accounting
+    and the log agreeing that no attempt happened. Otherwise a single bad
+    origin_digest under a max_attempts of 1 permanently blocks the resource:
+    the second, valid claim is refused even though no attempt was ever
+    recorded or performed, and the cap is consumed by attempts that never
+    occurred.
+    """
+    budgets_path = _budgets_path()
+    budgets_path.parent.mkdir(parents=True, exist_ok=True)
+    budgets_path.write_text(json.dumps({"action_types": {"send_invoice": {"max_attempts": 1}}}))
+
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="g"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    ledger = ActionLedger(storage, "run_1")
+
+    auth_id = resolve_authorization_id("send_invoice", None, {"invoice": "INV-001"})
+    assert auth_id is not None
+
+    # The budget gate passes; the digest check after it rejects the claim.
+    with pytest.raises(LedgerError, match="origin_digest must be 64 lowercase hex"):
+        ledger.claim("send_invoice", {"invoice": "INV-001"}, origin_digest="not-hex")
+
+    # No attempt was recorded and no slot was consumed: the rejected claim
+    # leaves no authorization-bound entry at all.
+    events = storage.read_events("run_1")
+    assert not [e for e in events if e.type is EventType.ACTION_RECORDED]
+    raw = load_budgets(budgets_path)
+    assert "authorization_bound" not in raw
+
+    # The same claim, valid this time, still gets its single slot and records.
+    outcome = ledger.claim("send_invoice", {"invoice": "INV-001"})
+    assert outcome.fresh
+    events = storage.read_events("run_1")
+    assert [e for e in events if e.type is EventType.ACTION_RECORDED]
+
+    raw = load_budgets(budgets_path)
+    assert raw["authorization_bound"]["send_invoice"][auth_id]["counter"] == 1
+    assert get_remaining(raw, "send_invoice", auth_id) == 0
+
+    # The one slot is now genuinely spent, by the attempt that was recorded.
+    with pytest.raises(LedgerError, match="budget exhausted"):
+        ledger.claim("send_invoice", {"invoice": "INV-001"}, key="fresh-key-2")
 
 
 def test_distinct_authorizations_keep_independent_budgets(
