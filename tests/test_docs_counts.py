@@ -177,3 +177,53 @@ def test_documented_extras_exist_in_pyproject() -> None:
                         f"{path} installs the [{extra}] extra, but pyproject.toml "
                         f"declares only {sorted(declared)}"
                     )
+
+
+# The landing page's meta description is the figure set search engines and
+# link previews render, and it is HTML, so the markdown-only guard above never
+# opened it. It drifted three times that way (#1283): the guard below reads it
+# and pins both its figures to the code, so the next drift fails a test.
+LANDING_PAGE = ROOT / "docs" / "index.html"
+_META_CLI_COMMANDS = re.compile(r"([\d,]+)\s+CLI commands")
+_META_TESTS = re.compile(r"([\d,]+)\s+tests")
+
+
+def _meta_description() -> str:
+    """The landing page's ``<meta name="description">`` content."""
+    text = LANDING_PAGE.read_text(encoding="utf-8")
+    match = re.search(r'<meta\s+name="description"\s+content="([^"]*)"', text)
+    assert match, 'docs/index.html has no <meta name="description"> to guard'
+    return match.group(1)
+
+
+def test_landing_meta_states_the_real_cli_command_count() -> None:
+    """Count the subcommands the parser actually builds, in-process, and pin
+    the meta description's figure to it."""
+    from continuum.cli.main import build_parser
+
+    parser = build_parser()
+    subparsers = next(
+        action for action in parser._subparsers._group_actions if hasattr(action, "choices")
+    )
+    description = _meta_description()
+    stated = _META_CLI_COMMANDS.search(description)
+    assert stated, f"meta description states no CLI-command figure: {description!r}"
+    assert int(stated.group(1).replace(",", "")) == len(subparsers.choices), (
+        f"docs/index.html says {stated.group(1)} CLI commands, "
+        f"build_parser() registers {len(subparsers.choices)}"
+    )
+
+
+@pytest.mark.slow
+def test_landing_meta_states_the_real_suite_total() -> None:
+    """The meta description's test figure tracks the suite, not the last
+    hand-edit that happened to touch the page."""
+    description = _meta_description()
+    stated = _META_TESTS.search(description)
+    assert stated, f"meta description states no test figure: {description!r}"
+    live = live_total()
+    documented = int(stated.group(1).replace(",", ""))
+    assert abs(live - documented) <= TOLERANCE, (
+        f"suite collects {live} tests but docs/index.html says {documented}: "
+        "re-sync the meta description (pytest --collect-only -q)"
+    )
