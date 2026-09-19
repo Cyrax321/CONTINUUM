@@ -96,7 +96,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 continuum --help                 # CLI 진입점
 continuum-mcp --help             # MCP 서버 진입점 ([mcp] 또는 [dev] 필요)
 pytest -q                        # 최소 환경에서 약 2,397개 수집, 약 2,320개 통과, 약 27개 스킵 (정확한 수는 환경에 따라 다름)
-ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
+ruff check src/ tests/ examples/ benchmarks/ && ruff format --check src/ tests/ examples/ benchmarks/
 mypy src/continuum               # CI가 강제하는 세 가지 게이트
 ```
 

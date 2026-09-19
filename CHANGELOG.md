@@ -52,6 +52,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`benchmarks/` is now included in CI and pre-commit ruff gates (#1064).**
+  `benchmarks/` is imported by the test suite but sat outside the lint scope
+  in both CI and pre-commit configuration. The five ruff lint and format
+  findings in `benchmarks/fault_injection/runner.py` (SIM115, I001, SIM102,
+  SIM105, and formatting drift) are resolved, and CI `ruff check` and
+  `ruff format --check` as well as `.pre-commit-config.yaml` now cover
+  `benchmarks/`. Contributor verification guides across the documentation are
+  synchronized to match.
 - **Webhook dedup now survives a compaction inside the re-notify window
   (#1186).** `_within_dedup_window` scanned only the live event tail for the
   `NOTIFICATION_SENT` / `NOTIFICATION_FAILED` rows the dedup state lives in,

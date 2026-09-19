@@ -299,13 +299,18 @@ def _assess_unsafe_edit(storage: Storage, run_id: str) -> tuple[bool, str | None
                 return False, f"unexpected exception: {exc}"
             return False, "did not refuse"
 
-        ok, why = _refuses(lambda: approve_restore(storage, run_id, reason="test restore", anchor_sequence=anchor))
+        ok, why = _refuses(
+            lambda: approve_restore(storage, run_id, reason="test restore", anchor_sequence=anchor)
+        )
         if not ok:
             return False, None, [f"restore should refuse: {why}"], True
-        ok, why = _refuses(lambda: approve_merge(storage, run_id, reason="test merge", anchor_sequence=anchor))
+        ok, why = _refuses(
+            lambda: approve_merge(storage, run_id, reason="test merge", anchor_sequence=anchor)
+        )
         if not ok:
             return False, None, [f"merge should refuse: {why}"], True
         from continuum.recovery.gate import check_preconditions
+
         try:
             check_preconditions(storage, run_id, anchor, edit_type="fork")
             return False, None, ["fork should refuse but passed"], True
@@ -327,7 +332,12 @@ def _assess_unsafe_edit(storage: Storage, run_id: str) -> tuple[bool, str | None
             check_preconditions(storage, run_id, anchor, edit_type="fork")
         except Exception as exc:
             return False, None, [f"fork after reconcile should pass but raised {exc}"], True
-        return True, "continuum.recovery.gate", [f"unsafe_edit correctly refused {action_id[:8]}... and passed after reconcile"], False
+        return (
+            True,
+            "continuum.recovery.gate",
+            [f"unsafe_edit correctly refused {action_id[:8]}... and passed after reconcile"],
+            False,
+        )
     except Exception as exc:
         return False, None, [f"unsafe_edit assess exception: {exc}"], True
 
@@ -342,6 +352,7 @@ def _assess_fresh_key_reissuance() -> tuple[bool, str | None, list[str], bool]:
     mirrors the public-boundary scenario in tests/test_budget_drawdown.py
     but is replayable via the fault corpus.
     """
+    import contextlib
     import json
     import os
     import tempfile
@@ -352,14 +363,13 @@ def _assess_fresh_key_reissuance() -> tuple[bool, str | None, list[str], bool]:
     from continuum.budgets import get_remaining, load_budgets
     from continuum.models import Run
 
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
-    tmp_path = Path(tmp.name)
-    tmp.close()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as tmp:
+        tmp_path = Path(tmp.name)
     old_env = os.environ.get("CONTINUUM_BUDGETS_PATH")
     old_default = None
     try:
-        import continuum.budgets as _budgets
         import continuum.actions.ledger as _ledger_mod
+        import continuum.budgets as _budgets
 
         old_default = _budgets.DEFAULT_BUDGETS_PATH
         _budgets.DEFAULT_BUDGETS_PATH = str(tmp_path)
@@ -411,14 +421,14 @@ def _assess_fresh_key_reissuance() -> tuple[bool, str | None, list[str], bool]:
                     "remaining 0" not in msg
                     and "remaining: 0" not in msg
                     and "0 remaining" not in msg
+                    and "0" not in msg
                 ):
-                    if "0" not in msg:
-                        return (
-                            False,
-                            None,
-                            [f"refusal should indicate remaining 0, got: {msg}"],
-                            True,
-                        )
+                    return (
+                        False,
+                        None,
+                        [f"refusal should indicate remaining 0, got: {msg}"],
+                        True,
+                    )
 
             try:
                 outcome2 = ledger.claim("send_invoice", {"invoice": "INV-002"}, key="fresh-other")
@@ -484,8 +494,8 @@ def _assess_fresh_key_reissuance() -> tuple[bool, str | None, list[str], bool]:
             storage.close()
     finally:
         try:
-            import continuum.budgets as _budgets2
             import continuum.actions.ledger as _ledger_mod2
+            import continuum.budgets as _budgets2
 
             if old_default is not None:
                 _budgets2.DEFAULT_BUDGETS_PATH = old_default
@@ -496,10 +506,8 @@ def _assess_fresh_key_reissuance() -> tuple[bool, str | None, list[str], bool]:
             os.environ.pop("CONTINUUM_BUDGETS_PATH", None)
         else:
             os.environ["CONTINUUM_BUDGETS_PATH"] = old_env
-        try:
+        with contextlib.suppress(Exception):
             tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
 
 
 def run_single_fault(fault: FaultClass, run_id: str | None = None) -> FaultInjectionResult:
