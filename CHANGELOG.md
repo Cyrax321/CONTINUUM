@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Portable lineage tokens for delegated work (#760).** A downstream service
+  that receives delegated work can now independently verify where it came from
+  without a copy of the recovery database. `continuum lineage-issue <run_id>
+  --key issuer.pem --purpose "..."` mints a versioned, signed token binding the
+  source run, the checkpoint version, the event-chain point, the sealed recovery
+  contract (by integrity hash, so the exact terms are named without carrying
+  them), the embedded attestation, issuer key identity, an optional audience,
+  and finite issuance/expiry times. `continuum lineage-verify [<run_id>] --token
+  t.json` checks signature, expiry, audience, version, and the referenced
+  run/checkpoint without writing state, reports `VALID` / `MALFORMED` /
+  `UNSUPPORTED_VERSION` / `TAMPERED` / `EXPIRED` / `WRONG_AUDIENCE` /
+  `UNKNOWN_ISSUER` / `BROKEN_REFERENCE`, and exits 0 only on `VALID`. With no
+  `run_id` the token is checked on its own contents, which is what a verifier
+  with no access to the source store needs. The token is evidence of origin and
+  delegation, not a capability: it carries no secrets and no event history, and
+  verifying it authorizes nothing on the source run. New module
+  `src/continuum/security/lineage.py`, CLI in `src/continuum/cli/main.py`, tests
+  in `tests/test_lineage.py` plus the lineage cases in `tests/test_cli.py`, and
+  the design and trust boundary in `references/attestation.md`.
+
 ### Changed
 
 - **The TUI `tree` view fetches the run once instead of twice (#1157).**
@@ -891,7 +913,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,311 collected, ~2,253 passed, ~25 skipped on a minimal env).
+  (~2,363 collected, ~2,337 passed, ~26 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

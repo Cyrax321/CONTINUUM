@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from collections.abc import Sequence
@@ -72,6 +73,13 @@ from continuum.security.attestation import (
     generate_keypair,
     sign_chain,
     verify_attestation,
+)
+from continuum.security.lineage import (
+    DEFAULT_TOKEN_TTL_SECONDS,
+    TokenVerdict,
+    issue_token,
+    key_id,
+    verify_token,
 )
 from continuum.serve import cmd_serve
 from continuum.state.diff import diff_states, render_diff
@@ -3680,6 +3688,172 @@ def cmd_attest_verify(args: argparse.Namespace, storage: Storage, out: Any, err:
     return ExitCode.OK if verdict == "SIGNED" else ExitCode.CORRUPTED
 
 
+_PEM_BLOCK = re.compile(r"-----BEGIN(?: [A-Z]+)* KEY-----[\s\S]*?-----END(?: [A-Z]+)* KEY-----")
+
+
+def _pem_blocks(text: str) -> list[str]:
+    """Every complete PEM block in ``text``, so a keyring file parses like a single key."""
+    return [match.group(0) for match in _PEM_BLOCK.finditer(text)]
+
+
+def _load_signing_key(args: argparse.Namespace) -> str:
+    """Read the issuer key from ``--key`` or ``CONTINUUM_SIGNER_KEY``."""
+    key_path = args.key or os.environ.get("CONTINUUM_SIGNER_KEY")
+    if not key_path:
+        raise ValueError("no signing key: pass --key PATH or set CONTINUUM_SIGNER_KEY")
+    try:
+        return Path(key_path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"cannot read signing key {key_path!r}: {exc}") from exc
+
+
+def _run_head(storage: Storage, run_id: str) -> tuple[int, str]:
+    """The live chain point (sequence, head hash) a token binds."""
+    storage.get_run(run_id)
+    events = storage.read_events(run_id)
+    if not events:
+        raise ValueError(f"run {run_id!r} has no events to attest")
+    head = events[-1]
+    if head.hash is None:
+        raise ValueError(f"run {run_id!r} head event has no hash; the chain is incomplete")
+    return head.sequence, head.hash
+
+
+def cmd_lineage_issue(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Issue a portable lineage token delegating this run's provenance downstream.
+
+    Binds the run's sealed recovery contract and an event-chain attestation of
+    its live head under one issuer signature. The token is evidence of origin
+    and delegation only: it authorizes nothing on the source run, and the
+    downstream holder verifies it with ``lineage-verify``.
+    """
+    private_pem = _load_signing_key(args)
+    seq, chain_hash = _run_head(storage, args.run_id)
+    signer = args.signer or os.environ.get("CONTINUUM_SIGNER")
+
+    # The contract is re-derived read-only, exactly as `show-contract` derives
+    # it, so the token binds terms the engine actually reached rather than terms
+    # the caller asserted. `assess` never writes.
+    contract = (
+        RecoveryEngine(storage)
+        .assess(args.run_id, current_environment=_environment(args, args.run_id))
+        .contract
+    )
+
+    if args.attest:
+        # Bind an attestation a third party already signed, which may be a
+        # different key from the issuer's: attesting a chain and delegating work
+        # are separate acts.
+        try:
+            attestation = json.loads(Path(args.attest).read_text(encoding="utf-8"))
+        except OSError as exc:
+            print(f"error: cannot read attestation {args.attest!r}: {exc}", file=err)
+            return ExitCode.NOT_FOUND
+    else:
+        attestation = sign_chain(private_pem, args.run_id, seq, chain_hash, signer=signer).to_dict()
+
+    token = issue_token(
+        contract,
+        attestation,
+        private_pem,
+        purpose=args.purpose,
+        audience=args.audience,
+        issuer=signer,
+        expires_at=args.expires_at or None,
+        ttl_seconds=None if args.expires_at else args.ttl,
+    )
+    doc = token.to_dict()
+
+    if args.out:
+        Path(args.out).write_text(token.to_canonical_json() + "\n", encoding="utf-8")
+        payload = {"token_file": args.out, **doc}
+        text = (
+            f"Lineage token written to {args.out} (run {token.run_id}, "
+            f"checkpoint v{token.checkpoint_version}, seq {token.trusted_through_seq}, "
+            f"expires {token.expires_at})."
+        )
+    else:
+        payload = doc
+        text = token.to_canonical_json()
+    _emit(payload, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
+    return ExitCode.OK
+
+
+def cmd_lineage_verify(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Verify a lineage token a downstream handoff produced.
+
+    Checks the issuer signature, expiry, audience and the referenced run /
+    checkpoint without writing state. A ``run_id`` is optional: with one, the
+    sealed contract is re-derived and its seal compared to the token's; without
+    one, the token is verified on its own contents, which is what a verifier
+    with no access to the source store needs.
+    """
+    try:
+        raw = Path(args.token).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"error: cannot read token {args.token!r}: {exc}", file=err)
+        return ExitCode.NOT_FOUND
+
+    contract = None
+    if args.run_id:
+        storage.get_run(args.run_id)
+        # Read-only: the verifier confirms the sealed terms the token claims,
+        # and never mutates the source run it is only reading.
+        contract = (
+            RecoveryEngine(storage)
+            .assess(args.run_id, current_environment=_environment(args, args.run_id))
+            .contract
+        )
+
+    trusted = None
+    if args.trusted_keys:
+        # A keyring file may hold several public keys; each complete PEM block
+        # becomes one trusted issuer identity.
+        trusted = set(_pem_blocks(args.trusted_keys.read_text(encoding="utf-8")))
+    elif args.issuer_key:
+        trusted = set(_pem_blocks(Path(args.issuer_key).read_text(encoding="utf-8")))
+
+    verification = verify_token(
+        raw,
+        expected_audience=args.audience,
+        trusted_issuers=trusted,
+        contract=contract,
+        expected_run_id=args.run_id,
+    )
+    parsed = verification.token
+    token_run = parsed.run_id if parsed else None
+
+    payload = {
+        "run_id": token_run,
+        "verdict": verification.verdict.value,
+        "reasons": verification.reasons,
+        "advisories": verification.advisories,
+        "issuer_key_id": key_id(parsed.public_key) if parsed else None,
+        "issuer": parsed.issuer if parsed else None,
+        "audience": parsed.audience if parsed else None,
+        "purpose": parsed.purpose if parsed else None,
+        "expires_at": parsed.expires_at if parsed else None,
+    }
+    if verification.verdict is TokenVerdict.VALID:
+        if parsed is None:  # Only MALFORMED reports without a parsed token.
+            raise ValueError("a VALID verdict must carry the parsed token")
+        text = (
+            f"Lineage token VALID for run {token_run} (checkpoint v"
+            f"{parsed.checkpoint_version}, seq {parsed.trusted_through_seq}); "
+            f"issuer {parsed.issuer or key_id(parsed.public_key)}, purpose {parsed.purpose!r}."
+        )
+        if verification.advisories:
+            text += " Advisory: " + "; ".join(verification.advisories)
+    else:
+        text = f"Lineage token {verification.verdict.value}: " + "; ".join(
+            verification.reasons or ["the token was rejected"]
+        )
+        if verification.advisories:
+            text += " Advisory: " + "; ".join(verification.advisories)
+    _emit(payload, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
+    return ExitCode.OK if verification.verdict is TokenVerdict.VALID else ExitCode.CORRUPTED
+
+
 # --------------------------------------------------------------------------- #
 # parser
 # --------------------------------------------------------------------------- #
@@ -4218,6 +4392,58 @@ def build_parser() -> argparse.ArgumentParser:
     )
     attest_verify.add_argument("--attest", required=True, help="path to attestation JSON.")
 
+    lineage_issue = with_run(
+        add(
+            "lineage-issue", cmd_lineage_issue, "Issue a portable lineage token for delegated work."
+        )
+    )
+    lineage_issue.add_argument(
+        "--key", help="issuer private key PEM path (or CONTINUUM_SIGNER_KEY)."
+    )
+    lineage_issue.add_argument("--signer", help="issuer name (or CONTINUUM_SIGNER env).")
+    lineage_issue.add_argument(
+        "--attest", help="bind a pre-signed attestation JSON instead of signing the live head."
+    )
+    lineage_issue.add_argument(
+        "--purpose", required=True, help="why this work is delegated (recorded in the token)."
+    )
+    lineage_issue.add_argument("--audience", help="recipient this token is bound to (optional).")
+    lineage_issue.add_argument(
+        "--ttl",
+        type=float,
+        default=DEFAULT_TOKEN_TTL_SECONDS,
+        help="token lifetime in seconds (default: 3600).",
+    )
+    lineage_issue.add_argument("--expires-at", help="ISO-8601 expiry, overriding --ttl.")
+    lineage_issue.add_argument("--out", help="write the token JSON here (default: stdout).")
+    lineage_issue.add_argument(
+        "--env",
+        action="append",
+        metavar="NAME=VERSION",
+        help="declare a current environment resource (repeatable).",
+    )
+
+    lineage_verify = add("lineage-verify", cmd_lineage_verify, "Verify a portable lineage token.")
+    lineage_verify.add_argument(
+        "run_id", nargs="?", help="run the token is checked against (optional)."
+    )
+    lineage_verify.add_argument("--token", required=True, help="path to lineage token JSON.")
+    lineage_verify.add_argument("--audience", help="recipient this token must be bound to.")
+    lineage_verify.add_argument(
+        "--env",
+        action="append",
+        metavar="NAME=VERSION",
+        help="declare a current environment resource (repeatable).",
+    )
+    lineage_verify.add_argument(
+        "--issuer-key", type=Path, help="trusted issuer public key PEM path."
+    )
+    lineage_verify.add_argument(
+        "--trusted-keys",
+        type=Path,
+        help="file of trusted issuer public keys (one or more PEM blocks).",
+    )
+
     serve = add("serve", cmd_serve, "Run the CONTINUUM sidecar (JSON wire protocol over stdio).")
     serve.add_argument(
         "--transport",
@@ -4377,6 +4603,12 @@ def main(
     # hooks never touches a run, so it must not create an empty database as a
     # side effect of editing a settings file.
     if args.command in ("benchmark", "attest-keygen", "serve", "hooks", "notify-test"):
+        return int(args.func(args, None, out, err))
+
+    # A lineage token can be checked with no access to the source store at all:
+    # without a run_id there is nothing to read, and opening storage would only
+    # risk creating an empty database as a side effect of a read-only check.
+    if args.command == "lineage-verify" and not getattr(args, "run_id", None):
         return int(args.func(args, None, out, err))
 
     # Instant resume detection (issue #394): SessionStart hook reads
