@@ -114,6 +114,29 @@ def test_action_rows_flag_uncertain_actions_with_their_ledger_key(
     assert rows[0].action_type == "send_invoice"
 
 
+def test_action_rows_survive_compaction(db: str, store: SQLiteStorage) -> None:
+    """A settled claim must keep showing after compaction (#1182).
+
+    The Actions tab is the view an operator reaches for while a run is blocked;
+    folding the live tail alone emptied it at the anchor boundary, hiding the
+    very rows that name what is blocking the run.
+    """
+    run("--db", db, "start", "r1", "--goal", "g")
+    ActionLedger(SQLiteStorage(db), "r1").claim("send_invoice", {}, key="invoice:I-1")
+    store.compact_run("r1")
+    # The claim left the live tail entirely: compaction archived it, and the
+    # live rows that remain are the anchor markers, not the action. That is the
+    # bug, not a setup detail -- folding read_events() here finds no actions.
+    assert not any(e.type is EventType.ACTION_RECORDED for e in store.read_events("r1"))
+    assert any(e.type is EventType.ACTION_RECORDED for e in store.read_archived_events("r1"))
+
+    rows = tui_model.action_rows(store, "r1")
+
+    expected = str(idempotency_key("send_invoice", None, scope="r1", key="invoice:I-1"))
+    assert [(r.key, r.action_type) for r in rows] == [(expected, "send_invoice")]
+    assert rows[0].uncertain is True
+
+
 def test_event_rows_include_the_archived_prefix_after_compaction(
     db: str, store: SQLiteStorage
 ) -> None:

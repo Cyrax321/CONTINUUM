@@ -271,11 +271,16 @@ def checkpoint_rows(storage: Storage, run_id: str) -> list[CheckpointRow]:
 def action_rows(storage: Storage, run_id: str) -> list[ActionRow]:
     """The `actions` view, each row carrying the key a reconciliation needs.
 
-    Folded from the live log the same way the dashboard HITL buttons fold it,
-    so the key offered here is the key that would settle the action.
+    Folded over the archived prefix as well as the live tail, the same
+    ``read_all_events`` the dashboard HITL buttons and ``ActionLedger._replay``
+    already fold: a claim settled before compaction keeps protecting afterwards,
+    or exactly-once would quietly reset at the anchor boundary. Reading the live
+    log alone made a compacted run render no actions at all (#1182) -- the view
+    an operator reaches for while a run is blocked, hiding the very rows that
+    name what is blocking it. Mirrors ``event_rows`` one function down (#532).
     """
     storage.get_run(run_id)
-    folded: dict[str, Action] = fold_action_events(storage.read_events(run_id))
+    folded: dict[str, Action] = fold_action_events(storage.read_all_events(run_id))
     return [
         ActionRow(
             key=key,

@@ -52,6 +52,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The TUI `actions` view now folds the archived prefix as well as the live
+  tail, so a compacted run no longer renders no actions at all (#1182).**
+  `action_rows` in `src/continuum/tui/model.py` folded
+  `storage.read_events`, the live tail only, while every other consumer of the
+  same fold -- the dashboard HITL buttons, `ActionLedger._replay`,
+  `continuum actions`, the gate -- already folded `read_all_events`, because a
+  claim settled before compaction must keep protecting afterwards or
+  exactly-once quietly resets at the anchor boundary. Compaction moves the
+  claim into `events_archive` and leaves only anchor markers live, so the tab
+  an operator reaches for *while a run is blocked* emptied itself at exactly
+  the moment it was needed, hiding the rows that name what is blocking it. It
+  now reads the same stream `event_rows` one function down already reads
+  (#532), and the two views cannot diverge again.
+
 - **The docs-count guard now reads `references/` and the translated READMEs,
   and the stale counts they held are re-synced (#1109, #1071).** The guard in
   `tests/test_docs_counts.py` watched only three files, so `references/testing.md`
