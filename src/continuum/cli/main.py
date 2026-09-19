@@ -1371,9 +1371,11 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             "status": run.status.value,
             "error": "terminal_run",
             "message": msg,
+            "safe": False,
         }
-        _emit(payload, msg, as_json=args.json, stream=err)
-        # UNSAFE (30): run exists but resuming is not safe — distinct from NOT_FOUND (2)
+        # Machine JSON on stdout (same as every other resume _emit); text stays human-readable.
+        _emit(payload, msg, as_json=args.json, stream=out)
+        # UNSAFE (30): run exists but resuming is not safe (distinct from NOT_FOUND / 2).
         return ExitCode.UNSAFE
     engine = RecoveryEngine(storage, strict_unknown=not args.tolerate_unknown)
     decision = engine.assess(
