@@ -50,7 +50,7 @@ from continuum.storage.base import Storage
 # SessionStart hook can inject a banner without opening the database.
 _RESUME_JSON = ".continuum/resume.json"
 
-__all__ = ["CheckpointManager", "RestoredRun", "CheckpointError"]
+__all__ = ["CheckpointManager", "RestoredRun", "CheckpointError", "clear_resume_pointer"]
 
 
 class CheckpointError(RuntimeError):
@@ -406,3 +406,35 @@ def _write_resume_json(run_id: str, checkpoint: StateCheckpoint) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
+
+
+def clear_resume_pointer(run_id: str) -> bool:
+    """Remove the SessionStart resume pointer when it names ``run_id``.
+
+    The inverse of :func:`_write_resume_json` (issue #394). A run closed as
+    completed is no longer interrupted, so the banner its checkpoints wrote
+    must not keep surfacing that run as the active one on the next session
+    start. Every path that closes a run - the CLI, the TUI, and the dashboard
+    HITL buttons - routes through here so a completion cannot leave a stale
+    pointer behind.
+
+    A pointer naming any other run is left alone. Missing or unreadable files
+    are not errors, and a failure to unlink is swallowed: a stale pointer costs
+    a wrong banner, but failing the removal would cost the completion itself.
+    Valid JSON that is not an object (a bare number, string, list, or ``null``
+    from a truncated or tampered file) is likewise not an error, since the
+    pointer cannot name this run either.
+    Returns whether the pointer named this run and was removed.
+    """
+    path = Path(_RESUME_JSON)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(payload, dict) or payload.get("run_id") != run_id:
+        return False
+    try:
+        path.unlink()
+    except OSError:
+        return False
+    return True

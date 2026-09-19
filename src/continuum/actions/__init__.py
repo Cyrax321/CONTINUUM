@@ -5,7 +5,6 @@ from continuum.actions.ledger import (
     ActionLedger,
     ActionOutcome,
     ClaimLockError,
-    DuplicateAction,
     LedgerError,
 )
 from continuum.actions.reconciliation import (
@@ -24,7 +23,6 @@ __all__ = [
     "ActionOutcome",
     "AssumeNotOccurredReconciler",
     "ClaimLockError",
-    "DuplicateAction",
     "IdempotencyKey",
     "LedgerError",
     "ManualReconciler",

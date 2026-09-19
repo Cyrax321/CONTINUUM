@@ -13,6 +13,10 @@ from continuum.adapters.generic import GenericAgentAdapter
 from continuum.recovery.engine import RecoveryEngine
 from continuum.storage.base import Storage
 
+__all__ = [
+    "BrowserAdapter",
+]
+
 
 class BrowserAdapter(GenericAgentAdapter):
     """Drives a browser via playwright, recorded as an action."""
