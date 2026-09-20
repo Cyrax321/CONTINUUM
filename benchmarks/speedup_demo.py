@@ -8,6 +8,7 @@ world re measurement with Claude Code will show the larger token cost delta.
 
 from __future__ import annotations
 
+import argparse
 import time
 
 from continuum.checkpoint import CheckpointManager
@@ -56,7 +57,26 @@ def run_async_single() -> float:
     return elapsed
 
 
+def build_parser() -> argparse.ArgumentParser:
+    """Build the ``benchmarks/speedup_demo.py`` argument parser.
+
+    Only ``--help`` is recognised; anything else fails with exit code 2
+    (argparse convention) instead of silently launching the measurement
+    (issue #949).
+    """
+    return argparse.ArgumentParser(
+        prog="python benchmarks/speedup_demo.py",
+        description=(
+            "Demo of the per-section sync versus async-single checkpoint "
+            "path speedup, using only the checkpoint and ledger machinery "
+            "(no model is called)."
+        ),
+        epilog="With no arguments, runs the demo and prints the timings.",
+    )
+
+
 def main() -> None:
+    build_parser().parse_args()
     per_section = run_per_section_sync()
     async_single = run_async_single()
     print(f"per section sync (5 checkpoints): {per_section * 1000:.1f} ms")

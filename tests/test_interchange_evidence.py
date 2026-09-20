@@ -82,7 +82,7 @@ def test_truncation_is_detectable() -> None:
         _make_run(store)
         primitives = export_evidence(store, "run_1")
         assert verify_export(primitives) is True
-        # Drop a middle line — sequence and prev_hash break
+        # Drop a middle line, so sequence and prev_hash break
         truncated = primitives[:2] + primitives[3:]
         assert verify_export(truncated) is False
         # Tail truncation is detectable by length and final hash mismatch
@@ -217,7 +217,7 @@ def test_zero_new_dependencies() -> None:
     import ast
     from pathlib import Path
 
-    path = Path("src/continuum/interchange/evidence.py")
+    path = Path(__file__).resolve().parents[1] / "src/continuum/interchange/evidence.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
     imports: list[str] = []
     for node in ast.walk(tree):

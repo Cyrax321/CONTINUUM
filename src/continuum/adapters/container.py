@@ -17,12 +17,22 @@ from continuum.adapters.generic import GenericAgentAdapter
 from continuum.recovery.engine import RecoveryEngine
 from continuum.storage.base import Storage
 
+__all__ = [
+    "ContainerAdapter",
+]
+
 
 class ContainerAdapter(GenericAgentAdapter):
     """Runs commands inside a docker container, recorded as an action."""
 
     @staticmethod
     def available() -> bool:
+        """Whether the ``docker`` CLI is on PATH.
+
+        This does not check that the daemon is running: a stopped daemon
+        surfaces at execution time as a failed action, not here. Smoke
+        tests skip on ``False`` instead of failing.
+        """
         return shutil.which("docker") is not None
 
     def __init__(
@@ -38,6 +48,16 @@ class ContainerAdapter(GenericAgentAdapter):
     def run_in_container(
         self, run_id: str, command: str, *, dep_scope: str | None = None
     ) -> AdapterResult:
+        """Run ``sh -c command`` in a fresh container of ``self.image``.
+
+        Executes ``docker run --rm <image> sh -c <command>`` and returns its
+        stdout as ``AdapterResult.output``. A non-zero exit or a docker
+        failure is captured into the result (status ``failed`` with ``error``
+        set) rather than raised, because the attempt is already recorded in
+        the ledger. Raises ``RuntimeError`` up front when docker is not on
+        PATH. ``dep_scope`` names the dependency the action should be scoped
+        to for recovery.
+        """
         if not self.available():
             raise RuntimeError("docker is not available on PATH")
 

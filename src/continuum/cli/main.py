@@ -23,14 +23,21 @@ import argparse
 import json
 import os
 import sqlite3
+import stat
 import sys
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from continuum import __version__
 from continuum.actions import ActionLedger
-from continuum.checkpoint import CheckpointError, CheckpointManager
+from continuum.checkpoint import (
+    CheckpointError,
+    CheckpointManager,
+    CheckpointTrigger,
+    clear_resume_pointer,
+)
 from continuum.cli.colour import Palette
 from continuum.cli.exitcodes import ExitCode, exit_code_for
 from continuum.clienthooks import (
@@ -39,6 +46,7 @@ from continuum.clienthooks import (
     observe_command,
     observe_event_payload,
     remove_claude_code_hook,
+    remove_client_hook,
 )
 from continuum.environment import StaticProvider, capture
 from continuum.events import EventType
@@ -80,6 +88,7 @@ from continuum.storage import (
     ConcurrentWriteError,
     CorruptedRecord,
     RunNotFound,
+    SchemaVersionError,
     Storage,
     StorageError,
     open_storage,
@@ -101,7 +110,7 @@ def _colourise(text: str, palette: Palette) -> str:
     Deliberately a post-processing pass rather than colour woven through every
     command: the text is produced once, identically, and this only decides how
     it looks. It cannot alter wording, ordering or exit codes, because it never
-    sees them — and when colour is off it returns the string untouched.
+    sees them; and when colour is off it returns the string untouched.
     """
     if not palette.enabled:
         return text
@@ -173,7 +182,7 @@ def _environment(args: argparse.Namespace, run_id: str) -> EnvironmentSnapshot |
     """Build a snapshot from ``--env name=version`` pairs.
 
     Returns ``None`` when nothing was supplied, which the validator treats as
-    "unverified" rather than "unchanged" — omitting the flag must not look like
+    "unverified" rather than "unchanged": omitting the flag must not look like
     a clean environment.
     """
     pairs: list[str] = list(getattr(args, "env", None) or [])
@@ -197,6 +206,41 @@ def _environment(args: argparse.Namespace, run_id: str) -> EnvironmentSnapshot |
             )
         resources[name] = EnvResource(name=name, version=version)
     return capture(run_id, StaticProvider(resources))
+
+
+def _liveness_advisory(
+    storage: Storage, run_id: str, *, now: datetime | None = None
+) -> dict[str, Any]:
+    """Compute liveness advisory for the read path, injected clock."""
+    try:
+        from continuum.recovery.health import advisory_for_storage
+
+        return advisory_for_storage(storage, run_id, now=now)
+    except Exception:
+        return {"breached": False, "silence_seconds": None, "threshold_seconds": None}
+
+
+def _liveness_text(advisory: dict[str, Any]) -> str:
+    """Render advisory as human text, never affects exit code."""
+    try:
+        from continuum.recovery.health import advisory_text
+
+        return advisory_text(advisory)
+    except Exception:
+        breached = advisory.get("breached")
+        silence = advisory.get("silence_seconds")
+        threshold = advisory.get("threshold_seconds")
+        phase = advisory.get("phase") or "otherwise"
+        if silence is None:
+            return "Liveness: no events yet, no silence to evaluate."
+        if breached:
+            return (
+                f"Liveness: BREACHED, silence {silence:.1f}s exceeds threshold "
+                f"{threshold}s (phase {phase}). Advisory only."
+            )
+        return (
+            f"Liveness: ok, silence {silence:.1f}s within threshold {threshold}s (phase {phase})."
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -264,6 +308,11 @@ def cmd_start(args: argparse.Namespace, storage: Storage, out: Any, err: Any) ->
 
 
 def cmd_runs(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """List the most recent runs with their status and event count.
+
+    The text table truncates long goals to keep one run per line; the JSON
+    payload carries each goal in full, so scripts never read a clipped goal.
+    """
     runs = storage.list_runs(limit=args.limit)
     if not runs:
         _emit(
@@ -607,6 +656,11 @@ def cmd_status(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
 
 def cmd_history(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """List a run's checkpoint lineage, one row per checkpoint.
+
+    Read-only. A run that was never created raises ``RunNotFound`` rather than
+    reporting an empty history, which would read as "no checkpoints yet".
+    """
     # Multiple checkpoints legitimately share a state version (put_version
     # returns the same version when the state fingerprint is unchanged), so we
     # list every checkpoint rather than keying by version, which would collapse
@@ -652,6 +706,11 @@ def cmd_history(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
 
 
 def cmd_events(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Print a run's event log, optionally windowed by ``--after`` / ``--upto``.
+
+    Read-only. Shows the whole log, archived prefix included, so a compacted run
+    reads the same as one that was never compacted.
+    """
     storage.get_run(args.run_id)  # raises RunNotFound for a run that was never created
     # Full log: archived prefix plus live tail, matching the dashboard hint (issue #532).
     events = [
@@ -678,6 +737,28 @@ def cmd_events(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     return ExitCode.OK
 
 
+def _page_bounds(
+    total: int, limit: int | None, offset: int, err: Any
+) -> tuple[int, int, int] | None:
+    """Validate --limit/--offset and return (start, end, hidden) for display paging.
+
+    Paging truncates display only; the underlying graph stays whole, so a
+    truncated listing can never change what staleness or validation conclude
+    (issues #321, #597). Returns None after reporting usage errors to err.
+    """
+    if limit is not None and limit < 1:
+        # Refuse rather than clamp: --limit 0 would print an empty-looking
+        # graph for a run that has nodes, which this listing must never do.
+        print(f"--limit must be 1 or more (got {limit})", file=err)
+        return None
+    if offset < 0:
+        print(f"--offset must be 0 or more (got {offset})", file=err)
+        return None
+    start = min(offset, total)
+    end = total if limit is None else min(total, start + limit)
+    return start, end, total - (end - start)
+
+
 def cmd_provenance(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Show provenance DAG with per-node Origin (issue #554). Read-only, compaction-aware."""
     storage.get_run(args.run_id)
@@ -696,22 +777,41 @@ def cmd_provenance(args: argparse.Namespace, storage: Storage, out: Any, err: An
         else:
             print(dot, file=out)
         return ExitCode.OK
+    ordered = sorted(graph.nodes.values(), key=lambda n: n.sequence)
+    page = _page_bounds(
+        len(ordered),
+        getattr(args, "limit", None),
+        getattr(args, "offset", None) or 0,
+        err,
+    )
+    if page is None:
+        return ExitCode.ERROR
+    start, end, hidden = page
+    shown = ordered[start:end]
     if getattr(args, "json", False):
         payload = graph.to_dict()
         payload["run_id"] = args.run_id
+        payload["nodes"] = payload["nodes"][start:end]
+        payload["nodes_total"] = len(ordered)
+        payload["nodes_hidden"] = hidden
         _emit(payload, "", as_json=True, stream=out)
         return ExitCode.OK
     lines = [
         f"run: {args.run_id}  (provenance DAG)",
         f"nodes: {len(graph.nodes)}  edges: {sum(len(v) for v in graph.edges.values())}",
     ]
-    for node in sorted(graph.nodes.values(), key=lambda n: n.sequence):
+    for node in shown:
         parents = graph.reverse_edges.get(node.event_id, [])
         children = graph.edges.get(node.event_id, [])
         parents_str = ",".join(p[:8] for p in parents) if parents else "-"
         children_str = ",".join(c[:8] for c in children) if children else "-"
         lines.append(
             f"  {node.sequence:>3}  {node.type.value:<18} {node.event_id[:8]}  origin={node.origin.value}  parents={parents_str}  children={children_str}  {node.label}"
+        )
+    if hidden:
+        lines.append(
+            f"  ... {hidden} of {len(ordered)} nodes hidden by paging; "
+            "run without --limit/--offset to see the whole graph"
         )
     _emit({}, "\n".join(lines), as_json=False, stream=out, palette=getattr(args, "_palette", None))
     return ExitCode.OK
@@ -730,6 +830,16 @@ def cmd_impact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         events = storage.read_events(args.run_id)
     graph = build_provenance_graph(events)
     downstream = downstream_of(graph, evidence_id)
+    page = _page_bounds(
+        len(downstream),
+        getattr(args, "limit", None),
+        getattr(args, "offset", None) or 0,
+        err,
+    )
+    if page is None:
+        return ExitCode.ERROR
+    start, end, hidden = page
+    shown = downstream[start:end]
     if getattr(args, "json", False):
         payload = {
             "run_id": args.run_id,
@@ -742,8 +852,10 @@ def cmd_impact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
                     "origin": n.origin.value,
                     "label": n.label,
                 }
-                for n in downstream
+                for n in shown
             ],
+            "downstream_total": len(downstream),
+            "downstream_hidden": hidden,
         }
         _emit(payload, "", as_json=True, stream=out)
         return ExitCode.OK
@@ -754,15 +866,25 @@ def cmd_impact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         f"run: {args.run_id}  impact of {evidence_id!r}",
         f"downstream: {len(downstream)} node(s)",
     ]
-    for node in downstream:
+    for node in shown:
         lines.append(
             f"  {node.sequence:>3}  {node.type.value:<18} {node.event_id[:8]}  origin={node.origin.value}  {node.label}"
+        )
+    if hidden:
+        lines.append(
+            f"  ... {hidden} of {len(downstream)} nodes hidden by paging; "
+            "run without --limit/--offset to see the whole impact"
         )
     _emit({}, "\n".join(lines), as_json=False, stream=out, palette=getattr(args, "_palette", None))
     return ExitCode.OK
 
 
 def cmd_diff(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Show the semantic diff between two stored state versions of one run.
+
+    Read-only: both versions are read as stored, never re-projected, so the diff
+    reports what was actually persisted at each point.
+    """
     before = storage.get_version(args.run_id, args.from_version)
     after = storage.get_version(args.run_id, args.to_version)
     diff = diff_states(before, after)
@@ -780,15 +902,24 @@ def _human_steps(decision: Any, run_id: str) -> list[str]:
     """Executable next steps for this decision, derived from live config.
 
     Read-only: the reconciler registry and gate config are inspected, never
-    executed. Absent files simply mean fewer shortcuts to suggest.
+    executed. Absent files simply mean fewer shortcuts to suggest. A
+    malformed registry is not: it is an operator mistake that should reach
+    `main`'s `ValueError` handler rather than degrade to an empty registry
+    with no signal something is wrong (issue #1062).
     """
     from continuum.gate import DEFAULT_GATE_CONFIG_PATH
-    from continuum.reconcilers import DEFAULT_RECONCILERS_PATH, load_reconcilers
+    from continuum.reconcilers import (
+        DEFAULT_RECONCILERS_PATH,
+        ReconcilerConfigError,
+        load_reconcilers,
+    )
     from continuum.recovery.guidance import human_steps_for
 
     try:
         probes = load_reconcilers(Path(DEFAULT_RECONCILERS_PATH))
         probed: list[str] = list(probes)
+    except ReconcilerConfigError:
+        raise
     except Exception:
         probed = []
     gate_configured = Path(DEFAULT_GATE_CONFIG_PATH).exists()
@@ -894,6 +1025,8 @@ def cmd_validate(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
         text = decision.render()
     if pins_text:
         text += "\n\n" + pins_text
+    liveness = _liveness_advisory(storage, args.run_id)
+    text += "\n\n" + _liveness_text(liveness)
     payload = {
         "run_id": decision.run_id,
         "mode": decision.mode.value,
@@ -903,6 +1036,7 @@ def cmd_validate(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
         "repairs": [s.action_name for s in decision.plan.steps],
         "human_steps": steps,
         "constraint_pins": constraint_pins,
+        "liveness": liveness,
     }
     # Advisory health is intentionally not part of the payload above; use
     # dedicated health command or resume advisory key for the score.
@@ -914,6 +1048,152 @@ def cmd_validate(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
         palette=getattr(args, "_palette", None),
     )
     return exit_code_for(decision.mode)
+
+
+def _parse_duration(value: str) -> int:
+    """Parse duration like "30m", "1h", "10s" or plain seconds into int seconds."""
+    if isinstance(value, int):
+        return int(value)
+    s = str(value).strip()
+    if s.isdigit():
+        return int(s)
+    # Support suffixes
+    suffixes = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    if s and s[-1].lower() in suffixes:
+        num = s[:-1].strip()
+        if num.replace(".", "", 1).isdigit():
+            return int(float(num) * suffixes[s[-1].lower()])
+    raise ValueError(f"invalid duration {value!r}, expected e.g. 30m, 1h, 3600 or 10s")
+
+
+def cmd_watch(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Watch a run for liveness breach, optionally notify via webhook.
+
+    Read-only unless a breach is detected, in which case it appends
+    LIVENESS_SILENCE_DETECTED (hash-chained) and, on recovery, LIVENESS_RECOVERED.
+    Webhook delivery is fail-open, like every notification path.
+    """
+    run_id = args.run_id
+    # Check run exists
+    try:
+        storage.get_run(run_id)
+    except Exception as exc:
+        print(f"error: {exc}", file=err)
+        return 2
+    # Determine threshold
+    max_silence = getattr(args, "max_silence", None)
+    override_threshold = None
+    if max_silence is not None:
+        try:
+            override_threshold = _parse_duration(max_silence)
+        except Exception as exc:
+            print(f"error: --max-silence: {exc}", file=err)
+            return 1
+    # Compute advisory with injected clock (now)
+    try:
+        from continuum.recovery.health import CadenceContract, advisory_for_storage
+
+        # Use override if provided, else load contract
+        if override_threshold is not None:
+            # Empty scopes so the explicit operator value wins: otherwise the
+            # default otherwise scope (3600s) would silently override the flag (#670).
+            contract = CadenceContract(max_silence_seconds=override_threshold, phase_scopes={})
+            # We need to compute advisory manually with override
+            from datetime import UTC, datetime
+
+            from continuum.recovery.health import _has_open_claim, _last_event_ts, evaluate
+
+            last_ts = _last_event_ts(storage, run_id)
+            has_claim = _has_open_claim(storage, run_id)
+            now = datetime.now(UTC)
+            result = evaluate(now, last_ts, contract=contract, has_open_claim=has_claim)
+            advisory = {
+                "breached": result.breached,
+                "silence_seconds": result.silence_seconds,
+                "threshold_seconds": result.threshold_seconds,
+                "phase": result.phase,
+                "has_open_claim": has_claim,
+                "last_event_ts": result.last_event_ts.isoformat() if result.last_event_ts else None,
+                "now": result.now.isoformat(),
+            }
+        else:
+            advisory = advisory_for_storage(storage, run_id)
+    except Exception as exc:
+        print(f"error: liveness check failed: {exc}", file=err)
+        return 1
+
+    breached = bool(advisory.get("breached"))
+    # Append liveness events as needed (mutating only on breach/recovery).
+    # The episode scan walks the full history including the archived prefix
+    # (read_all_events) so compaction cannot break the state machine: without
+    # it, a compacted run whose DETECTED lives in the archive looks like it
+    # never breached, minting a duplicate DETECTED for the same episode and
+    # never minting LIVENESS_RECOVERED (issue #1072).
+    try:
+        try:
+            events = storage.read_all_events(run_id)
+        except Exception:
+            events = storage.read_events(run_id)
+        last_liveness = None
+        for ev in reversed(events):
+            if ev.type.value in ("LIVENESS_SILENCE_DETECTED", "LIVENESS_RECOVERED"):
+                last_liveness = ev.type.value
+                break
+        if breached and last_liveness != "LIVENESS_SILENCE_DETECTED":
+            # Append DETECTED
+            from continuum.events import EventType
+
+            storage.append_event(
+                run_id,
+                EventType.LIVENESS_SILENCE_DETECTED,
+                {
+                    "silence_seconds": advisory.get("silence_seconds"),
+                    "threshold_seconds": advisory.get("threshold_seconds"),
+                    "phase": advisory.get("phase"),
+                },
+            )
+        elif not breached and last_liveness == "LIVENESS_SILENCE_DETECTED":
+            from continuum.events import EventType
+
+            storage.append_event(
+                run_id,
+                EventType.LIVENESS_RECOVERED,
+                {"silence_seconds": advisory.get("silence_seconds")},
+            )
+    except Exception:
+        # Fail-open on storage errors for liveness events, never block the check
+        pass
+
+    on_breach = getattr(args, "on_breach", "exit")
+    webhook_url = getattr(args, "webhook_url", None)
+    payload = {
+        "run_id": run_id,
+        "breached": breached,
+        "liveness": advisory,
+    }
+    text = (
+        _liveness_text(advisory)
+        if breached
+        else f"Liveness ok for {run_id}: {advisory.get('silence_seconds')}"
+    )
+    if breached and on_breach == "webhook" and webhook_url:
+        from continuum.recovery.notify import post_webhook
+
+        # Fail-open delivery, like dashboard token path
+        if not post_webhook(webhook_url, payload):
+            print("warning: webhook delivery failed", file=err)
+    # Emit result
+    _emit(
+        payload,
+        text,
+        as_json=getattr(args, "json", False),
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    # Exit code: breached maps to WAIT which is REQUIRES_HUMAN (20), otherwise OK
+    if breached:
+        return 20
+    return 0
 
 
 def cmd_health(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
@@ -988,6 +1268,97 @@ def cmd_health(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     return ExitCode.OK
 
 
+def _notify_blocked_run(
+    storage: Storage,
+    run_id: str,
+    mode: str,
+    payload: dict[str, Any],
+    decision: Any,
+    args: argparse.Namespace,
+    err: Any,
+) -> None:
+    """Deliver blocked-run notifications per the webhook registry (issue #305).
+
+    Never raises and never changes the caller's verdict: a malformed registry
+    warns and skips, delivery outcomes print one line each, and every
+    failure is already dead-lettered in the event log by ``notify_blocked``.
+    """
+    from continuum.recovery.webhooks import (
+        DEFAULT_WEBHOOKS_PATH,
+        WebhookConfigError,
+        load_webhook_registry,
+        notify_blocked,
+    )
+
+    config = Path(getattr(args, "webhooks_config", None) or DEFAULT_WEBHOOKS_PATH)
+    try:
+        registry = load_webhook_registry(config)
+    except WebhookConfigError as exc:
+        print(f"warning: {exc}; notification skipped", file=err)
+        return
+    if not registry.endpoints:
+        return
+    records = notify_blocked(
+        storage, run_id, mode=mode, payload=payload, contract=decision.contract, registry=registry
+    )
+    for record in records:
+        if record.status == "sent":
+            print(f"notification sent: {record.url}", file=err)
+        elif record.status == "failed":
+            print(f"warning: {record.url}: {record.detail}", file=err)
+        # A skipped record stays silent: dedup doing its job is not news.
+
+
+def cmd_notify_test(args: argparse.Namespace, storage: None, out: Any, err: Any) -> int:
+    """POST a test notification to every configured webhook endpoint (issue #305).
+
+    A wiring probe, not a state transition: it bypasses dedup by design,
+    writes nothing to the event log, and requires no run, so an operator can
+    verify the registry, the network path, and the receiver's signature check
+    without manufacturing a real blockage. Exits non-zero when any endpoint
+    refuses, because a bell that cannot ring is the failure being probed for.
+    """
+    from continuum.recovery.notify import post_webhook
+    from continuum.recovery.webhooks import (
+        DEFAULT_WEBHOOKS_PATH,
+        NOTIFY_TEST_EVENT,
+        WebhookConfigError,
+        load_webhook_registry,
+    )
+
+    config = Path(args.webhooks_config) if args.webhooks_config else Path(DEFAULT_WEBHOOKS_PATH)
+    try:
+        registry = load_webhook_registry(config)
+    except WebhookConfigError as exc:
+        print(f"error: {exc}", file=err)
+        return ExitCode.ERROR
+    if not registry.endpoints:
+        print(
+            f"error: no endpoints registered in {config}; "
+            "see docs/guides/webhooks.md for the registry format",
+            file=err,
+        )
+        return ExitCode.ERROR
+
+    payload: dict[str, Any] = {"event": NOTIFY_TEST_EVENT}
+    if args.run_id:
+        payload["run_id"] = args.run_id
+    if registry.dashboard_base_url and args.run_id:
+        payload["dashboard_url"] = f"{registry.dashboard_base_url}/runs/{args.run_id}"
+
+    failed = False
+    for endpoint in registry.endpoints:
+        if post_webhook(endpoint.url, payload, secret=endpoint.secret, timeout=endpoint.timeout):
+            print(f"delivered: {endpoint.url}", file=out)
+        else:
+            failed = True
+            print(f"failed: {endpoint.url}", file=err)
+    if failed:
+        print("one or more endpoints refused the test notification", file=err)
+        return ExitCode.ERROR
+    return ExitCode.OK
+
+
 def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Report how a run may resume. Read-only unless ``--repair`` is given."""
     run_id = args.run_id
@@ -1000,6 +1371,27 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             )
             return 2
         run_id = active.run_id
+    # Terminal runs have nothing to resume (#1197). Exit non-zero so
+    # `continuum resume && ./start-agent.sh` cannot continue onto a closed run.
+    run = storage.get_run(run_id)
+    if run.status in (
+        RunStatus.COMPLETED,
+        RunStatus.ABORTED,
+        RunStatus.FAILED,
+        RunStatus.CRASHED,
+    ):
+        msg = f"Run {run_id} is terminal ({run.status.value}); nothing to resume."
+        payload = {
+            "run_id": run_id,
+            "status": run.status.value,
+            "error": "terminal_run",
+            "message": msg,
+            "safe": False,
+        }
+        # Machine JSON on stdout (same as every other resume _emit); text stays human-readable.
+        _emit(payload, msg, as_json=args.json, stream=out)
+        # UNSAFE (30): run exists but resuming is not safe (distinct from NOT_FOUND / 2).
+        return ExitCode.UNSAFE
     engine = RecoveryEngine(storage, strict_unknown=not args.tolerate_unknown)
     decision = engine.assess(
         run_id,
@@ -1021,7 +1413,16 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     text = decision.render()
     if family_blocked and decision.mode.value == "resume":
         # House rule: the most cautious signal wins (#243). A clean parent
-        # with an unsafe child is presented as request_human.
+        # with an unsafe child is presented as request_human on every surface:
+        # this text, the JSON payload and the exit code. The engine's per-run
+        # verdict stays visible in the rationale, but it must not read as
+        # permission to continue (issue #741).
+        text = text.replace(
+            "Recovery decision: RESUME", "Recovery decision: REQUEST_HUMAN"
+        ).replace(
+            "Next permitted action: continue",
+            "Next permitted action: none (settle the children below first)",
+        )
         text += "\n\nFAMILY BLOCKED: children of this run are not resumable.\n" + "\n".join(
             f"  !! {r}" for r in family_rationale
         )
@@ -1055,12 +1456,18 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             print(f"error: --pinning: {exc}", file=err)
             return ExitCode.ERROR
 
-    presented_mode = (
-        "request_human"
-        if (family_blocked and decision.mode.value == "resume")
-        else decision.mode.value
+    # The same house rule, as a mode: what the exit code and the JSON report.
+    # Following the engine's per-run mode here let `resume "$PARENT" &&
+    # ./start-agent.sh` exit 0 onto a family holding an unreconciled side
+    # effect, breaking the only-a-verified-safe-run-exits-0 contract
+    # (issue #741).
+    effective_mode = (
+        RecoveryMode.REQUEST_HUMAN
+        if (family_blocked and decision.mode is RecoveryMode.RESUME)
+        else decision.mode
     )
-    presented_safe = decision.safe and not (family_blocked and decision.mode.value == "resume")
+    presented_mode = effective_mode.value
+    presented_safe = decision.safe and effective_mode is decision.mode
     # Advisory prefix-trust (issue #401): deterministic, read-only, never gates.
     try:
         from continuum.analysis.prefix_trust import trust_over_prefix
@@ -1072,6 +1479,8 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     pins_text = _constraint_pins_text(constraint_pins)
     if pins_text:
         text += "\n\n" + pins_text
+    liveness = _liveness_advisory(storage, run_id)
+    text += "\n\n" + _liveness_text(liveness)
     payload = {
         "run_id": decision.run_id,
         "goal": storage.get_run(run_id).goal,
@@ -1095,6 +1504,7 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         },
         "advisory": advisory,
         "constraint_pins": constraint_pins,
+        "liveness": liveness,
     }
     _emit(
         payload,
@@ -1104,7 +1514,16 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         palette=getattr(args, "_palette", None),
     )
 
-    if decision.mode is not RecoveryMode.RESUME and not args.repair:
+    # The bell next to the HITL door (issue #305): a blocked run pushes its
+    # verdict to the operator's webhook endpoints so nobody has to poll to
+    # learn a run is parked. Opt-in via .continuum/webhooks.json; dedup on
+    # (run_id, mode, contract hash) keeps a cron re-running resume from
+    # spamming, and delivery failure is dead-lettered, never raised - the
+    # verdict above is already final.
+    if presented_mode == RecoveryMode.REQUEST_HUMAN.value:
+        _notify_blocked_run(storage, run_id, presented_mode, payload, decision, args, err)
+
+    if effective_mode is not RecoveryMode.RESUME and not args.repair:
         print(
             "\nRun with --repair to record the repair plan, or resolve the items above first.",
             file=err,
@@ -1132,7 +1551,7 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             file=err,
         )
 
-    return exit_code_for(decision.mode)
+    return exit_code_for(effective_mode)
 
 
 def cmd_confirm(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
@@ -1201,7 +1620,10 @@ def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         print(f"error: budget registry invalid: {exc}", file=err)
         return ExitCode.ERROR
 
-    events = storage.read_events(args.run_id)
+    # Archive-aware (issue #734): compaction moves attempts into the archive,
+    # so a live-tail-only count understates attempts and overstates remaining
+    # after every compaction.
+    events = storage.read_all_events(args.run_id)
     types_seen = sorted(
         {
             e.payload.get("action", {}).get("action_type")
@@ -1393,6 +1815,7 @@ def cmd_complete(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     """
     run = storage.get_run(args.run_id)  # raises RunNotFound -> NOT_FOUND
     if run.status is RunStatus.COMPLETED:
+        clear_resume_pointer(args.run_id)
         _emit(
             {
                 "run_id": args.run_id,
@@ -1423,15 +1846,8 @@ def cmd_complete(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     updated = run.touch(status=RunStatus.COMPLETED)
     storage.update_run(updated)
     # Instant resume file tracks the most recent checkpoint; a completed run
-    # is no longer interrupted, so remove the file if it refers to this run.
-    try:
-        resume_path = Path(".continuum/resume.json")
-        if resume_path.exists():
-            data = json.loads(resume_path.read_text(encoding="utf-8"))
-            if data.get("run_id") == args.run_id:
-                resume_path.unlink()
-    except Exception:
-        pass
+    # is no longer interrupted, so the pointer must not keep naming it.
+    clear_resume_pointer(args.run_id)
     payload = {
         "run_id": args.run_id,
         "status": updated.status.value,
@@ -1960,40 +2376,44 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     # Fast path for SessionStart hook: check resume.json before touching DB.
     # This keeps the hook silent and fast when no interrupted run exists.
     resume_path = Path(".continuum/resume.json")
-    if not args.run_id and getattr(args, "hook_event_name", "SessionStart") == "SessionStart":
-        if not resume_path.exists():
-            # Silent when no interrupted run, as required for token floor.
-            return ExitCode.OK
-        # When file exists, inject its banner out of band before the full
-        # briefing. The file was written on the last checkpoint and contains
-        # the run_id that the hook should surface.
+    if (
+        not args.run_id
+        and getattr(args, "hook_event_name", "SessionStart") == "SessionStart"
+        and not resume_path.exists()
+    ):
+        # Silent when no interrupted run, as required for token floor.
+        return ExitCode.OK
+
+    # The file was written on the last checkpoint. Read it once and validate
+    # the run it names before anything is surfaced: a stale file must not
+    # advertise a run the database no longer holds, because the banner's
+    # resume command could only fail (issue #1063).
+    resume_run: str | None = None
+    resume_run_completed = False
+    unrecoverable_run: str | None = None
+    if resume_path.exists():
         try:
             resume_data = json.loads(resume_path.read_text(encoding="utf-8"))
-            banner_run = resume_data.get("run_id")
-            if banner_run:
-                # Verify the run is still active (not completed) before
-                # surfacing, but do it without a full project if possible.
-                # A quick existence check is enough; the full briefing below
-                # will do the thorough assessment.
-                pass
         except Exception:
             # Corrupt file is not a blocker; fall through to normal briefing
             # which will do the DB check and report correctly.
-            pass
+            resume_data = None
+        if isinstance(resume_data, dict):
+            candidate = resume_data.get("run_id")
+            if isinstance(candidate, str) and candidate:
+                try:
+                    resume_run_completed = storage.get_run(candidate).status is RunStatus.COMPLETED
+                    resume_run = candidate
+                except Exception:
+                    unrecoverable_run = candidate
 
     run_id = args.run_id
     if not run_id:
         # Prefer the resume.json run_id when present, as it was written at
         # checkpoint time and is available without a DB scan. Fall back to
         # the active-run query for cases where the file is stale or missing.
-        if resume_path.exists():
-            try:
-                resume_data = json.loads(resume_path.read_text(encoding="utf-8"))
-                candidate = resume_data.get("run_id")
-                if candidate and storage.get_run(candidate):
-                    run_id = candidate
-            except Exception:
-                pass
+        if resume_run:
+            run_id = resume_run
         if not run_id:
             active = storage.get_active_run()
             run_id = active.run_id if active else None
@@ -2019,45 +2439,44 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     contract = decision.contract
     state = decision.state
 
+    # Diagnostic path (issue #742): the raw agent summary stays reachable,
+    # verbatim, for an operator debugging the curation. Explicit opt-in, so
+    # the default briefing is the curated one.
+    if getattr(args, "raw_summary", False):
+        summaries = [
+            e for e in storage.read_events(run_id) if e.type is EventType.REASONING_SUMMARY
+        ]
+        if not summaries:
+            print(f"No reasoning summary recorded for {run_id}.", file=out)
+            return ExitCode.OK
+        payload = dict(summaries[-1].payload)
+        print(json.dumps(payload, indent=2, ensure_ascii=False), file=out)
+        return ExitCode.OK
+
     lines: list[str] = []
-    # Instant resume banner (issue #394): when .continuum/resume.json exists
-    # it was written on the last checkpoint and names the interrupted run.
-    # Inject a banner out of band so the SessionStart hook surfaces the run
-    # without the agent having to discover and call resume itself.
-    if Path(".continuum/resume.json").exists():
-        try:
-            _resume = json.loads(Path(".continuum/resume.json").read_text(encoding="utf-8"))
-            _banner_run = _resume.get("run_id")
-            if _banner_run:
-                lines.append(f"Interrupted run {_banner_run} – resume pending")
-                lines.append(f"  run: continuum resume {_banner_run} --json")
-                lines.append("")
-        except Exception:
-            pass
+    # Instant resume banner (issue #394): surface the interrupted run the
+    # file named so the SessionStart hook points the agent at resume without
+    # it having to discover the command itself. Only for a run the database
+    # still holds, that is not completed, and that this briefing actually
+    # covers; a file naming a run that is gone gets a note instead of a
+    # resume command that cannot work (issue #1063).
+    if resume_run and not resume_run_completed and run_id == resume_run:
+        lines.append(f"Interrupted run {resume_run} – resume pending")
+        lines.append(f"  run: continuum resume {resume_run} --json")
+        lines.append("")
+    elif unrecoverable_run:
+        lines.append(f"Interrupted run {unrecoverable_run} is no longer in the database")
+        lines.append("")
     lines += [
         f"CONTINUUM active run: {run_id}",
-        f"goal: {state.goal.description}",
-        f"progress: {state.progress.completed}/{state.progress.total or '?'} completed"
-        + (f", {state.progress.failed} failed" if state.progress.failed else ""),
-        f"recovery: {decision.mode.value} (safe={decision.safe})",
     ]
-    # Newest reasoning summary (#235): the resumed agent inherits the dead
-    # session's plan state, not just its progress counters.
-    summaries = [e for e in storage.read_events(run_id) if e.type is EventType.REASONING_SUMMARY]
-    if summaries:
-        summary = summaries[-1].payload.get("summary", {})
-        lines.append("where the last session left off (self-authored):")
-        for item in summary.get("plan_stack", [])[:3]:
-            lines.append(f"  plan: {item}")
-        for d in summary.get("decisions", [])[-3:]:
-            what = d.get("what", "")
-            why = d.get("why", "")
-            lines.append(f"  decision: {what}" + (f" ({why})" if why else ""))
-        for q in summary.get("open_questions", [])[:3]:
-            lines.append(f"  open: {q}")
-        ws = summary.get("working_set", [])
-        if ws:
-            lines.append(f"  working set: {', '.join(map(str, ws[:5]))}")
+    # Curated resume context (issue #742): provenance-labeled sections,
+    # verified first, agent material last, stale items quarantined with
+    # reasons. Pure and deterministic; the verdict is an input, never changed.
+    from continuum.recovery.briefing_curation import curate_briefing, render_curated_briefing
+
+    curated = curate_briefing(storage, run_id, decision)
+    lines += render_curated_briefing(curated)
 
     obs = contract.post_checkpoint_observations[:5]
     if obs:
@@ -2065,27 +2484,6 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
         lines += [
             f"  [{o.get('status', '?')}] {o.get('path', '')}" for o in obs if not o.get("truncated")
         ]
-    # Informed retry (#265): the engine's account of prior attempts, next to
-    # the agent's own summary above. Absent history means no section.
-    if decision.informed_retry:
-        from continuum.recovery.summary import render_informed_retry
-
-        lines.append("what previous attempts changed (engine-recorded):")
-        lines += [f"  {line}" for line in render_informed_retry(decision.informed_retry)]
-    # Structured attempt memory (issue #313): after verified state before open questions.
-    if state.attempt_lessons:
-        from continuum.recovery.summary import render_attempt_lesson
-
-        lines.append("attempt lessons (system-derived):")
-        for lesson in state.attempt_lessons:
-            lines += [f"  {line}" for line in render_attempt_lesson(lesson)]
-    # Sleep-time trajectory reports (issue #393): distilled from archived history
-    if getattr(state, "trajectory_reports", None):
-        from continuum.analysis.trajectory_report import render_trajectory_report
-
-        lines.append("trajectory reports (sleep-time, system-derived):")
-        for report in state.trajectory_reports:
-            lines += [f"  {line}" for line in render_trajectory_report(report)]
     if steps:
         lines.append("next steps:")
         lines += [f"  {i}. {t}" for i, t in enumerate(steps, 1)]
@@ -2099,6 +2497,9 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
             "safe": decision.safe,
             "context": context,
             "human_steps": steps,
+            "curated_sections": curated["sections"],
+            "quarantine": curated["quarantine"],
+            "omitted": curated["omitted"],
             "attempt_lessons": [lesson.model_dump(mode="json") for lesson in state.attempt_lessons],
             "trajectory_reports": [
                 report.model_dump(mode="json") for report in state.trajectory_reports
@@ -2116,6 +2517,169 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     return ExitCode.OK
 
 
+#: Snapshots written beside the log at the compaction boundary (issue #449).
+#: The paths are the ones docs/guides/embed-claude-code.md already tells
+#: operators to read, so automating the hook does not move the files out from
+#: under a recipe someone has already scripted against.
+_PRECOMPACT_RESUME_JSON = ".continuum/precompact-resume.json"
+_PRECOMPACT_VERIFY_JSON = ".continuum/precompact-verify.json"
+
+
+def _precompact_resume_payload(storage: Storage, run_id: str) -> dict[str, Any]:
+    """The recovery verdict as of now, in the shape the guide says to read.
+
+    A deliberate subset of ``resume --json``: the PreCompact section of
+    docs/guides/embed-claude-code.md tells operators to inspect
+    ``contract.verified`` and ``contract.invalidated``, so the contract is
+    carried whole, next to the mode and the progress counters. Family roll-up
+    and advisory trust scoring are left out - they answer questions a
+    compaction boundary does not ask, and every field written here is one a
+    resumed session may act on.
+    """
+    decision = RecoveryEngine(storage).assess(run_id)
+    return {
+        "run_id": decision.run_id,
+        "goal": storage.get_run(run_id).goal,
+        "mode": decision.mode.value,
+        "safe": decision.safe,
+        "next_allowed_action": decision.next_allowed_action,
+        "human_steps": _human_steps(decision, run_id),
+        "contract": decision.contract.model_dump(mode="json"),
+        "progress": {
+            "completed": decision.state.progress.completed,
+            "pending": decision.state.progress.pending,
+            "failed": decision.state.progress.failed,
+        },
+    }
+
+
+def _write_precompact_snapshots(storage: Storage, run_id: str) -> tuple[dict[str, str], list[str]]:
+    """Write both compaction snapshots. Returns ``(written, failures)``.
+
+    Failures come back as strings instead of being raised. By the time this
+    runs the checkpoint is already sealed in the hash-chained log, which is the
+    durable half; the snapshots are a convenience for the next session and for
+    the operator. A read-only working tree, or a projection this build cannot
+    fold, must not turn a successful checkpoint into a failed hook and take the
+    host's compaction down with it.
+    """
+    written: dict[str, str] = {}
+    failures: list[str] = []
+    builders: tuple[tuple[str, str, Any], ...] = (
+        ("resume", _PRECOMPACT_RESUME_JSON, lambda: _precompact_resume_payload(storage, run_id)),
+        (
+            "verify",
+            _PRECOMPACT_VERIFY_JSON,
+            lambda: storage.verify_events(run_id).model_dump(mode="json"),
+        ),
+    )
+    for label, path, build in builders:
+        try:
+            payload = build()
+            target = Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n",
+                encoding="utf-8",
+            )
+        except Exception as exc:  # deliberately broad: see the docstring
+            failures.append(f"{path}: {exc}")
+        else:
+            # as_posix, not str: on Windows ``str(Path(...))`` rewrites the
+            # separator, so the same hook reported
+            # ".continuum\\precompact-resume.json" there and the documented
+            # forward-slash path everywhere else. These paths are a published
+            # contract (the guide names them, and recipes read them straight out
+            # of this payload), so they are reported in the one form that reads
+            # the same on every platform. Windows opens a forward-slash path
+            # either way.
+            written[label] = target.as_posix()
+    return written, failures
+
+
+def cmd_precompact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Checkpoint at the context-compaction boundary (issue #449).
+
+    Wired as a PreCompact hook by ``hooks install``. Claude Code fires
+    PreCompact immediately before it compacts the transcript, which is the one
+    moment where reasoning that was never recorded is about to be destroyed -
+    the case CONTINUUM exists for. Until now it was also the only lifecycle
+    hook the installer left for the user to wire by hand, and forgetting it
+    costs exactly what CONTINUUM promises to keep.
+
+    The documented recipe could not be installed verbatim: it names one run
+    (``continuum checkpoint my-task --reason "pre-compact"``) while
+    ``hooks install`` runs once and runs come and go. So the hook resolves the
+    run itself, as ``observe`` and ``briefing`` do. The trigger recorded is
+    :data:`CheckpointTrigger.CONTEXT_PRESSURE` - the harness-side, involuntary
+    form of the signal :class:`ContextPressurePolicy` can only see when the
+    agent volunteers its own token counts.
+
+    Beside the checkpoint it leaves the two snapshots the guide promises:
+    ``.continuum/precompact-resume.json`` (the recovery verdict as of this
+    checkpoint) and ``.continuum/precompact-verify.json`` (the chain audit).
+    The checkpoint itself also refreshes ``.continuum/resume.json``, so the
+    next session's SessionStart briefing detects the interruption with no DB
+    read at all.
+
+    Never fails the host. With no active run there is nothing to seal, and a
+    snapshot that cannot be written is reported rather than raised: hooks fire
+    for every session in this directory, including ones with nothing to do
+    with CONTINUUM, and a compaction broken by its own safety net would earn
+    an uninstall.
+    """
+    run_id = args.run_id
+    if not run_id:
+        active = storage.get_active_run()
+        run_id = active.run_id if active else None
+    if not run_id:
+        _emit(
+            {"active_run": None, "checkpoint_id": None, "snapshots": {}, "failures": []},
+            "CONTINUUM: no active run; nothing to checkpoint before compaction.",
+            as_json=args.json,
+            stream=out,
+            palette=getattr(args, "_palette", None),
+        )
+        return ExitCode.OK
+
+    storage.get_run(run_id)  # raises RunNotFound -> NOT_FOUND by the dispatcher
+    checkpoint = CheckpointManager(storage).checkpoint(
+        run_id,
+        trigger=CheckpointTrigger.CONTEXT_PRESSURE,
+        reason=args.reason or "pre-compact",
+        environment=_environment(args, run_id),
+    )
+    written, failures = _write_precompact_snapshots(storage, run_id)
+
+    lines = [
+        f"Checkpoint {checkpoint.checkpoint_id} sealed at v{checkpoint.version} "
+        f"before compaction ({checkpoint.state.progress.completed} completed)"
+    ]
+    lines += [f"  {label}: {path}" for label, path in sorted(written.items())]
+    # Reported, not raised: the checkpoint above is the durable half and it
+    # landed. Staying silent about an unwritten snapshot would leave the
+    # operator reading a stale file from an earlier compaction as if it
+    # described this one.
+    lines += [f"  [!!] snapshot not written: {failure}" for failure in failures]
+    _emit(
+        {
+            "active_run": run_id,
+            "checkpoint_id": checkpoint.checkpoint_id,
+            "version": checkpoint.version,
+            "trigger": checkpoint.trigger,
+            "integrity_hash": checkpoint.integrity_hash,
+            "completed": checkpoint.state.progress.completed,
+            "snapshots": written,
+            "failures": failures,
+        },
+        "\n".join(lines),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK
+
+
 def cmd_gateway(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Run the enforcing HTTP gateway (issue #213 seam 4). Long-running."""
     from continuum.gateway import (
@@ -2123,6 +2687,7 @@ def cmd_gateway(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
         GatewayConfigError,
         GatewayServer,
         load_gateway_config,
+        load_gateway_tenant,
     )
 
     config_path = Path(args.config) if args.config else Path(DEFAULT_GATEWAY_CONFIG_PATH)
@@ -2139,9 +2704,12 @@ def cmd_gateway(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
         )
         return ExitCode.ERROR
 
+    bound_tenant = load_gateway_tenant(config_path)
     active = storage.get_active_run()
     run_id = args.run_id or (active.run_id if active else None)
-    server = GatewayServer(lambda: open_storage(args.db), run_id, routes, port=args.port)
+    server = GatewayServer(
+        lambda: open_storage(args.db), run_id, routes, port=args.port, bound_tenant=bound_tenant
+    )
     print(
         f"CONTINUUM gateway listening on 127.0.0.1:{server.port} "
         f"({len(routes)} upstream route(s), run={run_id or 'dynamic'})",
@@ -2171,6 +2739,7 @@ def cmd_hooks_install(args: argparse.Namespace, storage: Storage, out: Any, err:
     gate_command = command[: -len("observe")] + "gate"
 
     briefing_command = command[: -len("observe")] + "briefing"
+    precompact_command = command[: -len("observe")] + "precompact"
     statuses = [
         (
             install_client_hook(
@@ -2197,6 +2766,43 @@ def cmd_hooks_install(args: argparse.Namespace, storage: Storage, out: Any, err:
             briefing_command,
         ),
     ]
+    # Compaction checkpoint (issue #449). On by default, unlike --with-gate: a
+    # gate can deny a tool call and so changes how the agent behaves, while
+    # this only seals state the run already has. The empty matcher is the one
+    # the guide's hand-written recipe uses, so an operator who already pasted
+    # that entry sees it repointed rather than duplicated. Skipped entirely for
+    # a client whose profile declares no compaction event, since wiring one to
+    # an event the harness never fires would only look like durability.
+    compact_event = profile.get("compact_event")
+    no_precompact = bool(getattr(args, "no_precompact", False))
+    if compact_event and not no_precompact:
+        statuses.append(
+            (
+                install_client_hook(
+                    settings_path,
+                    precompact_command,
+                    event_name=compact_event,
+                    matcher="",
+                ),
+                "",
+                "precompact",
+                compact_event,
+                precompact_command,
+            )
+        )
+    # An explicit opt-out has to undo an earlier install, not merely decline
+    # this one: run against a directory where the hook is already wired,
+    # --no-precompact would otherwise leave it sealing a checkpoint at every
+    # compaction for an operator who just said not to. Only the command this
+    # installer writes is dropped, so the hand-written recipe that pins one run
+    # survives the very flag that makes room for it.
+    unwired: list[tuple[str, str]] = []
+    if (
+        compact_event
+        and no_precompact
+        and remove_client_hook(settings_path, kind="precompact", event_name=compact_event)
+    ):
+        unwired.append(("precompact", compact_event))
     if getattr(args, "with_gate", False):
         statuses.append(
             (
@@ -2217,6 +2823,8 @@ def cmd_hooks_install(args: argparse.Namespace, storage: Storage, out: Any, err:
     for st, matcher, kind, event, cmd in statuses:
         lines.append(f"  [{st}] {kind} on {event} (matcher {matcher})")
         lines.append(f"    command: {cmd}")
+    for kind, event in unwired:
+        lines.append(f"  [removed] {kind} on {event} (--no-precompact)")
     payload: dict[str, Any] = {
         "client": args.client,
         "settings": str(settings_path),
@@ -2224,6 +2832,7 @@ def cmd_hooks_install(args: argparse.Namespace, storage: Storage, out: Any, err:
             {"event": event, "matcher": m, "kind": k, "status": st, "command": cmd}
             for st, m, k, event, cmd in statuses
         ],
+        "unwired": [{"event": event, "kind": kind} for kind, event in unwired],
     }
     if args.client == "codex":
         hint = _codex_feature_flag_hint()
@@ -2367,10 +2976,9 @@ def cmd_gate(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> 
         )
         return 2
 
-    actions_by_key = fold_action_events(storage.read_events(run_id)) if run_id is not None else {}
-    consumed = (
-        collect_consumed_authorities(storage.read_events(run_id)) if run_id is not None else {}
-    )
+    history = storage.read_all_events(run_id) if run_id is not None else []
+    actions_by_key = fold_action_events(history)
+    consumed = collect_consumed_authorities(history)
     decision = gate_decide(
         config,
         tool_name,
@@ -2416,6 +3024,7 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
         DEFAULT_RECONCILERS_PATH,
         ReconcilerConfigError,
         load_reconcilers,
+        settle_authority,
         settle_run,
     )
 
@@ -2427,6 +3036,32 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
     except ReconcilerConfigError as exc:
         print(f"error: {exc}", file=err)
         return ExitCode.ERROR
+
+    # Authority probe path (issue #289c)
+    authority_id = getattr(args, "authority", None)
+    if authority_id:
+        authority_report = settle_authority(
+            storage, args.run_id, authority_id, probes, dry_run=args.dry_run
+        )
+        payload = {"run_id": args.run_id, "dry_run": args.dry_run, **authority_report.as_dict()}
+        # Keep existing shape for actions report when authority path taken
+        if authority_report.valid is True:
+            line = f"authority {authority_id!r} still valid, reconciled and unblocked"
+        elif authority_report.valid is False:
+            line = f"authority {authority_id!r} not valid, remains blocked"
+        else:
+            line = f"authority {authority_id!r} probe could not determine validity"
+        lines = [line, f"detail: {authority_report.detail}"]
+        if args.dry_run:
+            lines.append("dry run: nothing was written")
+        _emit(
+            payload,
+            "\n".join(lines),
+            as_json=args.json,
+            stream=out,
+            palette=getattr(args, "_palette", None),
+        )
+        return ExitCode.OK if authority_report.valid is True else ExitCode.REQUIRES_HUMAN
 
     pending = ActionLedger(storage, args.run_id).pending()
     report = settle_run(storage, args.run_id, probes, dry_run=args.dry_run)
@@ -2469,7 +3104,7 @@ def cmd_verify(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         text = f"Event chain verified: {report.checked} events, no violations."
     else:
         lines = [f"INTEGRITY FAILURE: {len(report.violations)} violation(s)"]
-        lines += [f"  seq {v.sequence}: {v.kind} — {v.detail}" for v in report.violations[:20]]
+        lines += [f"  seq {v.sequence}: {v.kind}: {v.detail}" for v in report.violations[:20]]
         if len(report.violations) > 20:
             lines.append(
                 f"... and {len(report.violations) - 20} more violation(s) omitted, see --json for full list"
@@ -2596,7 +3231,7 @@ def cmd_actions(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     if uncertain:
         lines.append("")
         lines.append(
-            f"{len(uncertain)} action(s) with unresolved outcomes — reconcile before resuming."
+            f"{len(uncertain)} action(s) with unresolved outcomes: reconcile before resuming."
         )
     _emit(
         {"actions": payload},
@@ -2608,7 +3243,138 @@ def cmd_actions(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     return ExitCode.REQUIRES_HUMAN if uncertain else ExitCode.OK
 
 
+def cmd_forget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Enumerate memory writes for a tenant and tombstone them (issue #567, parent #304).
+
+    Every memory write is a ledger row keyed by tenant namespace, so
+    enumeration is a filter over ``rendered_key``. The command lists
+    exactly what to delete externally and, unless ``--dry-run``, appends
+    a ``MEMORY_TOMBSTONED`` event. The chain keeps hashes, not plaintext,
+    so logical deletion does not break ``verify()``. Physical removal of
+    historical hashes is out of scope by design.
+
+    When ``--run-id`` is given, enumeration is scoped to that run;
+    otherwise it scans every run in storage. The tombstone is written
+    to the target run (explicit ``--run-id`` or the active run). Dry-run
+    never writes.
+    """
+    tenant = getattr(args, "tenant", None)
+    if not tenant or not str(tenant).strip():
+        print("error: --tenant is required and must be non-empty", file=out)
+        return ExitCode.ERROR
+    tenant = str(tenant).strip()
+    reason = getattr(args, "reason", "") or ""
+    dry_run = bool(getattr(args, "dry_run", False))
+    run_filter = getattr(args, "run_id", None)
+
+    # Determine target run for tombstone (when not dry-run)
+    target_run_id: str | None = run_filter
+    if not dry_run and target_run_id is None:
+        active = storage.get_active_run()
+        target_run_id = active.run_id if active else None
+
+    # Enumerate: scan runs for memory actions whose rendered_key contains tenant
+    hits: list[dict[str, str]] = []
+    record_keys: set[str] = set()
+    runs_to_scan = []
+    if run_filter:
+        try:
+            storage.get_run(run_filter)
+            runs_to_scan = [storage.get_run(run_filter)]
+        except Exception as exc:
+            print(f"error: {exc}", file=out)
+            return ExitCode.NOT_FOUND
+    else:
+        runs_to_scan = list(storage.list_runs())
+
+    for run in runs_to_scan:
+        try:
+            events = storage.read_all_events(run.run_id)
+        except Exception:
+            continue
+        for ev in events:
+            if ev.type != EventType.ACTION_RECORDED:
+                continue
+            payload = dict(ev.payload)
+            rendered = payload.get("rendered_key") or ""
+            if not isinstance(rendered, str) or not rendered.startswith("mem:"):
+                continue
+            # Tenant is third segment of mem:{store}:{tenant}:{record}
+            parts = rendered.split(":")
+            if len(parts) < 4:
+                continue
+            tenant_in_key = parts[2]
+            if tenant_in_key != tenant:
+                continue
+            record_key = parts[3] if len(parts) >= 4 else rendered
+            # Also handle longer record keys with colons? Use join remainder
+            if len(parts) > 4:
+                record_key = ":".join(parts[3:])
+            hits.append({"run_id": run.run_id, "rendered_key": rendered, "record_key": record_key})
+            record_keys.add(record_key)
+
+    # Also check tombstone history to avoid re-tombstoning? No, enumeration is idempotent
+    sorted_keys = sorted(record_keys)
+    payload_out: dict[str, object] = {
+        "tenant": tenant,
+        "record_keys": sorted_keys,
+        "hits": hits,
+        "dry_run": dry_run,
+        "reason": reason,
+    }
+    lines = [f"Tenant {tenant!r}: {len(sorted_keys)} record(s) found"]
+    if sorted_keys:
+        for rk in sorted_keys:
+            lines.append(f"  - {rk}")
+    else:
+        lines.append("  (no matching memory records)")
+    if dry_run:
+        lines.append("Dry run: no tombstone written.")
+    else:
+        if not target_run_id:
+            lines.append("No target run for tombstone; enumeration only.")
+            payload_out["tombstone_run"] = None
+        elif not sorted_keys:
+            lines.append("Nothing to tombstone.")
+            payload_out["tombstone_run"] = target_run_id
+        else:
+            try:
+                storage.get_run(target_run_id)
+            except Exception as exc:
+                print(f"error: target run {target_run_id!r} not found: {exc}", file=out)
+                return ExitCode.NOT_FOUND
+            # Hashes are kept, plaintext record_keys are in the tombstone payload
+            # but the historical chain retains hashes, so verify() stays intact.
+            tombstone_payload = {
+                "tenant": tenant,
+                "record_keys": sorted_keys,
+                "reason": reason,
+                "hits": len(hits),
+                "hashes_kept": True,
+            }
+            storage.append_event(
+                target_run_id, EventType.MEMORY_TOMBSTONED, tombstone_payload, source=Origin.HUMAN
+            )
+            lines.append(f"Tombstone written to run {target_run_id!r} ({len(sorted_keys)} keys).")
+            payload_out["tombstone_run"] = target_run_id
+            payload_out["tombstone_sequence"] = storage.last_sequence(target_run_id)
+
+    _emit(
+        payload_out,
+        "\n".join(lines),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK
+
+
 def cmd_contract(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Print the recovery contract for a run without acting on it.
+
+    Read-only, but the exit status still carries the recovery mode, so a script
+    can gate on the verdict without parsing the contract it just printed.
+    """
     decision = RecoveryEngine(storage).assess(
         args.run_id, current_environment=_environment(args, args.run_id)
     )
@@ -2733,7 +3499,7 @@ def _verify_against_stored(run_id: str, storage: Storage) -> tuple[bool | None, 
     """Re-derive the stored version's own prefix and check it still projects to it.
 
     Returns (verified, human description). ``None`` means the comparison was not
-    attempted, which is reported rather than quietly counted as a pass — a
+    attempted, which is reported rather than quietly counted as a pass; a
     silent no-op that looks like a check is the bug this replaces.
 
     The prefix matters. A stored version is the projection of events up to its
@@ -2784,6 +3550,13 @@ def cmd_export_evidence(args: argparse.Namespace, storage: Storage, out: Any, er
 
 
 def cmd_benchmark(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Run the recovery and idempotency benchmarks and report both.
+
+    Uses its own throwaway stores, so the configured database is untouched. The
+    idempotency pass runs a quarter of ``--total``, since it attempts every
+    action twice across four strategies. ``--json`` appends the machine
+    readable payload after the tables rather than replacing them.
+    """
     import json
 
     from continuum.benchmark import (
@@ -2808,19 +3581,52 @@ def cmd_benchmark(args: argparse.Namespace, storage: Storage, out: Any, err: Any
     return ExitCode.OK
 
 
+def _write_private_key(path: Path, pem: str) -> int:
+    """Write an unencrypted private key PEM at 0600 and return the mode applied.
+
+    The PEM is PKCS8 with no encryption, so the file mode is the only barrier
+    between the key material and every other local user. ``Path.write_text``
+    would create it at 0666 masked by the ambient umask (0644 out of the box),
+    which is world-readable. Opening through ``os.open`` with an explicit mode
+    creates the file owner-only from the start, with no window at 0644.
+
+    A pre-existing file is narrowed too: ``open(2)`` ignores the mode argument
+    when the file already exists, so a 0644 key being overwritten would keep its
+    old mode without the explicit ``chmod``.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+    except Exception:
+        os.close(fd)
+        raise
+    with handle:
+        handle.write(pem)
+    # The mode argument above is ignored when the path already existed, so an
+    # overwritten key still needs narrowing.
+    os.chmod(path, 0o600)
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
 def cmd_attest_keygen(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Generate an Ed25519 signer key pair for event-chain attestation.
 
     Does not touch storage: key custody is the operator's responsibility, so the
-    tool only writes the two PEM files and says where they went.
+    tool only writes the two PEM files and says where they went. The private key
+    is written owner-only (0600): it is unencrypted PKCS8, so a world-readable
+    file would hand raw signing material to every local user (#1056).
     """
     private_pem, public_pem = generate_keypair()
     priv_path = Path(args.out) if args.out else Path("signer.pem")
     pub_path = Path(args.pub) if args.pub else priv_path.with_suffix(priv_path.suffix + ".pub")
-    priv_path.write_text(private_pem, encoding="utf-8")
+    applied = _write_private_key(priv_path, private_pem)
     pub_path.write_text(public_pem, encoding="utf-8")
     payload = {"private_key": str(priv_path), "public_key": str(pub_path)}
-    text = f"Wrote private key {priv_path} and public key {pub_path}. Keep the private key secret."
+    text = (
+        f"Wrote private key {priv_path} (mode {applied:o}, owner-only) and "
+        f"public key {pub_path}. Keep the private key secret."
+    )
     _emit(payload, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
     return ExitCode.OK
 
@@ -2873,9 +3679,9 @@ def cmd_attest_verify(args: argparse.Namespace, storage: Storage, out: Any, err:
     """Verify a signed attestation against the run's live event chain.
 
     Three outcomes:
-      SIGNED    — signature valid and the live chain still matches the signed point.
-      ALTERED   — signature valid but the chain changed after signing.
-      UNTRUSTED — the signature does not verify against the embedded public key.
+      SIGNED    : signature valid and the live chain still matches the signed point.
+      ALTERED   : signature valid but the chain changed after signing.
+      UNTRUSTED : the signature does not verify against the embedded public key.
     """
     storage.get_run(args.run_id)
     doc = json.loads(Path(args.attest).read_text(encoding="utf-8"))
@@ -2946,11 +3752,21 @@ def cmd_attest_verify(args: argparse.Namespace, storage: Storage, out: Any, err:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the full ``continuum`` parser, subcommands included.
+
+    Every subcommand sets ``func`` as a default, so :func:`main` dispatches on
+    the parsed namespace alone and never on the command name.
+    """
     parser = argparse.ArgumentParser(
         prog="continuum",
         description="Semantic recovery layer for long-running AI agents.",
     )
-    parser.add_argument("--version", action="version", version=f"continuum {__version__}")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"continuum {__version__}",
+        help="print the version and exit.",
+    )
     parser.add_argument(
         "--db", default=_DEFAULT_DB, help=f"storage URL or path (default: {_DEFAULT_DB})."
     )
@@ -2975,15 +3791,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     def add(name: str, func: Any, help_text: str) -> argparse.ArgumentParser:
+        """Register a subcommand bound to ``func``, returning it for more arguments."""
         p = sub.add_parser(name, help=help_text, description=help_text)
         p.set_defaults(func=func)
         return p
 
     def with_run(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        """Add the positional ``run_id`` every run-scoped subcommand takes."""
         p.add_argument("run_id", help="the run to operate on.")
         return p
 
     def with_env(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        """Add the repeatable ``--env NAME=VERSION`` flag for staleness checks."""
         p.add_argument(
             "--env",
             action="append",
@@ -2993,7 +3812,9 @@ def build_parser() -> argparse.ArgumentParser:
         return p
 
     add("init", cmd_init, "Create storage.")
-    add("runs", cmd_runs, "List runs.").add_argument("--limit", type=int, default=20)
+    add("runs", cmd_runs, "List runs.").add_argument(
+        "--limit", type=int, default=20, help="show at most N runs (default: 20)."
+    )
 
     start = with_run(add("start", cmd_start, "Create a run with a goal. Mutates storage."))
     start.add_argument("--goal", required=True, help="what the run is trying to achieve.")
@@ -3021,30 +3842,56 @@ def build_parser() -> argparse.ArgumentParser:
     prov_parser.add_argument(
         "--dot", action="store_true", help="emit Graphviz DOT with per-node Origin color"
     )
+    prov_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="show at most N nodes, display only; the graph behind staleness stays whole",
+    )
+    prov_parser.add_argument(
+        "--offset", type=int, default=0, help="skip the first M nodes in sequence order"
+    )
     impact = with_run(
         add("impact", cmd_impact, "Show downstream impact of an evidence item. Read-only.")
     )
     impact.add_argument(
         "--evidence", required=True, help="evidence event id or payload evidence_id"
     )
+    impact.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="show at most N downstream nodes, display only",
+    )
+    impact.add_argument("--offset", type=int, default=0, help="skip the first M downstream nodes")
 
     events = with_run(add("events", cmd_events, "List recorded events."))
-    events.add_argument("--after", type=int, default=0)
-    events.add_argument("--upto", type=int, default=None)
+    events.add_argument("--after", type=int, default=0, help="list events with sequence > N.")
+    events.add_argument("--upto", type=int, default=None, help="list events with sequence <= N.")
 
     diff = with_run(add("diff", cmd_diff, "Compare two state versions."))
-    diff.add_argument("from_version", type=int)
-    diff.add_argument("to_version", type=int)
+    diff.add_argument("from_version", type=int, help="state version to compare from.")
+    diff.add_argument("to_version", type=int, help="state version to compare to.")
 
     validate = with_env(with_run(add("validate", cmd_validate, "Validate state. Read-only.")))
     validate.add_argument("--model", help="model that will run the resumed agent.")
-    validate.add_argument("--tolerate-unknown", action="store_true")
+    validate.add_argument(
+        "--tolerate-unknown",
+        action="store_true",
+        help="treat unknown environment resources as satisfying the contract.",
+    )
     validate.add_argument(
         "--dashboard", action="store_true", help="render the Phase 14 recovery dashboard."
     )
 
     health = with_run(add("health", cmd_health, "Advisory prefix-trust health check. Read-only."))
-    health.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    # Subparser default SUPPRESS: accepts trailing --json without shadowing the global flag (#677).
+    health.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="emit machine-readable JSON (same as the global flag).",
+    )
     # health is advisory only; it never gates, never moves mode, never changes exit code
     # (issue #401). It reports trust_score with per-dimension breakdown.
 
@@ -3056,19 +3903,49 @@ def build_parser() -> argparse.ArgumentParser:
         help="the run to resume; omit to resume the most recently active run.",
     )
     resume.add_argument("--model", help="model that will run the resumed agent.")
-    resume.add_argument("--tolerate-unknown", action="store_true")
+    resume.add_argument(
+        "--tolerate-unknown",
+        action="store_true",
+        help="treat unknown environment resources as satisfying the contract.",
+    )
     resume.add_argument("--repair", action="store_true", help="record the repair plan.")
     resume.add_argument(
         "--pinning",
         default=None,
         help="JSON object of environment pins to diff against the run (issue #241).",
     )
+    resume.add_argument(
+        "--webhooks-config",
+        dest="webhooks_config",
+        default=None,
+        help="webhook registry to notify on request_human (default: .continuum/webhooks.json).",
+    )
+
+    notify_test = add(
+        "notify-test", cmd_notify_test, "POST a test notification to every configured webhook."
+    )
+    notify_test.add_argument(
+        "run_id",
+        nargs="?",
+        default=None,
+        help="optional run id to include in the test payload's deep link.",
+    )
+    notify_test.add_argument(
+        "--webhooks-config",
+        dest="webhooks_config",
+        default=None,
+        help="webhook registry to probe (default: .continuum/webhooks.json).",
+    )
 
     confirm = with_env(
         with_run(add("confirm", cmd_confirm, "Confirm self-reported state so the run may resume."))
     )
     confirm.add_argument("--model", help="model that will run the resumed agent.")
-    confirm.add_argument("--tolerate-unknown", action="store_true")
+    confirm.add_argument(
+        "--tolerate-unknown",
+        action="store_true",
+        help="treat unknown environment resources as satisfying the contract.",
+    )
     confirm.add_argument(
         "--scope",
         nargs="+",
@@ -3149,8 +4026,12 @@ def build_parser() -> argparse.ArgumentParser:
     compact.add_argument("--force", action="store_true", help="apply without confirmation.")
 
     checkpoint = with_env(with_run(add("checkpoint", cmd_checkpoint, "Force a checkpoint.")))
-    checkpoint.add_argument("--trigger", default="manual")
-    checkpoint.add_argument("--reason", default="")
+    checkpoint.add_argument(
+        "--trigger", default="manual", help="trigger to record (default: manual)."
+    )
+    checkpoint.add_argument(
+        "--reason", default="", help="free-text reason to record on the checkpoint."
+    )
 
     rewind = with_run(add("rewind", cmd_rewind, "Rewind workspace and projection to a checkpoint."))
     rewind.add_argument(
@@ -3201,8 +4082,12 @@ def build_parser() -> argparse.ArgumentParser:
         cmd_gateway,
         "Run the enforcing HTTP proxy for registered upstreams. Mutates storage.",
     )
-    gateway_cmd.add_argument("--port", type=int, default=8765)
-    gateway_cmd.add_argument("--run-id", default=None)
+    gateway_cmd.add_argument(
+        "--port", type=int, default=8765, help="port to listen on (default: 8765)."
+    )
+    gateway_cmd.add_argument(
+        "--run-id", default=None, help="run the gateway enforces (default: all registered runs)."
+    )
     gateway_cmd.add_argument(
         "--config",
         default=None,
@@ -3224,6 +4109,31 @@ def build_parser() -> argparse.ArgumentParser:
         dest="hook_event_name",
         default="SessionStart",
         help=argparse.SUPPRESS,
+    )
+    briefing.add_argument(
+        "--raw-summary",
+        dest="raw_summary",
+        action="store_true",
+        default=False,
+        help="print the raw agent reasoning summary verbatim (diagnostic; default is the curated briefing).",
+    )
+
+    precompact = with_env(
+        add(
+            "precompact",
+            cmd_precompact,
+            "Checkpoint before context compaction (PreCompact hook). Mutates the run.",
+        )
+    )
+    precompact.add_argument(
+        "--run-id",
+        default=None,
+        help="run to seal (default: the most recently active non-terminal run).",
+    )
+    precompact.add_argument(
+        "--reason",
+        default="",
+        help="checkpoint reason recorded in the log (default: pre-compact).",
     )
 
     gate = add(
@@ -3251,6 +4161,7 @@ def build_parser() -> argparse.ArgumentParser:
     hooks_sub = hooks.add_subparsers(dest="hooks_command", metavar="ACTION CLIENT", required=True)
 
     def hooks_client(p: argparse.ArgumentParser, func: Any) -> None:
+        """Give a ``hooks`` action its client selector and settings override."""
         p.add_argument(
             "client",
             choices=tuple(CLIENT_PROFILES),
@@ -3276,6 +4187,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also install a PreToolUse gate that denies unclaimed side-effect calls.",
     )
+    install.add_argument(
+        "--no-precompact",
+        action="store_true",
+        help=(
+            "skip the compaction checkpoint hook, and take out one an earlier install "
+            "wrote (installed by default where the client has a compaction event)."
+        ),
+    )
     hooks_client(install, cmd_hooks_install)
 
     remove = hooks_sub.add_parser(
@@ -3295,6 +4214,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="rebuild drifted index rows from the log (requires --index).",
     )
 
+    forget = add(
+        "forget",
+        cmd_forget,
+        "Enumerate and tombstone memory records for a tenant. Mutates unless --dry-run.",
+    )
+    forget.add_argument(
+        "--tenant", required=True, help="tenant namespace to enumerate and tombstone."
+    )
+    forget.add_argument(
+        "--run-id", default=None, help="target run for tombstone (default: active run)."
+    )
+    forget.add_argument("--reason", default="", help="reason for erasure.")
+    forget.add_argument("--dry-run", action="store_true", help="list only, do not write tombstone.")
+
     reconcile_auto = with_run(
         add(
             "reconcile",
@@ -3310,11 +4243,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="probe registry path (default: .continuum/reconcilers.json).",
     )
+    reconcile_auto.add_argument(
+        "--authority",
+        default=None,
+        help="probe a consumed authority id via reconcilers.json instead of actions",
+    )
     with_run(add("actions", cmd_actions, "List external side effects."))
     with_env(with_run(add("show-contract", cmd_contract, "Print the recovery contract.")))
 
     replay = with_run(add("replay", cmd_replay, "Re-derive state from events."))
-    replay.add_argument("--upto", type=int, default=None)
+    replay.add_argument("--upto", type=int, default=None, help="replay events with sequence <= N.")
 
     with_run(
         add(
@@ -3356,6 +4294,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8765, help="port for --transport http.")
 
     def cmd_dashboard(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+        """Serve the read-only dashboard, blocking until interrupted.
+
+        Binds loopback unless ``--host`` says otherwise: the pages render goals
+        and side-effect details, which must not be off-host by default.
+        """
         from continuum.dashboard import serve_dashboard as _serve
 
         print(f"Serving dashboard at http://localhost:{args.port}", file=out)
@@ -3372,12 +4315,112 @@ def build_parser() -> argparse.ArgumentParser:
         help="bind address (default: 127.0.0.1; 0.0.0.0 exposes recovery data).",
     )
 
+    def cmd_tui(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+        """Open the full-screen terminal dashboard (issue #782), q quits.
+
+        Read-only until an action is confirmed: browsing and refreshing never
+        write, and every mutating verb shows its exact write in the footer and
+        waits for a further y before performing it. Refuses rather than
+        half-rendering when curses is unavailable or stdout is not a TTY.
+        """
+        from continuum.tui import run_tui
+
+        return run_tui(storage, refresh_seconds=args.refresh, err=err)
+
+    tui = add(
+        "tui",
+        cmd_tui,
+        "Full-screen terminal dashboard: monitor and control runs (q quits).",
+    )
+    tui.add_argument(
+        "--refresh",
+        type=float,
+        default=0.0,
+        help="auto-refresh interval in seconds (default: 0, refresh on demand with r).",
+    )
+
+    watch = with_run(
+        add("watch", cmd_watch, "Watch a run for liveness breach, optionally notify via webhook.")
+    )
+    watch.add_argument(
+        "--max-silence",
+        dest="max_silence",
+        default=None,
+        help="max silence before breach, e.g. 30m, 1h, 3600",
+    )
+    watch.add_argument(
+        "--on-breach",
+        choices=("webhook", "exit"),
+        default="exit",
+        help="action on breach (default: exit)",
+    )
+    watch.add_argument(
+        "--webhook-url",
+        dest="webhook_url",
+        default=None,
+        help="webhook URL for --on-breach webhook",
+    )
+    # Subparser default SUPPRESS: accepts trailing --json without shadowing the global flag (#677).
+    watch.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="emit machine-readable JSON (same as the global flag).",
+    )
+
     return parser
 
 
 # --------------------------------------------------------------------------- #
 # entry point
 # --------------------------------------------------------------------------- #
+
+
+def _bare_invocation(
+    parser: argparse.ArgumentParser, args: argparse.Namespace, out: Any, err: Any
+) -> int:
+    """`continuum` with no subcommand: open the TUI, or print help.
+
+    The interactive path is what an operator typing bare `continuum` at a
+    shell expects (issue #782): the full-screen dashboard with its landing
+    splash. Piped output, `--json` and platforms without curses keep the
+    help text unchanged: a script that runs `continuum` blind must never
+    find a curses screen where it expected usage text.
+    """
+    interactive = not args.json and _stream_is_a_tty(out) and _curses_available()
+    if not interactive:
+        parser.print_help(file=out)
+        return ExitCode.OK
+    from continuum.tui import run_tui
+
+    try:
+        storage = open_storage(args.db)
+    except SchemaVersionError as exc:
+        # A newer database must never be downgraded or silently replaced. Keep
+        # the branded launcher usable, but make the incompatibility visible in
+        # the splash and direct the operator to a compatible --db path.
+        return int(run_tui(None, database_error=str(exc), err=err))
+    except (StorageError, ValueError, NotImplementedError, RuntimeError) as exc:
+        print(f"error: {exc}", file=err)
+        return ExitCode.ERROR
+    except sqlite3.Error as exc:
+        print(f"error: cannot open storage at '{args.db}': {exc}", file=err)
+        return ExitCode.ERROR
+    try:
+        return run_tui(storage, err=err)
+    finally:
+        storage.close()
+
+
+def _stream_is_a_tty(out: Any) -> bool:
+    isatty = getattr(out, "isatty", None)
+    return callable(isatty) and bool(isatty())
+
+
+def _curses_available() -> bool:
+    from importlib.util import find_spec
+
+    return find_spec("curses") is not None
 
 
 def main(
@@ -3400,12 +4443,11 @@ def main(
         Palette(False) if args.json else Palette.for_stream(out, force=getattr(args, "color", None))
     )
     if getattr(args, "func", None) is None:
-        parser.print_help(file=out)
-        return ExitCode.OK
+        return _bare_invocation(parser, args, out, err)
 
     # hooks never touches a run, so it must not create an empty database as a
     # side effect of editing a settings file.
-    if args.command in ("benchmark", "attest-keygen", "serve", "hooks"):
+    if args.command in ("benchmark", "attest-keygen", "serve", "hooks", "notify-test"):
         return int(args.func(args, None, out, err))
 
     # Instant resume detection (issue #394): SessionStart hook reads
@@ -3436,6 +4478,13 @@ def main(
 
     try:
         return int(args.func(args, storage, out, err))
+    except FileNotFoundError as exc:
+        # An operator-supplied input file that does not exist is an ordinary
+        # operator mistake (--attest, --key, --payload-file typed from memory),
+        # not an internal failure. Naming the path is what the traceback would
+        # have made the reader dig for. See issue #1143.
+        print(f"error: file not found: {exc.filename or exc}", file=err)
+        return ExitCode.ERROR
     except (RunNotFound, CheckpointNotFound) as exc:
         print(f"error: {exc}", file=err)
         return ExitCode.NOT_FOUND

@@ -378,6 +378,7 @@ def test_source_vocabularies_remain_intact() -> None:
         "human",
         "llm",
         "external_agent",
+        "external_monitor",
         "imported",
     }
     assert {s.value for s in StateStatus} == {

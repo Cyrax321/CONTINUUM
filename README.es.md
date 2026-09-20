@@ -55,20 +55,22 @@ CONTINUUM plantea una pregunta más precisa y más difícil: puede un agente rea
 
 ## Inicio rápido
 
-Publicado en PyPI como `continuum-agent` 0.1.0, ejecuta `pip install continuum-agent` (`pip install continuum-agent==0.1.0` para fijar la versión). Las etiquetas de release además adjuntan wheels construidos en [GitHub Releases](https://github.com/Cyrax321/CONTINUUM/releases).
+Publicado en PyPI como `continuum-agent` 0.1.2, ejecuta `pip install continuum-agent` (`pip install continuum-agent==0.1.2` para fijar la versión). Las etiquetas de release además adjuntan wheels construidos en [GitHub Releases](https://github.com/Cyrax321/CONTINUUM/releases).
 
 Rutas sin configuración (sin clonar, sin instalar, sin publicar nada):
 
 | Ruta | Cómo |
 |:--|:--|
-| Instalar desde PyPI | `pip install continuum-agent==0.1.0` y luego `continuum --help` |
+| Instalar desde PyPI | `pip install continuum-agent==0.1.2` y luego `continuum --help` |
 | Ver la recuperación tras fallo de principio a fin | `docker run --rm ghcr.io/cyrax321/continuum` |
 | Usar la CLI a través de Docker | `docker run --rm ghcr.io/cyrax321/continuum continuum --help` |
 | Ejecutar la CLI sin clonar | `uvx --from git+https://github.com/Cyrax321/CONTINUUM.git continuum --help` |
 | Windows PowerShell (desde un clon) | `powershell -ExecutionPolicy Bypass -File .\try-it.ps1` o `powershell -ExecutionPolicy Bypass -File .\try-it.ps1 cli --help` |
+| Ver la misma recuperación en un cuaderno | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Cyrax321/CONTINUUM/blob/main/examples/demo.ipynb) |
+| El mismo cuaderno, en Binder | [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/Cyrax321/CONTINUUM/HEAD?labpath=examples%2Fdemo.ipynb) |
 | Entorno de desarrollo completo en el navegador | [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Cyrax321/CONTINUUM?quickstart=1) |
 
-La imagen Docker se publica en GHCR por CI en cada push a `main` y en cada etiqueta de release (`.github/workflows/docker-publish.yml`). El Codespace se define en `.devcontainer/`.
+La imagen Docker se publica en GHCR por CI en cada push a `main` y en cada etiqueta de release (`.github/workflows/docker-publish.yml`). El Codespace se define en `.devcontainer/`. El cuaderno es [examples/demo.ipynb](examples/demo.ipynb): su primera celda instala CONTINUUM solo cuando falla la importación, así que el mismo archivo funciona en Colab, en Binder y desde un clon.
 
 ```bash
 git clone https://github.com/Cyrax321/CONTINUUM.git
@@ -94,7 +96,7 @@ Verifica:
 ```bash
 continuum --help                 # punto de entrada CLI
 continuum-mcp --help             # punto de entrada servidor MCP (necesita [mcp] o [dev])
-pytest -q                        # ~1,380 tests recogidos (el número exacto y los saltos varían por entorno)
+pytest -q                        # ~2,426 recogidos, ~2,361 pasando, ~41 saltados en un entorno mínimo (los recuentos exactos varían)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # las tres puertas que CI exige
 ```
@@ -227,7 +229,7 @@ CONTINUUM se verifica contra agentes LLM reales, límites de protocolo en vivo y
 - **Clientes de terceros**: Gemini CLI y Kilo Code conectados vía stdio JSON-RPC contra el almacén SQLite en vivo, validando coexistencia multiagente y aislamiento de autorización.
 - **Cumplimiento de protocolo**: conducido de extremo a extremo con `@modelcontextprotocol/inspector --cli` a través de muertes de proceso, las herramientas mutantes deniegan por defecto tras `CONTINUUM_MCP_MUTATING_CLIENTS`, los reclamos externos degradan a `REQUIRES_REVIEW` (`safe: false`).
 - **Auto reparación**: servidores matados de forma brusca se recuperan de sidecars huérfanos `-wal`/`-shm` de SQLite mediante limpieza de un solo reintento al arrancar.
-- **Escala**: cerca de 1,380 tests recogidos (~1,360 pasando, el resto se salta sin servicios opcionales) en Python 3.11, 3.12 y 3.13 (unitarios, basados en propiedades con `hypothesis`, concurrencia, adversariales). CONTINUUM-Bench ejecuta cinco escenarios de caída más un escenario dedicado de deriva de argumentos, midiendo 0 trabajo duplicado y 0 efectos secundarios duplicados para CONTINUUM frente a duplicación total para la reproducción ingenua, más una suite separada de 12 escenarios de corrección de recuperación (`continuum.benchmark.phase6`) que codifica los puntos de caída del estudio de ejecución durable como aserciones ejecutables.
+- **Escala**: cerca de 2,426 tests recogidos (~2,361 pasando, el resto se salta sin servicios opcionales) en Python 3.11, 3.12 y 3.13 (unitarios, basados en propiedades con `hypothesis`, concurrencia, adversariales). CONTINUUM-Bench ejecuta cinco escenarios de caída más un escenario dedicado de deriva de argumentos, midiendo 0 trabajo duplicado y 0 efectos secundarios duplicados para CONTINUUM frente a duplicación total para la reproducción ingenua, más una suite separada de 14 escenarios de corrección de recuperación (`continuum.benchmark.phase6`) que codifica los puntos de caída del estudio de ejecución durable como aserciones ejecutables.
 - **Auditoría adversarial**: la superficie MCP completa fue auditada sobre el protocolo en vivo, se encontraron y corrigieron tres defectos. Método y pasos de reproducción en [test.md](test.md).
 
 ## Integración MCP
@@ -393,7 +395,7 @@ Esquema v6. SQLite es primario, Postgres verificado por CI. Un registro, muchas 
 
 ### Mapa de módulos, una librería, muchas superficies
 
-CONTINUUM es una librería (`src/continuum`, 104 módulos) más una suite de tests grande (98 archivos de test, ~1,380 tests). Todos los módulos añaden y reproducen un registro de eventos encadenado:
+CONTINUUM es una librería (`src/continuum`, 124 módulos) más una suite de tests grande (161 archivos de test, ~2,426 tests). Todos los módulos añaden y reproducen un registro de eventos encadenado:
 
 | Módulo | Rol |
 |:--|:--|
@@ -417,7 +419,7 @@ CONTINUUM es una librería (`src/continuum`, 104 módulos) más una suite de tes
 | `dashboard/` | Dashboard web `app.py` `hitl.py` con botones HITL confirmar/reconciliar/completar, aviso de confianza de prefijo, fijaciones |
 | `cli/` | 38 comandos argparse, códigos de salida como veredicto, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | Puente de procesador de spans de OpenTelemetry |
-| `benchmark/` | Harness de CONTINUUM-Bench, 5 escenarios de caída + deriva de argumentos + suite de recuperación de 12 escenarios |
+| `benchmark/` | Harness de CONTINUUM-Bench, 5 escenarios de caída + deriva de argumentos + suite de recuperación de 14 escenarios |
 
 ### Limitaciones honestas
 
@@ -498,7 +500,7 @@ CONTINUUM se sitúa en la intersección de ejecución durable, seguimiento idemp
 ## Estado y limitaciones
 
 - **Probado**: 1,360 pasados + 23 saltados en una ejecución completa en la auditoría del 2026-08-24 de este árbol, CI hace cumplir la suite en Python 3.11, 3.12 y 3.13, y los conteos varían por plataforma y servicios opcionales como Postgres (ver [STATUS.md](STATUS.md)). La superficie MCP también ha sido auditada de forma adversarial sobre el protocolo en vivo, ver [test.md](test.md).
-- **En PyPI como `continuum-agent` 0.1.0** (`pip install continuum-agent`, el clon aún funciona vía `pip install .` ver Inicio rápido).
+- **En PyPI como `continuum-agent` 0.1.2** (`pip install continuum-agent`, el clon aún funciona vía `pip install .` ver Inicio rápido).
 - **La autenticación de llamante MCP es opcional por despliegue.** Cuando se establece `CONTINUUM_MCP_TOKEN`, el servidor rechaza cada herramienta mutante a menos que el llamante presente ese secreto compartido en el `_meta.authToken` del handshake `initialize`, secretos por llamante disponibles vía `CONTINUUM_MCP_CLIENT_TOKENS` (pares `name:secret`). Sin ningún token configurado, la autorización es solo por identidad declarada (el valor histórico por defecto, preservado para uso local de un solo usuario).
 - **Confirmar estado auto reportado vía MCP requiere un secreto separado.** `continuum_confirm` rechaza a cada llamante hasta que el operador establece `CONTINUUM_MCP_CONFIRM_TOKEN`, porque un agente al que se le permite registrar progreso no debe poder confirmarlo también. La ruta por defecto sigue siendo conducida por humano: ejecuta `continuum confirm <run_id>` en el host.
 - **Componentes no construidos**: API en la nube (Fase 13).
@@ -511,7 +513,7 @@ CONTINUUM se sitúa en la intersección de ejecución durable, seguimiento idemp
 
 A principios de 2026 vi agentes de larga duración fallar en la recuperación, no en el razonamiento. Los checkpoints se trataban como prueba para continuar, no como evidencia a verificar. Estudiando Temporal, LangGraph, ACRFence 2603.20625 y self conditioning 2509.09677, encontré que el hueco era un sustrato de verificación portable que pregunta, dado el estado en el tiempo T y el mundo tal como está ahora, sigue siendo seguro continuar.
 
-En tres semanas construí CONTINUUM desde un invariante, cada hecho lleva su origen. El resultado es un registro encadenado con `verify()`, un libro mayor con deduplicación por clave estable, una puerta y un gateway que bloquean efectos no reclamados, y un motor de recuperación que sella un contrato. Cinco costuras exponen el mismo registro a Claude Code, LangGraph, LangChain, OpenAI, HTTP y OpenTelemetry. Validado con muertes reales y 1380 tests, imprime `0 duplicados` donde la reproducción ingenua imprime `50`.
+En tres semanas construí CONTINUUM desde un invariante, cada hecho lleva su origen. El resultado es un registro encadenado con `verify()`, un libro mayor con deduplicación por clave estable, una puerta y un gateway que bloquean efectos no reclamados, y un motor de recuperación que sella un contrato. Cinco costuras exponen el mismo registro a Claude Code, LangGraph, LangChain, OpenAI, HTTP y OpenTelemetry. Validado con muertes reales y ~2,426 tests, imprime `0 duplicados` donde la reproducción ingenua imprime `50`.
 
 CONTINUUM fue creado por **Anandhu P Shaji** ([@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/)) y es mantenido por el creador original. Es de código abierto bajo [Apache-2.0](LICENSE). Las contribuciones de la comunidad son bienvenidas vía [CONTRIBUTING.md](CONTRIBUTING.md) y se acreditan en [AUTHORS.md](AUTHORS.md) y [graphs/contributors](https://github.com/Cyrax321/CONTINUUM/graphs/contributors).
 

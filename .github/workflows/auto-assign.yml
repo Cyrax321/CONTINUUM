@@ -74,3 +74,39 @@ jobs:
                 await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
               }
             }
+
+      - name: Request Anya review on docs-only PRs
+        if: github.event_name == 'pull_request_target'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const pr = context.payload.pull_request.number;
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr,
+              per_page: 100,
+            });
+            const docsOnly =
+              files.length > 0 &&
+              files.every((f) => /\.md$|^docs\/|^references\//.test(f.filename));
+            if (!docsOnly) {
+              core.info(`#${pr} touches code; leaving reviewer choice to humans.`);
+              return;
+            }
+            try {
+              await github.rest.pulls.requestReviewers({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr,
+                reviewers: ['anya-research'],
+              });
+              core.info(`Requested anya-research review on docs-only #${pr}.`);
+            } catch (err) {
+              const status = err.status ?? err.response?.status;
+              if (status === 422) {
+                core.info(`anya-research already requested on #${pr}; nothing to do.`);
+                return;
+              }
+              throw err;
+            }

@@ -1,0 +1,26 @@
+name: Markdown lint
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: markdownlint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  markdownlint:
+    name: Markdown lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DavidAnson/markdownlint-cli2-action@v24
+        with:
+          globs: |
+            CONTRIBUTING.md
+            README.md
+            SECURITY.md
+            CODE_OF_CONDUCT.md
+          config: .markdownlint-cli2.jsonc

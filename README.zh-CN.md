@@ -53,20 +53,22 @@ CONTINUUM 提出一个更窄但更难的问题：智能体能否从任务状态�
 
 ## 快速开始
 
-以 `continuum-agent` 0.1.0 发布至 PyPI，执行 `pip install continuum-agent` 即可（固定版本请用 `pip install continuum-agent==0.1.0`）。发布标签还会将构建好的 wheel 附加到 [GitHub Releases](https://github.com/Cyrax321/CONTINUUM/releases)。
+以 `continuum-agent` 0.1.2 发布至 PyPI，执行 `pip install continuum-agent` 即可（固定版本请用 `pip install continuum-agent==0.1.2`）。发布标签还会将构建好的 wheel 附加到 [GitHub Releases](https://github.com/Cyrax321/CONTINUUM/releases)。
 
 零配置路径（无需克隆、无需安装、无需发布）：
 
 | 路径 | 方法 |
 |:--|:--|
-| 从 PyPI 安装 | `pip install continuum-agent==0.1.0`，然后执行 `continuum --help` |
+| 从 PyPI 安装 | `pip install continuum-agent==0.1.2`，然后执行 `continuum --help` |
 | 端到端观看崩溃恢复 | `docker run --rm ghcr.io/cyrax321/continuum` |
 | 通过 Docker 使用 CLI | `docker run --rm ghcr.io/cyrax321/continuum continuum --help` |
 | 无需克隆即可运行 CLI | `uvx --from git+https://github.com/Cyrax321/CONTINUUM.git continuum --help` |
 | Windows PowerShell（在克隆中） | `powershell -ExecutionPolicy Bypass -File .\try-it.ps1` 或 `powershell -ExecutionPolicy Bypass -File .\try-it.ps1 cli --help` |
+| 在笔记本中观看同样的恢复过程 | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Cyrax321/CONTINUUM/blob/main/examples/demo.ipynb) |
+| 同样的笔记本，在 Binder 上运行 | [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/Cyrax321/CONTINUUM/HEAD?labpath=examples%2Fdemo.ipynb) |
 | 浏览器中的完整开发环境 | [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Cyrax321/CONTINUUM?quickstart=1) |
 
-Docker 镜像由 CI 在每次推送到 `main` 和每个发布标签时发布到 GHCR（`.github/workflows/docker-publish.yml`）。Codespace 在 `.devcontainer/` 中定义。
+Docker 镜像由 CI 在每次推送到 `main` 和每个发布标签时发布到 GHCR（`.github/workflows/docker-publish.yml`）。Codespace 在 `.devcontainer/` 中定义。该笔记本是 [examples/demo.ipynb](examples/demo.ipynb)：其首个单元格仅在导入失败时安装 CONTINUUM，因此单个文件即可在 Colab、Binder 和本地克隆三种环境中运行。
 
 ```bash
 git clone https://github.com/Cyrax321/CONTINUUM.git
@@ -92,7 +94,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI 入口
 continuum-mcp --help             # MCP 服务器入口（需要 [mcp] 或 [dev]）
-pytest -q                        # 约 1,380 个用例被收集（具体数量和跳过数因环境而异）
+pytest -q                        # 最小环境中约 2,426 个收集，约 2,361 个通过，约 41 个跳过（具体数量因环境而异）
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI 强制的三扇门禁
 ```
@@ -225,8 +227,24 @@ CONTINUUM 针对真实 LLM 智能体、真实协议边界和硬进程崩溃进�
 - **第三方客户端**：Gemini CLI 和 Kilo Code 通过 stdio JSON-RPC 对接真实 SQLite 存储，验证多智能体共存和鉴权隔离。
 - **协议合规**：使用 `@modelcontextprotocol/inspector --cli` 在进程死亡间端到端驱动，变更工具默认拒绝并位于 `CONTINUUM_MCP_MUTATING_CLIENTS` 后，外部声明降级为 `REQUIRES_REVIEW`（`safe: false`）。
 - **自愈**：硬杀的服务器在启动时通过单次重试清理孤立的 SQLite `-wal`/`-shm` 伴生文件来恢复。
-- **规模**：约 1,380 个测试被收集（约 1,360 通过，其余在缺少可选服务时跳过），覆盖 Python 3.11、3.12 和 3.13（单元、`hypothesis` 属性测试、并发、对抗）。CONTINUUM-Bench 运行五个崩溃场景加一个专门的参数漂移场景，对 CONTINUUM 测量到 0 重复工作和 0 重复副作用，而对朴素重放则为完全重复，另有一个 12 场景恢复正确性套件（`continuum.benchmark.phase6`）将持久执行调研中的崩溃点编码为可执行断言。
+- **规模**：约 2,402 个测试被收集（约 2,361 通过，其余在缺少可选服务时跳过），覆盖 Python 3.11、3.12 和 3.13（单元、`hypothesis` 属性测试、并发、对抗）。CONTINUUM-Bench 运行五个崩溃场景加一个专门的参数漂移场景，对 CONTINUUM 测量到 0 重复工作和 0 重复副作用，而对朴素重放则为完全重复，另有一个 14 场景恢复正确性套件（`continuum.benchmark.phase6`）将持久执行调研中的崩溃点编码为可执行断言。
 - **对抗审计**：完整 MCP 面已在真实协议上被审计，发现并修复了三个缺陷。方法和复现步骤见 [test.md](test.md)。
+
+<!-- BENCH:START -->
+### 地平线规模基准（真实运行，无虚构数字）
+
+Generated: 2026-09-10T07:38:24.375062  Horizon scenarios: 5  Passed: 3  Failed: 2
+
+Accuracy: 0.6  Unnecessary escalation: 0.2  Repair precision: 0.8  Duplicate side effects: 0  Duplicate work: 0.0  Compression: 1.694
+
+| Scenario | Cycles | Years | Correct | Actual | Accuracy |
+| --- | --- | --- | --- | --- | --- |
+| horizon_steady_progress_year | 131 | 2.3 | resume | resume | 1.0 |
+| horizon_quarterly_drift_year | 131 | 2.3 | repair | request_human | 0.0 |
+| horizon_budget_exhaustion_year | 131 | 2.3 | request_human | request_human | 1.0 |
+| horizon_compaction_stress_year | 164 | 2.87 | resume | resume | 1.0 |
+| horizon_abort_condition_year | 131 | 2.3 | abort | request_human | 0.0 |
+<!-- BENCH:END -->
 
 ## MCP 集成
 
@@ -391,7 +409,7 @@ Schema v6。SQLite 为主，Postgres 经 CI 验证。单一日志，多重投影
 
 ### 模块映射，一库多面
 
-CONTINUUM 是一个库（`src/continuum`，104 个模块）加上大型测试套件（98 个测试文件，约 1,380 个测试）。所有模块追加并重放同一个哈希链事件日志：
+CONTINUUM 是一个库（`src/continuum`，124 个模块）加上大型测试套件（161 个测试文件，约 2,402 个测试）。所有模块追加并重放同一个哈希链事件日志：
 
 | 模块 | 职责 |
 |:--|:--|
@@ -415,7 +433,7 @@ CONTINUUM 是一个库（`src/continuum`，104 个模块）加上大型测试套
 | `dashboard/` | Web 仪表板 `app.py` `hitl.py` 带 HITL 按钮确认、对账和完成，前缀信任建议，钉扎 |
 | `cli/` | 38 个 argparse 命令，退出码即裁决，`runs、start、inspect、resume、verify、health、tree、benchmark、attest、dashboard` |
 | `otel.py` | OpenTelemetry 跨度处理器桥 |
-| `benchmark/` | CONTINUUM-Bench  harness，5 个崩溃场景 + 参数漂移 + 12 场景恢复套件 |
+| `benchmark/` | CONTINUUM-Bench  harness，5 个崩溃场景 + 参数漂移 + 14 场景恢复套件 |
 
 ### 诚实的局限
 
@@ -496,7 +514,7 @@ CONTINUUM 位于持久执行、幂等副作用追踪和针对 LLM 智能体的�
 ## 状态与局限
 
 - **已测试**：在 2026-08-24 对本树的完整运行中为 1,360 通过 + 23 跳过，CI 在 Python 3.11、3.12 和 3.13 上强制执行套件，计数因平台和 Postgres 等可选服务而异（见 [STATUS.md](STATUS.md)）。MCP 面也已在真实协议上被对抗性审计，见 [test.md](test.md)。
-- **在 PyPI 上为 `continuum-agent` 0.1.0**（`pip install continuum-agent`，克隆仍可通过 `pip install .` 见 Quick Start）。
+- **在 PyPI 上为 `continuum-agent` 0.1.2**（`pip install continuum-agent`，克隆仍可通过 `pip install .` 见 Quick Start）。
 - **MCP 调用者认证按部署可选。** 当设置 `CONTINUUM_MCP_TOKEN` 时，服务器会拒绝每个变更工具，除非调用者在 `initialize` 握手的 `_meta.authToken` 中出示该共享密钥，通过 `CONTINUUM_MCP_CLIENT_TOKENS`（`name:secret` 对）支持按调用者的密钥。未配置任何 token 时，鉴权仅按声明身份（历史默认值，为本地单用户使用保留）。
 - **通过 MCP 确认自我报告状态需要单独的密钥。** `continuum_confirm` 会拒绝每个调用者，直至操作员设置 `CONTINUUM_MCP_CONFIRM_TOKEN`，因为被允许记录进度的智能体不能同时被允许确认它。默认路径保持人类驱动：在主机上运行 `continuum confirm <run_id>`。
 - **未构建组件**：云 API（阶段 13）。
@@ -509,7 +527,7 @@ CONTINUUM 位于持久执行、幂等副作用追踪和针对 LLM 智能体的�
 
 在 2026 年初，我看到长时间运行的智能体在恢复而非推理上失败。检查点被视为继续的证明，而非待验证的证据。调研 Temporal、LangGraph、ACRFence 2603.20625 和 self conditioning 2509.09677 后，我发现缺口是一个可移植的验证基座，它会问：给定时间 T 的状态和当下的世界，继续是否仍然安全。
 
-在三周内，我从一个不变量出发构建了 CONTINUUM：每个事实都携带其来源。结果是一个带 `verify()` 的哈希链日志、带稳定键去重的账本、阻止未声明效应的门控与网关，以及密封合约的恢复引擎。五个接缝将同一日志暴露给 Claude Code、LangGraph、LangChain、OpenAI、HTTP 和 OpenTelemetry。经真实杀死和 1380 个测试验证，它在朴素重放打印 `50` 的地方打印 `0 重复`。
+在三周内，我从一个不变量出发构建了 CONTINUUM：每个事实都携带其来源。结果是一个带 `verify()` 的哈希链日志、带稳定键去重的账本、阻止未声明效应的门控与网关，以及密封合约的恢复引擎。五个接缝将同一日志暴露给 Claude Code、LangGraph、LangChain、OpenAI、HTTP 和 OpenTelemetry。经真实杀死和约 2,402 个测试验证，它在朴素重放打印 `50` 的地方打印 `0 重复`。
 
 CONTINUUM 由 **Anandhu P Shaji**（[@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/)）创建并由原始创建者维护。基于 [Apache-2.0](LICENSE) 开源。社区贡献欢迎通过 [CONTRIBUTING.md](CONTRIBUTING.md)，并在 [AUTHORS.md](AUTHORS.md) 和 [graphs/contributors](https://github.com/Cyrax321/CONTINUUM/graphs/contributors) 中致谢。
 

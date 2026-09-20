@@ -92,8 +92,8 @@ def stable_hash(value: Any, algorithm: str = "sha256") -> str:
 def make_id(prefix: str) -> str:
     """Random hex identifier with a human-readable prefix, e.g. ``run_8f3a...``.
 
-    Uses 16 bytes (128 bits) of cryptographic randomness — the same budget as
-    UUID v4 — so birthday-paradox collisions are negligible even at billions of
+    Uses 16 bytes (128 bits) of cryptographic randomness, the same budget as
+    UUID v4, so birthday-paradox collisions are negligible even at billions of
     IDs.
     """
     return f"{prefix}_{secrets.token_hex(16)}"

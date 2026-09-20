@@ -1031,6 +1031,34 @@ def test_cli_budget_exhausted_exit_is_reported_not_raised(db: str, tmp_path: Pat
     assert any(r["action_type"] == "deploy" and r["attempts"] >= 1 for r in rows)
 
 
+def test_cli_budget_counts_archived_attempts_after_compaction(db: str, tmp_path: Path) -> None:
+    """Attempts live in the event log; compaction moves them to the archive.
+
+    The report read only the live tail, so after a compaction it understated
+    attempts and overstated remaining for exactly the runs long enough to have
+    been compacted (issue #734).
+    """
+    with SQLiteStorage(db) as store:
+        ledger = ActionLedger(store, "run_1")
+        outcome = ledger.claim("send_invoice", {}, key="invoice:1")
+        ledger.fail(outcome.key, "500 from upstream")
+        store.compact_run("run_1")
+
+    code, out, err = run(
+        "--db",
+        db,
+        "--json",
+        "budget",
+        "run_1",
+        "--config",
+        registry(tmp_path, {"default_max_attempts": 3}),
+    )
+    assert code == ExitCode.OK, err
+    by_type = {r["action_type"]: r for r in json.loads(out)["budgets"]}
+    assert by_type["send_invoice"]["attempts"] == 1, "archived attempt must still count"
+    assert by_type["send_invoice"]["remaining"] == 2
+
+
 def test_hand_built_authorization_counter_bool_is_rejected() -> None:
     raw = bound_registry()
     raw["authorization_bound"]["send_invoice"]["authz:stripe-cust-1"]["counter"] = True

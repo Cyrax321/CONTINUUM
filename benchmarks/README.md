@@ -26,3 +26,39 @@ The script:
 
 The deliverable for #6 is the captured sequence plus the deviations noted in the
 issue, not a passing unit test.
+
+## Hook-path speedup micro-benchmark
+
+`speedup_demo.py` measures checkpoint/ledger machinery cost with no LLM: five
+per-section sync checkpoints versus one async checkpoint at the end, then prints
+the wall-clock ratio.
+
+```bash
+PYTHONPATH=src python benchmarks/speedup_demo.py
+```
+
+## Scripted suites via `run.py`
+
+The phase-6, byte-count, fault-injection, and horizon suites run scripted
+(no LLM, no API key) through one runner. With no arguments it executes every
+suite in order and writes all reports under `benchmarks/out/`; `--list`
+prints the suites and their report paths without running anything:
+
+```bash
+PYTHONPATH=src python benchmarks/run.py --list
+PYTHONPATH=src python benchmarks/run.py
+```
+
+| Suite | What it runs | Report lands in |
+|:--|:--|:--|
+| `phase6` | Recovery-correctness scenarios | `benchmarks/out/report.{json,md}` |
+| `continuum-bench` | Crash-recovery byte counts | Merged into `benchmarks/out/report.json` |
+| `fault-injection` | Chaos suite (#397) | `benchmarks/out/fault_injection_report.{json,md}` |
+| `horizon` | Horizon-scale suite (#398) | `benchmarks/out/horizon_report.{json,md}`; also regenerates the README bench table |
+
+The full run takes minutes. The horizon suite's numbers feed the bench
+table in the top-level README (marked `BENCH:START`/`BENCH:END` there).
+Pass `--publish` to also refresh the latest-results block in
+`references/bench.md`; plain runs leave that file alone. The nightly publish
+CI (`.github/workflows/bench-nightly.yml`) runs with `--publish` and commits
+both files when the numbers move.

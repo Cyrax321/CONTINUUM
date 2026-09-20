@@ -29,6 +29,7 @@ from continuum.plugins import (
     StateExtractor,
     ValidationRule,
 )
+from continuum.state.extractor import ExtractionContext
 
 # --- Registry ---------------------------------------------------------------
 
@@ -84,7 +85,7 @@ def test_all_of_filters_by_type() -> None:
 class _DummyExtractor:
     name = "dummy"
 
-    def extract(self, trajectory, environment=None) -> SemanticState:
+    def extract(self, context: ExtractionContext) -> SemanticState:
         return SemanticState(run_id="r", goal=Goal(description="g"))
 
 
@@ -104,7 +105,8 @@ class _DummyRule:
 
 def test_state_extractor_seam_is_satisfied() -> None:
     assert isinstance(_DummyExtractor(), StateExtractor)
-    state = _DummyExtractor().extract(None)
+    ctx = ExtractionContext(run_id="r", trajectory=())
+    state = _DummyExtractor().extract(ctx)
     assert isinstance(state, SemanticState)
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from continuum.analysis.trajectory_report import (
     build_trajectory_report,
@@ -267,7 +268,8 @@ def test_digest_auditable_and_briefing_consumption() -> None:
 
         from continuum.cli.main import main as cli_main
 
-        tmp = tempfile.mktemp(suffix=".sqlite")
+        fd, tmp = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
         file_storage = SQLiteStorage(tmp)
         try:
             file_storage.create_run(Run(run_id=run_id, goal="g"))

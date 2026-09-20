@@ -1,5 +1,7 @@
 # Instant Autonomous Detection
 
+> **Shipped.** Both halves landed and issue #83 is closed. The `SessionStart` briefing hook runs on session start (#394), and `.continuum/resume.json` is precomputed on every checkpoint in `src/continuum/checkpoint/manager.py` (#394 fast path). This note is kept for historical context.
+
 A Claude Code session only acts after the user sends a message, so detection costs a user message plus a model inference plus an MCP round trip. There is no autonomous session start trigger today.
 
 ## Proposal

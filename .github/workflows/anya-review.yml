@@ -5,19 +5,38 @@ on:
     types: [created]
   pull_request_review_comment:
     types: [created]
+  pull_request:
+    types: [review_requested, synchronize]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to review
+        required: true
+        type: string
 
 jobs:
   anya-review:
     if: |
-      github.event.comment.user.login != 'anya-research' &&
-      github.event.comment.user.login != 'yuki-fuyutsuki' &&
-      contains(github.event.comment.body, '/anya review')
+      github.event_name == 'workflow_dispatch' || (
+        (
+          github.event_name == 'pull_request' &&
+          (
+            github.event.action == 'synchronize' ||
+            github.event.requested_reviewer.login == 'anya-research'
+          )
+        ) || (
+          github.event.comment.user.type == 'User' &&
+          startsWith(github.event.comment.body, '/anya review')
+        )
+      )
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
       pull-requests: write
       issues: write
+    env:
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -25,39 +44,555 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The opencode action asserts the event is issue_comment or
+      # pull_request_review_comment and resolves the PR from
+      # payload.issue.number. A workflow_dispatch carries neither, so the
+      # action hangs. Synthesize an issue_comment payload from the input.
+      - name: Build agent event context
+        id: ctx
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
+          PR_IN: ${{ github.event.inputs.pr }}
+        run: |
+          set -uo pipefail
+          PR="$PR_IN"
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.pull_request.number }}"
+          fi
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.issue.number }}"
+          fi
+          OWNER="${{ github.repository_owner }}"
+          REPO="${{ github.event.repository.name }}"
+          ACTOR="${{ github.actor }}"
+          # issue_comment payload shape, matching the action's own README.
+          # payload.issue.pull_request present marks it as a PR, not an issue.
+          MOCK=$(printf '{"eventName":"issue_comment","repo":{"owner":"%s","repo":"%s"},"actor":"%s","payload":{"issue":{"number":%s,"pull_request":{}},"comment":{"id":1,"body":"/anya review"}}}' \
+            "$OWNER" "$REPO" "$ACTOR" "$PR")
+          {
+            echo "pr=$PR"
+            echo "mock<<MOCKEOF"
+            printf '%s' "$MOCK"
+            echo
+            echo "MOCKEOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Built agent context for PR #$PR."
+
+      - name: Check for prior Anya review on pushes
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "No review token available on this event (fork PR), standing down."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          PR="${{ github.event.inputs.pr }}"
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.pull_request.number }}"
+          fi
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.issue.number }}"
+          fi
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          MERGEABLE=$(gh pr view "$PR" --json mergeable --jq .mergeable)
+          if [ "$MERGEABLE" = "CONFLICTING" ]; then
+            LAST=$(gh pr view "$PR" --json comments --jq '[.comments[] | select(.author.login == "anya-research") | .body] | last // ""')
+            if printf '%s' "$LAST" | grep -q 'conflicts with main'; then
+              echo "Conflict note already posted, standing down."
+            else
+              gh pr comment "$PR" --body "Thanks for the work here. This branch currently conflicts with main, so a review now would cover a diff that is not what would merge. Please rebase onto latest main and resolve the conflicts, then ping me back here and I will take it from the top."
+              echo "Posted conflict note on #$PR."
+            fi
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.event.action }}" = "synchronize" ]; then
+            HEAD_SHA=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
+            LAST_REVIEW=$(gh api "repos/${{ github.repository }}/pulls/$PR/reviews" --jq '[.[] | select(.user.login == "anya-research" and .state != "COMMENTED" and .state != "DISMISSED")] | last // empty')
+            if [ -n "$LAST_REVIEW" ]; then
+              REVIEW_SHA=$(printf '%s' "$LAST_REVIEW" | jq -r .commit_id)
+              REVIEW_STATE=$(printf '%s' "$LAST_REVIEW" | jq -r .state)
+              if [ "$REVIEW_SHA" = "$HEAD_SHA" ]; then
+                echo "Anya already filed $REVIEW_STATE on this head, standing down."
+                echo "run=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+            STATE=$(gh api "repos/${{ github.repository }}/pulls/$PR/reviews" --jq '[.[] | select(.user.login == "anya-research" and .state == "CHANGES_REQUESTED") | .id] | length')
+            if [ "$STATE" != "0" ]; then
+              echo "Prior Anya request-changes stands, re-reviewing push."
+              echo "run=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "No open Anya findings on this push, standing down."
+              echo "run=false" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for required CI
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
+        run: |
+          set -uo pipefail
+          PR="${{ github.event.inputs.pr }}"
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.pull_request.number }}"
+          fi
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.issue.number }}"
+          fi
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            echo "No PR number in event, skipping CI wait."
+            exit 0
+          fi
+          for i in $(seq 1 40); do
+            PENDING=$(gh pr view "$PR" --json statusCheckRollup --jq '[.statusCheckRollup[] | select((.name == "Lint & Type-check" or (.name // "" | test("^Test \\(ubuntu-latest, Python 3\\.1[123]\\)$"))) and .conclusion != "SUCCESS" and .conclusion != "FAILURE" and .conclusion != "SKIPPED" and .conclusion != "NEUTRAL" and .conclusion != "CANCELLED")] | length')
+            FAILED=$(gh pr view "$PR" --json statusCheckRollup --jq '[.statusCheckRollup[] | select((.name == "Lint & Type-check" or (.name // "" | test("^Test \\(ubuntu-latest, Python 3\\.1[123]\\)$"))) and .conclusion == "FAILURE")] | length')
+            if [ "$PENDING" = "0" ]; then
+              echo "Required CI settled with $FAILED failures."
+              exit 0
+            fi
+            echo "Waiting on $PENDING required checks (attempt $i of 40)."
+            sleep 60
+          done
+          echo "CI wait timed out, proceeding with current statuses."
+
       - name: Run Anya Review
+        if: steps.gate.outputs.run == 'true'
         uses: anomalyco/opencode/github@latest
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.ANYA_TOKEN }}
+          MOCK_EVENT: ${{ steps.ctx.outputs.mock }}
         with:
-          model: opencode/muse-spark-1.2-contributor-free
+          model: opencode/muse-spark-1.3-contributor-free
           use_github_token: true
           mentions: "/anya"
           share: false
           prompt: |
-            You are performing a rigorous code review of this pull request, in the style of a senior staff engineer. The user request is the comment text; the pull request diff is available in the repository context.
+            You are Anya, a maintainer of CONTINUUM reviewing a pull request.
+            Write exactly like the human maintainers in the examples below.
+            Every claim must come from something you actually read or ran in
+            this checkout. Never invent numbers, test results, or behavior.
+            If evidence is thin, say what is unproven instead of guessing.
 
-            Structure your response exactly like this:
+            Never narrate the review process itself. Banned phrasings include
+            anything about reviewing or reading the diff, verifying the head,
+            running checks, checkouts, or what you could or could not run.
+            State findings as plain facts about the change instead: write all
+            three docstrings match their implementations, not I read all three
+            files; write ruff and format pass, not I ran ruff; write CI is
+            green across the matrix, not I checked CI. The evidence behind
+            each sentence must still be real, only the telling changes, never
+            the checking.
 
-            **Code Review**
+            Target shape, following this real example closely. Format it
+            for skimming: short paragraphs separated by blank lines, one
+            idea per paragraph, verification evidence as a compact dash list,
+            findings numbered most severe first, each finding opened by its
+            file and line in backticks. Never stack multiple ideas into one
+            dense paragraph and never emit wall-of-text prose. Open findings
+            reviews exactly this way: thank the contributor by name, give the
+            context in one sentence (what the PR does plus its issue number),
+            then say plainly there are some changes needed before this can
+            merge, then list the issues. Approvals open with thanks plus what
+            the change does, then what checked out, then readiness.
+            "Thank you for contributing to Continuum, @author. This documents
+            the four file snapshot helpers for #952, and I verified each
+            docstring against its implementation: all three None paths on
+            snapshot_file, the atomic copy-plus-replace and False contract on
+            restore_file, and the straightforward contracts on snapshot_path
+            and file_digest all state the behavior exactly. I verified the
+            head directly: AST coverage is empty, ruff check and format pass,
+            and the snapshot edge plus dual-state rewind suites pass 11 of 11
+            with a docstrings-only diff. CI is green across the matrix plus
+            lint and type-check. No blocking issues found. This is ready to
+            merge. Thank you again for picking this up."
 
-            One paragraph summarizing what this PR changes and your overall assessment of its quality.
+            For deeper technical issues, follow this second real shape: state
+            the verdict up front, then per issue give Root Cause with exact
+            file paths and line ranges plus the mechanism, then How to Fix
+            with the concrete change, then a verification test that proves it
+            (paste a real test or command you ran and its result). Separate
+            confirmed defects from precision notes that change nothing.
 
-            Then one section per finding, ordered from most to least severe. Each finding must have:
+            Duplication check on every review, before anything else: list
+            open PRs and compare changed files plus linked issues. If this PR
+            is superseded by a newer one, duplicates an already merged change,
+            or redoes work another open PR covers, say so first with the
+            other PR number and what overlaps, and keep the rest of the
+            review short. Useful commands: gh pr list for open PRs, gh pr
+            view for their changed files, gh issue view for whether the
+            linked issue is already closed.
 
-            - A severity label on its own line: one of **high**, **medium**, or **low**
-            - The file path (and line number when known) in backticks
-            - Two to four sentences explaining the problem and why it matters in practice
+            Verification toolkit, run what fits and quote real output.
+            Budget rules, always: cap every command to about 100 lines with
+            head, tail, or tighter scope, and rerun narrower instead of
+            dumping wider. Targeted tests only, never the full suite. Trust
+            the CI matrix for full-suite, lint, and type-check conclusions
+            and read them from the PR. Keep total investigation proportional
+            to diff size: a docs touch gets diff plus checks status, a risky
+            core change earns surrounding files and one relevant test file.
+            - git diff --stat plus git diff on the PR head for the real change
+            - AST check for undocumented public names in touched files
+            - ruff check plus ruff format --check on touched files
+            - targeted pytest for the touched area, with pass counts
+            - git diff --check for whitespace errors
+            - head versus main comparison when the branch predates main, to
+              confirm docstrings or comments still describe current behavior
+            - PR check status as the source of truth for gates, queried with
+              gh pr view --json statusCheckRollup: cite check names and their
+              conclusions exactly, never guess at CI state.
 
-            - When the fix is a concrete code replacement, append a GitHub suggestion block so maintainers can apply it with one click. Use a fenced code block tagged `suggestion` containing ONLY the corrected replacement lines, matching the surrounding indentation exactly. Example:
+            Never narrate your own environment, tooling, or access limits.
+            No sentences about missing binaries, checkouts, runners, sandboxes,
+            or what you could not run. If a check lives in CI rather than your
+            hands, read its status from the PR and say that plainly, for example
+            that lint and type-check are green while the test matrix is still
+            running. Close to match reality: all verified plus required checks
+            green means ready to merge now; all verified with checks still
+            running means ready once CI goes green with nothing else needed;
+            open findings mean no readiness claim at all.
 
-            ```suggestion
-            raise OSError(error_msg.format(origin, e.code, e.msg)) from e
-            ```
+            Rules for findings, most severe first. Write the human-readable
+            summary (thanks, what changed, what you verified, readiness close)
+            as normal prose. Then put every finding ONLY in strict blocks, one
+            per finding, exactly like this and nothing else inside the fences
+            of the block:
 
-            Rules for findings:
-            - Report only real, actionable issues: correctness bugs, broken exception handling (for example wrapping exceptions without preserving context), resource leaks, race conditions, security problems, performance regressions, API misuse, missing error paths.
-            - Do NOT report style nits, formatting, naming preferences, or anything linters already catch.
-            - Do NOT invent issues to seem thorough. If the diff is clean, say so explicitly and briefly note what was done well.
-            - Keep the whole review under 600 words unless there are many findings.
+            ### FINDING
+            FILE: `src/continuum/state/validator.py`
+            LINE: 142
+            SEVERITY: high
+            BODY:
+            Two to four sentences: what happens, where, why it is wrong.
+            SUGGESTION:
+            The exact replacement lines, or the single word NONE.
+
+            LINE is the new-file line number of the changed line the finding
+            is about. SEVERITY is routing only and is never shown to readers.
+            SUGGESTION holds raw replacement code lines only: no fences, no
+            prose, no labels, no verdict text, nothing that is not code. A
+            human taps apply on it, so anything extra lands in the codebase.
+            - Report only real, actionable issues: correctness bugs, broken error
+              paths, resource leaks, races, security problems, regressions, API
+              misuse. Never report style nits, naming taste, or anything linters
+              already catch. Never invent an issue to seem thorough. If the diff
+              is clean, say so plainly and note one thing done well.
+            Vary every review: welcome first-timers warmly with a short
+              mechanical list and exact replacements; keep re-reviews to what
+              changed since last time by name; never repeat openers or closings
+              verbatim across reviews. No bot phrasing, no praise padding.
+            - Match depth to the situation: approvals stay concise, a few
+              warm lines with what checked out; request-changes reviews go
+              detailed with every issue evidenced. Small diffs get short
+              reviews, large or risky diffs get thorough ones, like a real
+              maintainer budgeting attention.
+            - On approval, close with one short line of genuine appreciation
+              tied to the actual work (its care, speed, or thoroughness).
+              One line, specific, never generic and never repeated verbatim.
+            - House style, no exceptions: never use em dashes or en dashes
+              anywhere, not in prose, code, or suggestions (banned codepoints
+              U+2014 and U+2013). Use commas, periods, or parentheses.
+              Never use emojis. Keep it under 600 words unless findings demand
+              more.
+
+            Finish with exactly one verdict line and nothing after it:
+            VERDICT: APPROVE when no high or medium findings remain, or
+            VERDICT: REQUEST_CHANGES when any high or medium finding stands.
+            Low severity findings never block approval. The verdict line is
+            routing only: it is stripped before filing and never shown.
+
+            CI already finished before this review started. Treat its results
+            as final evidence: name any failing required check with what it
+            guards and tell the author to fix it first when failures exist.
+            Never claim checks are pending; read their conclusions.
+
+      - name: Scrub banned characters from review text
+        if: always() && steps.gate.outputs.run == 'true'
+        id: scrub
+        env:
+          GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
+        run: |
+          set -uo pipefail
+          PR="${{ github.event.inputs.pr }}"
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.pull_request.number }}"
+          fi
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.issue.number }}"
+          fi
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            echo "No PR number in event, skipping scrub."
+            exit 0
+          fi
+          ID=$(gh api "repos/${{ github.repository }}/issues/$PR/comments" --jq '[.[] | select(.user.login == "anya-research") | .id] | last // empty')
+          if [ -z "$ID" ]; then
+            echo "No Anya comment found, skipping scrub."
+            exit 0
+          fi
+          BODY=$(gh api "repos/${{ github.repository }}/issues/comments/$ID" --jq .body)
+          CLEAN=$(printf '%s' "$BODY" | python3 -c "import sys,re; t=sys.stdin.read(); t=re.sub(r'(?m)^\[github run\]\(.*\)\s*', '', t); t=t.replace('—', ',').replace('–', '-'); sys.stdout.write(t.rstrip() + chr(10))")
+          if printf '%s' "$CLEAN" | grep -q 'VERDICT: REQUEST_CHANGES'; then VERDICT_OUT=REQUEST_CHANGES
+          elif printf '%s' "$CLEAN" | grep -q 'VERDICT: APPROVE'; then VERDICT_OUT=APPROVE
+          else VERDICT_OUT=""; fi
+          CLEAN=$(printf '%s' "$CLEAN" | python3 -c "import sys,re; t=sys.stdin.read(); t=re.sub(r'(?m)^VERDICT: (APPROVE|REQUEST_CHANGES)\s*', '', t); sys.stdout.write(t.rstrip() + chr(10))")
+          if [ "$CLEAN" != "$BODY" ]; then
+            gh api "repos/${{ github.repository }}/issues/comments/$ID" -X PATCH -f body="$CLEAN" --jq .id
+            echo "Scrubbed banned dash characters from comment $ID."
+          else
+            echo "Comment $ID already clean."
+          fi
+          {
+            echo "comment_id=$ID"
+            echo "verdict=$VERDICT_OUT"
+            echo 'cleaned<<SCRUBEOF'
+            printf '%s\n' "$CLEAN"
+            echo 'SCRUBEOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Submit formal review with inline findings
+        if: steps.scrub.outputs.comment_id != '' && steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
+          REVIEW_BODY: ${{ steps.scrub.outputs.cleaned }}
+          VERDICT_IN: ${{ steps.scrub.outputs.verdict }}
+        run: |
+          set -uo pipefail
+          PR="${{ github.event.inputs.pr }}"
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.pull_request.number }}"
+          fi
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.issue.number }}"
+          fi
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            echo "No PR number in event, skipping formal review."
+            exit 0
+          fi
+          printf '%s' "$REVIEW_BODY" > /tmp/anya_review_body.md
+          HEAD_SHA=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
+          export PR HEAD_SHA
+          python3 - <<'PYEOF'
+          import json, os, re, subprocess
+
+          def sh(*args):
+              r = subprocess.run(args, capture_output=True, text=True)
+              if r.returncode != 0:
+                  raise RuntimeError(' '.join(args) + ': ' + r.stderr[:300])
+              return r.stdout
+
+          repo = os.environ['GITHUB_REPOSITORY'].split('/', 1)
+          owner, name = repo[0], repo[1]
+          pr = os.environ['PR']
+          head_sha = os.environ['HEAD_SHA']
+          text = open('/tmp/anya_review_body.md', encoding='utf-8').read()
+
+          verdict = os.environ.get('VERDICT_IN', '').strip()
+          if verdict not in ('APPROVE', 'REQUEST_CHANGES'):
+              print('No verdict recorded, skipping formal review.')
+              raise SystemExit(0)
+
+          # Added-line ranges per file, from the live PR diff.
+          diff = sh('gh', 'pr', 'diff', pr)
+          added, cur, new_line = {}, '', 0
+          for line in diff.splitlines():
+              m = re.match(r'^\+\+\+ b/(.*)$', line)
+              if m:
+                  cur = m.group(1)
+                  added.setdefault(cur, set())
+                  continue
+              m = re.match(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@', line)
+              if m:
+                  new_line = int(m.group(1))
+                  continue
+              if line.startswith('+') and not line.startswith('+++'):
+                  added.setdefault(cur, set()).add(new_line)
+                  new_line += 1
+              elif line.startswith('-') and not line.startswith('---'):
+                  pass
+              else:
+                  new_line += 1
+
+          # Strict finding blocks.
+          findings, summary = [], text
+          if '### FINDING' in text:
+              summary = text.split('### FINDING')[0].rstrip()
+              for chunk in text.split('### FINDING')[1:]:
+                  f = re.search(r'FILE:\s*`?([^`\n]+)`?', chunk)
+                  ln = re.search(r'LINE:\s*(\d+)', chunk)
+                  sv = re.search(r'SEVERITY:\s*(high|medium|low)', chunk, re.I)
+                  bd = re.search(r'BODY:\s*(.*?)\s*SUGGESTION:', chunk, re.S)
+                  sg = re.search(r'SUGGESTION:\s*(.*)$', chunk, re.S)
+                  if not (f and ln and sv and bd and sg):
+                      continue
+                  findings.append({
+                      'file': f.group(1).strip(),
+                      'line': int(ln.group(1)),
+                      'severity': sv.group(1).lower(),
+                      'body': bd.group(1).strip(),
+                      'suggestion': sg.group(1).strip(),
+                  })
+
+          def clean_suggestion(raw):
+              lines = []
+              for ln in raw.splitlines():
+                  s = ln.strip()
+                  if re.match(r'^```', s):
+                      continue
+                  if re.match(r'^(VERDICT|SEVERITY)\s*:', s, re.I):
+                      continue
+                  if s.lower() in ('high', 'medium', 'low', 'none'):
+                      continue
+                  lines.append(ln)
+              return '\n'.join(lines).strip()
+
+          inline, overflow = [], []
+          for f in findings:
+              sugg = clean_suggestion(f['suggestion'])
+              if f['line'] in added.get(f['file'], set()):
+                  body = f['body']
+                  if sugg:
+                      body += '\n\n```suggestion\n%s\n```' % sugg
+                  inline.append({'path': f['file'], 'line': f['line'],
+                                 'side': 'RIGHT', 'body': body})
+              else:
+                  overflow.append((f, sugg))
+          for f, sugg in overflow:
+              summary += '\n\n`%s:%d`\n\n%s' % (f['file'], f['line'], f['body'])
+              if sugg:
+                  summary += '\n\n```suggestion\n%s\n```' % sugg
+
+          api = lambda *a: sh('gh', 'api', *a)
+          if inline:
+              proc = subprocess.run(
+                  ['gh', 'api', 'repos/%s/%s/pulls/%s/reviews' % (owner, name, pr),
+                   '-X', 'POST', '--input', '-'],
+                  input=json.dumps({'commit_id': head_sha, 'comments': inline}),
+                  capture_output=True, text=True)
+              if proc.returncode != 0:
+                  raise RuntimeError('pending review: ' + proc.stderr[:300])
+              rid = json.loads(proc.stdout)['id']
+              proc = subprocess.run(
+                  ['gh', 'api', 'repos/%s/%s/pulls/%s/reviews/%s/events' % (owner, name, pr, rid),
+                   '-X', 'POST', '--input', '-'],
+                  input=json.dumps({'event': verdict, 'body': summary}),
+                  capture_output=True, text=True)
+              if proc.returncode != 0:
+                  raise RuntimeError('submit review: ' + proc.stderr[:300])
+              print('Filed formal %s with %d inline findings.' % (verdict, len(inline)))
+          else:
+              open('/tmp/anya_summary.md', 'w', encoding='utf-8').write(summary)
+              out = api('repos/%s/%s/pulls/%s/reviews' % (owner, name, pr),
+                        '-X', 'POST', '-f', 'commit_id=' + head_sha,
+                        '-f', 'event=' + verdict, '-F', 'body=@/tmp/anya_summary.md',
+                        '--jq', '{id, state}')
+              print('Filed formal %s without inline findings.' % verdict)
+              print(out.strip()[:120])
+          PYEOF
+
+      - name: Remove standalone comment
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/issues/comments/${{ steps.scrub.outputs.comment_id }}" -X DELETE
+          echo "Removed standalone comment, the formal review stands alone."
+
+      - name: Resolve own addressed threads on approve
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
+        run: |
+          set -uo pipefail
+          PR="${{ github.event.inputs.pr }}"
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.pull_request.number }}"
+          fi
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.issue.number }}"
+          fi
+          STATE=$(gh api "repos/${{ github.repository }}/pulls/$PR/reviews" --jq '[.[] | select(.user.login == "anya-research" and .state != "COMMENTED" and .state != "DISMISSED")] | last | .state // ""')
+          if [ "$STATE" != "APPROVED" ]; then
+            echo "Latest Anya review is not an approval, leaving threads alone."
+            exit 0
+          fi
+          IDS=$(gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:50){nodes{id,isResolved,comments(first:1){nodes{author{login}}}}}}}}' -f o="${{ github.repository_owner }}" -f r="${{ github.event.repository.name }}" -F n="$PR" --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false and .comments.nodes[0].author.login == "anya-research") | .id] | .[]')
+          for TID in $IDS; do
+            gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -f id="$TID" --jq .data.resolveReviewThread.thread.isResolved
+          done
+          echo "Resolved own addressed threads."
+
+      - name: Remove acknowledgement reactions
+        if: always() && steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
+        run: |
+          set -uo pipefail
+          PR="${{ github.event.inputs.pr }}"
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.pull_request.number }}"
+          fi
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.issue.number }}"
+          fi
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            echo "No PR number in event, skipping reaction cleanup."
+            exit 0
+          fi
+          REPO="${{ github.repository }}"
+          for RID in $(gh api "repos/$REPO/issues/$PR/reactions" --jq '[.[] | select(.user.login == "anya-research" and .content == "eyes") | .id][]' || true); do
+            gh api "repos/$REPO/issues/$PR/reactions/$RID" -X DELETE || true
+            echo "Removed eyes reaction $RID from PR $PR."
+          done
+          for CID in $(gh api "repos/$REPO/issues/$PR/comments" --jq '.[].id' || true); do
+            for RID in $(gh api "repos/$REPO/issues/comments/$CID/reactions" --jq '[.[] | select(.user.login == "anya-research" and .content == "eyes") | .id][]' || true); do
+              gh api "repos/$REPO/issues/comments/$CID/reactions/$RID" -X DELETE || true
+              echo "Removed eyes reaction $RID from comment $CID."
+            done
+          done
+          for CID in $(gh api "repos/$REPO/pulls/$PR/comments" --jq '.[].id' || true); do
+            for RID in $(gh api "repos/$REPO/pulls/comments/$CID/reactions" --jq '[.[] | select(.user.login == "anya-research" and .content == "eyes") | .id][]' || true); do
+              gh api "repos/$REPO/pulls/comments/$CID/reactions/$RID" -X DELETE || true
+              echo "Removed eyes reaction $RID from review comment $CID."
+            done
+          done
+          echo "Reaction cleanup done."
+
+      - name: Auto-merge approved PRs
+        if: always() && steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
+        run: |
+          set -uo pipefail
+          PR="${{ github.event.inputs.pr }}"
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.pull_request.number }}"
+          fi
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            PR="${{ github.event.issue.number }}"
+          fi
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            echo "No PR number in event, skipping auto-merge."
+            exit 0
+          fi
+          STATE=$(gh api "repos/${{ github.repository }}/pulls/$PR/reviews" --jq '[.[] | select(.user.login == "anya-research" and .state != "COMMENTED") | .state] | last // ""')
+          if [ "$STATE" != "APPROVED" ]; then
+            echo "No APPROVED formal review from Anya, skipping auto-merge."
+            exit 0
+          fi
+          DOCSONLY=$(gh pr view "$PR" --json files --jq '[.files[].path] | length')
+          if [ "$DOCSONLY" = "0" ]; then
+            echo "No files changed, skipping auto-merge."
+            exit 0
+          fi
+          gh pr merge "$PR" --auto --squash
+          echo "Auto-merge enabled for PR #$PR on Anya approval."

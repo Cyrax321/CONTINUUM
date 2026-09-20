@@ -42,6 +42,12 @@ grep -E "^## \[0\.1\.0\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md
 # Each prints its line; exits nonzero on any other value.
 grep -E '^version = "0\.1\.0"$' pyproject.toml
 grep -E '^__version__ = "0\.1\.0"$' src/continuum/__init__.py
+
+# The version being cut must be strictly newer than the newest existing tag.
+# Prints the newest tag; if it equals the version above, the bump was skipped
+# (this is exactly how the v0.1.2 drift happened, #838: the tag shipped while
+# both files still read 0.1.0, so every artifact built from it misreported).
+git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1
 ```
 
 Passing looks like:
@@ -53,6 +59,9 @@ Passing looks like:
 - `pyproject.toml` and `src/continuum/__init__.py` read the same version, and
   the tag about to be cut is that version prefixed with `v`: `0.1.0` becomes
   `v0.1.0`.
+- The newest existing tag sorts strictly below the version being cut. An equal
+  or newer tag means the release process was entered from the wrong end:
+  reconcile on `main` first (#838) instead of tagging over the drift.
 
 If any check fails, stop and reconcile on `main` through a reviewed PR before
 continuing. Do not edit files ad hoc during the cut.
@@ -141,6 +150,20 @@ you want to exercise the tip rather than the cut.)
   release workflow skips PyPI until trusted publishing is switched on
   (`PUBLISH_PYPI` repository variable set to `true`). While #215 is pending, a
   missing PyPI package does not mean the release failed.
+- **Version agreement across PyPI, the tag, and `pyproject.toml`:** once the
+  publish lands, all three must read the same version. `v0.1.2` was tagged
+  while `pyproject.toml` still read `0.1.0` and PyPI never received a 0.1.2 at
+  all (#838); this check is what makes that drift visible instead of silent.
+
+  ```bash
+  # Prints PyPI's latest version for continuum-agent. It must equal the
+  # version declared in pyproject.toml and the tag just cut.
+  curl -s https://pypi.org/pypi/continuum-agent/json \
+    | python -c "import json, sys; print(json.load(sys.stdin)['info']['version'])"
+  ```
+
+  If it disagrees, do not retag or republish the same number: PyPI never
+  reuses a version. Cut the next patch release through this same checklist.
 - **Launch assets:** the orientation table, regenerable crash-recovery visual,
   and research page belong to #400. This checklist deliberately carries no
   steps for them; link them from the GitHub Release description when they land.

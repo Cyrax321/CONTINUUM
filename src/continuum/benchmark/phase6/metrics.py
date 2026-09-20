@@ -17,8 +17,23 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+__all__ = [
+    "BenchmarkReport",
+    "RecoveryOutcome",
+    "ScenarioResult",
+]
+
 
 class RecoveryOutcome(StrEnum):
+    """How a scenario's recovery behaved.
+
+    PASS and FAIL are the only outcomes the harness produces
+    (``run_scenario`` never raises). ESCALATED marks a recovery that
+    correctly handed off to a human instead of finishing, DEGRADED one that
+    recovered only partially; both exist for results a scenario constructs
+    by hand.
+    """
+
     PASS = "pass"
     FAIL = "fail"
     ESCALATED = "escalated"
@@ -44,6 +59,13 @@ class BenchmarkReport(BaseModel):
     results: list[ScenarioResult] = Field(default_factory=list)
 
     def summary(self) -> dict[str, Any]:
+        """Count the run two ways: pass/fail totals and per-outcome counts.
+
+        ``failed`` is everything whose ``passed`` flag is False (so an
+        ESCALATED or DEGRADED result counts as failed unless it was
+        constructed with ``passed=True``), while ``by_outcome`` counts each
+        outcome value separately, preserving the fuller picture.
+        """
         passed = sum(1 for r in self.results if r.passed)
         by_outcome: dict[str, int] = {}
         for r in self.results:

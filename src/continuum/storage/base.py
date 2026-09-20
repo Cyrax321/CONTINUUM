@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
+from heapq import merge
 from types import TracebackType
 from typing import Any, ClassVar
 
@@ -57,8 +58,8 @@ class RunNotFound(StorageError, KeyError):
 
     Subclasses ``KeyError`` so ``except KeyError`` still catches it, but
     overrides ``__str__``: ``KeyError.__str__`` applies ``repr()`` to its
-    message, which would surface to CLI users as ``"no such run: 'ghost'"``
-    — quoted twice.
+    message, which would surface to CLI users as ``"no such run: 'ghost'"``,
+    quoted twice.
     """
 
     def __init__(self, run_id: str) -> None:
@@ -119,6 +120,25 @@ class Storage(ABC):
         """
         raise NotImplementedError
 
+    def _validate_compaction_bound(
+        self, through_sequence: int | None, anchor_sequence: int
+    ) -> None:
+        """Reject an explicit ``through_sequence`` that would eat the anchor.
+
+        The live log must always retain its anchor marker (issue #705): a
+        bound at or above the marker's sequence archives and deletes the
+        marker and every live row after it, so the next append mints a fresh
+        genesis and the live chain forks away from the archive. Both
+        compaction backends call this with the sequence their transaction is
+        about to assign the marker, so the guard is defined once and cannot
+        drift between the two again (issue #1078).
+        """
+        if through_sequence is not None and through_sequence >= anchor_sequence:
+            raise ValueError(
+                f"through_sequence {through_sequence} would archive the anchor marker"
+                f" at sequence {anchor_sequence}: the live log must retain its anchor"
+            )
+
     def read_archived_events(self, run_id: str) -> Sequence[Event]:
         """Read events moved into ``events_archive``, oldest first.
 
@@ -138,7 +158,17 @@ class Storage(ABC):
         provenance calculation that reads only live events would miss an
         archived ``EXTERNAL_AGENT`` fact and launder it to ``DETERMINISTIC``.
         Callers that compute ``derived_origin`` over a run's history must use
-        this helper so min is honest. Sorted to keep hash chain order stable.
+        this helper so min is honest. Authority enforcement, memory enumeration,
+        forensic joins, and cross-run action scans likewise require full history:
+        compaction moves facts but does not revoke their consequences. The
+        forced anchor checkpoint in ``compact_run`` also folds full history,
+        because the live tail of an already-compacted run carries no
+        ``RUN_STARTED`` (issue #648); per-turn checkpoint evaluation and
+        ``restore`` intentionally read only the live tail instead, trading
+        completeness for the bounded per-turn cost compaction exists for.
+        Callers folding the same history more than once should reuse the returned
+        sequence within that operation instead of rescanning the archive.
+        Sorted to keep hash chain order stable.
         """
         archived = list(self.read_archived_events(run_id))
         live = list(self.read_events(run_id))
@@ -146,7 +176,10 @@ class Storage(ABC):
             return live
         if not live:
             return archived
-        return tuple(sorted([*archived, *live], key=lambda e: e.sequence))
+        # Both streams arrive sequence-ordered, so merge linearly instead of
+        # re-sorting: full-history folds on long compacted runs pay O(n).
+        # merge is stable, matching sorted() for equal sequences.
+        return tuple(merge(archived, live, key=lambda e: e.sequence))
 
     def foreign_action(self, key: str, *, exclude_run: str) -> Action | None:
         """Newest action recorded under ``key`` outside ``exclude_run``.
@@ -177,7 +210,9 @@ class Storage(ABC):
     # -- lifecycle -------------------------------------------------------- #
 
     @abstractmethod
-    def close(self) -> None: ...
+    def close(self) -> None:
+        """Release the backing store. Idempotent; safe to call twice."""
+        ...
 
     def __enter__(self) -> Storage:
         return self
@@ -215,7 +250,9 @@ class Storage(ABC):
             )
 
     @abstractmethod
-    def create_run(self, run: Run) -> Run: ...
+    def create_run(self, run: Run) -> Run:
+        """Persist a new run row. Raises when the id already exists."""
+        ...
 
     @abstractmethod
     def create_run_started(self, run: Run, *, source: Origin = Origin.DETERMINISTIC) -> Run:
@@ -229,13 +266,19 @@ class Storage(ABC):
         """
 
     @abstractmethod
-    def get_run(self, run_id: str) -> Run: ...
+    def get_run(self, run_id: str) -> Run:
+        """Return the run row. Raises RunNotFound for a run that was never created."""
+        ...
 
     @abstractmethod
-    def update_run(self, run: Run) -> Run: ...
+    def update_run(self, run: Run) -> Run:
+        """Persist run changes and refresh its timestamp. Raises RunNotFound for a missing row."""
+        ...
 
     @abstractmethod
-    def list_runs(self, *, limit: int | None = None) -> Sequence[Run]: ...
+    def list_runs(self, *, limit: int | None = None) -> Sequence[Run]:
+        """Most recently created runs first, at most ``limit`` when given."""
+        ...
 
     @abstractmethod
     def get_active_run(self) -> Run | None:
@@ -275,13 +318,19 @@ class Storage(ABC):
         *,
         after_sequence: int = 0,
         upto: int | None = None,
-    ) -> Sequence[Event]: ...
+    ) -> Sequence[Event]:
+        """Live (unarchived) events in sequence order, windowed by ``after_sequence``/``upto``."""
+        ...
 
     @abstractmethod
-    def last_sequence(self, run_id: str) -> int: ...
+    def last_sequence(self, run_id: str) -> int:
+        """Highest live sequence number; 0 when the run has no events yet."""
+        ...
 
     @abstractmethod
-    def verify_events(self, run_id: str) -> IntegrityReport: ...
+    def verify_events(self, run_id: str) -> IntegrityReport:
+        """Recompute the hash chain and report whether it is intact."""
+        ...
 
     # -- state versions --------------------------------------------------- #
 
@@ -290,27 +339,41 @@ class Storage(ABC):
         """Persist a state version. Returns the assigned version number."""
 
     @abstractmethod
-    def get_version(self, run_id: str, version: int) -> SemanticState: ...
+    def get_version(self, run_id: str, version: int) -> SemanticState:
+        """Return one persisted state version. Raises for an unknown version."""
+        ...
 
     @abstractmethod
-    def latest_version(self, run_id: str) -> SemanticState | None: ...
+    def latest_version(self, run_id: str) -> SemanticState | None:
+        """Newest persisted state, or None when nothing was stored yet."""
+        ...
 
     @abstractmethod
-    def list_versions(self, run_id: str) -> Sequence[int]: ...
+    def list_versions(self, run_id: str) -> Sequence[int]:
+        """Persisted state version numbers in ascending order."""
+        ...
 
     # -- checkpoints ------------------------------------------------------ #
 
     @abstractmethod
-    def put_checkpoint(self, checkpoint: StateCheckpoint) -> StateCheckpoint: ...
+    def put_checkpoint(self, checkpoint: StateCheckpoint) -> StateCheckpoint:
+        """Persist a checkpoint and return it."""
+        ...
 
     @abstractmethod
-    def get_checkpoint(self, checkpoint_id: str) -> StateCheckpoint: ...
+    def get_checkpoint(self, checkpoint_id: str) -> StateCheckpoint:
+        """Return one checkpoint. Raises for an unknown id."""
+        ...
 
     @abstractmethod
-    def latest_checkpoint(self, run_id: str) -> StateCheckpoint | None: ...
+    def latest_checkpoint(self, run_id: str) -> StateCheckpoint | None:
+        """Newest checkpoint for the run, or None when there is none."""
+        ...
 
     @abstractmethod
-    def list_checkpoints(self, run_id: str) -> Sequence[StateCheckpoint]: ...
+    def list_checkpoints(self, run_id: str) -> Sequence[StateCheckpoint]:
+        """Every checkpoint for the run in creation order."""
+        ...
 
     @abstractmethod
     def delete_checkpoint(self, checkpoint_id: str) -> None:

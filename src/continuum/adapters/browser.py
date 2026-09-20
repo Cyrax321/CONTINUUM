@@ -13,12 +13,22 @@ from continuum.adapters.generic import GenericAgentAdapter
 from continuum.recovery.engine import RecoveryEngine
 from continuum.storage.base import Storage
 
+__all__ = [
+    "BrowserAdapter",
+]
+
 
 class BrowserAdapter(GenericAgentAdapter):
     """Drives a browser via playwright, recorded as an action."""
 
     @staticmethod
     def available() -> bool:
+        """Whether the ``playwright`` package imports.
+
+        This probes the Python dependency only, not whether a browser binary
+        is installed: that surfaces at execution time. Smoke tests skip on
+        ``False`` instead of failing.
+        """
         try:
             import playwright  # noqa: F401
 
@@ -30,6 +40,15 @@ class BrowserAdapter(GenericAgentAdapter):
         super().__init__(storage, engine=engine)
 
     def navigate(self, run_id: str, url: str, *, dep_scope: str | None = None) -> AdapterResult:
+        """Load ``url`` in headless Chromium and return the rendered page.
+
+        The HTML of the loaded page comes back as ``AdapterResult.output``;
+        navigation failures are captured into the result (status ``failed``
+        with ``error`` set) rather than raised, because the attempt is
+        already recorded in the ledger. Raises ``RuntimeError`` up front
+        when playwright is not installed. ``dep_scope`` names the
+        dependency the action should be scoped to for recovery.
+        """
         if not self.available():
             raise RuntimeError("playwright is not installed")
 

@@ -12,6 +12,7 @@ __all__ = ["is_derived_unverified", "derived_label", "stamp_derived"]
 
 
 def stamp_derived(payload: dict[str, Any], source_events: list[Event]) -> dict[str, Any]:
+    """Copy ``payload`` stamped with the derived origin of its source events."""
     derived = derived_provenance_for_events(source_events)
     stamped = dict(payload)
     stamped["derived_origin"] = derived.value
@@ -19,6 +20,7 @@ def stamp_derived(payload: dict[str, Any], source_events: list[Event]) -> dict[s
 
 
 def derived_label(payload: dict[str, Any]) -> str:
+    """Human-readable provenance label for a stamped payload."""
     raw = payload.get("derived_origin")
     if raw is None:
         return "unverified (derived from unverified sources)"
@@ -32,6 +34,7 @@ def derived_label(payload: dict[str, Any]) -> str:
 
 
 def is_derived_unverified(payload: dict[str, Any]) -> bool:
+    """True when the payload's derived origin is missing or self-certified."""
     raw = payload.get("derived_origin")
     if raw is None:
         return True

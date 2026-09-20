@@ -319,6 +319,46 @@ def test_the_contract_refuses_out_of_order_work(store: SQLiteStorage) -> None:
     assert decision.permits(decision.contract.next_allowed_action or "")
 
 
+def test_an_aborted_contract_advertises_no_next_action(store: SQLiteStorage) -> None:
+    """Issue #1058: a run the engine declared unsafe must not simultaneously
+    name a permitted action, even though a repair plan still exists."""
+    seed(store)
+    store.append_event(
+        "run_1",
+        EventType.RISK_OBSERVED,
+        {"trigger": "side_effect_duplicate", "score": 1.0},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v4"))
+
+    assert decision.mode is RecoveryMode.ABORT
+    assert decision.contract.recovery_status is RecoverySafety.UNSAFE
+    # The plan is real -- the drift did produce repair steps -- but under
+    # ABORT none of them is permitted.
+    assert decision.plan.first is not None
+    assert decision.contract.next_allowed_action is None
+    assert decision.permits("revalidate_dependency:dataset") is False
+    # An auditor still sees the work that exists; only the permission is gone.
+    assert decision.contract.required_actions
+
+
+def test_a_rollback_contract_advertises_no_next_action(store: SQLiteStorage) -> None:
+    """The same rule as ABORT holds for risk-driven ROLLBACK (issue #1058)."""
+    seed(store)
+    store.append_event(
+        "run_1",
+        EventType.RISK_OBSERVED,
+        {"trigger": "meltdown", "score": 1.0},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v4"))
+
+    assert decision.mode is RecoveryMode.ROLLBACK
+    assert decision.contract.recovery_status is RecoverySafety.BLOCKED
+    assert decision.contract.next_allowed_action is None
+    assert decision.permits("revalidate_dependency:dataset") is False
+
+
 def test_contracts_are_deterministic(store: SQLiteStorage) -> None:
     seed(store)
     engine = RecoveryEngine(store)
@@ -428,7 +468,7 @@ def test_assessment_changes_nothing(store: SQLiteStorage) -> None:
 def test_lenient_mode_still_never_resumes_over_an_uncertain_side_effect(
     store: SQLiteStorage,
 ) -> None:
-    """Tolerating uncertainty downgrades REQUEST_HUMAN to WAIT — not to RESUME.
+    """Tolerating uncertainty downgrades REQUEST_HUMAN to WAIT, not to RESUME.
 
     Opting out of strictness may change who resolves the doubt; it must never
     make an unresolved side effect look settled.
@@ -505,6 +545,149 @@ def test_self_certified_runs_are_confirmable(store: SQLiteStorage) -> None:
     assert all(
         e.status is not StateStatus.REQUIRES_REVIEW for e in confirmed.validation.report.statuses
     )
+
+
+def test_confirmation_survives_compaction(store: SQLiteStorage) -> None:
+    """A human confirmation must survive compaction: the confirm event sits in
+    the pre-anchor prefix, so the confirm scan has to read the archived
+    prefix too, or a confirmed run silently re-escalates to request_human."""
+    store.create_run(Run(run_id="r1", goal="do X"))
+    store.append_event("r1", EventType.RUN_STARTED, {"goal": "do X"}, source=Origin.EXTERNAL_AGENT)
+    store.append_event(
+        "r1", EventType.TASK_UPDATED, {"completed": 1, "failed": 0}, source=Origin.EXTERNAL_AGENT
+    )
+    store.append_event(
+        "r1",
+        EventType.REVIEW_CONFIRMED,
+        {"components": ["goal", "progress"]},
+        source=Origin.HUMAN,
+    )
+
+    confirmed = RecoveryEngine(store).assess("r1")
+    assert confirmed.mode is RecoveryMode.RESUME
+
+    store.compact_run("r1")
+    # The confirm event is archived out of the live tail by the compaction.
+    assert not any(e.type is EventType.REVIEW_CONFIRMED for e in store.read_events("r1")), (
+        "precondition failed: confirm event still live"
+    )
+
+    after = RecoveryEngine(store).assess("r1")
+    assert after.mode is RecoveryMode.RESUME
+    assert after.safe
+
+
+def test_risk_trigger_survives_compaction(store: SQLiteStorage) -> None:
+    """A risk observed before the anchor must keep driving the verdict once the
+    compaction archives it out of the live tail. The risk scan folds the
+    archived prefix, so ``triggering_risks`` cannot empty and a policy-mapped
+    rollback cannot silently downgrade to something less cautious (#1050)."""
+    store.create_run(Run(run_id="r1", goal="do X"))
+    store.append_event("r1", EventType.RUN_STARTED, {"goal": "do X"}, source=Origin.EXTERNAL_AGENT)
+    store.append_event(
+        "r1", EventType.TASK_UPDATED, {"completed": 1, "failed": 0}, source=Origin.EXTERNAL_AGENT
+    )
+    store.append_event(
+        "r1",
+        EventType.RISK_OBSERVED,
+        {"risk_id": "r1", "trigger": "meltdown"},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+
+    before = RecoveryEngine(store).assess("r1")
+    assert before.mode is RecoveryMode.ROLLBACK
+    assert before.contract.triggering_risks
+
+    store.compact_run("r1")
+    # The risk event is archived out of the live tail by the compaction.
+    assert not any(e.type is EventType.RISK_OBSERVED for e in store.read_events("r1")), (
+        "precondition failed: risk event still live"
+    )
+
+    after = RecoveryEngine(store).assess("r1")
+    assert after.contract.triggering_risks == before.contract.triggering_risks
+    assert after.mode is RecoveryMode.ROLLBACK
+
+
+def test_liveness_breach_count_survives_compaction(store: SQLiteStorage) -> None:
+    """A silence detected before the anchor must still count as a breach once
+    the compaction archives it. The breach count folds the archived prefix, so
+    it cannot reset to zero and understate how often the run went quiet
+    (#1050)."""
+    store.create_run(Run(run_id="r1", goal="do X"))
+    store.append_event("r1", EventType.RUN_STARTED, {"goal": "do X"}, source=Origin.EXTERNAL_AGENT)
+    store.append_event(
+        "r1", EventType.TASK_UPDATED, {"completed": 1, "failed": 0}, source=Origin.EXTERNAL_AGENT
+    )
+    store.append_event(
+        "r1",
+        EventType.LIVENESS_SILENCE_DETECTED,
+        {"silence_seconds": 300},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+
+    before = RecoveryEngine(store).assess("r1")
+    assert before.contract.liveness["breaches"] == 1
+
+    store.compact_run("r1")
+    assert not any(
+        e.type is EventType.LIVENESS_SILENCE_DETECTED for e in store.read_events("r1")
+    ), "precondition failed: silence event still live"
+
+    after = RecoveryEngine(store).assess("r1")
+    assert after.contract.liveness["breaches"] == 1
+
+
+def test_consumed_authority_survives_compaction(store: SQLiteStorage) -> None:
+    """An authority consumed before the anchor must still block resume once the
+    compaction archives it. The authority scan folds the archived prefix, so
+    the block cannot drop out of the rationale and leave ``resume`` reporting
+    safe when the gate would still deny (#1050)."""
+    store.create_run(Run(run_id="r1", goal="do X"))
+    store.append_event("r1", EventType.RUN_STARTED, {"goal": "do X"}, source=Origin.EXTERNAL_AGENT)
+    store.append_event(
+        "r1", EventType.TASK_UPDATED, {"completed": 1, "failed": 0}, source=Origin.EXTERNAL_AGENT
+    )
+    store.append_event(
+        "r1",
+        EventType.AUTHORITY_CONSUMED,
+        {"authority_id": "cred-1", "resource": "dataset"},
+        source=Origin.EXTERNAL_AGENT,
+    )
+
+    before = RecoveryEngine(store).assess("r1")
+    assert before.mode is RecoveryMode.REQUEST_HUMAN
+    assert "consumed authority blocks resume" in "; ".join(before.rationale)
+
+    store.compact_run("r1")
+    assert not any(e.type is EventType.AUTHORITY_CONSUMED for e in store.read_events("r1")), (
+        "precondition failed: authority event still live"
+    )
+
+    after = RecoveryEngine(store).assess("r1")
+    assert after.mode is RecoveryMode.REQUEST_HUMAN
+    assert "consumed authority blocks resume" in "; ".join(after.rationale)
+
+
+def test_assess_degrades_when_the_archive_read_fails(store: SQLiteStorage) -> None:
+    """A failing archive read must not fail assess(): the shared fetch falls
+    back to the live log, so a broken archive view degrades to the live-only
+    verdict instead of bricking the assessment."""
+
+    class FlakyArchiveView:
+        """Raises on the first read_all_events call, like a broken archive."""
+
+        def __init__(self) -> None:
+            self._raised = False
+
+        def __getattr__(self, name: str) -> object:
+            if name == "read_all_events" and not self._raised:
+                self._raised = True
+                raise RuntimeError("archive unreadable")
+            return getattr(store, name)
+
+    decision = RecoveryEngine(FlakyArchiveView()).assess("run_1")  # type: ignore[arg-type]
+    assert decision.mode is RecoveryMode.RESUME
 
 
 # --- unprojectable logs (issue #383) ---------------------------------------- #

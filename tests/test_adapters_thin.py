@@ -219,3 +219,52 @@ async def test_pydantic_error_path_fails_the_action(db: str) -> None:
         ctx, "charge_card", {"customer": "c2"}, result=None, error="card declined"
     )
     assert last_action(db).status is ActionStatus.FAILED
+
+
+# --- provenance -------------------------------------------------------------------- #
+
+
+def test_guard_ledger_writes_carry_external_agent(db: str) -> None:
+    """Framework-asserted facts must not self-certify as deterministic (#612)."""
+    from continuum.models import Origin
+    from continuum.provenance_map import derived_provenance_for_events
+
+    with SQLiteStorage(db) as store:
+        guard = ContinuumToolGuard(store, "run_1")
+        guard.complete(guard.claim("notify.customer", {"order_id": "O-9"}))
+        action_events = [
+            e for e in store.read_events("run_1") if e.type is EventType.ACTION_RECORDED
+        ]
+    assert action_events, "guard must record action events"
+    assert {e.source for e in action_events} == {Origin.EXTERNAL_AGENT}
+    with SQLiteStorage(db) as store:
+        derived = derived_provenance_for_events(store.read_events("run_1"))
+    assert derived is Origin.EXTERNAL_AGENT
+
+
+def test_default_ledger_stays_deterministic(db: str) -> None:
+    """The new source parameter must not change existing writers (#612)."""
+    from continuum.actions import ActionLedger
+    from continuum.models import Origin
+
+    with SQLiteStorage(db) as store:
+        ActionLedger(store, "run_1").claim("x.do", {}, key="plain")
+        action_events = [
+            e for e in store.read_events("run_1") if e.type is EventType.ACTION_RECORDED
+        ]
+    assert action_events
+    assert {e.source for e in action_events} == {Origin.DETERMINISTIC}
+
+
+def test_guard_source_override_is_respected(db: str) -> None:
+    """Callers that own the facts can keep the deterministic stamp (#612)."""
+    from continuum.models import Origin
+
+    with SQLiteStorage(db) as store:
+        guard = ContinuumToolGuard(store, "run_1", source=Origin.DETERMINISTIC)
+        guard.complete(guard.claim("notify.customer", {"order_id": "O-9"}))
+        action_events = [
+            e for e in store.read_events("run_1") if e.type is EventType.ACTION_RECORDED
+        ]
+    assert action_events
+    assert {e.source for e in action_events} == {Origin.DETERMINISTIC}

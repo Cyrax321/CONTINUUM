@@ -28,10 +28,35 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-__all__ = ["GuardKind", "GuardDecision", "evaluate", "protected_call", "langgraph_protected_node"]
+__all__ = [
+    "GuardKind",
+    "GuardDecision",
+    "RESULT_ENVELOPE_KEY",
+    "evaluate",
+    "protected_call",
+    "langgraph_protected_node",
+]
+
+# Journal envelope, same literal adapters.generic uses for the same reason
+# (issue #44): a stored result must be distinguishable from the caller's own
+# dict, or the replay path unwraps one member of it instead of the dict
+# (issue #736). Defined locally so the core stays importable without the
+# adapter stack.
+RESULT_ENVELOPE_KEY = "__return_value__"
 
 
 class GuardKind(StrEnum):
+    """Enumeration of replay-guard verdicts for intended side effects.
+
+    Classifies an action against the folded ledger into one of:
+    ``ALLOW`` (live claim, proceed with execution),
+    ``SKIP_DUPLICATE`` (already completed, return memoized result),
+    ``DENY_UNCLAIMED`` (no claim registered yet),
+    ``DENY_DUPLICATE`` (explicit duplicate refusal),
+    ``BLOCK_UNCERTAIN`` (outcome in doubt, requires reconciliation), or
+    ``DENY_RECLAIM`` (previous attempt closed, requires new claim).
+    """
+
     ALLOW = "allow"
     SKIP_DUPLICATE = "skip_duplicate"
     DENY_UNCLAIMED = "deny_unclaimed"
@@ -42,6 +67,12 @@ class GuardKind(StrEnum):
 
 @dataclass(frozen=True)
 class GuardDecision:
+    """Verdict and rationale produced by evaluating an action against the ledger.
+
+    Carries the evaluated :class:`GuardKind`, an explanatory human-readable
+    reason, and the optional resolved idempotency key string.
+    """
+
     kind: GuardKind
     reason: str
     key: str | None = None
@@ -79,6 +110,7 @@ def evaluate(
         return GuardDecision(
             GuardKind.BLOCK_UNCERTAIN,
             f"{action_type!r} {rendered_key!r} has an unknown outcome; reconcile first",
+            key=key,
         )
     return GuardDecision(
         GuardKind.DENY_RECLAIM,
@@ -139,7 +171,16 @@ def protected_call(
         except Exception as exc:
             ledger.fail(key_to_use, str(exc), certain=False)
             raise
-        journal = result if isinstance(result, dict) else {"return": result}
+        # A non-dict has to be wrapped to be stored. So does any dict carrying
+        # the envelope key or the legacy "return" marker: the replay path below
+        # unwraps those, and storing a caller's own dict with such a key as-is
+        # would make replay return one member of it rather than the whole dict,
+        # so a completed operation would answer differently on its second call
+        # than on its first (issue #736).
+        needs_envelope = (
+            not isinstance(result, dict) or RESULT_ENVELOPE_KEY in result or "return" in result
+        )
+        journal = {RESULT_ENVELOPE_KEY: result} if needs_envelope else result
         ledger.complete(key_to_use, external_id=key, result=journal)
         return GuardKind.ALLOW, result
 
@@ -147,7 +188,15 @@ def protected_call(
         assert decision.key is not None
         cached_action = actions[decision.key]
         cached = cached_action.result
-        value = cached.get("return", cached) if isinstance(cached, dict) else cached
+        if isinstance(cached, dict) and RESULT_ENVELOPE_KEY in cached:
+            value = cached[RESULT_ENVELOPE_KEY]
+        elif isinstance(cached, dict) and set(cached) == {"return"}:
+            # Legacy journal from before the envelope: a non-dict result
+            # wrapped as {"return": ...}. The write path now envelopes any
+            # dict containing "return", so this shape is historical only.
+            value = cached["return"]
+        else:
+            value = cached
         return GuardKind.SKIP_DUPLICATE, value
 
     raise ReplayBlocked(decision)
@@ -182,9 +231,11 @@ def langgraph_protected_node(
     import hashlib
 
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        """Wrap a node function with identity calculation and replay protection."""
         node_name = getattr(fn, "__name__", "node")
 
         def identity(state: dict[str, Any]) -> str:
+            """Compute a stable idempotency key for node execution from state."""
             if key_fields:
                 basis = {k: state.get(k) for k in key_fields}
             else:
@@ -196,6 +247,7 @@ def langgraph_protected_node(
             return f"node:{node_name}:{digest}"
 
         def wrapped(state: dict[str, Any]) -> dict[str, Any]:
+            """Execute or short-circuit node invocation using memoized results."""
             kind, value = protected_call(
                 storage,
                 run_id,

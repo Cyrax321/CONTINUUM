@@ -6,13 +6,15 @@ behavior without changing call sites. See references/integration-architecture.md
 section 3.2.
 
 The ``EnvironmentProvider`` seam already ships in ``continuum.environment``;
-it is re-exported here so all four seams live behind one import.
+it is re-exported here so all four seams live behind one import. The
+``StateExtractor`` seam is defined in ``continuum.state.extractor`` and
+re-exported here so all four seams share one import surface.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from continuum.environment import EnvironmentProvider
 from continuum.models import (
@@ -21,6 +23,7 @@ from continuum.models import (
     EnvironmentSnapshot,
     SemanticState,
 )
+from continuum.state.extractor import StateExtractor
 
 
 @dataclass
@@ -30,17 +33,6 @@ class Reconciliation:
     occurred: bool
     external_id: str | None = None
     note: str = ""
-
-
-@runtime_checkable
-class StateExtractor(Protocol):
-    """Maps an arbitrary framework's trajectory onto CONTINUUM's SemanticState."""
-
-    name: str
-
-    def extract(
-        self, trajectory: Any, environment: EnvironmentSnapshot | None = None
-    ) -> SemanticState: ...
 
 
 @runtime_checkable

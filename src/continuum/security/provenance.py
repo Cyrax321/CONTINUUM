@@ -15,6 +15,14 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
+__all__ = [
+    "ObservationProvenance",
+    "ObservationSource",
+    "PlanBranch",
+    "RiskTier",
+    "TrustLevel",
+]
+
 ObservationSource = Literal["environment_observed", "user_instructed", "deterministic"]
 TrustLevel = Literal["verified", "unverified", "contested"]
 RiskTier = Literal["low", "medium", "high"]

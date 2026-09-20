@@ -5,9 +5,13 @@ Copy-paste recipes for wiring CONTINUUM into Claude Code's session lifecycle.
 ## What you get
 
 - **SessionStart** injects the active run's recovery contract before the first model turn.
-- **PreCompact** verifies pinned constraints survive compaction.
+- **PreCompact** seals a checkpoint and verifies pinned constraints survive compaction.
 
-Both hooks are read-only and silent when no run is active.
+SessionStart is read-only; PreCompact writes a checkpoint. Neither one fails its
+host when there is nothing to act on: `briefing` exits 0 with no output at all
+(it reads `.continuum/resume.json` before it would open SQLite), and `precompact`
+exits 0 after printing `CONTINUUM: no active run; nothing to checkpoint before
+compaction.`
 
 ## Install (one command)
 
@@ -15,10 +19,11 @@ Both hooks are read-only and silent when no run is active.
 continuum hooks install claude-code
 ```
 
-This writes two entries to `.claude/settings.json`:
+This writes three entries to `.claude/settings.json`:
 
 - `PostToolUse` on `Write|Edit|MultiEdit|NotebookEdit` → `continuum observe`
 - `SessionStart` → `continuum briefing` (instant detection via `.continuum/resume.json`)
+- `PreCompact` → `continuum precompact` (checkpoint at the compaction boundary; `--no-precompact` skips it and takes out an entry an earlier install wrote)
 
 Verify:
 
@@ -26,7 +31,10 @@ Verify:
 cat .claude/settings.json | python -m json.tool
 ```
 
-## Add PreCompact for constraint verification (copy-paste)
+## Replace PreCompact with a read-only briefing (copy-paste)
+
+`hooks install` already wires PreCompact to `continuum precompact`. Use this
+instead if you want the compaction boundary to report without writing:
 
 ```json
 {
@@ -37,7 +45,7 @@ cat .claude/settings.json | python -m json.tool
         "hooks": [
           {
             "type": "command",
-            "command": "/absolute/path/to/.venv/bin/continuum briefing --json"
+            "command": "/absolute/path/to/.venv/bin/continuum --json briefing"
           }
         ]
       }
@@ -46,9 +54,12 @@ cat .claude/settings.json | python -m json.tool
 }
 ```
 
-Replace `/absolute/path/to/.venv/bin/continuum` with `which continuum`.
+Replace `/absolute/path/to/.venv/bin/continuum` with the resolved path:
+`which continuum` on macOS/Linux, `where.exe continuum` on Windows, where
+the executable lives under `.venv\Scripts\continuum.exe` rather than
+`.venv/bin/continuum`.
 
-For an explicit `resume --json` variant (pairs with #394):
+For an explicit `--json resume` variant (pairs with #394):
 
 ```json
 {
@@ -59,7 +70,7 @@ For an explicit `resume --json` variant (pairs with #394):
         "hooks": [
           {
             "type": "command",
-            "command": "/absolute/path/to/.venv/bin/continuum resume --json"
+            "command": "/absolute/path/to/.venv/bin/continuum --json resume"
           }
         ]
       }
@@ -70,7 +81,7 @@ For an explicit `resume --json` variant (pairs with #394):
         "hooks": [
           {
             "type": "command",
-            "command": "/absolute/path/to/.venv/bin/continuum resume --json"
+            "command": "/absolute/path/to/.venv/bin/continuum --json resume"
           }
         ]
       }
@@ -106,7 +117,7 @@ Measured: briefing silent 0.01 ms, resume 0.05 ms with resume.json, well under 1
 
 ## Constraint verification
 
-`continuum resume --json` includes `pins` from `SemanticState`. The PreCompact hook sees the same contract.
+`continuum --json resume` includes `pins` from `SemanticState`. The PreCompact hook sees the same contract.
 
 ## Troubleshooting
 

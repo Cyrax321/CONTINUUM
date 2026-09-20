@@ -7,7 +7,7 @@ Strategies, and when each is defensible
 ---------------------------------------
 
 ``ProbeReconciler``
-    Ask the external system directly — search for the issue, look up the charge.
+    Ask the external system directly: search for the issue, look up the charge.
     The only strategy that produces evidence. Prefer it wherever a read exists.
 
 ``AssumeNotOccurredReconciler``
@@ -20,7 +20,7 @@ Strategies, and when each is defensible
     operation is not idempotent. Slow, and honest about it.
 
 There is deliberately no ``AssumeOccurred`` strategy. Assuming success without
-evidence silently drops work, and a dropped side effect is invisible — nothing
+evidence silently drops work, and a dropped side effect is invisible: nothing
 in the system will ever contradict it. Optimism is the one default that cannot
 be audited after the fact.
 """
@@ -43,6 +43,7 @@ __all__ = [
     "ManualReconciler",
     "reconcile_pending",
     "ReconciliationReport",
+    "unresolved_actions",
 ]
 
 
@@ -66,7 +67,7 @@ class Reconciler(ABC):
         """Return a resolution, or ``None`` if this reconciler cannot decide.
 
         Returning ``None`` is a legitimate answer and leaves the action
-        uncertain — better than a confident wrong one.
+        uncertain, which is better than a confident wrong one.
         """
 
 
@@ -75,7 +76,7 @@ class ProbeReconciler(Reconciler):
 
     The probe receives the recorded action and returns a ``Resolution``, or
     ``None`` if it could not find out. A probe that raises is treated as "could
-    not find out" rather than as evidence of absence — an unreachable API tells
+    not find out" rather than as evidence of absence: an unreachable API tells
     you nothing about whether your earlier request landed.
     """
 
@@ -86,9 +87,15 @@ class ProbeReconciler(Reconciler):
         self.last_error: Exception | None = None
 
     def resolve(self, action: Action) -> Resolution | None:
+        """Query the external system for evidence of ``action``.
+
+        Invokes the configured probe callable. If the probe raises an exception,
+        records it in :attr:`last_error` and returns ``None`` so an unreachable
+        probe is treated as uncertain rather than evidence of absence.
+        """
         try:
             return self._probe(action)
-        except Exception as exc:  # noqa: BLE001 - an unreachable probe is not evidence
+        except Exception as exc:
             self.last_error = exc
             return None
 
@@ -111,6 +118,11 @@ class AssumeNotOccurredReconciler(Reconciler):
             )
 
     def resolve(self, action: Action) -> Resolution:
+        """Resolve ``action`` by assuming it did not occur to allow a retry.
+
+        Returns a :class:`Resolution` with ``occurred=False``, relying on the
+        explicit assertion that the underlying operation is idempotent.
+        """
         return Resolution(
             occurred=False,
             note="assumed not to have occurred (operation declared idempotent)",
@@ -126,6 +138,11 @@ class ManualReconciler(Reconciler):
         self.reason = reason
 
     def resolve(self, action: Action) -> None:
+        """Defer resolution of ``action`` to human review.
+
+        Always returns ``None`` so the action remains unresolved and flagged
+        for manual inspection.
+        """
         return None
 
 
@@ -143,13 +160,19 @@ class ReconciliationReport:
         return not self.unresolved
 
     def render(self) -> str:
+        """Render a human-readable text summary of the reconciliation outcome.
+
+        Lists actions confirmed as performed, confirmed as not performed, and
+        those still unresolved that require human review. Returns
+        ``"nothing to reconcile"`` when no actions were processed.
+        """
         lines = []
         if self.resolved_completed:
             lines.append(f"confirmed as performed: {', '.join(self.resolved_completed)}")
         if self.resolved_failed:
             lines.append(f"confirmed as not performed: {', '.join(self.resolved_failed)}")
         if self.unresolved:
-            lines.append(f"STILL UNKNOWN — needs human review: {', '.join(self.unresolved)}")
+            lines.append(f"STILL UNKNOWN (needs human review): {', '.join(self.unresolved)}")
         return "\n".join(lines) or "nothing to reconcile"
 
 

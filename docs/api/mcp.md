@@ -13,6 +13,37 @@ continuum-mcp --transport sse
 continuum-mcp --transport streamable-http
 ```
 
+## Installation
+
+The `continuum-mcp` console script ships with the base package, but the SDK it
+serves with is the optional `[mcp]` extra. An install without the extra is a
+supported state, not a broken one: the entry point reports the missing extra
+with the command to run on stderr and exits 1 instead of raising a traceback
+the client can only report as `CONNECTION_CLOSED`.
+
+```bash
+pip install "continuum-agent[mcp]"   # from PyPI
+
+# GitHub or fork installs must use the PEP 508 direct-reference form, quoted:
+pip install "continuum-agent[mcp] @ git+https://github.com/<you>/CONTINUUM.git"
+
+# A bare VCS URL cannot carry an extra, so it installs the core only and the
+# entry point will report the missing SDK on first run:
+pip install git+https://github.com/Cyrax321/CONTINUUM.git
+```
+
+Quote the extra in every form. Unquoted `[mcp]` is a glob in zsh, where the
+command either fails or silently expands; the same rule covers the editable
+form, `pip install -e ".[mcp]"`.
+
+The split is deliberate. The core library and CLI must import with only
+`pydantic` (stated in `pyproject.toml` and the module docstrings), and
+packaging has no mechanism to condition an entry point on an extra, so the
+choice is between an unconditional entry point with a clear missing-dependency
+error and moving the SDK into core dependencies. The second was rejected
+because it violates that architecture; the first is the contract documented
+here and exercised by the missing-SDK tests in `tests/test_mcp_server.py`.
+
 ## Registration
 
 Claude Code discovers the server from the project's `.mcp.json`, which declares
@@ -67,6 +98,37 @@ Twelve tools: three read-only, nine mutating.
 
 Read-only responses `continuum_resume` and `continuum_validate` include a
 `constraint_pins` block: per-pin status (`present`, `absent`, `unverifiable`), grace deadline, and flagged set derived from reconstruction accounting (hash-tagged markers in the recovery context, issue #419). The CLI renders flagged pins prominently with TTY-aware colour while piped output stays byte-identical modulo colour codes. No gating changes live here; strict escalation remains in the accounting layer.
+
+## Environment variables
+
+`CONTINUUM_MCP_ALLOW`
+: The primary authorization variable: a comma-separated list of client names
+allowed to call mutating tools (for example
+`CONTINUUM_MCP_ALLOW=claude-code,cline`). Everything else is denied, and the
+read-only tools above stay open to every caller.
+
+`CONTINUUM_MCP_MUTATING_CLIENTS`
+: An older alias for `CONTINUUM_MCP_ALLOW`, kept from PR #3. It states what is
+being allowed more explicitly, so it wins when both are set; otherwise the two
+behave identically.
+
+Either variable takes precedence over `.continuum/mcp-policy.json`, and an
+explicit `allow` passed by an API caller takes precedence over both; each
+source replaces the ones below it rather than merging, so `policy.source`
+always names exactly where a grant came from.
+
+`CONTINUUM_DB`
+: The database path the server opens when `--db` is not passed on the command
+line (default `./continuum.db`).
+
+`CONTINUUM_MCP_SLIM`
+: Set to `1` to ship a read-only server. The tool table above lists twelve tools
+-- nine mutating, three read-only -- and slim removes the nine mutating ones,
+leaving `continuum_resume`, `continuum_validate` and `continuum_list_actions`.
+The variable is checked inside `build_server`, so every caller path that
+constructs a server honours it, not just the CLI entry point. It is off by
+default and is not a security boundary on its own: it shrinks what a caller can
+ask for, but the allowlist above is still what decides who may ask.
 
 ## build_server
 
@@ -174,3 +236,32 @@ in use. Do not resolve it with `claude mcp remove continuum-mcp -s project`, whi
 edits the committed `.mcp.json` and unregisters the server for everyone who clones
 the repository. Leave the diagnostic in place, or drop the local entry with
 `-s local` once the environment is on `PATH`.
+
+### Windows: response frames end with `\r\n`
+
+On Windows the MCP Python SDK terminates its stdio frames with CRLF instead of
+the LF the JSON-RPC-over-stdio transport specifies (upstream
+[modelcontextprotocol/python-sdk#2433](https://github.com/modelcontextprotocol/python-sdk/issues/2433);
+confirmed against this server, every response line ends `b"\r\n"`). Lenient
+clients, Claude Code among them, absorb the extra byte. Strict NDJSON clients
+reject every frame, so the same install works in one client and reports a
+protocol error in another, on Windows only, which is why it lands in
+troubleshooting rather than in a release note.
+
+The defect is upstream, so CONTINUUM neither patches nor vendors it. What the
+repository does instead:
+
+- `scripts/mcp_smoke.py` reads the wire with `newline=""` (universal newlines
+  would rewrite the bytes and hide the difference) and states the observed
+  framing in its output: a Windows run reports `CRLF (\r\n)`, a Linux run
+  reports `LF (\n)`. Run it when a Windows client fails in a way a Linux one
+  does not.
+- The suite pins the framing on the raw wire
+  (`tests/test_mcp_entrypoint.py`): binary pipes, no newline translation, an
+  assert that every response frame ends `b"\r\n"` on Windows and `b"\n"`
+  elsewhere. If the SDK ever fixes #2433, that assert is what turns the change
+  into a visible CI failure instead of a silent behaviour shift, and this
+  section follows it.
+- A strict client has to tolerate both terminators or fail everywhere on
+  Windows; if yours does not, that is the client side of the upstream issue,
+  not a CONTINUUM configuration.

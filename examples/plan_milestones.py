@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 
 from continuum.events import EventType
@@ -11,7 +12,8 @@ from continuum.storage import SQLiteStorage
 
 
 def main() -> None:
-    db = tempfile.mktemp(suffix=".db")
+    fd, db = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
     storage = SQLiteStorage(db)
     run_id = "plan-run-1"
     storage.create_run(Run(run_id=run_id, goal="5 milestones"))

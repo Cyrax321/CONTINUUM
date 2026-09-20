@@ -75,11 +75,13 @@ class ProvenanceGraph:
     subagent_spans: list[dict[str, Any]] = field(default_factory=list)
 
     def add_node(self, node: ProvenanceNode) -> None:
+        """Insert a node, initializing its edge lists."""
         self.nodes[node.event_id] = node
         self.edges.setdefault(node.event_id, [])
         self.reverse_edges.setdefault(node.event_id, [])
 
     def add_edge(self, parent_id: str, child_id: str) -> None:
+        """Link parent to child; unknown ids are ignored."""
         if parent_id not in self.nodes or child_id not in self.nodes:
             return
         if child_id not in self.edges.get(parent_id, []):

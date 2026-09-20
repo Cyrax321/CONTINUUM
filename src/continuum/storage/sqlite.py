@@ -3,20 +3,20 @@
 Chosen defaults and why
 -----------------------
 
-* **WAL journal mode** — readers never block the writer, so `continuum inspect`
+* **WAL journal mode**: readers never block the writer, so `continuum inspect`
   can read a run while the agent is still working.
-* **`synchronous=FULL`** — the whole point of this layer is surviving power
+* **`synchronous=FULL`**: the whole point of this layer is surviving power
   loss. `NORMAL` can lose the last commits on a WAL crash, which would silently
   reintroduce the duplicate-work problem CONTINUUM exists to prevent. The cost
   is an fsync per append; correctness wins.
-* **`foreign_keys=ON`** — events cannot reference a run that was never created.
-* **`IMMEDIATE` transactions for writes** — takes the write lock up front, so a
+* **`foreign_keys=ON`**: events cannot reference a run that was never created.
+* **`IMMEDIATE` transactions for writes**: takes the write lock up front, so a
   racing writer fails at BEGIN rather than halfway through a read-modify-write.
 
 Sequence allocation is done inside the write transaction with a UNIQUE
 constraint on ``(run_id, sequence)`` as the backstop. If two processes race,
 one commits and the other hits the constraint and is reported as a
-``ConcurrentWriteError`` — never a silent overwrite.
+``ConcurrentWriteError``, never a silent overwrite.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from continuum.events import Event, EventType, IntegrityReport, IntegrityViolation
+from continuum.events import CAUSED_BY_TYPES, Event, EventType, IntegrityReport, IntegrityViolation
 from continuum.models import Action, Origin, Run, RunStatus, SemanticState, StateCheckpoint, utcnow
 from continuum.security.hashing import make_id
 from continuum.state.versioning import canonical_state_json, state_fingerprint
@@ -71,7 +71,10 @@ def _resolve_path(url_or_path: str | Path) -> str:
 
     ``sqlite:///`` is the conventional form: the third slash begins an absolute
     path. Stripping it blindly would turn ``/var/db`` into ``var/db`` and open a
-    file in the wrong place, so the leading slash is preserved.
+    file in the wrong place, so the leading slash is preserved. The exception is
+    a Windows drive letter: ``sqlite:///C:/db`` is the three-slash absolute form
+    of ``C:/db``, and the leftover slash would leave a path (``/C:/db``) that
+    sqlite3 rejects on Windows, so it is dropped (#842).
     """
     raw = str(url_or_path)
     if raw.startswith("sqlite://"):
@@ -79,15 +82,20 @@ def _resolve_path(url_or_path: str | Path) -> str:
         # sqlite://a.db -> a.db (relative). Stripping the third slash too would
         # silently turn an absolute path into a relative one.
         raw = raw[len("sqlite://") :]
+        if len(raw) >= 3 and raw[0] == "/" and raw[1].isalpha() and raw[2] == ":":
+            # A drive letter follows the third slash: that slash is the URL
+            # grammar, not the filesystem. sqlite:///C:/db -> C:/db.
+            raw = raw[1:]
     if raw in ("", "/"):
         return ":memory:"
     return raw
 
 
 class SQLiteStorage(Storage):
+    """Single-host durable storage. Safe for threads and for separate processes."""
+
     supports_action_index = True
     supports_compaction = True
-    """Single-host durable storage. Safe for threads and for separate processes."""
 
     def __init__(self, url: str | Path = ":memory:", *, timeout: float = 30.0) -> None:
         self.path = _resolve_path(url)
@@ -164,6 +172,7 @@ class SQLiteStorage(Storage):
             yield self._live_connection()
 
     def close(self) -> None:
+        """Close the connection. Idempotent; later use raises a clear error."""
         with self._lock:
             conn = getattr(self, "_connection", None)
             if conn is None:
@@ -171,7 +180,7 @@ class SQLiteStorage(Storage):
             try:
                 conn.close()
             except sqlite3.ProgrammingError:
-                # Already closed — safe to call close() more than once.
+                # Already closed, and close() is safe to call more than once.
                 pass
             finally:
                 self._connection = None  # type: ignore[assignment]
@@ -192,6 +201,7 @@ class SQLiteStorage(Storage):
     # -- runs ------------------------------------------------------------- #
 
     def create_run(self, run: Run) -> Run:
+        """Insert the run row. Raises ConcurrentWriteError when the id exists."""
         self.require_usable_run_id(run)
         with self._write() as conn:
             try:
@@ -246,6 +256,7 @@ class SQLiteStorage(Storage):
         return run
 
     def get_run(self, run_id: str) -> Run:
+        """Return the run row. Raises RunNotFound for a missing id."""
         with self._read() as conn:
             row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
         if row is None:
@@ -253,6 +264,7 @@ class SQLiteStorage(Storage):
         return self._row_to_run(row)
 
     def update_run(self, run: Run) -> Run:
+        """Persist run changes with a refreshed timestamp. Raises RunNotFound when no row matches."""
         updated = run.touch()
         with self._write() as conn:
             cursor = conn.execute(
@@ -271,6 +283,7 @@ class SQLiteStorage(Storage):
         return updated
 
     def list_runs(self, *, limit: int | None = None) -> Sequence[Run]:
+        """Newest runs first by creation time, at most ``limit`` when given."""
         query = "SELECT * FROM runs ORDER BY created_at DESC, run_id DESC"
         params: tuple[Any, ...] = ()
         if limit is not None:
@@ -281,6 +294,7 @@ class SQLiteStorage(Storage):
         return [self._row_to_run(row) for row in rows]
 
     def get_active_run(self) -> Run | None:
+        """Most recently updated non-terminal run, or None when there is none."""
         terminal = (
             RunStatus.COMPLETED.value,
             RunStatus.CRASHED.value,
@@ -322,6 +336,7 @@ class SQLiteStorage(Storage):
         expected_sequence: int | None = None,
         source: Origin = Origin.DETERMINISTIC,
     ) -> Event:
+        """Append one chained event in a write transaction and return it."""
         with self._write() as conn:
             event = self._append_chained(
                 conn,
@@ -351,7 +366,7 @@ class SQLiteStorage(Storage):
         (compaction) reuse this instead of :meth:`append_event`, which would
         try to nest a second transaction.
         """
-        if type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED) and payload is not None:
+        if type in CAUSED_BY_TYPES and payload is not None:
             caused_by = payload.get("caused_by") if isinstance(payload, dict) else None
             if caused_by is not None:
                 if not isinstance(caused_by, list):
@@ -395,7 +410,8 @@ class SQLiteStorage(Storage):
         return event
 
     def append_sealed(self, event: Event) -> Event:
-        if event.type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED):
+        """Store a pre-sealed event as-is, preserving its chain."""
+        if event.type in CAUSED_BY_TYPES:
             caused_by = event.payload.get("caused_by") if isinstance(event.payload, dict) else None
             if caused_by is not None:
                 if not isinstance(caused_by, list):
@@ -406,7 +422,7 @@ class SQLiteStorage(Storage):
                     if not isinstance(cid, str) or not 1 <= len(cid) <= 128:
                         raise ValueError("caused_by entries must be 1-128 chars")
         with self._write() as conn:
-            if event.type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED):
+            if event.type in CAUSED_BY_TYPES:
                 caused_by = (
                     event.payload.get("caused_by") if isinstance(event.payload, dict) else None
                 )
@@ -478,6 +494,12 @@ class SQLiteStorage(Storage):
         crash in between leave an anchored live log whose prefix never
         reached the archive, so verify would trust a genesis that was never
         earned.
+
+        ``through_sequence`` must stay below the anchor marker's sequence:
+        the live log always retains its anchor, so a value at or above it is
+        rejected (issue #705) instead of silently deleting the anchor and
+        every live row, which would leave the next append minting a fresh
+        genesis and fork the hash chain away from the archive.
         """
         from continuum.checkpoint.manager import CheckpointManager
 
@@ -486,13 +508,26 @@ class SQLiteStorage(Storage):
         needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
         if needs_fresh_anchor:
             try:
-                CheckpointManager(self).checkpoint(run_id, force_version=True)
+                manager = CheckpointManager(self)
+                # The anchor must project over full history: after an earlier
+                # compaction the live tail begins at the anchor markers with
+                # no RUN_STARTED, so a live-only fold would conclude the run
+                # never started (issue #648). Per-turn checkpoint evaluation
+                # deliberately keeps the cheaper live-tail read.
+                state = manager.project_current(run_id, full_history=True)
+                manager.checkpoint(run_id, state=state, force_version=True)
             except Exception as exc:
                 raise ValueError(f"run {run_id!r} could not be anchored: {exc}") from exc
             lv = self.latest_version(run_id)
         storage_version = lv
         if storage_version is None:
             raise ValueError(f"run {run_id!r} could not be anchored: no projectable state")
+        # The anchor marker is appended at the head of the log in the
+        # transaction below, so its sequence is the current head + 1. The
+        # guard lives on the shared base so the Postgres backend cannot drop
+        # it again (issue #1078).
+        anchor_sequence = self.last_sequence(run_id) + 1
+        self._validate_compaction_bound(through_sequence, anchor_sequence)
         through = (
             through_sequence
             if through_sequence is not None
@@ -529,6 +564,7 @@ class SQLiteStorage(Storage):
         return {"archived": max(archived, 0)}
 
     def read_archived_events(self, run_id: str) -> Sequence[Event]:
+        """Compacted events from the archive, oldest first."""
         with self._read() as conn:
             rows = conn.execute(
                 "SELECT * FROM events_archive WHERE run_id = ? ORDER BY sequence ASC", (run_id,)
@@ -652,6 +688,7 @@ class SQLiteStorage(Storage):
         after_sequence: int = 0,
         upto: int | None = None,
     ) -> Sequence[Event]:
+        """Live events in sequence order, windowed by ``after_sequence``/``upto``."""
         query = "SELECT * FROM events WHERE run_id = ? AND sequence > ?"
         params: list[Any] = [run_id, after_sequence]
         if upto is not None:
@@ -663,6 +700,7 @@ class SQLiteStorage(Storage):
         return [self._row_to_event(row) for row in rows]
 
     def last_sequence(self, run_id: str) -> int:
+        """Highest live sequence number; 0 when the run has no events yet."""
         with self._read() as conn:
             row = conn.execute(
                 "SELECT MAX(sequence) AS seq FROM events WHERE run_id = ?", (run_id,)
@@ -886,6 +924,7 @@ class SQLiteStorage(Storage):
     # -- versions --------------------------------------------------------- #
 
     def put_version(self, state: SemanticState, *, reason: str = "", force: bool = False) -> int:
+        """Persist a state version, reusing the head when the fingerprint is unchanged."""
         fingerprint = state_fingerprint(state)
         with self._write() as conn:
             self._require_run(conn, state.run_id)
@@ -916,6 +955,7 @@ class SQLiteStorage(Storage):
         return version
 
     def get_version(self, run_id: str, version: int) -> SemanticState:
+        """Return one state version. Raises CheckpointNotFound for an unknown version."""
         with self._read() as conn:
             row = conn.execute(
                 "SELECT state, fingerprint FROM versions WHERE run_id = ? AND version = ?",
@@ -926,6 +966,7 @@ class SQLiteStorage(Storage):
         return self._row_to_state(row, run_id, version)
 
     def latest_version(self, run_id: str) -> SemanticState | None:
+        """Newest state version, or None when nothing was stored yet."""
         with self._read() as conn:
             row = conn.execute(
                 "SELECT state, fingerprint, version FROM versions WHERE run_id = ? "
@@ -951,6 +992,7 @@ class SQLiteStorage(Storage):
         return state
 
     def list_versions(self, run_id: str) -> Sequence[int]:
+        """Stored state version numbers in ascending order."""
         with self._read() as conn:
             rows = conn.execute(
                 "SELECT version FROM versions WHERE run_id = ? ORDER BY version ASC", (run_id,)
@@ -960,6 +1002,7 @@ class SQLiteStorage(Storage):
     # -- checkpoints ------------------------------------------------------ #
 
     def put_checkpoint(self, checkpoint: StateCheckpoint) -> StateCheckpoint:
+        """Persist a checkpoint. Raises ConcurrentWriteError when the id exists."""
         sealed = checkpoint if checkpoint.verify() else checkpoint.sealed()
         with self._write() as conn:
             self._require_run(conn, sealed.run_id)
@@ -984,6 +1027,7 @@ class SQLiteStorage(Storage):
         return sealed
 
     def get_checkpoint(self, checkpoint_id: str) -> StateCheckpoint:
+        """Return one checkpoint. Raises CheckpointNotFound for an unknown id."""
         with self._read() as conn:
             row = conn.execute(
                 "SELECT body FROM checkpoints WHERE checkpoint_id = ?", (checkpoint_id,)
@@ -993,6 +1037,7 @@ class SQLiteStorage(Storage):
         return self._row_to_checkpoint(row)
 
     def latest_checkpoint(self, run_id: str) -> StateCheckpoint | None:
+        """Newest checkpoint for the run, or None when there is none."""
         with self._read() as conn:
             row = conn.execute(
                 "SELECT body FROM checkpoints WHERE run_id = ? "
@@ -1002,6 +1047,7 @@ class SQLiteStorage(Storage):
         return self._row_to_checkpoint(row) if row else None
 
     def list_checkpoints(self, run_id: str) -> Sequence[StateCheckpoint]:
+        """Every checkpoint for the run in version order."""
         with self._read() as conn:
             rows = conn.execute(
                 "SELECT body FROM checkpoints WHERE run_id = ? ORDER BY version ASC", (run_id,)
@@ -1009,6 +1055,7 @@ class SQLiteStorage(Storage):
         return [self._row_to_checkpoint(row) for row in rows]
 
     def delete_checkpoint(self, checkpoint_id: str) -> None:
+        """Remove a checkpoint by id. Callers must not delete one a decision still depends on."""
         with self._write() as conn:
             conn.execute("DELETE FROM checkpoints WHERE checkpoint_id = ?", (checkpoint_id,))
 

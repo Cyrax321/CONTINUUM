@@ -179,6 +179,6 @@ def verify_attestation(
             return False
         signature = base64.b64decode(data["signature"])
         pub.verify(signature, _payload_bytes(data))
-    except Exception:  # noqa: BLE001 - any failure means "not valid"
+    except Exception:
         return False
     return expected_chain_hash is None or data.get("chain_hash") == expected_chain_hash

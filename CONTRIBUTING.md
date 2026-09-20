@@ -97,13 +97,13 @@ root.
 
 ```bash
 # Lint with ruff
-ruff check src/ tests/
+ruff check src/ tests/ examples/
 
 # Auto-fix safe issues
-ruff check --fix src/ tests/
+ruff check --fix src/ tests/ examples/
 
 # Format check
-ruff format --check src/ tests/
+ruff format --check src/ tests/ examples/
 
 # Type-check with mypy (strict mode)
 mypy src/continuum
@@ -129,7 +129,7 @@ scoped to the same three directories CI lints (`src/`, `tests/`, `examples/`):
 ```yaml
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.4
+    rev: v0.16.5
     hooks:
       - id: ruff-check
         args: [--fix]
@@ -148,10 +148,21 @@ To run it manually against all files:
 pre-commit run --all-files
 ```
 
-If you bump the `ruff==` pin in `pyproject.toml`, bump `rev` in
-`.pre-commit-config.yaml` to the matching `vX.Y.Z` tag in the same PR. A hook
-running a different ruff than CI is how a locally formatted file still fails
-`ruff format --check` on the PR.
+The ruff version lives in four places that must move together in one PR.
+`tests/test_precommit_config.py` fails any PR where they drift, which is how a
+dependabot `pip` bump surfaces (as a red test, not a version skew, so read a
+failure there as drift before anything else):
+
+1. the `ruff==` pin in the `dev` extra of `pyproject.toml`,
+2. `rev:` in `.pre-commit-config.yaml`,
+3. the `rev:` quoted in the yaml block above. This file is itself one of the
+   pins, which is easy to miss because you are editing prose, not
+   configuration.
+4. the `ruff==` row in the dependency table in `references/install.md` (#840:
+   this one drifted two releases before anything watched it).
+
+A hook running a different ruff than CI is how a locally formatted file still
+fails `ruff format --check` on the PR.
 
 **Note on mypy:** mypy is intentionally not included in this pre-commit setup.
 Pre-commit hooks run in isolated environments without the project's installed

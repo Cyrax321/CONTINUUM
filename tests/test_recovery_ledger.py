@@ -11,6 +11,7 @@ from continuum.models import RecoveryContract, RecoverySafety
 from continuum.recovery import (
     FileLedgerBackend,
     LedgerEntryKind,
+    LedgerLockError,
     MemoryLedgerBackend,
     RecoveryLedger,
 )
@@ -66,6 +67,37 @@ def test_compact_keeps_anchors_and_recent_and_stays_verifiable(ledger: RecoveryL
     assert ok is True
 
 
+def test_append_after_compact_keeps_chain_and_clears_gate(ledger: RecoveryLedger) -> None:
+    """Entries appended after a compaction must not collide with the sparse
+    sequences the survivors kept: verify() must stay ok on an untampered
+    ledger, and a post-compaction gate approval must clear the pending gate.
+    """
+    for _ in range(55):
+        ledger.record_attempt("run_1")
+    ledger.append_decision("run_1", _contract(), gate="required")
+    for _ in range(5):
+        ledger.record_attempt("run_1")
+
+    removed = ledger.compact("run_1", keep=10)
+    assert removed == 51
+    ok, _ = ledger.verify("run_1")
+    assert ok is True
+    # Precondition: the gate-required decision survived the compaction and is
+    # still pending, so the post-approval assertion below actually tests
+    # clearing rather than an already-empty gate.
+    assert ledger.pending_gate("run_1") is not None
+
+    max_sequence = max(e.sequence for e in ledger.entries("run_1"))
+    approved = ledger.record_gate("run_1", "approved")
+    assert approved.sequence == max_sequence + 1
+
+    sequences = [e.sequence for e in ledger.entries("run_1")]
+    assert len(set(sequences)) == len(sequences), "sequences must not collide"
+    ok, broken_at = ledger.verify("run_1")
+    assert ok is True, f"untampered ledger reported broken at index {broken_at}"
+    assert ledger.pending_gate("run_1") is None
+
+
 def test_attempts_and_requires_human(ledger: RecoveryLedger) -> None:
     ledger.record_attempt("run_1")
     ledger.record_attempt("run_1")
@@ -99,6 +131,40 @@ def test_file_backend_round_trips(tmp_path) -> None:  # type: ignore[no-untyped-
     reopened = RecoveryLedger(backend)
     assert len(reopened.entries("run_1")) == 2
     assert reopened.verify("run_1")[0] is True
+
+
+def test_file_backend_sanitizes_windows_reserved_characters(tmp_path) -> None:
+    """A run id may carry characters Windows forbids in filenames (#842).
+
+    Only the separators were replaced, so a caller-supplied id like
+    ``run:1<2026>?`` produced a ledger file that could not be opened on
+    Windows at all. Every forbidden character must round-trip through a
+    name that opens on both platform families.
+    """
+    hostile = 'run:1<2026>?"*|/x\\y'
+    backend = FileLedgerBackend(str(tmp_path))
+    RecoveryLedger(backend).append_decision(hostile, _contract(0))
+
+    reopened = RecoveryLedger(backend)
+    assert len(reopened.entries(hostile)) == 1
+    assert reopened.verify(hostile)[0] is True
+
+
+def test_file_backend_sanitizes_windows_reserved_device_names(tmp_path) -> None:
+    """``CON`` and friends are reserved as filenames with any extension.
+
+    The ``ledger-`` prefix already shields the real filename, but the
+    sanitizer must not become a trap the day the prefix changes (#842).
+    """
+    from continuum.recovery.ledger import _sanitize_run_id
+
+    assert _sanitize_run_id("CON") == "_CON"
+    assert _sanitize_run_id("nul.backup") == "_nul.backup"
+    assert _sanitize_run_id("com1") == "_com1"
+    # Ordinary ids, including ones that merely contain the substring, pass.
+    assert _sanitize_run_id("run_1") == "run_1"
+    assert _sanitize_run_id("connection") == "connection"
+    assert _sanitize_run_id("a/b\\c:d") == "a_b_c_d"
 
 
 def test_pending_gate_survives_prior_approval(ledger: RecoveryLedger) -> None:
@@ -152,3 +218,52 @@ def test_append_under_cross_process_lock() -> None:
     ledger = RecoveryLedger(MemoryLedgerBackend(), lock=InMemoryLeaseCoordinator())
     ledger.append_decision("run_1", _contract())
     assert len(ledger.entries("run_1")) == 1
+
+
+def test_ledger_lock_contention_raises_ledger_lock_error() -> None:
+    coord = InMemoryLeaseCoordinator()
+    # Lease already held by another entity
+    assert coord.acquire("run_1", "other_holder") is True
+
+    ledger = RecoveryLedger(MemoryLedgerBackend(), lock=coord)
+
+    with pytest.raises(LedgerLockError, match=r"could not acquire ledger lock for run 'run_1'"):
+        ledger.append_decision("run_1", _contract())
+
+    with pytest.raises(LedgerLockError, match=r"could not acquire ledger lock for run 'run_1'"):
+        ledger.record_attempt("run_1")
+
+    with pytest.raises(LedgerLockError, match=r"could not acquire ledger lock for run 'run_1'"):
+        ledger.record_gate("run_1", "approved")
+
+    with pytest.raises(LedgerLockError, match=r"could not acquire ledger lock for run 'run_1'"):
+        ledger.compact("run_1")
+
+    # Once released, operations succeed
+    coord.release("run_1", "other_holder")
+    entry = ledger.append_decision("run_1", _contract())
+    assert entry.sequence == 0
+    assert ledger.record_attempt("run_1") == 1
+    gate_entry = ledger.record_gate("run_1", "approved")
+    assert gate_entry.gate == "approved"
+
+
+def test_ledger_lock_stub_refusal_raises_ledger_lock_error() -> None:
+    class ContestedLeaseStub:
+        def acquire(self, run_id: str, holder_id: str, ttl: object = None) -> bool:
+            return False
+
+        def release(self, run_id: str, holder_id: str) -> None:
+            pass
+
+    ledger = RecoveryLedger(MemoryLedgerBackend(), lock=ContestedLeaseStub())  # type: ignore[arg-type]
+
+    with pytest.raises(
+        LedgerLockError, match=r"could not acquire ledger lock for run 'run_contested'"
+    ):
+        ledger.append_decision("run_contested", _contract())
+
+    with pytest.raises(
+        LedgerLockError, match=r"could not acquire ledger lock for run 'run_contested'"
+    ):
+        ledger.record_attempt("run_contested")

@@ -1,7 +1,7 @@
 """Run the Phase 6 recovery-correctness scenario suite and emit a report.
 
 Usage:
-    uv run python benchmarks/run.py
+    uv run python benchmarks/run.py [--list] [--publish]
 
 Writes ``benchmarks/out/report.json`` and ``benchmarks/out/report.md``. The run
 is reproducible: scenarios build their own in-memory state, so the output can be
@@ -9,41 +9,42 @@ diffed across commits to watch recovery guarantees hold.
 
 Also runs the fault-injection chaos suite (#397) and emits its report
 via the shared emitter schema coordinated with #398 (horizon).
+
+Continuum bench byte counts (issue #568, #293a):
+- This runner now also drives ``continuum.benchmark`` (the crash-recovery
+  harness) and records per scenario per strategy:
+  checkpoint_bytes_written, bytes_read_at_resume, revalidation_calls,
+  resume_tokens, replay_tokens_to_productive.
+- Token counts are deterministic via ``continuum.checkpoint.context.estimate_tokens``
+  (len // 4), no vendor tokenizer, zero new deps. The numbers in
+  ``benchmarks/out/report.json`` are from real runs, not estimates, and the
+  report contains a ``continuum_benchmark`` key alongside the existing
+  ``benchmark, generated_at, summary, results`` envelope so parallel tracks do
+  not collide on the emitter schema.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
 
 # Ensure benchmarks is importable when run as `python benchmarks/run.py`
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from typing import Any
 
+from continuum.benchmark import run_benchmark as run_continuum_benchmark
 from continuum.benchmark.phase6 import run_benchmark, scenarios, write_report
 
 
-def _regenerate_readme_bench(horizon_report: Any, fault_report: Any | None = None) -> None:
-    """Regenerate README bench section from real runner numbers (no invented numbers).
-
-    Looks for markers <!-- BENCH:START --> and <!-- BENCH:END --> in README.md
-    and replaces the content between them with a table derived from the
-    horizon and fault-injection reports. If markers are missing, appends the
-    section. Deleting the table and re-running `python benchmarks/run.py`
-    regenerates it identically, proving no hand-edited numbers.
-    """
-    readme = Path(__file__).resolve().parent.parent / "README.md"
-    if not readme.exists():
-        return
-    text = readme.read_text(encoding="utf-8")
+def _bench_table_lines(horizon_report: Any, fault_report: Any | None = None) -> list[str]:
+    """Build the bench table body from real runner numbers (no invented numbers)."""
     # Build table from real numbers
     h_summary = horizon_report.summary()
     lines: list[str] = []
-    lines.append("<!-- BENCH:START -->")
-    lines.append("### Horizon-scale benchmark (real runs, no invented numbers)")
-    lines.append("")
     lines.append(
         f"Generated: {horizon_report.generated_at.isoformat()}  "
         f"Horizon scenarios: {h_summary.get('total', 0)}  "
@@ -106,19 +107,172 @@ def _regenerate_readme_bench(horizon_report: Any, fault_report: Any | None = Non
         lines.append(
             f"Fault-injection: {f_summary.get('total', 0)} scenarios, detection {f_summary.get('detection_rate', 0)}, unsafe {f_summary.get('unsafe_resume_rate', 0)}"
         )
-    lines.append("<!-- BENCH:END -->")
+    return lines
+
+
+def _swap_bench_section(path: Path, heading: str, body: list[str]) -> bool:
+    """Swap the marked bench block in path, appending it when markers are absent."""
+    lines = ["<!-- BENCH:START -->", heading, "", *body, "<!-- BENCH:END -->"]
     table = "\n".join(lines)
+    text = path.read_text(encoding="utf-8")
     if "<!-- BENCH:START -->" in text and "<!-- BENCH:END -->" in text:
         import re
 
         new_text = re.sub(r"<!-- BENCH:START -->.*<!-- BENCH:END -->", table, text, flags=re.DOTALL)
-        readme.write_text(new_text, encoding="utf-8")
+        path.write_text(new_text, encoding="utf-8")
+        return True
+    path.write_text(text.rstrip("\n") + "\n\n" + table + "\n", encoding="utf-8")
+    return True
+
+
+def _regenerate_readme_bench(horizon_report: Any, fault_report: Any | None = None) -> None:
+    """Regenerate README bench section from real runner numbers (no invented numbers).
+
+    Looks for markers <!-- BENCH:START --> and <!-- BENCH:END --> in README.md
+    and replaces the content between them with a table derived from the
+    horizon and fault-injection reports. If markers are missing, skips update
+    to avoid duplicate table appends (issue #776).
+    """
+    readme = Path(__file__).resolve().parent.parent / "README.md"
+    if not readme.exists():
+        return
+    text = readme.read_text(encoding="utf-8")
+    if "<!-- BENCH:START -->" not in text or "<!-- BENCH:END -->" not in text:
+        # Require markers in README.md instead of appending duplicate sections (issue #776)
+        return
+    body = _bench_table_lines(horizon_report, fault_report)
+    _swap_bench_section(
+        readme, "### Horizon-scale benchmark (real runs, no invented numbers)", body
+    )
+
+
+def _regenerate_bench_md(horizon_report: Any, fault_report: Any | None = None) -> None:
+    """Refresh the latest-results block in references/bench.md (nightly publish)."""
+    bench_md = Path(__file__).resolve().parent.parent / "references" / "bench.md"
+    if not bench_md.exists():
+        return
+    body = _bench_table_lines(horizon_report, fault_report)
+    _swap_bench_section(
+        bench_md, "### Latest nightly results (real runs, no invented numbers)", body
+    )
+
+
+def _append_continuum_bench(out_dir: str | Path) -> None:
+    """Run CONTINUUM-Bench and merge its byte counts into report.json.
+
+    The harness records per scenario per strategy: checkpoint_bytes_written,
+    bytes_read_at_resume, revalidation_calls, resume_tokens,
+    replay_tokens_to_productive. All counts are from real storage and
+    deterministic tokenizer runs, not estimates. The merged report keeps the
+    existing envelope (benchmark, generated_at, summary, results) and adds a
+    sibling key ``continuum_benchmark`` so the shared emitter schema stays
+    compatible with parallel tracks (#397/#398).
+    """
+    import json
+
+    try:
+        results = run_continuum_benchmark(total=100)
+    except Exception as exc:  # noqa: BLE001 - bench must not break the suite
+        print(f"continuum bench failed: {exc}")
+        return
+    bench_payload = [r.as_dict() for r in results]
+    report_path = Path(out_dir) / "report.json"
+    if not report_path.exists():
+        # No phase6 report yet, write a minimal envelope
+        envelope: dict[str, object] = {
+            "benchmark": "continuum-bench",
+            "generated_at": results[0].__dict__.get("generated_at", "") if results else "",
+            "summary": {"total": len(results)},
+            "results": bench_payload,
+            "continuum_benchmark": bench_payload,
+        }
+        report_path.write_text(json.dumps(envelope, indent=2), encoding="utf-8")
+        print(f"continuum bench: {len(results)} results written to {report_path}")
+        return
+    try:
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    # Preserve existing envelope, add continuum_benchmark
+    if isinstance(data, dict):
+        # report.json from phase6 is {generated_at, results} without benchmark key
+        # Wrap it into the shared envelope if needed
+        if "benchmark" not in data and "generated_at" in data:
+            data = {
+                "benchmark": "phase6",
+                "generated_at": data.get("generated_at"),
+                "summary": {
+                    "total": len(data.get("results", [])),
+                    "passed": sum(1 for r in data.get("results", []) if r.get("passed")),
+                    "failed": sum(1 for r in data.get("results", []) if not r.get("passed")),
+                },
+                "results": data.get("results", []),
+                **{k: v for k, v in data.items() if k not in ("generated_at", "results")},
+            }
+        data["continuum_benchmark"] = bench_payload
+        # Also surface a small summary for quick inspection
+        data["continuum_summary"] = {
+            "total": len(bench_payload),
+            "strategies": sorted({r["method"] for r in bench_payload}),
+            "scenarios": sorted({r["scenario"] for r in bench_payload}),
+        }
+        report_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        print(f"continuum bench: {len(results)} results merged into {report_path}")
     else:
-        # Append if no markers
-        readme.write_text(text.rstrip() + "\n\n" + table + "\n", encoding="utf-8")
+        print("continuum bench: unexpected report shape, skipping merge")
+
+
+_SUITES: dict[str, str] = {
+    "phase6": "recovery-correctness scenarios -> benchmarks/out/report.{json,md}",
+    "continuum-bench": "crash-recovery byte counts -> merged into benchmarks/out/report.json",
+    "fault-injection": "chaos suite (#397) -> benchmarks/out/fault_injection_report.{json,md}",
+    "horizon": (
+        "horizon-scale suite (#398) -> benchmarks/out/horizon_report.{json,md}; "
+        "also regenerates the README bench table"
+    ),
+}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the ``benchmarks/run.py`` argument parser.
+
+    Only ``--help`` and ``--list`` are recognised; anything else fails with
+    exit code 2 (argparse convention, matching ``src/continuum/cli/main.py``)
+    instead of silently launching the full multi-minute suite (issue #682).
+    """
+    parser = argparse.ArgumentParser(
+        prog="python benchmarks/run.py",
+        description=(
+            "Run the full benchmark suite: Phase 6 recovery-correctness scenarios, "
+            "the CONTINUUM crash-recovery byte-count bench, the fault-injection "
+            "chaos suite, and the horizon-scale suite. Takes minutes and writes "
+            "reports under benchmarks/out/."
+        ),
+        epilog="With no arguments, runs every suite in order and writes all reports.",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="print the suites this runner executes and where each report lands, then exit.",
+    )
+    parser.add_argument(
+        "--publish",
+        action="store_true",
+        help=(
+            "also refresh the latest-results block in references/bench.md "
+            "(used by the nightly publish CI; local runs leave it alone)."
+        ),
+    )
+    return parser
 
 
 def main() -> None:
+    args = build_parser().parse_args()
+    if args.list:
+        for name, what in _SUITES.items():
+            print(f"{name}: {what}")
+        return
+
     report = run_benchmark(scenarios.ALL_SCENARIOS)
     out_dir = os.path.join(os.path.dirname(__file__), "out")
     os.makedirs(out_dir, exist_ok=True)
@@ -129,8 +283,10 @@ def main() -> None:
     )
     print(f"json: {json_path}")
     print(f"md:   {md_path}")
+    # Append continuum byte-count bench (issue #568) without breaking the suite
+    _append_continuum_bench(out_dir)
 
-    # Fault-injection chaos suite (#397) — shares the emitter schema with #398
+    # Fault-injection chaos suite (#397), shares the emitter schema with #398
     try:
         from benchmarks.fault_injection.emitter import emit_fault_injection_report
         from benchmarks.fault_injection.runner import run_benchmark_suite
@@ -149,7 +305,7 @@ def main() -> None:
         print(f"fault-injection benchmark failed: {exc}")
         fault_report = None
 
-    # Horizon-scale suite (#398) — years of simulated time, judge-scored
+    # Horizon-scale suite (#398), years of simulated time, judge-scored
     try:
         from benchmarks.horizon.emitter import emit_horizon_report
         from benchmarks.horizon.runner import run_horizon_suite
@@ -168,6 +324,10 @@ def main() -> None:
         _regenerate_readme_bench(
             horizon_report, fault_report if "fault_report" in locals() else None
         )
+        if args.publish:
+            _regenerate_bench_md(
+                horizon_report, fault_report if "fault_report" in locals() else None
+            )
     except Exception as exc:  # noqa: BLE001 - don't let horizon break phase6
         print(f"horizon benchmark failed: {exc}")
         import traceback

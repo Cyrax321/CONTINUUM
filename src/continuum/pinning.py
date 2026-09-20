@@ -15,7 +15,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-__all__ = ["ALLOWED_PINNING_KEYS", "normalize_pinning", "pinning_drift"]
+__all__ = [
+    "ALLOWED_PINNING_KEYS",
+    "latest_pinning",
+    "normalize_pinning",
+    "pinning_drift",
+]
 
 ALLOWED_PINNING_KEYS = (
     "prompt_sha256",
