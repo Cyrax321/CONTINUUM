@@ -71,6 +71,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+<<<<<<< HEAD
+- **The TUI and dashboard `complete` verbs now perform the whole verb (#1153).**
+  Only `continuum complete` appended `REVIEW_CONFIRMED`, flipped the run row,
+  and cleared `.continuum/resume.json`; the TUI skipped the file, and the
+  dashboard skipped both the file and the confirmation. A run closed from the
+  dashboard left the resume file pointing at finished work, so the next
+  session's instant-resume fast path landed the operator back in the run they
+  had just closed, the exact hijack `cmd_complete` exists to prevent; and a
+  dashboard-closed externally-driven run stayed self-certified, because the
+  event that clears that marker never landed. The tail now lives in
+  `continuum.runs.close_run` and all three surfaces call it, so the events,
+  the row flip, and the cleanup cannot drift apart again. The resume delete
+  stays conditional on the file naming the run being closed, and an unreadable
+  file still does not block completing a run.
+=======
 - **Webhook dedup now survives a compaction inside the re-notify window
   (#1186).** `_within_dedup_window` scanned only the live event tail for the
   `NOTIFICATION_SENT` / `NOTIFICATION_FAILED` rows the dedup state lives in,
@@ -99,6 +114,7 @@ All notable changes to this project are documented here. The format follows
   all its prose is rephrased, so that one pattern reads all six READMEs.
   `references/testing.md`, `references/install.md`, and the translated READMEs
   now carry the same figures as `README.md`.
+>>>>>>> origin/main
 
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
@@ -956,7 +972,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,402 collected, ~2,361 passed, ~41 skipped on a minimal env).
+  (~2,419 collected, ~2,391 passed, ~28 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

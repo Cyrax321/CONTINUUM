@@ -47,10 +47,13 @@ from continuum.state.semantic import project
 from continuum.storage.base import Storage
 
 # Resume banner persistence (issue #394): written on every checkpoint so a
-# SessionStart hook can inject a banner without opening the database.
-_RESUME_JSON = ".continuum/resume.json"
+# SessionStart hook can inject a banner without opening the database. The
+# run-completion path reads this too (issue #1153): a run that is closed as
+# completed is no longer interrupted, so runs.py clears the file it finds
+# pointing at that run. Public because two modules now share the literal.
+RESUME_JSON = ".continuum/resume.json"
 
-__all__ = ["CheckpointManager", "RestoredRun", "CheckpointError", "clear_resume_pointer"]
+__all__ = ["CheckpointManager", "RestoredRun", "CheckpointError", "RESUME_JSON"]
 
 
 class CheckpointError(RuntimeError):
@@ -395,7 +398,7 @@ class CheckpointManager:
 
 def _write_resume_json(run_id: str, checkpoint: StateCheckpoint) -> None:
     """Persist a tiny file for SessionStart instant detection (issue #394)."""
-    path = Path(_RESUME_JSON)
+    path = Path(RESUME_JSON)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "run_id": run_id,
@@ -436,7 +439,7 @@ def clear_resume_pointer(run_id: str) -> bool:
     pointer cannot name this run either.
     Returns whether the pointer named this run and was removed.
     """
-    path = Path(_RESUME_JSON)
+    path = Path(RESUME_JSON)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):

@@ -23,7 +23,8 @@ from typing import Any
 from continuum.actions import ActionLedger
 from continuum.checkpoint import clear_resume_pointer
 from continuum.events import EventType
-from continuum.models import ActionStatus, Origin, RunStatus
+from continuum.models import ActionStatus, Origin
+from continuum.runs import close_run
 from continuum.storage.base import Storage
 
 __all__ = [
@@ -83,22 +84,20 @@ def confirm_run(storage: Storage, run_id: str) -> None:
 def complete_run(storage: Storage, run_id: str, summary: str = "") -> None:
     """Close the run as completed, from a human, with the log to match.
 
-    Appends ``RUN_COMPLETED`` (``Origin.HUMAN``) and flips the run row to
-    ``COMPLETED`` - the same pairing as ``continuum complete``. The optional
-    summary is embedded in the event payload and omitted entirely when empty,
-    so the log never carries a ``""`` placeholder that reads as a truncated
-    note. A missing run raises from ``get_run`` first; a run already terminal
-    is still closable the way the CLI allows it.
+    Lands ``REVIEW_CONFIRMED`` and then ``RUN_COMPLETED`` (both
+    ``Origin.HUMAN``), flips the run row to ``COMPLETED``, and clears the
+    instant-resume file when it names this run - the same tail
+    ``continuum complete`` performs, via the shared helper (issue #1153).
+    The confirmation matters here specifically: it is the event that clears
+    the ``self_certified`` marker on goal and progress, so a dashboard-closed
+    externally-driven run ends up confirmed the way a CLI-closed one does. The
+    optional summary is embedded in the event payload and omitted entirely
+    when empty, so the log never carries a ``""`` placeholder that reads as a
+    truncated note. A missing run raises from ``get_run`` first; a run already
+    terminal is still closable.
     """
-    run = storage.get_run(run_id)
-    note = {"closed_by": "dashboard"}
-    if summary:
-        note["summary"] = summary
-    storage.append_event(run_id, EventType.RUN_COMPLETED, note, source=Origin.HUMAN)
-    storage.update_run(run.touch(status=RunStatus.COMPLETED))
-    # Same cleanup the CLI performs: a closed run is no longer interrupted, so
-    # the resume banner must not keep naming it as the active run.
-    clear_resume_pointer(run_id)
+    storage.get_run(run_id)
+    close_run(storage, run_id, closed_by="dashboard", summary=summary)
 
 
 def reconcile_action(
