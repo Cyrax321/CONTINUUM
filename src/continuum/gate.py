@@ -104,8 +104,16 @@ def collect_consumed_authorities(events: Any) -> dict[str, Any]:
     return consumed
 
 
-def is_authority_consumed(authority_id: str, consumed: Any) -> bool:
-    """True when authority_id is in the consumed map."""
+def is_authority_consumed(authority_id: str, consumed: Mapping[str, Any] | None) -> bool:
+    """True when ``authority_id`` is marked consumed.
+
+    ``consumed`` is the map :func:`collect_consumed_authorities` builds: the
+    authority id keyed to the AUTHORITY_CONSUMED ``Event`` that spent it, not to
+    a bare payload dict. An empty map or ``None`` means nothing is spent. This
+    is the single definition of the check: both :func:`decide` and the gateway's
+    ``match_route`` route through it instead of testing membership inline, so the
+    two enforcement seams cannot drift apart (#1154).
+    """
     if not consumed:
         return False
     return authority_id in consumed

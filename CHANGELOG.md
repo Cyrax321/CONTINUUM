@@ -27,6 +27,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The authority-resurrection check now goes through its own exported helper
+  instead of being inlined twice (#1154).** `is_authority_consumed` was in
+  `__all__` and documented but called nowhere; `decide` and the gateway's
+  `match_route` each tested membership inline, and each also carried a
+  `hasattr` ladder whose dict fallback could not run, because
+  `collect_consumed_authorities` stores the `Event` itself as the map value and
+  an `Event` always has `.sequence` and `.payload`. Both call sites now route
+  through the helper and read those two attributes directly, with the
+  map-holds-Events contract documented at its one definition. Behaviour is
+  unchanged: the dead branches happened to compute the same values the live
+  ones did, so no message, verdict, or sequence number moves. What goes away is
+  that a security-sensitive block no longer reads as though it handles a
+  dict-valued map it can never receive, so the next change to
+  `collect_consumed_authorities` cannot silently select a different branch.
 - **The TUI `tree` view fetches the run once instead of twice (#1157).**
   `family_lines` in `src/continuum/tui/model.py` called
   `storage.get_run(run_id)` twice and discarded the first result: the first
@@ -956,7 +970,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,402 collected, ~2,361 passed, ~41 skipped on a minimal env).
+  (~2,409 collected, ~2,381 passed, ~28 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
