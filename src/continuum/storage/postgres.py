@@ -619,7 +619,18 @@ class PostgresStorage(Storage):
                 # never started (issue #648). Per-turn checkpoint evaluation
                 # deliberately keeps the cheaper live-tail read.
                 state = manager.project_current(run_id, full_history=True)
-                manager.checkpoint(run_id, state=state, force_version=True)
+                # The anchor becomes the newest checkpoint, so it inherits the
+                # environment the run validated against: writing it without one
+                # would leave a compacted run with no snapshot to diff a resumed
+                # capture against, and every resource would read as unknown
+                # (issue #762).
+                anchored = self.latest_checkpoint(run_id)
+                manager.checkpoint(
+                    run_id,
+                    state=state,
+                    force_version=True,
+                    environment=anchored.environment if anchored is not None else None,
+                )
             except Exception as exc:
                 raise ValueError(f"run {run_id!r} could not be anchored: {exc}") from exc
             lv = self.latest_version(run_id)

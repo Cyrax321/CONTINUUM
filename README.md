@@ -52,7 +52,7 @@ Modern AI agents run long tasks (hundreds of LLM calls, tool invocations, file a
 CONTINUUM asks a narrower, harder question: can an agent resume from a compact semantic representation of its task state while independently verifying that state is still valid in the current environment? Its differentiator is three-part:
 
 - **Semantic checkpoints**: a compact, versioned representation of what the agent needs to continue, not a conversation dump.
-- **Independent environment revalidation**: every checkpoint component is verified against the current environment before resume, with staleness propagating through the dependency graph.
+- **Independent environment revalidation**: every checkpoint component is verified against the current environment before resume, with staleness propagating through the dependency graph. A run can configure the observers it trusts (`continuum providers`) so resume captures the world by name instead of relying on a caller to remember to pass them; a provider that cannot report marks its resources unknown, never as unchanged.
 - **Provenance-aware state**: every fact traces to its origin, so agent-reported progress is never self-certifying.
 
 ## Quick Start
@@ -99,7 +99,7 @@ Verify:
 ```bash
 continuum --help                 # CLI entrypoint
 continuum-mcp --help             # MCP server entrypoint (needs [mcp] or [dev])
-pytest -q                        # ~2,402 collected, ~2,361 passed, ~41 skipped on a minimal env (exact counts vary)
+pytest -q                        # ~2,440 collected, ~2,411 passed, ~28 skipped on a minimal env (exact counts vary)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # the three gates CI enforces
 ```
@@ -196,7 +196,7 @@ Full walkthrough with code is in `docs/recovery_walkthrough.md` (`examples/recov
 | Framework adapters | Generic Python, OpenAI Agents SDK, LangGraph, and LangChain integrations |
 | Secure planning loop | Two-signal observation verification escalates high-risk branches to REQUIRES_REVIEW |
 | Periodic revalidation | Environment re-checked on a schedule, catching mid-run drift within one cycle |
-| Tamper-evident log | Hash-chained event log (51 event types) with integrity verification |
+| Tamper-evident log | Hash-chained event log (52 event types) with integrity verification |
 | Enforcing gate | Unclaimed side-effect calls are refused before they fire; deny messages teach the claim protocol |
 | Observation hooks | Every file a coding CLI writes becomes digest-verified evidence, outside model control |
 | Session briefing | Fresh sessions learn run state deterministically at start, including the last session's reasoning summary |
@@ -232,7 +232,7 @@ CONTINUUM is verified against real LLM agents, live protocol boundaries, and har
 - **Third-party clients**: Gemini CLI and Kilo Code connected over stdio JSON-RPC against the live SQLite store, validating multi-agent co-existence and authorization isolation.
 - **Protocol compliance**: driven end to end with `@modelcontextprotocol/inspector --cli` across process deaths; mutating tools deny by default behind `CONTINUUM_MCP_MUTATING_CLIENTS`; external claims degrade to `REQUIRES_REVIEW` (`safe: false`).
 - **Self-healing**: hard-killed servers recover from orphaned SQLite `-wal`/`-shm` sidecars via single-retry cleanup at startup.
-- **Scale**: roughly 2,402 tests collected (~2,361 passing; ~41 skipped; other outcomes vary by environment) on Python 3.11, 3.12, and 3.13 (unit, `hypothesis` property-based, concurrency, adversarial). CONTINUUM-Bench runs five crash scenarios plus a dedicated argument-drift scenario, measuring 0 duplicate work and 0 duplicate side effects for CONTINUUM against full duplication for naive replay; a separate 14-scenario recovery-correctness suite (`continuum.benchmark.phase6`) encodes the crash points from the durable-execution survey as executable assertions, and an 8-fault risk-injection suite (`benchmarks/fault_injection/`) grades failure handling.
+- **Scale**: roughly 2,440 tests collected (~2,361 passing; ~41 skipped; other outcomes vary by environment) on Python 3.11, 3.12, and 3.13 (unit, `hypothesis` property-based, concurrency, adversarial). CONTINUUM-Bench runs five crash scenarios plus a dedicated argument-drift scenario, measuring 0 duplicate work and 0 duplicate side effects for CONTINUUM against full duplication for naive replay; a separate 14-scenario recovery-correctness suite (`continuum.benchmark.phase6`) encodes the crash points from the durable-execution survey as executable assertions, and an 8-fault risk-injection suite (`benchmarks/fault_injection/`) grades failure handling.
 - **Adversarial audit**: the full MCP surface was audited over the live protocol; three defects were found and fixed. Method and reproduction steps in [test.md](test.md).
 
 <!-- BENCH:START -->
@@ -415,7 +415,7 @@ Schema v6. SQLite is primary, Postgres is CI verified. One log, many projections
 
 | Table | Purpose |
 |:--|:--|
-| `events` | Hash chained append only log (51 event types) |
+| `events` | Hash chained append only log (52 event types) |
 | `runs` | Run metadata with `parent_run_id` for multi agent |
 | `versions` | SemanticState snapshots per checkpoint |
 | `checkpoints` | Sealed checkpoint records with `RECOVERY` anchors |
@@ -425,7 +425,7 @@ Schema v6. SQLite is primary, Postgres is CI verified. One log, many projections
 
 ### Module map: one library, many surfaces
 
-CONTINUUM is one library (`src/continuum`, 124 modules) plus a large test suite (161 test files, ~2,402 tests). All modules append to and replay one hash chained event log:
+CONTINUUM is one library (`src/continuum`, 124 modules) plus a large test suite (161 test files, ~2,440 tests). All modules append to and replay one hash chained event log:
 
 | Module | Role |
 |:--|:--|
@@ -447,7 +447,7 @@ CONTINUUM is one library (`src/continuum`, 124 modules) plus a large test suite 
 | `mcp/` | 12 stdio tools plus authz `authz.py` token auth, allowlist, confirmation token |
 | `serve/` | Sidecar stdio JSON wire + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Web dashboard `app.py` `hitl.py` with HITL buttons confirm/reconcile/complete, prefix trust advisory, pins |
-| `cli/` | 46 argparse commands, exit codes as verdict: `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 47 argparse commands, exit codes as verdict: `runs, start, inspect, resume, verify, health, providers, tree, benchmark, attest, dashboard` |
 | `otel.py` | OpenTelemetry span processor bridge |
 | `benchmark/` | CONTINUUM-Bench harness: 5 crash scenarios + argument drift + 14 scenario recovery suite + 8 fault risk injection |
 
@@ -561,7 +561,7 @@ CONTINUUM sits at the overlap of durable execution, idempotent side-effect track
 
 In early 2026 I saw long running agents fail on recovery, not reasoning. Checkpoints were treated as proof to continue, not evidence to verify. Surveying Temporal, LangGraph, ACRFence 2603.20625 and self conditioning 2509.09677, I found the gap was a portable verification substrate that asks, given the state at time T and the world as it is now, is it still safe to continue.
 
-Over three weeks I built CONTINUUM from one invariant, every fact carries its origin. The result is a hash chained log with `verify()`, a ledger with stable key deduplication, a gate and gateway that block unclaimed effects, and a recovery engine that seals a contract. Five seams expose the same log to Claude Code, LangGraph, LangChain, OpenAI, HTTP and OpenTelemetry. Validated with real kills and ~2,402 tests, it prints `0 duplicates` where naive replay prints `50`.
+Over three weeks I built CONTINUUM from one invariant, every fact carries its origin. The result is a hash chained log with `verify()`, a ledger with stable key deduplication, a gate and gateway that block unclaimed effects, and a recovery engine that seals a contract. Five seams expose the same log to Claude Code, LangGraph, LangChain, OpenAI, HTTP and OpenTelemetry. Validated with real kills and ~2,440 tests, it prints `0 duplicates` where naive replay prints `50`.
 
 CONTINUUM was created by **Anandhu P Shaji** ([@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/)) and is maintained by the original creator. It is open source under the [Apache-2.0](LICENSE) license. Community contributions are welcome via [CONTRIBUTING.md](CONTRIBUTING.md) and are credited in [AUTHORS.md](AUTHORS.md) and [graphs/contributors](https://github.com/Cyrax321/CONTINUUM/graphs/contributors).
 

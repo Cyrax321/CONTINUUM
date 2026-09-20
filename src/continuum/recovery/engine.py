@@ -41,6 +41,13 @@ from typing import Any
 from continuum.actions.ledger import ActionLedger
 from continuum.analysis.depends import DependencyGraph as SourceDependencyGraph
 from continuum.checkpoint.manager import CheckpointManager, RestoredRun
+from continuum.environment.config import (
+    ProviderConfig,
+    ProviderDiagnostic,
+    ProviderRegistry,
+    config_from_events,
+    resolve_and_capture,
+)
 from continuum.environment.diff import EnvironmentDiff
 from continuum.events import EventType
 from continuum.gate import collect_consumed_authorities
@@ -112,6 +119,11 @@ class RecoveryDecision:
     #: events plus current failure signals, or None when there is no history.
     #: Informational only; presence never changes mode or safety.
     informed_retry: dict[str, Any] | None = None
+    #: Per-provider outcomes from the run's configured providers (issue #762),
+    #: empty when the caller supplied the environment or the run configures
+    #: none. A non-empty entry is evidence, not a mode: an unavailable provider
+    #: already degrades validation through the UNKNOWN resources it produced.
+    provider_diagnostics: tuple[ProviderDiagnostic, ...] = ()
 
     @property
     def state(self) -> SemanticState:
@@ -213,11 +225,15 @@ class RecoveryEngine:
         *,
         validator: StateValidator | None = None,
         strict_unknown: bool = True,
+        providers: ProviderRegistry | None = None,
     ) -> None:
         self.storage = storage
         self.validator = validator or StateValidator(strict_unknown=strict_unknown)
         self.strict_unknown = strict_unknown
         self._manager = CheckpointManager(storage)
+        #: Providers a configuration may resolve by name. Built-ins need no
+        #: registration; this is how a CallableProvider becomes discoverable.
+        self.providers = providers or ProviderRegistry()
 
     def assess(
         self,
@@ -228,6 +244,7 @@ class RecoveryEngine:
         replay: bool = True,
         scope: Iterable[str] | None = None,
         source_graph: SourceDependencyGraph | None = None,
+        provider_config: ProviderConfig | None = None,
     ) -> RecoveryDecision:
         """Decide how ``run_id`` may resume, without changing anything.
 
@@ -274,6 +291,24 @@ class RecoveryEngine:
             archive_aware_events = self.storage.read_all_events(run_id)
         except Exception:
             archive_aware_events = self.storage.read_events(run_id)
+
+        # Discoverable providers (issue #762): when the caller did not hand over
+        # a current environment, consult the run's configured providers instead,
+        # so a run that registered a world-observer is validated by it at resume
+        # without anyone having to remember to pass it in. An unconfigured run
+        # records no configuration event and keeps today's behaviour exactly.
+        provider_diagnostics: tuple[ProviderDiagnostic, ...] = ()
+        if current_environment is None:
+            config = (
+                provider_config
+                if provider_config is not None
+                else config_from_events(archive_aware_events)
+            )
+            if config is not None and config.specs:
+                captured = resolve_and_capture(run_id, config, registry=self.providers)
+                current_environment = captured.snapshot
+                provider_diagnostics = captured.diagnostics
+
         for _ev in archive_aware_events:
             if _ev.type is not EventType.REVIEW_CONFIRMED:
                 continue
@@ -563,6 +598,7 @@ class RecoveryEngine:
             impacted_files=impacted_files,
             tail_evidence=tail_evidence,
             informed_retry=informed_retry,
+            provider_diagnostics=provider_diagnostics,
         )
 
         # Process-wide counters (#1032). Imported lazily: observability imports

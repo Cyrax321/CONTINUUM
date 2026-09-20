@@ -791,6 +791,9 @@ _NON_PROJECTING = frozenset(
         # ring (see the enum's own note).
         EventType.NOTIFICATION_SENT,
         EventType.NOTIFICATION_FAILED,
+        # environment (issue #762): the provider configuration is append-only
+        # audit the resume path replays; it is not a field of run state.
+        EventType.ENVIRONMENT_PROVIDERS_CONFIGURED,
     }
 )
 

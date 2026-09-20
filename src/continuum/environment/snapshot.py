@@ -30,6 +30,7 @@ from continuum.security.hashing import stable_hash
 
 __all__ = [
     "EnvironmentProvider",
+    "ConfigurableProvider",
     "StaticProvider",
     "FileProvider",
     "ValueProvider",
@@ -55,7 +56,34 @@ class EnvironmentProvider(ABC):
         """Inspect resources. Must not raise: report ``UNKNOWN_VERSION`` instead."""
 
 
-class StaticProvider(EnvironmentProvider):
+class ConfigurableProvider(EnvironmentProvider):
+    """A provider a run can configure by name, without code.
+
+    ``from_config`` builds the provider from JSON-native parameters and
+    ``scope_of`` names the resource keys it will report, both without executing
+    the provider. That separation is what lets
+    :func:`~continuum.environment.config.resolve_and_capture` fail closed: it
+    knows what a provider owns before it asks the provider anything, so a
+    provider that cannot answer still leaves its resources reported rather than
+    absent.
+
+    Both raise ``ValueError`` on parameters they will not accept, and the
+    resolver treats that as a malformed configuration, reporting the declared
+    resources as unknown instead of trusting an unvalidated construction.
+    """
+
+    @classmethod
+    def from_config(cls, params: Mapping[str, Any]) -> ConfigurableProvider:
+        """Construct this provider from JSON-native parameters."""
+        raise NotImplementedError
+
+    @classmethod
+    def scope_of(cls, params: Mapping[str, Any]) -> frozenset[str]:
+        """The resource keys this configuration reports, without capturing."""
+        raise NotImplementedError
+
+
+class StaticProvider(ConfigurableProvider):
     """Fixed resources, supplied by the caller. Useful for tests and for
     environments CONTINUUM cannot inspect itself."""
 
@@ -71,8 +99,33 @@ class StaticProvider(EnvironmentProvider):
         """Return a copy of the fixed resources supplied at initialization."""
         return dict(self._resources)
 
+    @classmethod
+    def from_config(cls, params: Mapping[str, Any]) -> StaticProvider:
+        """Build a static provider from ``{"resources": {key: version}}``."""
+        resources = params.get("resources")
+        if not isinstance(resources, Mapping):
+            raise ValueError("a static provider needs a 'resources' mapping of key to version")
+        built: dict[str, EnvResource] = {}
+        for key, version in resources.items():
+            if not isinstance(key, str) or not isinstance(version, str) or not version:
+                raise ValueError(
+                    f"static resource {key!r} needs a non-empty string version, got {version!r}"
+                )
+            built[key] = EnvResource(name=key, version=version)
+        if not built:
+            raise ValueError("a static provider needs at least one resource")
+        return cls(resources=built)
 
-class ValueProvider(EnvironmentProvider):
+    @classmethod
+    def scope_of(cls, params: Mapping[str, Any]) -> frozenset[str]:
+        """The configured static resource keys."""
+        resources = params.get("resources")
+        if not isinstance(resources, Mapping):
+            raise ValueError("a static provider needs a 'resources' mapping of key to version")
+        return frozenset(resources)
+
+
+class ValueProvider(ConfigurableProvider):
     """Hashes arbitrary in-memory values into resource fingerprints."""
 
     name = "value"
@@ -105,8 +158,27 @@ class ValueProvider(EnvironmentProvider):
             captured[key] = EnvResource(name=key, kind="value", version=version, checksum=checksum)
         return captured
 
+    @classmethod
+    def from_config(cls, params: Mapping[str, Any]) -> ValueProvider:
+        """Build a value provider whose fingerprints come from the parameters."""
+        for key, value in params.items():
+            if not isinstance(key, str) or not key:
+                raise ValueError(f"a value parameter name must be a string, got {key!r}")
+            if callable(value) or not _is_json_native(value):
+                raise ValueError(
+                    f"value parameter {key!r} must be JSON-native, got {type(value).__name__}"
+                )
+        if not params:
+            raise ValueError("a value provider needs at least one parameter")
+        return cls(**params)
 
-class FileProvider(EnvironmentProvider):
+    @classmethod
+    def scope_of(cls, params: Mapping[str, Any]) -> frozenset[str]:
+        """One resource per configured value, keyed by parameter name."""
+        return frozenset(params)
+
+
+class FileProvider(ConfigurableProvider):
     """Fingerprints files by content hash.
 
     Content, not mtime: a file restored from backup has a new mtime but the same
@@ -125,6 +197,16 @@ class FileProvider(EnvironmentProvider):
         self.paths = [Path(p) for p in paths]
         self.chunk_size = chunk_size
         self.max_bytes = max_bytes
+
+    @classmethod
+    def from_config(cls, params: Mapping[str, Any]) -> FileProvider:
+        """Build a file provider from ``{"paths": [...], "max_bytes": N}``."""
+        return cls(_config_paths(params), **_config_size_kwargs(params))
+
+    @classmethod
+    def scope_of(cls, params: Mapping[str, Any]) -> frozenset[str]:
+        """One resource per path, normalized exactly as ``capture`` keys it."""
+        return frozenset(str(Path(p)) for p in _config_paths(params))
 
     def capture(self) -> Mapping[str, EnvResource]:
         """Fingerprint tracked files by streaming SHA-256 content checksums.
@@ -184,6 +266,13 @@ class CallableProvider(EnvironmentProvider):
 
     A probe that raises yields ``UNKNOWN_VERSION`` rather than propagating: an
     unreachable API is a validation result, not a crash.
+
+    Deliberately not a :class:`ConfigurableProvider`: a callable cannot be
+    serialized to the event log, and a configuration that held one would mean
+    different things before and after a restart. A run reaches a callable probe
+    by registering it by name with a
+    :class:`~continuum.environment.config.ProviderRegistry` and configuring that
+    name, so the configuration stays inert data and the probe stays live code.
     """
 
     name = "callable"
@@ -218,6 +307,40 @@ class CallableProvider(EnvironmentProvider):
                     name=key, kind=self._kind, version=None if value is None else str(value)
                 )
         return captured
+
+
+_JSON_NATIVE_TYPES: tuple[type, ...] = (str, int, float, bool, type(None), list, tuple, dict)
+
+
+def _is_json_native(value: object) -> bool:
+    """Whether a value survives a storage round-trip, without importing the
+    event payload validator (which would make this module depend on it)."""
+    return isinstance(value, _JSON_NATIVE_TYPES)
+
+
+def _config_paths(params: Mapping[str, Any]) -> list[str]:
+    """The ``paths`` parameter of a file provider, validated as strings."""
+    paths = params.get("paths")
+    if not isinstance(paths, (list, tuple)) or not paths:
+        raise ValueError("a file provider needs a non-empty 'paths' list")
+    if not all(isinstance(path, str) for path in paths):
+        raise ValueError(f"a file provider's paths must be strings, got {paths!r}")
+    return list(paths)
+
+
+def _config_size_kwargs(params: Mapping[str, Any]) -> dict[str, Any]:
+    """The optional ``chunk_size`` / ``max_bytes`` parameters, validated."""
+    kwargs: dict[str, Any] = {}
+    for key in ("chunk_size", "max_bytes"):
+        if key not in params:
+            continue
+        value = params[key]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"a file provider's {key} must be an integer, got {value!r}")
+        if value <= 0:
+            raise ValueError(f"a file provider's {key} must be positive, got {value!r}")
+        kwargs[key] = value if key != "max_bytes" else value
+    return kwargs
 
 
 def capture(
@@ -264,7 +387,7 @@ def process_fingerprint() -> Mapping[str, EnvResource]:
     }
 
 
-class GitProvider(EnvironmentProvider):
+class GitProvider(ConfigurableProvider):
     """Discovers the current commit of a git repository (git HEAD).
 
     A *discoverable* provider: rather than the agent asserting a version, this
@@ -277,6 +400,22 @@ class GitProvider(EnvironmentProvider):
 
     def __init__(self, path: str | Path = ".") -> None:
         self.path = Path(path)
+
+    @classmethod
+    def from_config(cls, params: Mapping[str, Any]) -> GitProvider:
+        """Build a git provider from ``{"path": "repo"}``, defaulting to ``.``."""
+        path = params.get("path", ".")
+        if not isinstance(path, str):
+            raise ValueError(f"a git provider 'path' must be a string, got {path!r}")
+        return cls(path)
+
+    @classmethod
+    def scope_of(cls, params: Mapping[str, Any]) -> frozenset[str]:
+        """The single ``git:<path>`` resource this provider reports."""
+        path = params.get("path", ".")
+        if not isinstance(path, str):
+            raise ValueError(f"a git provider 'path' must be a string, got {path!r}")
+        return frozenset({f"git:{Path(path)}"})
 
     def capture(self) -> Mapping[str, EnvResource]:
         """Inspect the current git commit HEAD for the configured repository.

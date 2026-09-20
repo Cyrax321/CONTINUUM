@@ -98,6 +98,11 @@ class EventType(StrEnum):
     STATE_CHECKPOINTED = "STATE_CHECKPOINTED"
     STATE_VALIDATED = "STATE_VALIDATED"
     ENVIRONMENT_CHANGED = "ENVIRONMENT_CHANGED"
+    # Which world-observers a run trusts at resume (issue #762). Append-only:
+    # the newest one is the authoritative configuration, and the payload holds
+    # the whole set, so an add and a remove are both full rewrites. Not folded:
+    # it configures validation rather than describing the task.
+    ENVIRONMENT_PROVIDERS_CONFIGURED = "ENVIRONMENT_PROVIDERS_CONFIGURED"
     RECOVERY_STARTED = "RECOVERY_STARTED"
     RECOVERY_COMPLETED = "RECOVERY_COMPLETED"
     RECOVERY_BLOCKED = "RECOVERY_BLOCKED"
