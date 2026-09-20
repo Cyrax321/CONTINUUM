@@ -397,6 +397,24 @@ def test_compacted_consumed_authority_still_denies(db: str, gateway: str) -> Non
     assert "spent" in body["reason"] and "consumed at seq" in body["reason"]
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({"id": "INV-2", "payment": {"auth_token": "spent"}}, id="dict-nested"),
+        pytest.param({"id": "INV-2", "payment": {"auth": ["spent"]}}, id="list-nested"),
+    ],
+)
+def test_nested_consumed_authority_still_denies(db: str, gateway: str, payload: dict) -> None:
+    """A spent authority nested in the body must not smuggle past the gateway (#1074)."""
+    from continuum.actions.authority import record_authority_consumed
+
+    with SQLiteStorage(db) as store:
+        record_authority_consumed(store, "run_1", "spent", via_action_id="original-action")
+    status, resp = post(gateway, "/v1/invoices", payload)
+    assert status == 403
+    assert "spent" in resp["reason"] and "consumed at seq" in resp["reason"]
+
+
 @pytest.mark.parametrize("bad_length", ["abc", "-5"])
 def test_malformed_length_smuggled_body_is_never_dispatched(
     db: str, gateway: str, bad_length: str
