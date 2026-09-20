@@ -6,7 +6,7 @@ overwrite each other.** One wins, the other is told it lost.
 
 These tests are the reason the engine takes an IMMEDIATE lock and keeps a
 UNIQUE constraint on ``(run_id, sequence)``. Without both, a race produces a
-forked chain that verifies clean — the worst possible failure, because it looks
+forked chain that verifies clean: the worst possible failure, because it looks
 correct.
 """
 
@@ -261,6 +261,16 @@ def test_the_run_lease_restores_exactly_once_under_concurrency(tmp_path: Path) -
     Wrapping the claim in the run's lease collapses eight simultaneous claimants
     to a single go-ahead, which is what makes docs/multi_agent_isolation.md's
     "one run, one owner at a time" sufficient for exactly-once.
+
+    The holder settles what it starts before letting go of the lease (issue
+    #672). A claim left STARTED at release is a live claim to every later
+    claimant: the ledger correctly raises UnknownSideEffect for a foreign
+    in-flight action, so a test whose winner never completes passes only when
+    no loser happens to acquire the lease after the winner's release, which is
+    timing and not a contract. Completing inside the hold makes the outcome
+    deterministic for every interleaving: one fresh claim, and every other
+    claimant is either turned away by the lease or served the deduplicated
+    result of the completed one.
     """
     from continuum.actions.ledger import ActionLedger
     from continuum.concurrency import SQLiteLeaseCoordinator
@@ -275,7 +285,10 @@ def test_the_run_lease_restores_exactly_once_under_concurrency(tmp_path: Path) -
             return "no-lease"
         try:
             with SQLiteStorage(db) as store:
-                outcome = ActionLedger(store, "run_1").claim("charge", {"amt": 100}, key="k")
+                ledger = ActionLedger(store, "run_1")
+                outcome = ledger.claim("charge", {"amt": 100}, key="k")
+                if outcome.fresh:
+                    ledger.complete(outcome.key, result={"charged": True})
                 return "fresh" if outcome.fresh else "dedup"
         finally:
             coordinator.release("run_1", holder)
@@ -284,6 +297,7 @@ def test_the_run_lease_restores_exactly_once_under_concurrency(tmp_path: Path) -
         outcomes = list(pool.map(claim, range(8)))
 
     assert outcomes.count("fresh") == 1, f"expected one winner, got {outcomes}"
+    assert set(outcomes) <= {"fresh", "dedup", "no-lease"}
 
 
 # --- the ledger takes the lease itself (issue #345, remaining half) ---------- #

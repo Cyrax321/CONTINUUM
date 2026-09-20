@@ -1,16 +1,16 @@
-"""Deciding how — and whether — a run may resume.
+"""Deciding how, and whether, a run may resume.
 
 The engine reduces three independent signals to one decision:
 
-* validation statuses (Phase 5) — is the state still true?
-* the action ledger (Phase 6) — did an external effect land?
-* checkpoint integrity (Phases 3–4) — is the record itself sound?
+* validation statuses (Phase 5): is the state still true?
+* the action ledger (Phase 6): did an external effect land?
+* checkpoint integrity (Phases 3–4): is the record itself sound?
 
 The decision rule
 -----------------
 
 **The most cautious applicable signal wins.** Not the first one evaluated, not
-the most common — the most cautious. Each signal proposes a mode; the engine
+the most common: the most cautious. Each signal proposes a mode; the engine
 takes the maximum on a severity ordering:
 
     RESUME < REPAIR_AND_RESUME < WAIT < REQUEST_HUMAN < ROLLBACK < ABORT
@@ -18,7 +18,7 @@ takes the maximum on a severity ordering:
 Order-independence matters because these signals genuinely co-occur. A run can
 have a stale dataset *and* an uncertain side effect at once. If the engine
 returned whichever it noticed first, the same situation would recover
-differently depending on iteration order — and the unsafe answer would win
+differently depending on iteration order, and the unsafe answer would win
 roughly half the time. Taking the maximum makes the outcome deterministic and
 always errs toward caution.
 
@@ -28,7 +28,7 @@ What the engine does not do
 It does not execute repairs, mutate the run, or contact anything external. It
 reads state and returns a decision plus a contract. Keeping it free of side
 effects means a recovery decision can be computed, logged and reviewed without
-committing to it — which is what makes ``continuum validate`` safe to run
+committing to it, which is what makes ``continuum validate`` safe to run
 against a live database.
 """
 
@@ -43,6 +43,7 @@ from continuum.analysis.depends import DependencyGraph as SourceDependencyGraph
 from continuum.checkpoint.manager import CheckpointManager, RestoredRun
 from continuum.environment.diff import EnvironmentDiff
 from continuum.events import EventType
+from continuum.gate import collect_consumed_authorities
 from continuum.models import (
     Action,
     ActionStatus,
@@ -88,7 +89,14 @@ _SAFETY_FOR_MODE: dict[RecoveryMode, RecoverySafety] = {
 
 @dataclass(frozen=True, slots=True)
 class RecoveryDecision:
-    """The engine's verdict, with everything needed to justify it."""
+    """The engine's verdict, with everything needed to justify it.
+
+    Advisory by default: this object describes the state of the run, it does
+    not control the process that asked about it (#1031). Nothing in the library
+    stops a caller from resuming after a verdict other than ``RESUME``. See
+    :meth:`permits` for the enforcement seams that do exist, none of which is
+    enabled without explicit configuration.
+    """
 
     run_id: str
     mode: RecoveryMode
@@ -112,23 +120,48 @@ class RecoveryDecision:
 
     @property
     def safe(self) -> bool:
+        """True only when the mode permits resuming without repair."""
         return self.mode is RecoveryMode.RESUME
 
     @property
     def environment_diff(self) -> EnvironmentDiff:
+        """The environment drift the validation found."""
         return self.validation.environment_diff
 
     @property
     def next_allowed_action(self) -> str | None:
+        """The single action the contract currently permits, if any."""
         return self.contract.next_allowed_action
 
     def permits(self, action: str) -> bool:
-        """Whether ``action`` is the one step the contract currently allows."""
+        """Whether ``action`` is the one step the contract currently allows.
+
+        Advisory, not enforcing. This reports what the contract allows; it does
+        not stop a caller from proceeding. CONTINUUM computes the verdict, it
+        does not supervise the process that asked for it (#1031).
+
+        A caller can ignore a ``False`` return and act anyway, and nothing in
+        the library will intervene. If you need the verdict *enforced*, that is
+        a separate seam and none of them is on by default:
+
+        * the host gate (``continuum gate``, :mod:`continuum.recovery.gate`)
+        * the HTTP gateway (``continuum gateway``, :mod:`continuum.gateway`)
+        * the replay guard (:mod:`continuum.replayguard`)
+        * observation hooks (``continuum hooks install``,
+          :mod:`continuum.clienthooks`)
+
+        Each must be configured explicitly; a plain ``pip install
+        continuum-agent`` gets none of them. The one enforcement that does ship
+        enabled is the CLI exit code: ``continuum resume`` exits non-zero unless
+        the run is verified safe, so ``continuum resume "$RUN" && ./start.sh``
+        cannot launch onto stale state (see :mod:`continuum.cli.exitcodes`).
+        """
         if self.mode is RecoveryMode.RESUME:
             return True
         return action == self.contract.next_allowed_action
 
     def render(self) -> str:
+        """Human-readable multi-line rendering of the decision and contract."""
         lines = [
             "CONTINUUM RECOVERY",
             "",
@@ -228,8 +261,20 @@ class RecoveryEngine:
         # Scoped confirm (issue #394) narrows this to named components only;
         # the payload may carry "components" or "scope" as a list, a single
         # string, or be absent (legacy full confirm of both).
+        # The scan includes the archived prefix so compaction cannot silently
+        # discard a human's confirmation (same archive-blindness family as
+        # issue #553): without it, a confirmed run re-escalates to
+        # request_human after every compaction.
         confirmed_components: set[str] = set()
-        for _ev in self.storage.read_events(run_id):
+        # Both archive-aware scans below (confirmations and provenance) share
+        # this one fetch: read_all_events walks the archived prefix too, and
+        # re-walking it twice per assess() doubles the archive scan for no
+        # gain.
+        try:
+            archive_aware_events = self.storage.read_all_events(run_id)
+        except Exception:
+            archive_aware_events = self.storage.read_events(run_id)
+        for _ev in archive_aware_events:
             if _ev.type is not EventType.REVIEW_CONFIRMED:
                 continue
             # Only human confirmations clear self-certification; an agent
@@ -252,11 +297,8 @@ class RecoveryEngine:
             else:
                 confirmed_components.update(["goal", "progress"])
 
-        # Provenance N-hop staleness (issue #553): include archived events so compaction does not launder
-        try:
-            provenance_events = self.storage.read_all_events(run_id)
-        except Exception:
-            provenance_events = self.storage.read_events(run_id)
+        # Provenance N-hop staleness (issue #553): the shared archive-aware
+        # fetch above feeds the validator so compaction does not launder it.
         validation = self.validator.validate(
             restored.state,
             current_environment=current_environment,
@@ -265,7 +307,7 @@ class RecoveryEngine:
             expected_model=expected_model,
             confirmed=confirmed_components,
             scope=scope,
-            events=provenance_events,
+            events=archive_aware_events,
         )
 
         ledger = ActionLedger(self.storage, run_id)
@@ -345,9 +387,118 @@ class RecoveryEngine:
             strict_unknown=self.validator.strict_unknown,
             unprojectable=unprojectable,
         )
+        liveness_advisory = None
+        liveness_breaches = 0
+        try:
+            from continuum.recovery.health import advisory_for_storage
+
+            liveness_advisory = advisory_for_storage(self.storage, run_id)
+            # Count prior breaches as DETECTED events. The archived prefix
+            # folds in via the shared fetch, so a silence detected before a
+            # compaction still counts: the live tail alone would reset the
+            # breach count to zero (same archive-blindness family as #553).
+            try:
+                liveness_breaches = sum(
+                    1 for e in archive_aware_events if e.type == EventType.LIVENESS_SILENCE_DETECTED
+                )
+            except Exception:
+                liveness_breaches = 0
+        except Exception:
+            liveness_advisory = None
+        # Risk evaluation (issue #303): map triggers to modes, collect ids.
+        # Runs before the decision so the worst trigger proposes alongside the
+        # other signals; the most cautious proposal wins regardless of order.
+        triggering_risks: list[str] = []
+        risk_mode = None
+        risk_rationale = None
+        try:
+            from continuum.recovery.risk import evaluate_risk, load_risk_policy
+
+            policy = load_risk_policy()
+            # Archive-aware: the shared fetch walks the archived prefix too, so
+            # compaction cannot empty triggering_risks by sealing the only
+            # RISK_OBSERVED events away from this scan.
+            try:
+                risk_events = [e for e in archive_aware_events if e.type == EventType.RISK_OBSERVED]
+            except Exception:
+                risk_events = []
+            best_mode = None
+            triggering: list[str] = []
+            triggers: list[str] = []
+            for risk_ev in risk_events:
+                trig = risk_ev.payload.get("trigger")
+                if not isinstance(trig, str):
+                    continue
+                mode_str = evaluate_risk(trig, policy)
+                if mode_str is None:
+                    continue
+                try:
+                    candidate = RecoveryMode(mode_str)
+                except Exception:
+                    continue
+                if best_mode is None or SEVERITY[candidate] > SEVERITY[best_mode]:
+                    best_mode = candidate
+                    triggering = [risk_ev.event_id]
+                    triggers = [trig]
+                elif SEVERITY[candidate] == SEVERITY[best_mode]:
+                    triggering.append(risk_ev.event_id)
+                    if trig not in triggers:
+                        triggers.append(trig)
+            if best_mode is not None:
+                risk_mode = best_mode
+                triggering_risks = triggering
+                # Name every trigger that proposed the winning mode, not just
+                # the first: the ids in triggering_risks are all contributors
+                # to the verdict the sealed reason justifies (issue #1057).
+                # Deduplicated by trigger so an equal-severity repeat does not
+                # duplicate the sentence the way #1042's double-append did.
+                risk_rationale = f"risk {', '.join(sorted(triggers))} triggers {best_mode.value}"
+        except Exception:
+            triggering_risks = []
+            risk_mode = None
+            risk_rationale = None
         mode, rationale = self._decide(
-            validation, uncertain, plan, restored, self.strict_unknown, admissibility
+            validation,
+            uncertain,
+            plan,
+            restored,
+            self.strict_unknown,
+            admissibility,
+            liveness_advisory=liveness_advisory,
+            risk_mode=risk_mode,
+            risk_rationale=risk_rationale,
         )
+
+        # Authority lifecycle (issue #289c): consumed authorities block resume
+        # until an external probe reconciles them. The gate already refuses
+        # forwarding, but the recovery decision must also surface the block
+        # so that `continuum resume` does not report safe when the gate would
+        # still deny. A later AUTHORITY_RECONCILED with valid true clears the
+        # map inside collect_consumed_authorities.
+        try:
+            # Archive-aware: an authority consumed before a compaction still
+            # blocks resume, and the AUTHORITY_RECONCILED that clears it may
+            # live in the archived prefix too.
+            consumed_authorities = collect_consumed_authorities(archive_aware_events)
+        except Exception:
+            # An empty map is the *unblocked* answer, and this block exists to
+            # be the check that survives a degraded log: when the ledger
+            # cannot be read, degrade to the most cautious verdict instead of
+            # asserting a safety conclusion the engine could not compute
+            # (issue #1066).
+            consumed_authorities = None
+        if consumed_authorities:
+            mode = RecoveryMode.REQUEST_HUMAN
+            rationale = (
+                *rationale,
+                f"consumed authority blocks resume: {sorted(consumed_authorities)}",
+            )
+        elif consumed_authorities is None:
+            mode = RecoveryMode.REQUEST_HUMAN
+            rationale = (
+                *rationale,
+                "consumed authority ledger unreadable: cannot clear the resume block",
+            )
 
         reason = "; ".join(rationale) if rationale else validation.report.reason
 
@@ -359,6 +510,16 @@ class RecoveryEngine:
             after_sequence = latest_version.source_sequence
         observations = collect_observations(self.storage, run_id, after_sequence=after_sequence)
 
+        # Build liveness section for contract
+        liveness_section = None
+        if liveness_advisory is not None:
+            liveness_section = {
+                "last_append_age": liveness_advisory.get("silence_seconds"),
+                "breaches": liveness_breaches,
+                "breached": bool(liveness_advisory.get("breached")),
+                "threshold_seconds": liveness_advisory.get("threshold_seconds"),
+                "phase": liveness_advisory.get("phase"),
+            }
         contract = build_contract(
             run_id=run_id,
             checkpoint_version=checkpoint_version,
@@ -368,6 +529,8 @@ class RecoveryEngine:
             reason=reason,
             scope=scope,
             post_checkpoint_observations=observations,
+            liveness=liveness_section,
+            triggering_risks=triggering_risks,
             admissibility=admissibility,
         )
 
@@ -387,7 +550,7 @@ class RecoveryEngine:
             plan=plan,
         )
 
-        return RecoveryDecision(
+        decision = RecoveryDecision(
             run_id=run_id,
             mode=mode,
             contract=contract,
@@ -400,6 +563,20 @@ class RecoveryEngine:
             tail_evidence=tail_evidence,
             informed_retry=informed_retry,
         )
+
+        # Process-wide counters (#1032). Imported lazily: observability imports
+        # RecoveryDecision from this module, so a top-level import would be
+        # circular. Collection is best-effort and never affects the verdict: a
+        # caller who resets or replaces the collector still gets the same
+        # decision, and a failure here must not change a safety property.
+        try:
+            from continuum.observability import collect_from_decision
+
+            collect_from_decision(decision)
+        except Exception:
+            pass
+
+        return decision
 
     # -- the decision rule ------------------------------------------------ #
 
@@ -437,6 +614,9 @@ class RecoveryEngine:
         restored: RestoredRun,
         strict_unknown: bool,
         admissibility: Any | None = None,
+        liveness_advisory: dict[str, object] | None = None,
+        risk_mode: RecoveryMode | None = None,
+        risk_rationale: str | None = None,
     ) -> tuple[RecoveryMode, tuple[str, ...]]:
         """Collect a proposal per signal and return the most cautious."""
         proposals: list[tuple[RecoveryMode, str]] = []
@@ -494,7 +674,7 @@ class RecoveryEngine:
 
         if not validation.safe:
             # Count only what actually needs repair. Reporting every status
-            # would include the VALID ones and overstate the damage — a run
+            # would include the VALID ones and overstate the damage: a run
             # with two verified components and one stale one would claim three
             # need repair. The decision itself is unaffected; the operator
             # reading the rationale is not.
@@ -510,6 +690,26 @@ class RecoveryEngine:
 
         if plan.requires_human:
             proposals.append((RecoveryMode.REQUEST_HUMAN, "at least one repair needs a person"))
+
+        # Liveness breach maps to WAIT, never auto-rollback (issue #302)
+        # Silence tells us nothing about what to roll back, only that a human
+        # or lease-recovery decision is needed. WAIT is the most cautious
+        # signal that still allows a lease to be recovered without human.
+        if liveness_advisory is not None and bool(liveness_advisory.get("breached")):
+            silence = liveness_advisory.get("silence_seconds")
+            threshold = liveness_advisory.get("threshold_seconds")
+            phase = liveness_advisory.get("phase") or "otherwise"
+            proposals.append(
+                (
+                    RecoveryMode.WAIT,
+                    f"liveness breach: silence {silence:.1f}s exceeds threshold {threshold}s (phase {phase})",
+                )
+            )
+
+        # Risk trigger mapping (issue #303): deterministic policy to mode
+        if risk_mode is not None:
+            rationale_text = risk_rationale or f"risk triggers {risk_mode.value}"
+            proposals.append((risk_mode, rationale_text))
 
         # A goal that is no longer valid cannot be repaired by re-running work.
         if any(
@@ -534,5 +734,11 @@ class RecoveryEngine:
         # entry. Both facts are asserted by tests rather than defended by dead
         # branches here.
         mode = max(proposals, key=lambda p: SEVERITY[p[0]])[0]
-        rationale = tuple(reason for proposed, reason in proposals if proposed is mode)
+        # dict.fromkeys dedups while preserving order: two proposals of the
+        # winning mode that carry the same sentence (the pasted-twice
+        # liveness block of #1042 did exactly that) must read as one reason,
+        # not as two observations that never happened.
+        rationale = tuple(
+            dict.fromkeys(reason for proposed, reason in proposals if proposed is mode)
+        )
         return mode, rationale

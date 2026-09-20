@@ -172,6 +172,23 @@ def test_reconcile_true_settles_uncertain_action(db: str, addr: str) -> None:
     assert "completed" in fold_statuses(db)
 
 
+def test_archived_uncertain_action_remains_visible_after_compaction(db: str) -> None:
+    from continuum.dashboard.hitl import pending_actions_with_keys
+
+    key = seed_uncertain(db, key="invoice:H-archived")
+    with SQLiteStorage(db) as store:
+        store.compact_run("run_1")
+        assert not any(
+            event.type is EventType.ACTION_RECORDED for event in store.read_events("run_1")
+        )
+
+        pending = pending_actions_with_keys(store, "run_1")
+
+    assert [(ledger_key, action.status.value) for ledger_key, action in pending] == [
+        (key, "started")
+    ]
+
+
 def test_reconcile_false_frees_the_action_for_retry(db: str, addr: str) -> None:
     seed_uncertain(db, key="invoice:H-2")
     status, _ = post(

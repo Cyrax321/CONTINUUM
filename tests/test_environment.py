@@ -13,7 +13,7 @@ from continuum.environment import (
     diff_environments,
     process_fingerprint,
 )
-from continuum.models import EnvResource
+from continuum.models import EnvResource, StateStatus
 
 # --- capture --------------------------------------------------------------- #
 
@@ -100,11 +100,59 @@ def test_an_unreadable_file_becomes_unknown(tmp_path: Path) -> None:
 
 
 def test_large_files_are_sized_rather_than_hashed(tmp_path: Path) -> None:
+    """An oversized file is reported as unknown, never as a fake identity.
+
+    The size used to be stamped into the version as ``size:<n>``, which
+    diff_environments then compared as an identity: a replaced file of the same
+    byte size verified as unchanged and the environment check failed open
+    (issue #738). The size lives in metadata instead.
+    """
     big = tmp_path / "big.bin"
     big.write_bytes(b"x" * 5000)
     resource = capture("run_1", FileProvider([big], max_bytes=1000)).resources[str(big)]
-    assert resource.version == "size:5000"
+    assert resource.version == UNKNOWN_VERSION
     assert resource.metadata["skipped"]
+    assert resource.metadata["size"] == 5000
+
+
+def test_a_replaced_same_size_oversized_file_is_not_verified_unchanged(tmp_path: Path) -> None:
+    """The fail-open regression (issue #738): same size, different content.
+
+    Two captures of a fully replaced file must never read as a verified
+    unchanged resource when the content was never hashed.
+    """
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"A" * 5000)
+    before = capture("run_1", FileProvider([big], max_bytes=1000))
+    big.write_bytes(b"B" * 5000)
+    after = capture("run_1", FileProvider([big], max_bytes=1000))
+
+    delta = next(d for d in diff_environments(before, after).deltas if d.resource == str(big))
+    assert delta.change is ResourceChange.UNKNOWN
+    assert "larger than max_bytes" in (delta.detail or "")
+
+
+def test_an_oversized_dependency_does_not_resume_as_verified(tmp_path: Path) -> None:
+    """The validator side of issue #738: unknown content must not read VALID."""
+    from continuum.models import ExternalDependency, Goal, Progress, SemanticState
+    from continuum.state.validator import validate_state
+
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"A" * 5000)
+    before = capture("run_1", FileProvider([big], max_bytes=1000))
+    big.write_bytes(b"B" * 5000)
+    after = capture("run_1", FileProvider([big], max_bytes=1000))
+
+    state = SemanticState(
+        run_id="run_1",
+        goal=Goal(description="analyse dataset"),
+        progress=Progress(),
+        external_dependencies=[ExternalDependency(resource=str(big), kind="file")],
+    )
+    outcome = validate_state(state, checkpoint_environment=before, current_environment=after)
+    entry = next(e for e in outcome.report.statuses if e.component_id == str(big))
+    assert entry.status is StateStatus.UNKNOWN
+    assert not outcome.report.safe_to_resume
 
 
 def test_value_provider_fingerprints_in_memory_state() -> None:

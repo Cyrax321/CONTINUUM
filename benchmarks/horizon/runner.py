@@ -14,6 +14,7 @@ from typing import Any
 
 from continuum.benchmark.phase6.metrics import BenchmarkReport, RecoveryOutcome, ScenarioResult
 from continuum.events import EventType
+from continuum.models import Origin
 from continuum.recovery import RecoveryEngine
 
 from .driver import run_horizon_scenario
@@ -34,20 +35,24 @@ def run_single_horizon(scenario_name: str) -> ScenarioResult:
         total_cycles=scen.cycles,
         mutations=scen.mutations,
     )
-    # For abort scenario, inject a decision invalidation to make it abort
+    # For the abort scenario, emit the risk signal the engine actually maps
+    # to ABORT. DECISION_INVALIDATED does not produce an abort proposal: the
+    # engine has no decision-invalidation -> abort path, and invalidating a
+    # decision escalates to REQUEST_HUMAN instead. The only mechanism that
+    # reaches ABORT is the risk policy (recovery/risk.py maps
+    # side_effect_duplicate -> ABORT), so the scenario exercises that.
     if scen.correct_mode == "abort":
-        # Invalidate a decision to force abort-like behavior
-        try:
-            horizon.storage.append_event(
-                horizon.run_id, EventType.DECISION_CREATED, {"decision_id": "d1", "decision": "x"}
-            )
+        with contextlib.suppress(Exception):
             horizon.storage.append_event(
                 horizon.run_id,
-                EventType.DECISION_INVALIDATED,
-                {"decision_id": "d1", "status": "invalid", "reason": "abort"},
+                EventType.RISK_OBSERVED,
+                {
+                    "trigger": "side_effect_duplicate",
+                    "score": 1.0,
+                    "detail": "duplicate effect observed",
+                },
+                source=Origin.EXTERNAL_MONITOR,
             )
-        except Exception:
-            pass
     # Assess recovery
     try:
         engine = RecoveryEngine(horizon.storage)

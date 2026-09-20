@@ -7,11 +7,11 @@ integrity hash makes it the unit recovery trusts.
 Ordering matters here. The manager writes the version, then the checkpoint,
 then records ``STATE_CHECKPOINTED``. If the process dies partway:
 
-* died before the version was written — nothing is lost; the state is still
+* died before the version was written: nothing is lost; the state is still
   derivable from the events.
-* died after the version but before the checkpoint — a version exists with no
+* died after the version but before the checkpoint: a version exists with no
   checkpoint. Harmless: the next checkpoint reuses it.
-* died after the checkpoint but before the event — the checkpoint exists and is
+* died after the checkpoint but before the event: the checkpoint exists and is
   valid; the log simply lacks the annotation. ``restore`` reads checkpoints, not
   the annotation, so recovery is unaffected.
 
@@ -50,7 +50,7 @@ from continuum.storage.base import Storage
 # SessionStart hook can inject a banner without opening the database.
 _RESUME_JSON = ".continuum/resume.json"
 
-__all__ = ["CheckpointManager", "RestoredRun", "CheckpointError"]
+__all__ = ["CheckpointManager", "RestoredRun", "CheckpointError", "clear_resume_pointer"]
 
 
 class CheckpointError(RuntimeError):
@@ -62,7 +62,7 @@ class RestoredRun:
     """What recovery gets back: verified state plus how stale it is.
 
     ``pending_events`` is the gap between the checkpoint and the end of the
-    log — work that happened after the last checkpoint. It is replayed onto the
+    log: work that happened after the last checkpoint. It is replayed onto the
     checkpoint rather than ignored, so a crash between checkpoints does not
     discard the work in between.
     """
@@ -75,6 +75,7 @@ class RestoredRun:
 
     @property
     def from_checkpoint(self) -> bool:
+        """True when the restore started from a checkpoint rather than replay."""
         return self.checkpoint is not None
 
 
@@ -161,9 +162,24 @@ class CheckpointManager:
 
     # -- writing ---------------------------------------------------------- #
 
-    def project_current(self, run_id: str) -> SemanticState:
-        """Fold the run's full event history into state."""
-        return project(run_id, self.storage.read_events(run_id))
+    def project_current(self, run_id: str, *, full_history: bool = True) -> SemanticState:
+        """Fold the run's event history into state.
+
+        Folds full history by default: after compaction RUN_STARTED and the
+        other foundation events live in the archive, and projecting the live
+        tail alone concludes the run never started (issue #648). The per-turn
+        auto-checkpoint path and the adapter hooks all inherit that default,
+        because a compaction can land between any two turns. Callers that can
+        prove they only need post-anchor facts pass ``full_history=False``:
+        ``restore`` does, since it replays the live tail onto a stored
+        checkpoint state rather than folding the archive again.
+        """
+        events = (
+            self.storage.read_all_events(run_id)
+            if full_history
+            else self.storage.read_events(run_id)
+        )
+        return project(run_id, events)
 
     def checkpoint(
         self,
@@ -208,6 +224,12 @@ class CheckpointManager:
         self._last_checkpoint_at[run_id] = stored.created_at
         self._last_state[run_id] = stored.state
         self._annotation_sequence[run_id] = annotation.sequence
+        # Process-wide counter (#1032). Best effort: a metrics failure must
+        # never break checkpointing, which is the safety-critical path.
+        with contextlib.suppress(Exception):
+            from continuum.observability import CHECKPOINTS_CREATED, get_metrics
+
+            get_metrics().increment(CHECKPOINTS_CREATED)
         # Instant resume detection (issue #394): persist a tiny file the
         # SessionStart hook can read without touching SQLite. Best effort;
         # a failure here must not break checkpointing itself.
@@ -301,6 +323,7 @@ class CheckpointManager:
         )
 
     def history(self, run_id: str) -> Sequence[StateCheckpoint]:
+        """Every checkpoint for the run in creation order, via storage."""
         return self.storage.list_checkpoints(run_id)
 
     # -- recovery anchors ------------------------------------------------- #
@@ -393,3 +416,35 @@ def _write_resume_json(run_id: str, checkpoint: StateCheckpoint) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
+
+
+def clear_resume_pointer(run_id: str) -> bool:
+    """Remove the SessionStart resume pointer when it names ``run_id``.
+
+    The inverse of :func:`_write_resume_json` (issue #394). A run closed as
+    completed is no longer interrupted, so the banner its checkpoints wrote
+    must not keep surfacing that run as the active one on the next session
+    start. Every path that closes a run - the CLI, the TUI, and the dashboard
+    HITL buttons - routes through here so a completion cannot leave a stale
+    pointer behind.
+
+    A pointer naming any other run is left alone. Missing or unreadable files
+    are not errors, and a failure to unlink is swallowed: a stale pointer costs
+    a wrong banner, but failing the removal would cost the completion itself.
+    Valid JSON that is not an object (a bare number, string, list, or ``null``
+    from a truncated or tampered file) is likewise not an error, since the
+    pointer cannot name this run either.
+    Returns whether the pointer named this run and was removed.
+    """
+    path = Path(_RESUME_JSON)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(payload, dict) or payload.get("run_id") != run_id:
+        return False
+    try:
+        path.unlink()
+    except OSError:
+        return False
+    return True

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from continuum.events import Event, EventType
@@ -75,6 +75,7 @@ class ProjectionReport:
 
     @property
     def complete(self) -> bool:
+        """True when the fold understood every event type it consumed."""
         return not self.ignored_types
 
 
@@ -91,7 +92,7 @@ def _provenance(event: Event) -> Provenance:
     """Carry the event's own trust marker into the projected component.
 
     Previously this hardcoded ``DETERMINISTIC``, which was true of the *fold*
-    but said nothing about the event being folded — so an agent's self-report
+    but said nothing about the event being folded, so an agent's self-report
     projected as indistinguishable from a verified fact.
 
     For derived artifacts (issue #392) the payload may carry a stamped
@@ -193,6 +194,18 @@ def _as_str_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Interpret a naive datetime as UTC; aware values pass through.
+
+    Event payloads are external input: an ``expires_at`` ISO string without a
+    UTC offset (``"2027-01-01"``) parses to a naive datetime, and everything
+    downstream compares against the tz-aware ``utcnow()``, which would raise
+    TypeError and brick validation for the run (issue #704). The project
+    convention is UTC everywhere, so a missing offset is read as UTC.
+    """
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+
 def _replace(items: list[Any], key: str, identifier: str, updated: Any) -> bool:
     for index, item in enumerate(items):
         if getattr(item, key) == identifier:
@@ -250,6 +263,7 @@ class _Accumulator:
     # -- handlers --------------------------------------------------------- #
 
     def run_started(self, event: Event) -> None:
+        """Fold a run start into the goal, progress, and creation time."""
         self.goal = Goal(
             description=_payload_str(event, "goal"),
             version=int(event.payload.get("goal_version", 1)),
@@ -264,6 +278,7 @@ class _Accumulator:
         self.created_at = event.timestamp
 
     def task_updated(self, event: Event) -> None:
+        """Fold a goal or progress update; raises ProjectionError before any start."""
         if self.goal is None:
             raise ProjectionError(
                 f"event {event.event_id}: TASK_UPDATED before the run was started"
@@ -291,7 +306,7 @@ class _Accumulator:
 
         # Re-derive `pending` whenever the caller moved `completed`/`failed`
         # without restating it. Keeping the old value would leave the counters
-        # summing past `total` and the update would be rejected — punishing a
+        # summing past `total` and the update would be rejected, punishing a
         # caller for omitting a field that had not changed.
         total = current["total"]
         if total is not None and "pending" not in payload:
@@ -336,6 +351,7 @@ class _Accumulator:
             self.pending_work = [w for w in self.pending_work if w.task_id != str(task_id)]
 
     def decision_created(self, event: Event) -> None:
+        """Fold a new decision, replacing any row with the same id."""
         decision = Decision(
             decision_id=_payload_str(event, "decision_id"),
             decision=_payload_str(event, "decision"),
@@ -348,6 +364,7 @@ class _Accumulator:
             self.decisions.append(decision)
 
     def decision_invalidated(self, event: Event) -> None:
+        """Mark the named decision invalid; raises ProjectionError for an unknown id."""
         decision_id = _payload_str(event, "decision_id")
         existing = next((d for d in self.decisions if d.decision_id == decision_id), None)
         if existing is None:
@@ -369,6 +386,7 @@ class _Accumulator:
         )
 
     def evidence_added(self, event: Event) -> None:
+        """Fold a new evidence item into the accumulator."""
         item = Evidence(
             evidence_id=_payload_str(event, "evidence_id"),
             summary=str(event.payload.get("summary", "")),
@@ -387,6 +405,7 @@ class _Accumulator:
             self.evidence.append(item)
 
     def finding_added(self, event: Event) -> None:
+        """Fold a new finding into the accumulator."""
         finding = Finding(
             finding_id=_payload_str(event, "finding_id"),
             claim=_payload_str(event, "claim"),
@@ -399,6 +418,7 @@ class _Accumulator:
             self.findings.append(finding)
 
     def finding_invalidated(self, event: Event) -> None:
+        """Mark the named finding invalid; raises ProjectionError for an unknown id."""
         finding_id = _payload_str(event, "finding_id")
         existing = next((f for f in self.findings if f.finding_id == finding_id), None)
         if existing is None:
@@ -411,6 +431,7 @@ class _Accumulator:
         )
 
     def work_added(self, event: Event) -> None:
+        """Fold a new pending-work item into the accumulator."""
         work = PendingWork(
             task_id=_payload_str(event, "task_id"),
             description=_payload_str(event, "description"),
@@ -422,6 +443,7 @@ class _Accumulator:
             self.pending_work.append(work)
 
     def dependency_declared(self, event: Event) -> None:
+        """Fold a declared external dependency into the accumulator."""
         dependency = ExternalDependency(
             resource=_payload_str(event, "resource"),
             kind=str(event.payload.get("kind", "resource")),
@@ -440,6 +462,7 @@ class _Accumulator:
             self.dependencies.append(dependency)
 
     def approval_requested(self, event: Event) -> None:
+        """Fold a new approval request into the accumulator."""
         approval = Approval(
             approval_id=_payload_str(event, "approval_id"),
             subject=_payload_str(event, "subject"),
@@ -449,6 +472,7 @@ class _Accumulator:
             self.approvals.append(approval)
 
     def approval_resolved(self, event: Event, status: ApprovalStatus) -> None:
+        """Fold an approval resolution, creating the row when unknown."""
         approval_id = _payload_str(event, "approval_id")
         existing = next((a for a in self.approvals if a.approval_id == approval_id), None)
         if existing is None:
@@ -467,7 +491,9 @@ class _Accumulator:
                     if event.payload.get("granted_by") is not None
                     else None
                 ),
-                "expires_at": datetime.fromisoformat(str(expires_raw)) if expires_raw else None,
+                "expires_at": (
+                    _as_utc(datetime.fromisoformat(str(expires_raw))) if expires_raw else None
+                ),
                 "reason": (
                     str(event.payload["reason"])
                     if event.payload.get("reason") is not None
@@ -478,6 +504,7 @@ class _Accumulator:
         _replace(self.approvals, "approval_id", approval_id, updated)
 
     def model_changed(self, event: Event) -> None:
+        """Fold a model change, keeping the previous model for the record."""
         previous = self.model
         self.model = ModelState(
             model=str(event.payload.get("model")) if event.payload.get("model") else None,
@@ -489,6 +516,7 @@ class _Accumulator:
         )
 
     def model_assumption_recorded(self, event: Event) -> None:
+        """Fold a model-specific assumption into the accumulator."""
         assumption = ModelSpecificState(
             item_id=_payload_str(event, "item_id"),
             description=_payload_str(event, "description"),
@@ -499,6 +527,7 @@ class _Accumulator:
         self.model = current.model_copy(update={"model_specific_state": assumptions})
 
     def constraint_pinned(self, event: Event) -> None:
+        """Fold a newly pinned governance constraint."""
         payload = ConstraintPinned.model_validate(event.payload)
         pin = ConstraintPin(
             constraint_id=payload.constraint_id,
@@ -510,6 +539,7 @@ class _Accumulator:
         self.pins[payload.constraint_id] = pin
 
     def constraint_retracted(self, event: Event) -> None:
+        """Fold a constraint retraction."""
         payload = ConstraintRetracted.model_validate(event.payload)
         constraint_id = payload.constraint_id
         if constraint_id in self.pins:
@@ -519,6 +549,7 @@ class _Accumulator:
                 self.unmatched_pin_retractions.append(constraint_id)
 
     def attempt_lesson(self, event: Event) -> None:
+        """Fold a recorded attempt lesson into the accumulator."""
         lesson = AttemptLesson.model_validate(event.payload)
         if any(existing.attempt_id == lesson.attempt_id for existing in self.attempt_lessons):
             return
@@ -526,6 +557,7 @@ class _Accumulator:
         self.attempt_lessons.sort(key=lambda existing: existing.created_at)
 
     def trajectory_report(self, event: Event) -> None:
+        """Fold a trajectory report into the accumulator."""
         report = TrajectoryReport.model_validate(event.payload)
         if any(existing.report_id == report.report_id for existing in self.trajectory_reports):
             return
@@ -535,6 +567,7 @@ class _Accumulator:
         self.trajectory_reports.sort(key=lambda existing: existing.window_end)
 
     def plan_upsert(self, event: Event) -> None:
+        """Fold a plan upsert, merging steps by id."""
         payload = event.payload
         plan_id = payload.get("plan_id")
         if not isinstance(plan_id, str) or not plan_id.strip():
@@ -595,6 +628,7 @@ class _Accumulator:
     # -- finish ----------------------------------------------------------- #
 
     def build(self) -> SemanticState:
+        """Assemble the accumulated rows into the projected state."""
         return self._build()
 
     def build_degraded(self, event: Event, reason: str) -> SemanticState:
@@ -726,6 +760,45 @@ _NON_PROJECTING = frozenset(
         EventType.GRANT_DENIED,
         # log maintenance (issue #239): records the compaction boundary itself
         EventType.EVENT_LOG_ANCHORED,
+        # liveness (issue #302): silence detection and recovery, never state
+        EventType.LIVENESS_SILENCE_DETECTED,
+        EventType.LIVENESS_RECOVERED,
+        # risk (issue #303): real-time risk signal, never state
+        EventType.RISK_OBSERVED,
+        # lineage (issue #259): restore/merge markers recording that an edit
+        # happened, sibling to RUN_FORKED above. The fold reads their effect
+        # off the log boundary itself, not out of these events.
+        EventType.RUN_RESTORED,
+        EventType.RUN_MERGED,
+        # human-in-the-loop: a confirmation receipt, never state
+        EventType.REVIEW_CONFIRMED,
+        # agent cognition (issue #235): the briefing surface reads this
+        # straight off the log; the projection does not fold it into state
+        EventType.REASONING_SUMMARY,
+        # perception and planning (security extension): the perception/branch
+        # ledger is consulted by its own readers, not by the state fold
+        EventType.PERCEPTION_OBSERVED,
+        EventType.BRANCH_RESOLVED,
+        # authority lifecycle (issue #289/#555): consumption and reconciliation
+        # are audit facts -- the enforcement reads them from the log
+        EventType.AUTHORITY_CONSUMED,
+        EventType.AUTHORITY_RECONCILED,
+        # memory governance (issue #304, #567): tombstone an operator finds
+        # by polling the log, never a projected field
+        EventType.MEMORY_TOMBSTONED,
+        # delivery receipts: best-effort and never gates a verdict. FAILED is
+        # the dead-letter row found by polling the log when the bell did not
+        # ring (see the enum's own note).
+        EventType.NOTIFICATION_SENT,
+        EventType.NOTIFICATION_FAILED,
+        # subagent spanning: delegation-chain trace the provenance and adapter
+        # surfaces read back; a span records what happened, not run state.
+        EventType.SUBAGENT_SPAWNED,
+        EventType.SUBAGENT_COMPLETED,
+        EventType.SUBAGENT_FAILED,
+        # context compaction: a marker the validator reads to report what a
+        # compaction kept; the fold reads its effect off the log boundary.
+        EventType.PRECOMPACT_HOOK,
     }
 )
 
@@ -846,7 +919,7 @@ def first_unprojectable_event(
     for event in sorted(events, key=lambda e: e.sequence):
         try:
             state, _ = project_incremental(run_id, [event], base=state)
-        except Exception as exc:  # noqa: BLE001 - see docstring
+        except Exception as exc:
             return event.sequence, str(event.type), _condense(str(exc))
     return None
 
@@ -860,7 +933,7 @@ def project(
 ) -> SemanticState:
     """Project a run's events into semantic state.
 
-    ``upto`` truncates the fold at a sequence number — the mechanism behind
+    ``upto`` truncates the fold at a sequence number: the mechanism behind
     ``continuum inspect --version`` and recovery from a partially trusted log.
 
     ``on_unprojectable`` forwards to :func:`project_incremental`: ``"raise"``
@@ -947,7 +1020,7 @@ def account_pins_in_context(
             flag = None
         else:
             # If context was truncated, we cannot tell if the pin was in a
-            # dropped section — mark as unverifiable rather than absent
+            # dropped section; mark as unverifiable rather than absent
             if is_truncated:
                 # Heuristic: if the pin's marker would have been in a low-
                 # priority section that was dropped, mark unverifiable

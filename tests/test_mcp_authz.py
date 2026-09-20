@@ -6,7 +6,7 @@ asking "is this safe to resume?" should never require permission.
 
 This is authorization by declared identity, not authentication. ``clientInfo``
 is asserted by the client at handshake and never verified, so these tests prove
-that honestly-named agents are kept apart — not that a hostile one is stopped.
+that honestly-named agents are kept apart, not that a hostile one is stopped.
 """
 
 from __future__ import annotations
@@ -311,7 +311,7 @@ async def test_read_only_tools_stay_open_to_anyone(
     """Asking "is this safe to resume?" must never require permission.
 
     A stranger denied read access could not even discover why its writes are
-    failing, and the information disclosed — a run's goal and progress — is
+    failing, and the information disclosed (a run's goal and progress) is
     already readable by anyone holding the database file.
     """
     await seed(server)

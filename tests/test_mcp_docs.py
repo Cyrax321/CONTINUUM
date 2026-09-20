@@ -23,13 +23,40 @@ from continuum.storage import SQLiteStorage
 #: The API reference page whose tool table mirrors ``tools/list``.
 MCP_DOC = Path(__file__).resolve().parents[1] / "docs" / "api" / "mcp.md"
 
+#: The MCP adversarial audit report whose coverage table must also stay complete.
+MCP_AUDIT = Path(__file__).resolve().parents[1] / "docs" / "TESTING_MCP.md"
+
 #: One documented tool: name and kind. The purpose column is prose and is left
 #: to a human reviewer, as is the sentence of totals under the table; the two
 #: columns that can silently contradict the server are not.
 ROW = re.compile(r"^\| `(continuum_\w+)` \| (mutate|read) \|", re.MULTILINE)
 
+#: Tool names listed in the audit coverage table (issue #759).
+AUDIT_TOOL = re.compile(r"^\| `(continuum_\w+)` \|", re.MULTILINE)
+
 #: The character house style bans, by code point so this file carries none.
 EM_DASH = chr(0x2014)
+
+#: Files whose shell commands document how to install the package, so the
+#: extras are spelled and quoted the same way in each of them.
+ROOT = Path(__file__).resolve().parents[1]
+INSTALL_DOCS = [
+    ROOT / "docs" / "api" / "README.md",
+    ROOT / "docs" / "api" / "mcp.md",
+    ROOT / "README.md",
+    ROOT / "references" / "install.md",
+    ROOT / "references" / "adapters.md",
+    ROOT / "references" / "quickstart.md",
+]
+
+#: An install command and its first non-flag argument: the target an extra
+#: appears in, if one appears at all.
+INSTALL_COMMAND = re.compile(r"(?:pip|uv pip) install\s+(?:-\S+\s+)*(\S+)")
+
+
+def _extras_targets(text: str) -> list[str]:
+    """Every install target in ``text`` that carries an extras bracket."""
+    return [target for target in INSTALL_COMMAND.findall(text) if "[" in target]
 
 
 @pytest.fixture
@@ -69,6 +96,121 @@ async def test_the_table_lists_every_served_tool_with_its_kind(server: Any) -> N
     assert dict(rows) == kinds(await server.list_tools())
 
 
+@pytest.mark.asyncio
+async def test_the_audit_coverage_table_lists_every_served_tool(server: Any) -> None:
+    """``docs/TESTING_MCP.md`` must name every tool ``tools/list`` exposes.
+
+    The audit once claimed "all 11 tools" while ``continuum_record_plan`` was
+    already served (issue #759). Pinning the coverage table to ``tools/list``
+    keeps that claim from rotting again.
+    """
+    text = MCP_AUDIT.read_text(encoding="utf-8")
+    section = text.split("## Tool coverage", 1)[1].split("## Findings", 1)[0]
+    covered = AUDIT_TOOL.findall(section)
+    assert len(covered) == len(set(covered)), "a tool is audited twice"
+    served = {tool.name for tool in await server.list_tools()}
+    assert set(covered) == served
+    assert "All 12 tools were exercised" in text
+
+
 def test_the_page_carries_no_em_dashes() -> None:
     """House style forbids them (issue #266) and one had reached the table."""
     assert EM_DASH not in MCP_DOC.read_text(encoding="utf-8")
+
+
+#: The repo root, for scanning the docs that state the MCP tool count.
+ROOT = Path(__file__).resolve().parents[1]
+
+#: Prose and tables that state how many tools the MCP server serves: the
+#: markdown docs, the marketing page, and the architecture drawing's text.
+TOOL_COUNT_DOCS = [
+    ROOT / "README.md",
+    *sorted((ROOT / "docs").rglob("*.md")),
+    *sorted((ROOT / "docs").rglob("*.html")),
+    *sorted((ROOT / "docs").rglob("*.svg")),
+    *sorted((ROOT / "references").rglob("*.md")),
+]
+
+#: A tool-count claim: "12 tools", "eleven tools", "12 stdio tools",
+#: "twelve MCP tools", "the twelve-tool server". The number may be digits or
+#: a word up to thirteen, and up to one adjective may sit before "tools".
+_TOOL_COUNT_CLAIM = re.compile(
+    r"\b(\d+|eleven|twelve|thirteen)[-\s]+(?:stdio\s+|MCP\s+)?tools\b", re.IGNORECASE
+)
+_WORD_TO_NUM = {"eleven": 11, "twelve": 12, "thirteen": 13}
+
+#: The mutating half of the same claim: "9 mutating", "8 mutating".
+_MUTATING_CLAIM = re.compile(r"\b(\d+)\s+mutating\b", re.IGNORECASE)
+
+#: A claim only counts when it is about this server, not a surveyed external
+#: system (the research notes describe benchmarks with their own tool counts),
+#: so the window around the claim must name the server or its transport.
+_ABOUT_US = re.compile(r"mcp|continuum|stdio|inspector", re.IGNORECASE)
+
+
+def _claims_about_us(text: str, match: re.Match[str]) -> bool:
+    window = text[max(0, match.start() - 200) : match.end() + 200]
+    return bool(_ABOUT_US.search(window))
+
+
+@pytest.mark.asyncio
+async def test_documented_tool_counts_match_the_server(server: Any) -> None:
+    """Every tool-count claim in the docs equals what ``tools/list`` serves.
+
+    The count drifted twice (#271, #759): tools were added and the prose kept
+    saying eleven, in ten files at once (#840). The server is the only
+    authority, so every claim about it is compared against it, digits and
+    words alike, including the read-only/mutating split. Claims about other
+    systems' tools (the research surveys) are left alone.
+    """
+    tools = await server.list_tools()
+    served = len(tools)
+    mutating = sum(
+        1 for tool in tools if not (tool.annotations and tool.annotations.read_only_hint)
+    )
+    for path in TOOL_COUNT_DOCS:
+        text = path.read_text(encoding="utf-8")
+        for match in _TOOL_COUNT_CLAIM.finditer(text):
+            if not _claims_about_us(text, match):
+                continue
+            claim = _WORD_TO_NUM.get(match.group(1).lower())
+            if claim is None:
+                claim = int(match.group(1))
+            assert claim == served, (
+                f"{path} claims {match.group(0)!r} but tools/list serves {served}"
+            )
+        for match in _MUTATING_CLAIM.finditer(text):
+            if not _claims_about_us(text, match):
+                continue
+            assert int(match.group(1)) == mutating, (
+                f"{path} claims {match.group(0)!r} but {mutating} tools mutate"
+            )
+
+
+def test_documented_extras_name_the_real_package() -> None:
+    """No install command teaches ``continuum[...]``, the wrong package.
+
+    A real PyPI package exists under the bare name ``continuum``, so a doc
+    that sends the operator to it installs something unrelated instead of the
+    extra (issue #836, the bug the remediation message shipped with until
+    #719). Removing every legitimate ``continuum-agent[`` first leaves only
+    the wrong spellings behind.
+    """
+    for path in INSTALL_DOCS:
+        text = path.read_text(encoding="utf-8")
+        assert "continuum[" not in text.replace("continuum-agent[", ""), (
+            f"{path} teaches an install of the wrong package"
+        )
+
+
+def test_documented_extras_are_quoted() -> None:
+    """Every extras-bearing install target is quoted.
+
+    Unquoted brackets are a glob in zsh, where ``pip install continuum-agent[
+    mcp]`` either fails or silently expands to the files that happen to match
+    (issue #836). Quoting is the documented house form in every context, so
+    the guard scans the target of every install command that carries one.
+    """
+    for path in INSTALL_DOCS:
+        for target in _extras_targets(path.read_text(encoding="utf-8")):
+            assert target.startswith('"'), f"{path}: unquoted extras in {target}"

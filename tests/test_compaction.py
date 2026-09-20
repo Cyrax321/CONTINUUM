@@ -252,6 +252,41 @@ def test_bounded_size_after_compaction(db: str) -> None:
     assert live_rows <= 25
 
 
+def test_a_run_can_be_compacted_repeatedly(db: str) -> None:
+    """Compact, work, compact: repeated compaction succeeds (issue #648).
+
+    The second compact takes a fresh anchor checkpoint whose projection used
+    to fold the live tail only. After the first compaction that tail begins
+    at the anchor markers with no RUN_STARTED, so the anchor raised
+    "could not be anchored ... has no goal" and a long-lived run could never
+    be compacted again, accumulating an unbounded live tail instead.
+    """
+    for i in range(3):
+        work(db, i)
+    with SQLiteStorage(db) as store:
+        first = store.compact_run("run_1")
+        assert first["archived"] > 0
+        assert store.verify_events("run_1").ok
+
+    for i in range(3, 6):
+        work(db, i)
+    with SQLiteStorage(db) as store:
+        archived_before = len(store.read_archived_events("run_1"))
+        second = store.compact_run("run_1")
+        assert second["archived"] > 0, "the second compact must archive the new prefix"
+        assert store.verify_events("run_1").ok
+        # Only the new prefix moved: total archived grew by exactly what this
+        # compact reported, and the live tail still carries the anchor markers.
+        archived_after = len(store.read_archived_events("run_1"))
+        assert archived_after - archived_before == second["archived"]
+        live_types = [e.type for e in store.read_events("run_1")]
+        assert EventType.EVENT_LOG_ANCHORED in live_types
+
+    # Recovery still works on the twice-compacted run.
+    restored = CheckpointManager(SQLiteStorage(db)).restore("run_1")
+    assert restored.state.run_id == "run_1"
+
+
 # --- protected nodes keep working across compaction ------------------------------ #
 
 
@@ -346,3 +381,47 @@ def test_anchor_event_is_non_projecting(db: str) -> None:
     assert not report.ignored_types, (
         "EVENT_LOG_ANCHORED must be declared non-projecting, not silently ignored"
     )
+
+
+def test_read_all_events_merges_in_sequence_order(db: str) -> None:
+    """Full history stays sequence-ordered across the archive boundary (#650 review)."""
+    with SQLiteStorage(db) as store:
+        for i in range(3):
+            store.append_event("run_1", EventType.WORK_COMPLETED, {"n": i})
+        store.compact_run("run_1")
+        for i in range(3, 6):
+            store.append_event("run_1", EventType.WORK_COMPLETED, {"n": i})
+        full = store.read_all_events("run_1")
+    seqs = [e.sequence for e in full]
+    assert seqs == sorted(seqs)
+    assert len(seqs) == len(set(seqs))
+    assert [e.payload["n"] for e in full if e.type is EventType.WORK_COMPLETED] == list(range(6))
+
+
+def test_compact_run_rejects_through_sequence_that_would_eat_the_anchor(db: str) -> None:
+    """Issue #705: through_sequence at or above the anchor's own sequence
+    must be rejected. Accepting it archived and deleted the anchor (and with
+    it the whole live log), so the next append minted a fresh genesis and
+    forked the hash chain away from the archive."""
+    for i in range(4):
+        work(db, i)
+    with SQLiteStorage(db) as store:
+        pre_live = len(store.read_events("run_1"))
+
+        with pytest.raises(ValueError, match="anchor"):
+            store.compact_run("run_1", through_sequence=10_000)
+
+        # The rejected call leaves a healthy, verifiable log behind: nothing
+        # was archived, only the forced checkpoint marker was appended.
+        report = store.verify_events("run_1")
+        assert report.ok, [v.kind for v in report.violations]
+        live = store.read_events("run_1")
+        assert len(live) == pre_live + 1
+        assert store.read_events("run_1")[0].sequence == 1, "live rows must not have moved"
+
+        # A bounded value below the anchor still compacts normally.
+        result = store.compact_run("run_1", through_sequence=1)
+        assert result["archived"] >= 1
+        assert any(e.type is EventType.EVENT_LOG_ANCHORED for e in store.read_events("run_1"))
+        report = store.verify_events("run_1")
+        assert report.ok, [v.kind for v in report.violations]

@@ -42,6 +42,26 @@ from continuum.recovery.ledger import LedgerLockError
 from continuum.storage import SQLiteStorage
 from continuum.testing import environment_fixture
 
+__all__ = [
+    "ALL_SCENARIOS",
+    "env_multi",
+    "scenario_adapter_failure_across_environments",
+    "scenario_checkpoint_rollback_correctness",
+    "scenario_concurrent_recovery_safety",
+    "scenario_external_edit_drift",
+    "scenario_human_verdict_honored",
+    "scenario_large_state_recovery_latency",
+    "scenario_ledger_tamper_detected",
+    "scenario_missing_dependency_graph_fallback",
+    "scenario_multi_dependency_corruption",
+    "scenario_out_of_scope_side_effect",
+    "scenario_plan_aware_resume_skips_completed_units",
+    "scenario_recovery_lease_exhaustion",
+    "scenario_single_dependency_corruption",
+    "scenario_transient_network_failure_on_install",
+    "seed_two",
+]
+
 
 def _new_store() -> SQLiteStorage:
     storage = SQLiteStorage(":memory:")
@@ -51,6 +71,7 @@ def _new_store() -> SQLiteStorage:
 
 
 def env_multi(**versions: str) -> EnvironmentSnapshot:
+    """Build an environment snapshot from resource name to version pairs."""
     return capture(
         "run_1",
         StaticProvider(
@@ -102,6 +123,7 @@ def _contract(version: int = 0) -> RecoveryContract:
 
 
 def scenario_single_dependency_corruption(ctx: ScenarioContext) -> None:
+    """One stale dependency invalidates only its own subtree."""
     with environment_fixture(dependencies=("dataset", "other")) as fx:
         decision = fx.engine.assess(
             fx.run_id, current_environment=fx.capture(dataset="v2"), scope={"dataset"}
@@ -112,6 +134,7 @@ def scenario_single_dependency_corruption(ctx: ScenarioContext) -> None:
 
 
 def scenario_multi_dependency_corruption(ctx: ScenarioContext) -> None:
+    """Stale dependencies are each reported invalid."""
     with environment_fixture(dependencies=("dataset", "other")) as fx:
         decision = fx.engine.assess(
             fx.run_id, current_environment=fx.capture(dataset="v2", other="v2")
@@ -121,6 +144,7 @@ def scenario_multi_dependency_corruption(ctx: ScenarioContext) -> None:
 
 
 def scenario_external_edit_drift(ctx: ScenarioContext) -> None:
+    """An external edit after anchoring reports drift on reconcile."""
     store = _new_store()
     seed_two(store)
     decision = RecoveryEngine(store).assess(
@@ -134,6 +158,7 @@ def scenario_external_edit_drift(ctx: ScenarioContext) -> None:
 
 
 def scenario_ledger_tamper_detected(ctx: ScenarioContext) -> None:
+    """A tampered ledger entry fails verification at its index."""
     backend = MemoryLedgerBackend()
     ledger = RecoveryLedger(backend)
     ledger.append_decision("run_1", _contract(0))
@@ -146,6 +171,7 @@ def scenario_ledger_tamper_detected(ctx: ScenarioContext) -> None:
 
 
 def scenario_recovery_lease_exhaustion(ctx: ScenarioContext) -> None:
+    """Exhausted recovery attempts require a human."""
     ledger = RecoveryLedger(MemoryLedgerBackend())
     for _ in range(3):
         ledger.record_attempt("run_1")
@@ -176,17 +202,24 @@ def scenario_out_of_scope_side_effect(ctx: ScenarioContext) -> None:
 
 
 def scenario_adapter_failure_across_environments(ctx: ScenarioContext) -> None:
+    """An adapter failure during recovery surfaces instead of being swallowed."""
+
     class FailingAdapter(AgentAdapter):
-        def __init__(self, storage: object, **kwargs: Any) -> None:  # noqa: D401
+        """Test double whose every capability raises."""
+
+        def __init__(self, storage: object, **kwargs: Any) -> None:
             self._storage = storage
 
         def capture_state(self, *a: Any, **k: Any) -> NoReturn:
+            """Raise instead of capturing state."""
             raise NotImplementedError
 
         def restore_state(self, *a: Any, **k: Any) -> NoReturn:
+            """Raise instead of restoring state."""
             raise NotImplementedError
 
         def intercept_action(self, *a: Any, **k: Any) -> NoReturn:
+            """Raise instead of intercepting an action."""
             raise NotImplementedError
 
         def resume(
@@ -197,6 +230,7 @@ def scenario_adapter_failure_across_environments(ctx: ScenarioContext) -> None:
             expected_model: Any = None,
             replay: bool = True,
         ) -> NoReturn:
+            """Raise instead of resuming the run."""
             raise RuntimeError("adapter failure across environment")
 
     register_adapter("fail_p6", lambda: FailingAdapter)
@@ -208,6 +242,7 @@ def scenario_adapter_failure_across_environments(ctx: ScenarioContext) -> None:
 
 
 def scenario_checkpoint_rollback_correctness(ctx: ScenarioContext) -> None:
+    """Restoring without replay returns the checkpointed version."""
     store = _new_store()
     seed_two(store)
     mgr = CheckpointManager(store)
@@ -221,6 +256,7 @@ def scenario_checkpoint_rollback_correctness(ctx: ScenarioContext) -> None:
 
 
 def scenario_concurrent_recovery_safety(ctx: ScenarioContext) -> None:
+    """A second holder cannot append while the lease is held."""
     coordinator = InMemoryLeaseCoordinator()
     assert coordinator.acquire("run_1", "holder-A")
     ledger = RecoveryLedger(MemoryLedgerBackend(), lock=coordinator, holder_id="holder-B")
@@ -235,6 +271,7 @@ def scenario_concurrent_recovery_safety(ctx: ScenarioContext) -> None:
 
 
 def scenario_large_state_recovery_latency(ctx: ScenarioContext) -> None:
+    """Assessing a hundred dependencies stays within the latency budget."""
     store = _new_store()
     n = 100
     for i in range(n):
@@ -266,6 +303,7 @@ def scenario_large_state_recovery_latency(ctx: ScenarioContext) -> None:
 
 
 def scenario_missing_dependency_graph_fallback(ctx: ScenarioContext) -> None:
+    """Assessment without a dependency graph still yields a decision."""
     store = _new_store()
     seed_two(store)
     decision = RecoveryEngine(store).assess("run_1", current_environment=env_multi(other="v3"))
@@ -275,6 +313,7 @@ def scenario_missing_dependency_graph_fallback(ctx: ScenarioContext) -> None:
 
 
 def scenario_human_verdict_honored(ctx: ScenarioContext) -> None:
+    """An approved human gate clears the pending gate."""
     ledger = RecoveryLedger(MemoryLedgerBackend())
     ledger.append_decision("run_1", _contract(0), gate="required")
     assert ledger.pending_gate("run_1") is not None
@@ -282,7 +321,58 @@ def scenario_human_verdict_honored(ctx: ScenarioContext) -> None:
     assert ledger.pending_gate("run_1") is None
 
 
+def scenario_plan_aware_resume_skips_completed_units(ctx: ScenarioContext) -> None:
+    """Plan-aware resume does zero duplicate work for completed units (#468).
+
+    Starts a 5-unit linear plan via PLAN_UPSERT, completes 2 units, then
+    reprojects from the log the way a post-crash resume would. Units 1-2
+    must not be re-executed while 3-5 remain. Mirrors examples/plan_milestones.py.
+    """
+    from continuum.state.semantic import project
+
+    store = _new_store()
+    units = [
+        {
+            "id": f"u{i}",
+            "title": f"milestone {i}",
+            "status": "pending",
+            "depends_on": [f"u{i - 1}"] if i > 1 else [],
+        }
+        for i in range(1, 6)
+    ]
+    store.append_event("run_1", EventType.PLAN_UPSERT, {"plan_id": "p1", "units": units})
+    store.append_event(
+        "run_1",
+        EventType.PLAN_UPSERT,
+        {
+            "plan_id": "p1",
+            "units": [
+                {"id": "u1", "title": "milestone 1", "status": "done", "depends_on": []},
+                {
+                    "id": "u2",
+                    "title": "milestone 2",
+                    "status": "done",
+                    "depends_on": ["u1"],
+                },
+            ],
+        },
+    )
+    # Post-crash resume reads the log fresh rather than trusting memory.
+    # Both lists derive from the full projected plan in one pass: the metric
+    # must be able to fire on its own, not inherit an already-filtered list.
+    resumed = project("run_1", store.read_events("run_1"))
+    completed = [u.step_id for u in resumed.plan if u.status.value == "completed"]
+    remaining = [u.step_id for u in resumed.plan if u.status.value != "completed"]
+    assert remaining == ["u3", "u4", "u5"], remaining
+    scheduled = set(remaining)
+    duplicates = [c for c in completed if c in scheduled]
+    ctx.metrics["duplicate_completed_units"] = len(duplicates)
+    ctx.metrics["remaining_units"] = remaining
+    assert not duplicates, f"completed units would re-execute: {duplicates}"
+
+
 def scenario_transient_network_failure_on_install(ctx: ScenarioContext) -> None:
+    """A vanished dependency keeps the run unsafe to resume."""
     store = _new_store()
     store.append_event(
         "run_1", EventType.DEPENDENCY_DECLARED, {"resource": "libx", "version": "v1"}
@@ -310,4 +400,5 @@ ALL_SCENARIOS: list[tuple[str, ScenarioFn]] = [
     ("missing_dependency_graph_fallback", scenario_missing_dependency_graph_fallback),
     ("human_verdict_honored", scenario_human_verdict_honored),
     ("transient_network_failure_on_install", scenario_transient_network_failure_on_install),
+    ("plan_aware_resume_skips_completed_units", scenario_plan_aware_resume_skips_completed_units),
 ]

@@ -1,4 +1,4 @@
-// CONTINUUM — Interactive Application Logic
+// CONTINUUM: Interactive Application Logic
 
 document.addEventListener('DOMContentLoaded', () => {
   initSimulator();

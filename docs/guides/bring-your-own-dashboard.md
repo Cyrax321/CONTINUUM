@@ -12,18 +12,19 @@ Your dashboard is presentation. CONTINUUM stays the substrate. That separation i
 
 ## Substrates consumed
 
-### 1. Resume contract (`continuum resume --json`)
+### 1. Resume contract (`continuum --json resume`)
 
 Shell:
 
 ```bash
-continuum resume my-task --json | python -m json.tool
+continuum --json resume my-task | python -m json.tool
 ```
 
 Python:
 
 ```python
 from continuum.recovery import RecoveryEngine
+from continuum.recovery.guidance import human_steps_for
 from continuum.storage import SQLiteStorage
 
 store = SQLiteStorage("continuum.db")
@@ -31,7 +32,7 @@ decision = RecoveryEngine(store).assess("my-task", current_environment=None)
 print(decision.mode)      # RecoveryMode.RESUME, REQUEST_HUMAN, ...
 print(decision.safe)      # bool, also exit code 0 means safe
 print(decision.contract.model_dump(mode="json"))
-print(decision.human_steps)  # executable next steps
+print(human_steps_for(decision, run_id="my-task"))  # executable next steps
 ```
 
 JSON shape (abridged):
@@ -107,10 +108,10 @@ ok = verify_export(primitives)
 
 Each line in the export is one of four neutral primitives:
 
-- `transition` — every event appended to the log
-- `observation` — validations and diffs
-- `relation` — dependency edges
-- `checkpoint` — sealed checkpoints
+- `transition`: every event appended to the log
+- `observation`: validations and diffs
+- `relation`: dependency edges
+- `checkpoint`: sealed checkpoints
 
 Every primitive is content-addressed:
 
@@ -139,7 +140,7 @@ For an external verifier that holds only the attestation file:
 ```bash
 continuum attest-keygen --out signer.pem --pub signer.pem.pub
 continuum attest my-task --key signer.pem --out my-task.attest.json
-continuum attest-verify my-task --attest my-task.attest.json --json | python -m json.tool
+continuum --json attest-verify my-task --attest my-task.attest.json | python -m json.tool
 ```
 
 Verdicts are `SIGNED`, `ALTERED`, or `UNTRUSTED` and appear in both human text and JSON.
@@ -149,12 +150,13 @@ Verdicts are `SIGNED`, `ALTERED`, or `UNTRUSTED` and appear in both human text a
 A 60-line Python example you can drop in and adapt. It polls the live store, renders the contract, and streams evidence.
 
 ```python
-# dashboard_minimal.py — polling example, adapt to your framework
+# dashboard_minimal.py: polling example, adapt to your framework
 import json
 from pathlib import Path
 from flask import Flask, jsonify, render_template_string
 from continuum.storage import SQLiteStorage
 from continuum.recovery import RecoveryEngine
+from continuum.recovery.guidance import human_steps_for
 from continuum.interchange.evidence import export_evidence
 
 DB = "continuum.db"
@@ -163,7 +165,7 @@ app = Flask(__name__)
 TEMPLATE = """
 <!doctype html>
 <title>CONTINUUM dashboard</title>
-<h1>Run {{run_id}} — {{mode}} (safe={{safe}})</h1>
+<h1>Run {{run_id}}: {{mode}} (safe={{safe}})</h1>
 <p>Goal: {{goal}}</p>
 <p>Progress: {{completed}} / {{total or '?'}} completed</p>
 <h2>Contract</h2>
@@ -193,7 +195,7 @@ def run_page(run_id: str):
         completed=decision.state.progress.completed,
         total=decision.state.progress.total,
         contract_text=json.dumps(decision.contract.model_dump(mode="json"), indent=2),
-        human_steps=decision.human_steps,
+        human_steps=human_steps_for(decision, run_id=run_id),
         evidence_text=json.dumps([e.model_dump(mode="json") for e in evidence], indent=2))
 
 @app.get("/api/run/<run_id>/resume")
@@ -204,7 +206,7 @@ def api_resume(run_id: str):
         "run_id": decision.run_id, "mode": decision.mode.value, "safe": decision.safe,
         "next_allowed_action": decision.next_allowed_action,
         "contract": decision.contract.model_dump(mode="json"),
-        "human_steps": decision.human_steps,
+        "human_steps": human_steps_for(decision, run_id=run_id),
         "progress": {"completed": decision.state.progress.completed, "pending": decision.state.progress.pending}
     }
     return jsonify(payload)
@@ -251,7 +253,7 @@ print("claimed", out.key)
 PY
 
 # SIGKILL simulation done, now ask the dashboard substrate what it should show
-continuum --db /tmp/byod-demo.db resume dashboard-demo --json | python -m json.tool | head -n 60
+continuum --db /tmp/byod-demo.db --json resume dashboard-demo | python -m json.tool | head -n 60
 continuum --db /tmp/byod-demo.db export-evidence dashboard-demo | wc -l
 continuum --db /tmp/byod-demo.db verify dashboard-demo
 ```
@@ -285,7 +287,7 @@ Measured from a fresh checkout:
 
 1. `uv pip install -e ".[dev]"` (about 40s)
 2. `continuum start my-task --goal "trial"` (1s)
-3. `python dashboard_minimal.py` (or `continuum resume my-task --json` from any UI) (1s)
+3. `python dashboard_minimal.py` (or `continuum --json resume my-task` from any UI) (1s)
 4. Simulate kill, re-poll `GET /api/run/my-task/resume` and see `request_human` (under 1s)
 5. Reconcile, re-poll, see `resume` (under 1s)
 

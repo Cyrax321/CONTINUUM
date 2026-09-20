@@ -9,9 +9,8 @@ on:
 jobs:
   yuki-review:
     if: |
-      github.event.comment.user.login != 'anya-research' &&
-      github.event.comment.user.login != 'yuki-fuyutsuki' &&
-      contains(github.event.comment.body, '/yuki review')
+      github.event.comment.user.type == 'User' &&
+      startsWith(github.event.comment.body, '/yuki review')
     runs-on: ubuntu-latest
     permissions:
       id-token: write

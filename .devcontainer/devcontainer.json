@@ -11,9 +11,9 @@
       ]
     }
   },
-  "forwardPorts": [8765],
+  "forwardPorts": [8000],
   "portsAttributes": {
-    "8765": {
+    "8000": {
       "label": "continuum dashboard",
       "onAutoForward": "notify"
     }

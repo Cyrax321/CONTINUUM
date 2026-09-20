@@ -22,6 +22,7 @@ __all__ = [
     "verify_observation",
     "resolve_branch",
     "record_observation",
+    "record_memory_observation",
 ]
 
 
@@ -122,6 +123,37 @@ def verify_observation(
         record_observation(storage, run_id, obs)
 
     return obs
+
+
+def record_memory_observation(
+    storage: object,
+    run_id: str,
+    content_hash: str,
+    raw_claim: str,
+    *,
+    observation_id: str | None = None,
+) -> Event:
+    """Record a memory-derived observation as unverified.
+
+    Memory retrievals are external observations whose trust cannot be
+    assumed. Like any ``PERCEPTION_OBSERVED`` they start as
+    ``unverified`` and a high-risk plan branch gated on them escalates
+    per the Secure Planning Loop. Callers should use the content hash
+    of the retrieved record as ``content_hash`` so forensic joins can
+    later link a poisoned ``origin_digest`` back to this observation.
+
+    Returns the appended ``PERCEPTION_OBSERVED`` event.
+    """
+    obs = ObservationProvenance(
+        observation_id=observation_id or make_id("obs"),
+        source="environment_observed",
+        trust_level="unverified",
+        verifier="memory_retrieval",
+        content_hash=content_hash,
+        q_vlm_model="memory",
+        raw_claim=raw_claim,
+    )
+    return record_observation(storage, run_id, obs)
 
 
 def record_observation(storage: object, run_id: str, obs: ObservationProvenance) -> Event:

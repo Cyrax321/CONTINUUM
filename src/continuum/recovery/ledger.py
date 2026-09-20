@@ -68,6 +68,13 @@ class LedgerLockError(LedgerError):
 
 
 class LedgerEntryKind(StrEnum):
+    """What a ledger entry records: a recovery decision, a gate event, or an attempt.
+
+    Every read filters on it: ``last_decision`` and ``reconcile`` look at
+    DECISION entries, ``pending_gate`` and the escalation marker are GATE
+    entries, and the attempt count is the number of ATTEMPT entries.
+    """
+
     DECISION = "decision"
     GATE = "gate"
     ATTEMPT = "attempt"
@@ -109,10 +116,22 @@ class RecoveryLedgerEntry:
         return self.content_hash == stable_hash(self.content())
 
     def to_record(self) -> dict[str, Any]:
+        """The full JSON-safe record: :meth:`content` plus its ``content_hash``.
+
+        This is the line backends persist; :meth:`from_record` is its exact
+        inverse, so a record round-trips to an equal entry.
+        """
         return self.content() | {"content_hash": self.content_hash}
 
     @classmethod
     def from_record(cls, rec: dict[str, Any]) -> RecoveryLedgerEntry:
+        """Rebuild an entry from a :meth:`to_record` record.
+
+        Raises ``KeyError`` when a required field is absent and lets pydantic
+        raise on an embedded contract that does not validate: a record that
+        did not come from ``to_record`` is a caller bug to surface, not a
+        ledger condition to absorb.
+        """
         contract = rec.get("contract")
         return cls(
             entry_id=rec["entry_id"],
@@ -133,27 +152,78 @@ class LedgerBackend:
     """Where ledger entries live. Storage-agnostic by design."""
 
     def load(self, run_id: str) -> list[RecoveryLedgerEntry]:
+        """Return the run's entries, an empty list when it has none.
+
+        Order is the backend's own; ``RecoveryLedger.entries`` sorts by
+        sequence before reading. A run with no data must yield an empty
+        list, not an error.
+        """
         raise NotImplementedError
 
     def save(self, entry: RecoveryLedgerEntry) -> None:
+        """Append one sealed entry. Must not rewrite or reorder what exists."""
         raise NotImplementedError
 
     def replace(self, run_id: str, entries: Sequence[RecoveryLedgerEntry]) -> None:
+        """Substitute the run's entire entry list with ``entries``.
+
+        Called only by ``compact`` with a re-sealed chain, so the write must
+        overwrite, not append: appending would duplicate the very history
+        compaction was asked to bound.
+        """
         raise NotImplementedError
 
 
 class MemoryLedgerBackend(LedgerBackend):
+    """In-memory backend: one entry list per run, gone when the process exits.
+
+    For tests and ephemeral runs; use ``FileLedgerBackend`` when the ledger
+    must survive the process.
+    """
+
     def __init__(self) -> None:
         self._store: dict[str, list[RecoveryLedgerEntry]] = {}
 
     def load(self, run_id: str) -> list[RecoveryLedgerEntry]:
+        """A copy of the run's entries: mutating it cannot corrupt the backend."""
         return list(self._store.get(run_id, []))
 
     def save(self, entry: RecoveryLedgerEntry) -> None:
+        """Append to the run's list, creating it on first save."""
         self._store.setdefault(entry.run_id, []).append(entry)
 
     def replace(self, run_id: str, entries: Sequence[RecoveryLedgerEntry]) -> None:
+        """Overwrite the run's list with a copy of ``entries``."""
         self._store[run_id] = list(entries)
+
+
+#: Every character a Windows filename forbids, separators included. POSIX
+#: forbids none of the extras, so replacing them all on every platform costs
+#: nothing and keeps a caller-supplied run id usable as a filename on both
+#: families (issue #842: only "/" and "\" were replaced, so run ids carrying
+#: ":*?<>"|" produced unopenable ledger files on Windows).
+_UNSAFE_FILENAME_CHARS = '/\\:*?"<>|'
+
+#: Windows reserves these device names as filenames with any extension, so a
+#: sanitized id whose stem is one of them still cannot open there.
+_RESERVED_DEVICE_NAMES = frozenset(
+    {"AUX", "CON", "NUL", "PRN"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def _sanitize_run_id(run_id: str) -> str:
+    """Turn a caller-supplied run id into a safe filename component.
+
+    The result keeps every character that is legal on both platform families
+    and substitutes an underscore for the rest, so the same run id maps to
+    the same file everywhere.
+    """
+    safe = "".join("_" if char in _UNSAFE_FILENAME_CHARS else char for char in run_id)
+    if safe.split(".", 1)[0].upper() in _RESERVED_DEVICE_NAMES:
+        safe = f"_{safe}"
+    return safe
 
 
 class FileLedgerBackend(LedgerBackend):
@@ -163,13 +233,17 @@ class FileLedgerBackend(LedgerBackend):
         self._directory = directory
 
     def _path(self, run_id: str) -> str:
-        safe = run_id.replace("/", "_").replace("\\", "_")
-        return os.path.join(self._directory, f"ledger-{safe}.jsonl")
+        return os.path.join(self._directory, f"ledger-{_sanitize_run_id(run_id)}.jsonl")
 
     def _ensure_directory(self) -> None:
         os.makedirs(self._directory, exist_ok=True)
 
     def load(self, run_id: str) -> list[RecoveryLedgerEntry]:
+        """Read the run's JSONL file, skipping blank lines.
+
+        A missing file is a run with no entries (empty list), not an error:
+        every ledger starts from GENESIS.
+        """
         path = self._path(run_id)
         if not os.path.exists(path):
             return []
@@ -183,11 +257,13 @@ class FileLedgerBackend(LedgerBackend):
         return out
 
     def save(self, entry: RecoveryLedgerEntry) -> None:
+        """Append one entry as a JSONL line, creating the directory if needed."""
         self._ensure_directory()
         with open(self._path(entry.run_id), "a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry.to_record()) + "\n")
 
     def replace(self, run_id: str, entries: Sequence[RecoveryLedgerEntry]) -> None:
+        """Rewrite the run's file with exactly ``entries``, nothing else."""
         self._ensure_directory()
         with open(self._path(run_id), "w", encoding="utf-8") as handle:
             for entry in entries:
@@ -245,12 +321,18 @@ class RecoveryLedger:
         anchor: bool = False,
         note: str = "",
     ) -> RecoveryLedgerEntry:
-        prev = entries[-1].content_hash if entries else GENESIS
+        # Sequence and prev_hash must follow the highest-sequence entry, not
+        # the last position of the backend's load order: after compact() the
+        # survivors keep their original (sparse) sequences, so len(entries)
+        # would mint a colliding sequence that sorts before them, breaking
+        # the chain walk in verify() and the approval ordering in
+        # pending_gate().
+        head = max(entries, key=lambda e: e.sequence) if entries else None
         partial = RecoveryLedgerEntry(
             entry_id=make_id("ledger"),
             run_id=run_id,
-            sequence=len(entries),
-            prev_hash=prev,
+            sequence=head.sequence + 1 if head else 0,
+            prev_hash=head.content_hash if head else GENESIS,
             content_hash="",
             kind=kind.value,
             contract=contract,
@@ -331,6 +413,12 @@ class RecoveryLedger:
             return count
 
     def attempts(self, run_id: str) -> int:
+        """The run's recovery-attempt count: how many ATTEMPT entries survive.
+
+        Compaction can lower this count, which is why escalation is recorded
+        as an anchored GATE entry (see ``record_attempt``) rather than
+        inferred from the number.
+        """
         return sum(1 for e in self.entries(run_id) if e.kind == LedgerEntryKind.ATTEMPT.value)
 
     def requires_human(self, run_id: str, *, max_attempts: int = 3) -> bool:
@@ -370,9 +458,16 @@ class RecoveryLedger:
     # -- reading ---------------------------------------------------------- #
 
     def entries(self, run_id: str) -> list[RecoveryLedgerEntry]:
+        """All entries for the run, sorted by sequence.
+
+        This is the chain-walk order ``verify`` depends on. Sequences are
+        sparse after ``compact`` (survivors keep their original numbers), so
+        position and sequence number disagree there; sorting handles both.
+        """
         return sorted(self._backend.load(run_id), key=lambda e: e.sequence)
 
     def last_decision(self, run_id: str) -> RecoveryLedgerEntry | None:
+        """The most recent DECISION entry for the run, or ``None`` if it has none."""
         decisions = [e for e in self.entries(run_id) if e.kind == LedgerEntryKind.DECISION.value]
         return decisions[-1] if decisions else None
 

@@ -236,6 +236,40 @@ def test_intercept_then_complete_action() -> None:
     assert listed["actions"][0]["status"] == "completed"
 
 
+def test_complete_and_reconcile_forward_consumed_inputs() -> None:
+    """Sidecar complete/reconcile record caller-supplied consumed_inputs (#558)."""
+    from continuum.actions.ledger import fold_action_events
+
+    srv = make_server()
+    srv.dispatch("record_progress", {"run_id": "r1", "completed": 1, "goal": "g"})
+    claim = srv.dispatch("intercept_action", {"run_id": "r1", "action_type": "x.do", "key": "k1"})
+    ci = {
+        "checkpoint_seq": 2,
+        "event_positions": [1],
+        "component_ids": ["d1"],
+        "action_ids": ["a1"],
+    }
+    done = srv.dispatch(
+        "complete_action",
+        {"run_id": "r1", "action_key": claim["action_key"], "consumed_inputs": ci},
+    )
+    assert done["status"] == "completed"
+    folded = fold_action_events(srv.storage.read_events("r1"))
+    assert folded[claim["action_key"]].consumed_inputs.checkpoint_seq == 2
+    assert folded[claim["action_key"]].consumed_inputs.action_ids == ["a1"]
+    srv.dispatch(
+        "reconcile_action",
+        {
+            "run_id": "r1",
+            "action_key": claim["action_key"],
+            "occurred": True,
+            "consumed_inputs": {"checkpoint_seq": 3},
+        },
+    )
+    refolded = fold_action_events(srv.storage.read_events("r1"))
+    assert refolded[claim["action_key"]].consumed_inputs.checkpoint_seq == 3
+
+
 def test_unknown_method_is_not_found() -> None:
     srv = make_server()
     with pytest.raises(MethodNotFound):
@@ -292,6 +326,82 @@ def test_stdio_resume_needs_no_params_at_all() -> None:
     assert "error" not in last, last
     assert last["result"]["run_id"] == "r1"
     assert last["result"]["goal"] == "migrate billing"
+
+
+@pytest.mark.parametrize("body", ("[]", "null", "5", '"resume"', "true", '["resume"]'))
+def test_stdio_answers_a_non_object_request_and_keeps_serving(body: str) -> None:
+    """A request that parses but is not an object is a client error (issue #582).
+
+    ``rid = req.get("id")`` sat one line above the guard whose own comment reads
+    "report, never crash the loop", so a line like ``[]`` raised
+    ``AttributeError`` where nothing was catching and the process exited 1.
+    Because stdio is a long-lived session, one malformed line from any client
+    took the durability plane down and every later request on that connection
+    with it. It must be answered like a line that is not JSON at all --
+    ``bad_request``, with a null id, since a non-object request has nowhere to
+    put one -- and the request behind it must still be served.
+    """
+    srv = make_server()
+    good = json_line(1, "record_progress", {"run_id": "r1", "completed": 2, "goal": "g"})
+    out = io.StringIO()
+
+    assert srv.serve_stdio(io.StringIO(f"{body}\n{good}\n"), out) == 0
+
+    lines = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+    assert len(lines) == 2, lines
+    assert lines[0] == {
+        "id": None,
+        "error": {"type": "bad_request", "message": "body must be a JSON object"},
+    }
+    assert lines[1]["id"] == 1
+    assert lines[1]["result"]["completed"] == 2
+
+
+def test_stdio_still_answers_a_line_that_is_not_json_at_all() -> None:
+    """The framing answer #582 reuses, pinned so the shared arm cannot change it.
+
+    A line that no parser can read keeps its own message (the decoder's), which
+    is what tells the two cases apart on the wire: same ``bad_request`` type and
+    null id, different text.
+    """
+    srv = make_server()
+    out = io.StringIO()
+
+    assert srv.serve_stdio(io.StringIO("not json at all\n"), out) == 0
+
+    answer = json.loads(out.getvalue().strip())
+    assert answer["id"] is None
+    assert answer["error"]["type"] == "bad_request"
+    assert answer["error"]["message"] != "body must be a JSON object"
+    assert "Expecting value" in answer["error"]["message"]
+
+
+def test_stdio_survives_a_run_of_unreadable_requests() -> None:
+    """The loop is a session, so the failure has to be survivable in series.
+
+    One answer per bad line, in order, and a working request at the end still
+    lands: the whole point of #582 is that the connection is not lost.
+    """
+    srv = make_server()
+    requests = (
+        "\n".join(
+            [
+                "[]",
+                "not json",
+                "null",
+                json_line(9, "record_progress", {"run_id": "r1", "completed": 1, "goal": "g"}),
+            ]
+        )
+        + "\n"
+    )
+    out = io.StringIO()
+
+    assert srv.serve_stdio(io.StringIO(requests), out) == 0
+
+    lines = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+    assert [line["id"] for line in lines] == [None, None, None, 9]
+    assert [line["error"]["type"] for line in lines[:3]] == ["bad_request"] * 3
+    assert lines[3]["result"]["completed"] == 1
 
 
 # --- authentication (fail-closed) ------------------------------------------
@@ -422,3 +532,31 @@ def json_line(rid: int, method: str, params: dict) -> str:
     import json
 
     return json.dumps({"id": rid, "method": method, "params": params})
+
+
+def test_malformed_consumed_inputs_is_bad_params_not_internal() -> None:
+    """Ledger validation failures surface as parameter errors (#645 review)."""
+    from continuum.serve.server import BadParams
+
+    srv = make_server()
+    srv.dispatch("record_progress", {"run_id": "r1", "completed": 1, "goal": "g"})
+    claim = srv.dispatch("intercept_action", {"run_id": "r1", "action_type": "x.do", "key": "k1"})
+    with pytest.raises(BadParams, match="greater than or equal"):
+        srv.dispatch(
+            "complete_action",
+            {
+                "run_id": "r1",
+                "action_key": claim["action_key"],
+                "consumed_inputs": {"checkpoint_seq": -1},
+            },
+        )
+    with pytest.raises(BadParams, match="consumed_inputs"):
+        srv.dispatch(
+            "reconcile_action",
+            {
+                "run_id": "r1",
+                "action_key": claim["action_key"],
+                "occurred": True,
+                "consumed_inputs": [1, 2],
+            },
+        )

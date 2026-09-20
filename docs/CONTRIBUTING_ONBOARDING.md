@@ -26,14 +26,24 @@ Welcome. This guide gets you from clone to green tests without re-deriving conte
 
 Install once with `uv sync --extra dev` (or `pip install -e ".[dev]"`).
 
-- Run all tests: `uv run pytest` or `pytest -q`. Expect `1020 passed, 9 skipped` on main at this writing. Skips are environmental (Postgres without `CONTINUUM_TEST_POSTGRES_DSN`, adapter tests without `langgraph` or `openai-agents`).
+- Recommended: install the [pre-commit hooks](../CONTRIBUTING.md#pre-commit-hooks-optional-but-recommended) before committing.
+- Run all tests: `uv run pytest` or `pytest -q`. Expect `~2,395 passed, ~28 skipped`
+  on main at this writing (`~2,423` collected).
+  <!-- generated via: pytest --collect-only -q; pytest -q -->
+  Skips are environmental (Postgres without `CONTINUUM_TEST_POSTGRES_DSN`, adapter tests without `langgraph` or `openai-agents`).
 - Run a single area: `uv run pytest tests/test_checkpoint_phase4.py -v`
+- Fast loop (skip slow integration tests): `uv run pytest -m "not slow"` or `pytest -q -m "not slow"`
+- Full suite (as CI runs it, slow tests included): `uv run pytest` or `pytest -q`
 - Lint: `uv run ruff check src/ tests/ examples/`
 - Format check: `uv run ruff format --check src/ tests/ examples/`
 - Auto fix lint and format: `uv run ruff check --fix src/ tests/ examples/` then `uv run ruff format src/ tests/ examples/`
 - Type check: `uv run mypy src/continuum` (strict, with the `pydantic.mypy` plugin)
 
 CI runs the same three jobs on Python 3.11, 3.12, and 3.13 and on lint and type check. A change must pass all four required status checks.
+
+## Reviewer bots
+
+To get an automated maintainer review, assign `anya-research` as a reviewer or comment `/anya review` on the PR. Anya reads the diff end to end, files a formal approve or request-changes review with exact file and line findings plus suggestion blocks, and enables auto-merge on approval when the PR touches docs only. She never uses em dashes. `yuki-fuyutsuki` takes the same `/yuki review` requests. On fork PRs assignment does not auto-fire, so comment `/anya review` there instead.
 
 ## Issue labels and where to pick work
 

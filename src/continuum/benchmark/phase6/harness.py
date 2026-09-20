@@ -25,6 +25,14 @@ from continuum.benchmark.phase6.metrics import (
     ScenarioResult,
 )
 
+__all__ = [
+    "ScenarioContext",
+    "ScenarioFn",
+    "run_benchmark",
+    "run_scenario",
+    "write_report",
+]
+
 ScenarioFn = Callable[["ScenarioContext"], None]
 
 
@@ -38,17 +46,33 @@ class ScenarioContext:
     _failed: bool = False
 
     def fail(self, message: str) -> None:
+        """Mark the scenario failed and record ``message`` in its notes.
+
+        Failing does not raise: the scenario keeps running so it can gather
+        more observations, and ``run_scenario`` converts the flag into a
+        FAIL outcome when the scenario returns.
+        """
         self.notes.append(f"FAIL: {message}")
         self._failed = True
 
 
 def run_scenario(name: str, fn: ScenarioFn) -> ScenarioResult:
+    """Run one scenario to a PASS or FAIL result; never raises.
+
+    The scenario signals failure either through ``ctx.fail`` (which lets it
+    keep running) or by raising; both become outcome FAIL with the reason in
+    ``notes`` (a raised exception is recorded as ``exception: <type>:
+    <message>``). The result carries the context's attempts and metrics
+    verbatim and the wall-clock elapsed time in milliseconds. ESCALATED and
+    DEGRADED are never produced here; they exist for results a scenario
+    constructs by hand.
+    """
     ctx = ScenarioContext()
     start = time.perf_counter()
     try:
         fn(ctx)
         outcome = RecoveryOutcome.FAIL if ctx._failed else RecoveryOutcome.PASS
-    except Exception as exc:  # noqa: BLE001 - the harness must record, not crash
+    except Exception as exc:
         outcome = RecoveryOutcome.FAIL
         ctx.notes.append(f"exception: {type(exc).__name__}: {exc}")
     elapsed_ms = round((time.perf_counter() - start) * 1000, 3)
@@ -64,6 +88,13 @@ def run_scenario(name: str, fn: ScenarioFn) -> ScenarioResult:
 
 
 def run_benchmark(scenarios: list[tuple[str, ScenarioFn]]) -> BenchmarkReport:
+    """Run every ``(name, scenario)`` pair in order and aggregate the results.
+
+    One broken scenario cannot abort the suite: each runs through
+    ``run_scenario``, which captures its failure into its own result. The
+    report's ``generated_at`` stamps the run; ``write_report`` persists it
+    as JSON and Markdown.
+    """
     return BenchmarkReport(
         generated_at=datetime.now(),
         results=[run_scenario(name, fn) for name, fn in scenarios],

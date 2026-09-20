@@ -14,11 +14,13 @@ from pathlib import Path
 
 import pytest
 
+from continuum import reconcilers
 from continuum.actions import ActionLedger
 from continuum.cli import ExitCode, main
 from continuum.events import EventType
 from continuum.models import ActionStatus, Origin, Run
 from continuum.reconcilers import (
+    _DEFAULT_TIMEOUT,
     ReconcilerConfigError,
     _parse_verdict,
     load_reconcilers,
@@ -67,6 +69,7 @@ def test_broken_json_raises_instead_of_degrading(tmp_path: Path) -> None:
 
 
 def test_probe_requires_a_command_and_positive_timeout(tmp_path: Path) -> None:
+    """The two arms a probe spec has to clear before it is registered at all."""
     p = tmp_path / "r.json"
     p.write_text(json.dumps({"probes": {"send_invoice": {"timeout": 5}}}))
     with pytest.raises(ReconcilerConfigError, match="command"):
@@ -74,6 +77,42 @@ def test_probe_requires_a_command_and_positive_timeout(tmp_path: Path) -> None:
     p.write_text(json.dumps({"probes": {"send_invoice": {"command": "x", "timeout": -1}}}))
     with pytest.raises(ReconcilerConfigError, match="timeout"):
         load_reconcilers(p)
+
+
+def test_a_boolean_timeout_is_refused_rather_than_read_as_one_second(tmp_path: Path) -> None:
+    """``bool`` is an ``int`` in Python, and JSON ``true`` reaches this loader.
+
+    Without an explicit check it passes the numeric arm above and registers as a
+    one second timeout, so every probe is killed just after it starts: the run
+    still ends in the human queue, but reported as an external system nobody can
+    reach instead of the registry typo it is (issue #322).
+    """
+    p = tmp_path / "r.json"
+    p.write_text(json.dumps({"probes": {"send_invoice": {"command": "x", "timeout": True}}}))
+    with pytest.raises(ReconcilerConfigError, match="positive number"):
+        load_reconcilers(p)
+
+
+def test_probes_not_wrapped_under_the_probes_key_is_refused(tmp_path: Path) -> None:
+    """A registry that maps action types at the top level is the wrong shape.
+
+    ``raw.get("probes", {})`` and ``raw.get("probes") or {}`` both default to an
+    empty dict for a file missing the ``probes`` key entirely, so this used to
+    load silently as an empty registry instead of raising: every action of that
+    type then read as having no probe registered, with nothing pointing at the
+    missing wrapper as the cause (issue #1062).
+    """
+    p = tmp_path / "r.json"
+    p.write_text(json.dumps({"send_invoice": {"command": "check-outbox", "timeout": 5}}))
+    with pytest.raises(ReconcilerConfigError, match="send_invoice"):
+        load_reconcilers(p)
+
+
+def test_an_empty_registry_file_is_still_a_valid_empty_registry(tmp_path: Path) -> None:
+    """An empty dict has no top-level keys to mistake for a missing wrapper."""
+    p = tmp_path / "r.json"
+    p.write_text("{}")
+    assert load_reconcilers(p) == {}
 
 
 # --- verdict parsing -------------------------------------------------------------- #
@@ -196,6 +235,28 @@ def test_settled_events_are_sourced_deterministic(db: str, tmp_path: Path) -> No
     assert all(e.source is Origin.DETERMINISTIC for e in reconciled)
 
 
+def test_settle_run_settles_archived_actions_after_compaction(db: str, tmp_path: Path) -> None:
+    """Compaction must not break the operator path for clearing risk (issue #647).
+
+    pending() is archive-aware, so an action claimed before a compaction is
+    still listed; settle_run used to resolve its ledger key from the live tail
+    only and abort the whole report with LookupError.
+    """
+    action_id = seed_pending(db, key="invoice:9")
+    with SQLiteStorage(db) as store:
+        store.compact_run("run_1", through_sequence=store.last_sequence("run_1"))
+        assert action_id in {a.action_id for a in ActionLedger(store, "run_1").pending()}
+    probes = load_reconcilers(registry(tmp_path, {"send_invoice": "echo occurred=true"}))
+    report = settle_run(SQLiteStorage(db), "run_1", probes)
+    assert report.settled == 1 and report.settled_true
+    with SQLiteStorage(db) as store:
+        from continuum.actions.ledger import fold_action_events
+
+        folded = fold_action_events(store.read_all_events("run_1"))
+    action = next(a for a in folded.values() if a.action_id == action_id)
+    assert action.status is ActionStatus.COMPLETED
+
+
 # --- CLI ------------------------------------------------------------------------------ #
 
 
@@ -238,3 +299,53 @@ def test_cli_reconcile_unknown_run_is_not_found(tmp_path: Path) -> None:
         pass
     code, _, _ = run("--db", path, "reconcile", "ghost")
     assert code == ExitCode.NOT_FOUND
+
+
+# --- documented contract (issue #322) ------------------------------------------------ #
+
+
+#: The reference page whose reconcile paragraph documents the registry.
+CLI_DOC = Path(__file__).resolve().parents[1] / "docs" / "api" / "cli.md"
+
+
+def documented_registry() -> str:
+    """The registry example a reader copies out of the module docstring."""
+    lines = [line.strip() for line in (reconcilers.__doc__ or "").splitlines()]
+    return next(line for line in lines if line.startswith("{"))
+
+
+def test_the_documented_registry_example_registers_its_probe(tmp_path: Path) -> None:
+    """The example has to be the shape the loader actually reads.
+
+    It showed a bare ``{action_type: spec}`` mapping, which is valid JSON and
+    clears every validation arm above because the ``probes`` key is simply
+    absent: the registry loads empty and ``continuum reconcile`` then reports the
+    action as having no probe instead of running the command that was registered
+    for it. A silent no-op is the one outcome an operator cannot debug from the
+    output, so the copyable example is pinned here.
+    """
+    p = tmp_path / "reconcilers.json"
+    p.write_text(documented_registry(), encoding="utf-8")
+
+    assert load_reconcilers(p) == {"send_invoice": {"command": "check-outbox", "timeout": 10.0}}
+
+
+def test_the_documented_default_timeout_is_the_one_applied(tmp_path: Path) -> None:
+    """Three places quote the default and only ``_DEFAULT_TIMEOUT`` decides it.
+
+    A registry that omits ``timeout`` still gets one, so the number is part of
+    what an operator sizes a probe against. The loader is asked for that registry
+    here rather than only the prose: pinning both to the constant is what stops a
+    change to it from leaving three stale mentions behind, and stops the prose
+    from being right about a default the loader no longer applies.
+    """
+    default = f"{_DEFAULT_TIMEOUT:g} seconds"
+
+    assert default in (reconcilers.__doc__ or "")
+    assert default in (load_reconcilers.__doc__ or "")
+    assert default in CLI_DOC.read_text(encoding="utf-8")
+
+    p = tmp_path / "reconcilers.json"
+    p.write_text('{"probes": {"send_invoice": {"command": "check-outbox"}}}', encoding="utf-8")
+
+    assert load_reconcilers(p)["send_invoice"]["timeout"] == _DEFAULT_TIMEOUT

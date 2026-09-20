@@ -30,6 +30,12 @@ revalidation - it does not silently assume the switch is safe.
 `mcp_smoke.py` drives the MCP server as a subprocess over stdio and prints every
 JSON-RPC frame as it crosses the wire. It asserts, rather than reports, that the
 same action intercepted twice returns `proceed: false` with the prior result.
+By default it spawns the installed `continuum-mcp` console script (PATH
+resolution being the most common real-world failure, issue #839), falling back
+to `python -m continuum.mcp` against the worktree source when the script is not
+on PATH; `--entry-point module` or `--entry-point console-script` forces either
+form. Its output also states the observed wire framing of the response frames,
+`\r\n` on Windows or `\n` elsewhere (see the MCP doc's troubleshooting section).
 
 Both exit non-zero if their guarantees fail.
 

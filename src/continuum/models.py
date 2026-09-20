@@ -2,7 +2,7 @@
 
 Phase 1 defines the *shape* of durable task state: enums, the semantic state
 tree, ledger records, environment snapshots, validation reports and recovery
-contracts. No storage or recovery logic lives here — these are pure data
+contracts. No storage or recovery logic lives here: these are pure data
 structures (mostly immutable) so they can be serialized, versioned, hashed and
 diffed without side effects.
 
@@ -12,7 +12,7 @@ Conventions
 * All IDs are stable strings (``run_..``, ``action_..``, ``finding_..``).
 * Enums are ``str`` subclasses so they serialize to readable JSON.
 * State-bearing models are frozen: mutations must produce a new version via
-  ``model_copy`` — the versioning phase builds on this property.
+  ``model_copy``; the versioning phase builds on this property.
 """
 
 from __future__ import annotations
@@ -54,6 +54,7 @@ __all__ = [
     "ConstraintPin",
     "AttemptLesson",
     "AuthorityConsumed",
+    "AuthorityReconciled",
     "ModelSpecificState",
     "ModelState",
     "Run",
@@ -70,16 +71,25 @@ __all__ = [
     "DiffEntry",
     "StateDiff",
     "UnknownSideEffect",
+    "Frozen",
+    "Origin",
+    "Provenance",
+    "TrajectoryReport",
+    "validate_caused_by",
+    "PROJECTION_BOOKKEEPING",
 ]
 
 Frozen = ConfigDict(frozen=True, extra="forbid")
 
 
 def utcnow() -> datetime:
+    """Return current UTC timestamp with timezone information."""
     return datetime.now(UTC)
 
 
 class RunStatus(StrEnum):
+    """Execution status of an agent run lifecycle."""
+
     PLANNED = "planned"
     STARTED = "started"
     RUNNING = "running"
@@ -92,6 +102,8 @@ class RunStatus(StrEnum):
 
 
 class StateStatus(StrEnum):
+    """Validity status of semantic state entities."""
+
     VALID = "valid"
     PARTIAL = "partial"
     STALE = "stale"
@@ -103,6 +115,8 @@ class StateStatus(StrEnum):
 
 
 class ActionStatus(StrEnum):
+    """Lifecycle and execution status of a recorded action."""
+
     PLANNED = "planned"
     STARTED = "started"
     COMPLETED = "completed"
@@ -114,6 +128,8 @@ class ActionStatus(StrEnum):
 
 
 class RecoveryMode(StrEnum):
+    """Strategy for recovering an agent execution run."""
+
     RESUME = "resume"
     REPAIR_AND_RESUME = "repair_and_resume"
     ROLLBACK = "rollback"
@@ -124,6 +140,8 @@ class RecoveryMode(StrEnum):
 
 
 class RecoverySafety(StrEnum):
+    """Assessment of whether and how safely a run can be resumed."""
+
     SAFE_TO_RESUME = "safe_to_resume"
     REQUIRES_REPAIR = "requires_repair"
     REQUIRES_REVALIDATION = "requires_revalidation"
@@ -133,6 +151,8 @@ class RecoverySafety(StrEnum):
 
 
 class Component(StrEnum):
+    """Semantic state component types tracked by CONTINUUM."""
+
     GOAL = "goal"
     PROGRESS = "progress"
     PLAN = "plan"
@@ -145,9 +165,12 @@ class Component(StrEnum):
     MODEL = "model"
     APPROVAL = "approval"
     ENVIRONMENT = "environment"
+    PIN = "pin"
 
 
 class DiffKind(StrEnum):
+    """Classification of a change between two state snapshots."""
+
     ADDED = "added"
     REMOVED = "removed"
     CHANGED = "changed"
@@ -155,6 +178,8 @@ class DiffKind(StrEnum):
 
 
 class ApprovalStatus(StrEnum):
+    """Current state of a requested human approval."""
+
     PENDING = "pending"
     GRANTED = "granted"
     REVOKED = "revoked"
@@ -163,6 +188,8 @@ class ApprovalStatus(StrEnum):
 
 
 class PlanStepStatus(StrEnum):
+    """Progress status of an individual execution plan step."""
+
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     BLOCKED = "blocked"
@@ -171,7 +198,7 @@ class PlanStepStatus(StrEnum):
 
 
 class Origin(StrEnum):
-    """Who asserted a fact — decides how much it can be trusted.
+    """Who asserted a fact, which decides how much it can be trusted.
 
     This describes the *writer*, not the derivation. Folding a fabricated event
     is still a faithful fold, so "the projection is reproducible" says nothing
@@ -180,10 +207,12 @@ class Origin(StrEnum):
     """
 
     DETERMINISTIC = "deterministic"
-    """Recorded by trusted local code: the CLI, or an adapter called in-process.
+    """Recorded by trusted local code: the CLI, or CONTINUUM's own in-process
+    orchestration (serve loop, replay guard, benchmarks).
 
-    Not a claim that the fact is *correct* — only that it was not asserted by an
-    autonomous agent reporting on itself.
+    Not a claim that the fact is *correct*, only that it was not asserted by an
+    autonomous agent reporting on itself. Framework adapters that execute tools
+    on an agent's behalf record EXTERNAL_AGENT instead (issue #612).
     """
 
     HUMAN = "human"
@@ -203,11 +232,14 @@ class Origin(StrEnum):
     IMPORTED = "imported"
     """Loaded from a foreign checkpoint whose event history is unavailable."""
 
+    EXTERNAL_MONITOR = "external_monitor"
+    """Asserted by an external risk monitor such as SNAGLINE. A witness, not an authority."""
+
     @property
     def self_certified(self) -> bool:
         """Whether this origin is an unverified self-report.
 
-        Such state is usable — it is often correct — but it cannot be the
+        Such state is usable (it is often correct) but it cannot be the
         grounds for declaring a run verified.
         """
         return self in (Origin.LLM, Origin.EXTERNAL_AGENT, Origin.IMPORTED)
@@ -235,6 +267,8 @@ class Provenance(BaseModel):
 
 
 class Goal(BaseModel):
+    """High-level objective and constraints governing an agent run."""
+
     model_config = Frozen
 
     description: str
@@ -251,6 +285,8 @@ class Goal(BaseModel):
 
 
 class PlanStep(BaseModel):
+    """A discrete execution step within an agent plan."""
+
     model_config = Frozen
 
     step_id: str = Field(default_factory=lambda: make_id("step"))
@@ -262,6 +298,8 @@ class PlanStep(BaseModel):
 
 
 class Progress(BaseModel):
+    """Quantitative metrics tracking completion of tasks within a run."""
+
     model_config = Frozen
 
     total: int | None = None
@@ -336,6 +374,8 @@ class DecisionPayload(BaseModel):
 
 
 class Evidence(BaseModel):
+    """Verifiable artifact or source data supporting findings and decisions."""
+
     model_config = Frozen
 
     evidence_id: str = Field(default_factory=lambda: make_id("evidence"))
@@ -348,6 +388,8 @@ class Evidence(BaseModel):
 
 
 class Finding(BaseModel):
+    """An assertion or discovered fact backed by cited evidence."""
+
     model_config = Frozen
 
     finding_id: str = Field(default_factory=lambda: make_id("finding"))
@@ -367,6 +409,8 @@ class Finding(BaseModel):
 
 
 class PendingWork(BaseModel):
+    """An outstanding task queued for execution with optional prerequisites."""
+
     model_config = Frozen
 
     task_id: str = Field(default_factory=lambda: make_id("task"))
@@ -392,6 +436,8 @@ class Approval(BaseModel):
 
 
 class ExternalDependency(BaseModel):
+    """An external system, API, or resource dependency required by a run."""
+
     model_config = Frozen
 
     resource: str
@@ -614,6 +660,39 @@ class AuthorityConsumed(BaseModel):
         return cleaned
 
 
+class AuthorityReconciled(BaseModel):
+    """Payload of AUTHORITY_RECONCILED: external probe result for an authority (issue #289/#557).
+
+    Records the probe's verdict about whether a previously consumed authority
+    is still valid on the external system. The event is hash-chained and
+    never deduplicates, so the audit trail preserves every probe result.
+    """
+
+    model_config = Frozen
+
+    authority_id: str = Field(min_length=1, max_length=128)
+    valid: bool | None = None
+    reason: str = Field(default="")
+    probed_at: str = Field(default="")
+
+    @field_validator("authority_id")
+    @classmethod
+    def _authority_id_valid(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("authority_id must be non-empty")
+        if len(cleaned) > 128:
+            raise ValueError("authority_id must be 1-128 characters")
+        return cleaned
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_bounded(cls, value: str) -> str:
+        if len(value) > 512:
+            return value[:512]
+        return value
+
+
 class TrajectoryReport(BaseModel):
     """Deterministic sleep-time report distilled from archived history (issue #393).
 
@@ -656,6 +735,8 @@ class ModelSpecificState(BaseModel):
 
 
 class ModelState(BaseModel):
+    """Model configuration, provider identity, and model-specific assumptions."""
+
     model_config = ConfigDict(frozen=True, extra="forbid", protected_namespaces=())
 
     model: str | None = None
@@ -687,7 +768,7 @@ class SubagentSpan(BaseModel):
 class SemanticState(BaseModel):
     """The compact, durable representation of task state.
 
-    This is what survives crashes and context loss — NOT the transcript.
+    This is what survives crashes and context loss, NOT the transcript.
 
     A state is a *projection* of an event prefix. ``source_sequence`` records
     how far into the log the projection consumed, which makes the state
@@ -761,33 +842,41 @@ class SemanticState(BaseModel):
     # -- lookups used by validation and recovery -------------------------- #
 
     def decision(self, decision_id: str) -> Decision | None:
+        """Look up a decision by its unique identifier, or return None."""
         return next((d for d in self.decisions if d.decision_id == decision_id), None)
 
     def finding(self, finding_id: str) -> Finding | None:
+        """Look up a finding by its unique identifier, or return None."""
         return next((f for f in self.findings if f.finding_id == finding_id), None)
 
     def dependency(self, resource: str) -> ExternalDependency | None:
+        """Look up an external dependency by its resource name, or return None."""
         return next((d for d in self.external_dependencies if d.resource == resource), None)
 
     def pin(self, constraint_id: str) -> ConstraintPin | None:
+        """Look up an active constraint pin by its identifier, or return None."""
         return self.pins.get(constraint_id)
 
     def active_pins(self) -> tuple[ConstraintPin, ...]:
+        """Return all currently active constraint pins as a tuple."""
         return tuple(self.pins.values())
 
     def evidence_ids(self) -> frozenset[str]:
+        """Return the set of all evidence identifiers present in this state."""
         return frozenset(e.evidence_id for e in self.evidence)
 
     def valid_decisions(self) -> tuple[Decision, ...]:
+        """Return all decisions with valid status as a tuple."""
         return tuple(d for d in self.decisions if d.status is StateStatus.VALID)
 
     def open_work(self) -> tuple[PendingWork, ...]:
+        """Return all pending work items whose status is not invalid."""
         return tuple(w for w in self.pending_work if w.status is not StateStatus.INVALID)
 
     def dangling_evidence(self) -> frozenset[str]:
         """Support cited by decisions or findings that the state cannot produce.
 
-        A decision may cite either raw evidence or a finding derived from it —
+        A decision may cite either raw evidence or a finding derived from it;
         both are legitimate provenance. Only references matching neither are
         dangling. Treating a cited finding as missing evidence would raise a
         false alarm on every well-formed reasoning chain, and false alarms are
@@ -887,11 +976,42 @@ class Action(BaseModel):
     side_effect_uncertain: bool = False
     compensated_by: list[str] = Field(default_factory=list)
     last_error: str | None = None
+    origin_digest: str | None = None
+    """Optional hash of the originating observation that motivated this write.
+
+    Stored as 64 lowercase hex (SHA-256) when present. Gives poisoning
+    forensics: a bad record can be joined back to the perception or
+    tool result that caused it, then sibling writes from the same
+    contaminated origin can be enumerated. Round-tripped via the ledger
+    payload and ``Action`` so the chain keeps the attribution.
+    """
     created_at: datetime = Field(default_factory=utcnow)
     started_at: datetime | None = None
     completed_at: datetime | None = None
     consumed_inputs: ConsumedInputs = Field(default_factory=ConsumedInputs)
     """Commitment inputs consumed to produce this action (issue #295)."""
+    budget_authorization_id: str | None = None
+    """The retry-budget bucket this attempt draws from (issue #1052).
+
+    Persisted rather than re-derived so the bucket survives whatever the caller
+    sends next. Token derivation reads the arguments, which are caller-controlled
+    noise plus the real resource, and the caller's ``volatile`` declaration names
+    which fields to drop; a retry that changes either one would otherwise compute
+    a different bucket from the same stored record and start its count over.
+    Pinning the id at first claim makes a retry and its settlement share one
+    counter by construction. ``None`` is a record that draws no authorization
+    budget at all, and is also the pre-#1052 legacy value, re-derived on the next
+    claim.
+    """
+
+    @field_validator("origin_digest")
+    @classmethod
+    def _origin_digest_is_sha256(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not _SHA256_PATTERN.fullmatch(value):
+            raise ValueError("origin_digest must be 64 lowercase hex characters")
+        return value
 
 
 class ActionRecordPayload(BaseModel):
@@ -979,6 +1099,8 @@ class UnknownSideEffect(RuntimeError):
 
 
 class EnvResource(BaseModel):
+    """Captured state of an external environment resource or tool."""
+
     model_config = Frozen
 
     name: str
@@ -989,6 +1111,8 @@ class EnvResource(BaseModel):
 
 
 class EnvironmentSnapshot(BaseModel):
+    """Collection of environment resource states captured at a point in time."""
+
     model_config = Frozen
 
     env_id: str = Field(default_factory=lambda: make_id("env"))
@@ -1004,6 +1128,8 @@ class EnvironmentSnapshot(BaseModel):
 
 
 class ComponentValidationEntry(BaseModel):
+    """Validation assessment for an individual state component."""
+
     model_config = Frozen
 
     component: Component
@@ -1013,6 +1139,8 @@ class ComponentValidationEntry(BaseModel):
 
 
 class StateValidationResult(BaseModel):
+    """Overall validation outcome evaluating if a state checkpoint is safe to resume."""
+
     model_config = Frozen
 
     run_id: str
@@ -1050,6 +1178,10 @@ class RecoveryContract(BaseModel):
     #: never affects the recovery decision. Newest first; a trailing row with
     #: ``truncated`` marks omitted older rows when the cap bites.
     post_checkpoint_observations: list[dict[str, Any]] = Field(default_factory=list)
+    #: Liveness advisory (issue #302): last append age and breach count, informational only.
+    liveness: dict[str, Any] | None = None
+    #: Triggering risks (issue #303): RISK_OBSERVED ids that caused this decision.
+    triggering_risks: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utcnow)
     integrity_hash: str | None = None
 
@@ -1075,6 +1207,7 @@ class Run(BaseModel):
     metadata: Mapping[str, Any] = Field(default_factory=dict)
 
     def touch(self, **overrides: Any) -> Run:
+        """Return an updated copy of the run with updated_at set to now."""
         return self.model_copy(update={"updated_at": utcnow(), **overrides})
 
 
@@ -1094,6 +1227,8 @@ PROJECTION_BOOKKEEPING: set[str] = {
 
 
 class StateCheckpoint(BaseModel):
+    """Durable, self-verifying snapshot of semantic state and environment."""
+
     model_config = Frozen
 
     checkpoint_id: str = Field(default_factory=lambda: make_id("checkpoint"))
@@ -1131,6 +1266,7 @@ class StateCheckpoint(BaseModel):
         return self.model_dump_json(exclude={"state": PROJECTION_BOOKKEEPING})
 
     def digest(self) -> str:
+        """Compute the stable cryptographic digest of the checkpoint content."""
         return stable_hash(self.content())
 
     def sealed(self) -> StateCheckpoint:
@@ -1143,10 +1279,13 @@ class StateCheckpoint(BaseModel):
         return self.model_copy(update={"integrity_hash": self.digest()})
 
     def verify(self) -> bool:
+        """Verify that the stored integrity hash matches the computed content digest."""
         return self.integrity_hash is not None and self.integrity_hash == self.digest()
 
 
 class DiffEntry(BaseModel):
+    """Individual component modification between two semantic states."""
+
     model_config = Frozen
 
     kind: DiffKind
@@ -1158,6 +1297,8 @@ class DiffEntry(BaseModel):
 
 
 class StateDiff(BaseModel):
+    """Collection of diff entries comparing two versions of semantic state."""
+
     model_config = Frozen
 
     run_id: str

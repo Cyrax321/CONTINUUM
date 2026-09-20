@@ -4,13 +4,13 @@ A checkpoint is only meaningful relative to an environment. "3,421 documents
 analysed" means nothing if the dataset was replaced afterwards. The snapshot is
 the fingerprint recovery compares against.
 
-Providers are pluggable because environments differ wildly — files, datasets,
+Providers are pluggable because environments differ wildly: files, datasets,
 git commits, API sessions, permissions. Each provider answers one question:
 *what does this resource look like right now?* CONTINUUM ships providers that
 need nothing but the standard library.
 
 Capture failures are recorded, not raised. If a resource cannot be inspected at
-recovery time — the API is down, the file is unreadable — that is itself a
+recovery time (the API is down, the file is unreadable), that is itself a
 finding: the resource becomes ``UNKNOWN`` rather than silently ``VALID``. An
 environment check that fails open would defeat the purpose of checking.
 """
@@ -36,6 +36,7 @@ __all__ = [
     "CallableProvider",
     "GitProvider",
     "capture",
+    "process_fingerprint",
     "UNKNOWN_VERSION",
 ]
 
@@ -67,6 +68,7 @@ class StaticProvider(EnvironmentProvider):
         self._resources = captured
 
     def capture(self) -> Mapping[str, EnvResource]:
+        """Return a copy of the fixed resources supplied at initialization."""
         return dict(self._resources)
 
 
@@ -79,6 +81,12 @@ class ValueProvider(EnvironmentProvider):
         self._values = values
 
     def capture(self) -> Mapping[str, EnvResource]:
+        """Compute content fingerprints for configured in-memory values.
+
+        Calculates a deterministic hash for each value using :func:`stable_hash`.
+        Values that fail serialization or hashing report :data:`UNKNOWN_VERSION`
+        with the error in metadata rather than raising.
+        """
         captured: dict[str, EnvResource] = {}
         for key, value in self._values.items():
             try:
@@ -119,16 +127,27 @@ class FileProvider(EnvironmentProvider):
         self.max_bytes = max_bytes
 
     def capture(self) -> Mapping[str, EnvResource]:
+        """Fingerprint tracked files by streaming SHA-256 content checksums.
+
+        Files exceeding ``max_bytes`` or causing an :class:`OSError` report
+        :data:`UNKNOWN_VERSION` with diagnostic metadata. Missing files are
+        omitted so environment diffing classifies them as removed.
+        """
         captured: dict[str, EnvResource] = {}
         for path in self.paths:
             key = str(path)
             try:
                 stat = path.stat()
                 if self.max_bytes is not None and stat.st_size > self.max_bytes:
+                    # UNKNOWN_VERSION, not a synthetic "size:<n>" stamp: a size
+                    # is not an identity, but diff_environments compared the old
+                    # stamp as one, so a replaced file of the same byte size
+                    # verified as unchanged and the environment check failed
+                    # open (issue #738). The size stays in metadata.
                     captured[key] = EnvResource(
                         name=key,
                         kind="file",
-                        version=f"size:{stat.st_size}",
+                        version=UNKNOWN_VERSION,
                         metadata={"skipped": "larger than max_bytes", "size": stat.st_size},
                     )
                     continue
@@ -174,11 +193,17 @@ class CallableProvider(EnvironmentProvider):
         self._kind = kind
 
     def capture(self) -> Mapping[str, EnvResource]:
+        """Execute registered probe callables and capture their results.
+
+        Wraps return values into :class:`~continuum.models.EnvResource` records.
+        Probes that raise an exception report :data:`UNKNOWN_VERSION` with the
+        exception details in metadata rather than propagating the failure.
+        """
         captured: dict[str, EnvResource] = {}
         for key, probe in self._probes.items():
             try:
                 value = probe()
-            except Exception as exc:  # noqa: BLE001 - a failed probe is a finding
+            except Exception as exc:
                 captured[key] = EnvResource(
                     name=key,
                     kind=self._kind,
@@ -254,6 +279,12 @@ class GitProvider(EnvironmentProvider):
         self.path = Path(path)
 
     def capture(self) -> Mapping[str, EnvResource]:
+        """Inspect the current git commit HEAD for the configured repository.
+
+        Executes ``git rev-parse HEAD`` under the repository path. If the command
+        fails, times out, or reports a non-zero exit status, returns
+        :data:`UNKNOWN_VERSION` with error details in metadata.
+        """
         key = f"git:{self.path}"
         try:
             result = subprocess.run(

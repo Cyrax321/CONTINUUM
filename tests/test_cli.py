@@ -2,7 +2,7 @@
 
 ``continuum resume "$RUN" && ./start-agent.sh`` is the line these tests exist to
 protect. If an unsafe run ever exits 0, an agent gets launched onto stale state
-or an unreconciled side effect — so the exit code is treated as a safety
+or an unreconciled side effect, so the exit code is treated as a safety
 guarantee, not a formatting detail.
 """
 
@@ -193,7 +193,7 @@ def test_no_command_reports_success_for_a_run_that_does_not_exist(
     """A typo'd run name must never look like a clean bill of health.
 
     An empty run has a trivially valid (empty) event chain and no recorded
-    actions, so `verify` and `actions` would happily exit 0 — letting
+    actions, so `verify` and `actions` would happily exit 0, letting
     `continuum verify $TYPO && deploy` succeed against a name nobody has ever
     written to. Mutating commands owe the same distinction: `checkpoint`
     diagnosed a missing run as a projection error until issue #202.
@@ -387,6 +387,21 @@ def test_validate_with_dashboard_renders_the_phase_14_dashboard(db: str) -> None
     assert "safe to resume:" in out
 
 
+def test_validate_with_dashboard_feeds_metrics_collector(db: str) -> None:
+    from continuum.observability import VALIDATIONS_RUN, get_metrics, reset_metrics
+
+    reset_metrics()
+    try:
+        code, out, _ = run("--db", db, "validate", "run_1", "--env", "dataset=v3", "--dashboard")
+        assert code == ExitCode.OK
+        assert "CONTINUUM RECOVERY DASHBOARD" in out
+        snap = get_metrics().snapshot()
+        assert snap["counters"].get(VALIDATIONS_RUN, 0) == 1
+        assert snap["gauges"].get("validation.components", 0) >= 1
+    finally:
+        reset_metrics()
+
+
 def test_validate_without_dashboard_stays_machine_friendly(db: str) -> None:
     code, out, _ = run("--db", db, "validate", "run_1", "--env", "dataset=v3")
     assert code == ExitCode.OK
@@ -564,6 +579,25 @@ def test_resume_without_repair_is_still_read_only(db: str) -> None:
     code, _, _ = run("--db", db, "resume", "run_1", "--env", "dataset=v4")
     assert code == ExitCode.REQUIRES_REPAIR
     assert SQLiteStorage(db).last_sequence("run_1") == before
+
+
+def test_resume_surfaces_a_malformed_reconciler_registry(
+    db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registry missing the ``probes`` wrapper must not degrade to silence.
+
+    The guidance probe around ``load_reconcilers`` used to catch every
+    exception and fall back to an empty registry, so `resume` printed its
+    normal guidance with no hint the config itself was wrong (#1062).
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".continuum").mkdir()
+    (tmp_path / ".continuum" / "reconcilers.json").write_text(
+        '{"send_invoice": {"command": "check-outbox"}}'
+    )
+    code, _, err = run("--db", db, "resume", "run_1")
+    assert code == ExitCode.ERROR
+    assert "send_invoice" in err
 
 
 def test_tolerating_unknown_is_opt_in(db: str) -> None:
@@ -747,6 +781,71 @@ def test_attest_keygen_writes_pem_files(tmp_path: Path) -> None:
     assert priv.exists()
     assert (tmp_path / "signer.pem.pub").exists()
     assert "PRIVATE KEY" in priv.read_text()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="permission bits are a POSIX concept (#1056)")
+def test_attest_keygen_writes_the_private_key_owner_only(tmp_path: Path) -> None:
+    """The private PEM is unencrypted, so 0644 would hand it to every local user."""
+    import stat
+
+    priv = tmp_path / "signer.pem"
+    code, out, _ = run("attest-keygen", "--out", str(priv))
+    assert code == ExitCode.OK
+    assert stat.S_IMODE(priv.stat().st_mode) == 0o600
+    # The public key is meant to be shareable, so it keeps the ambient mode a
+    # plain write_text would give it, compared against a reference rather than
+    # a literal 0o644, which would break under a stricter umask.
+    reference = tmp_path / "reference.txt"
+    reference.write_text("public", encoding="utf-8")
+    assert stat.S_IMODE((tmp_path / "signer.pem.pub").stat().st_mode) == stat.S_IMODE(
+        reference.stat().st_mode
+    )
+    # The operator is told the mode they actually got, in the same line of text.
+    assert "mode 600" in out
+
+
+@pytest.mark.skipif(os.name != "posix", reason="permission bits are a POSIX concept (#1056)")
+def test_attest_keygen_narrows_a_preexisting_world_readable_key(tmp_path: Path) -> None:
+    """An overwritten 0644 key keeps its old mode under open(2), so narrow it."""
+    import stat
+
+    priv = tmp_path / "signer.pem"
+    priv.write_text("stale placeholder", encoding="utf-8")
+    os.chmod(priv, 0o644)
+    assert stat.S_IMODE(priv.stat().st_mode) == 0o644
+
+    code, out, _ = run("attest-keygen", "--out", str(priv))
+    assert code == ExitCode.OK
+    assert stat.S_IMODE(priv.stat().st_mode) == 0o600
+    assert priv.read_text() != "stale placeholder"
+
+
+def test_write_private_key_closes_the_fd_if_wrapping_fails(tmp_path: Path, monkeypatch) -> None:
+    """A failure to wrap the fd must not leak it (#1056)."""
+    import errno
+    import importlib
+
+    # `continuum.cli.main` the attribute is the re-exported entry point, not
+    # this module, so reach the module itself by name.
+    cli_main = importlib.import_module("continuum.cli.main")
+
+    wrapped: list[int] = []
+
+    def failing_fdopen(fd: int, *args: object, **kwargs: object) -> object:
+        wrapped.append(fd)
+        raise OSError(errno.EIO, "simulated failure")
+
+    monkeypatch.setattr(os, "fdopen", failing_fdopen)
+
+    with pytest.raises(OSError):
+        cli_main._write_private_key(tmp_path / "signer.pem", "unused")
+
+    assert wrapped, "os.fdopen was never reached"
+    for fd in wrapped:
+        # The guard closed the fd, so it is no longer a valid descriptor.
+        with pytest.raises(OSError) as exc:
+            os.fstat(fd)
+        assert exc.value.errno == errno.EBADF
 
 
 def test_attest_and_verify_round_trip(db: str, tmp_path: Path) -> None:
@@ -1189,3 +1288,23 @@ def test_a_healthy_compacted_run_still_resumes_after_degrade_landed(db: str) -> 
     assert code in (ExitCode.OK, ExitCode.REQUIRES_HUMAN), f"{out}{err}"
     assert "PROJECTION FAILURE" not in out
     assert "Traceback" not in err
+
+
+def test_health_and_watch_honor_global_json_flag(db: str) -> None:
+    """Subparsers must not shadow the global --json flag (#677)."""
+    code, out, _ = run("--db", db, "--json", "health", "run_1")
+    assert code == ExitCode.OK
+    assert json.loads(out)["advisory"]["trust_score"] >= 0
+    code, out, _ = run("--db", db, "--json", "watch", "run_1", "--max-silence", "1h")
+    assert code == ExitCode.OK, out
+    assert json.loads(out)["breached"] is False
+
+
+def test_json_flag_works_after_the_subcommand(db: str) -> None:
+    """Trailing --json keeps working once shadowing is fixed (#677)."""
+    code, out, _ = run("--db", db, "health", "run_1", "--json")
+    assert code == ExitCode.OK
+    assert json.loads(out)["advisory"]["trust_score"] >= 0
+    code, out, _ = run("--db", db, "watch", "run_1", "--max-silence", "1h", "--json")
+    assert code == ExitCode.OK, out
+    assert json.loads(out)["breached"] is False

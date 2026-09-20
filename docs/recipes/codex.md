@@ -4,10 +4,10 @@ Copy-paste recipes for wiring CONTINUUM into Codex.
 
 ## What you get
 
-- **SessionStart** injects the recovery contract.
-- **PreCompact** re-verifies constraints.
+- **SessionStart** injects the recovery contract. `continuum hooks install codex` writes it.
+- **PreCompact** re-verifies constraints. Codex publishes no compaction event, so this one is copy-paste (see below) and reuses SessionStart.
 
-Both are read-only and silent when no run is active.
+Both are read-only. The installed `briefing` entry exits 0 with no output when no run is active.
 
 ## Enable Codex hooks (one-time)
 
@@ -47,7 +47,7 @@ cat .codex/hooks.json | python -m json.tool
         "hooks": [
           {
             "type": "command",
-            "command": "/absolute/path/to/.venv/bin/continuum resume --json"
+            "command": "/absolute/path/to/.venv/bin/continuum --json resume"
           }
         ]
       }
@@ -55,6 +55,10 @@ cat .codex/hooks.json | python -m json.tool
   }
 }
 ```
+
+Replace `/absolute/path/to/.venv/bin/continuum` with the resolved path:
+`which continuum` on macOS/Linux, `where.exe continuum` on Windows, where the
+executable lives under `.venv\Scripts\continuum.exe`.
 
 ```bash
 continuum --json resume | python -m json.tool | grep -q "pins"

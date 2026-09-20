@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -259,16 +260,33 @@ def test_installed_command_actually_records_through_the_real_entrypoint(
     (project / ".claude").mkdir(parents=True)
     monkeypatch.chdir(project)
 
-    subprocess.run([sys.executable, "-m", "continuum.cli", "init"], check=True, capture_output=True)
+    # Prepend the worktree's src so every subprocess below (including the
+    # shell-run baked command, whose interpreter fallback resolves `continuum`
+    # through PYTHONPATH) imports the tree under test, not an installed copy
+    # (issue #837).
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            filter(
+                None,
+                [str(Path(__file__).resolve().parents[1] / "src"), os.environ.get("PYTHONPATH")],
+            )
+        ),
+    }
+    subprocess.run(
+        [sys.executable, "-m", "continuum.cli", "init"], check=True, capture_output=True, env=env
+    )
     subprocess.run(
         [sys.executable, "-m", "continuum.cli", "start", "demo", "--goal", "write things"],
         check=True,
         capture_output=True,
+        env=env,
     )
     subprocess.run(
         [sys.executable, "-m", "continuum.cli", "hooks", "install", "claude-code"],
         check=True,
         capture_output=True,
+        env=env,
     )
     artifact = project / "out.txt"
     artifact.write_text("done")
@@ -278,7 +296,9 @@ def test_installed_command_actually_records_through_the_real_entrypoint(
     settings = json.loads((project / ".claude" / "settings.json").read_text())
     command = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
     hook_input = json.dumps(payload_for(artifact))
-    result = subprocess.run(command, input=hook_input, capture_output=True, text=True, shell=True)
+    result = subprocess.run(
+        command, input=hook_input, capture_output=True, text=True, shell=True, env=env
+    )
     assert result.returncode == ExitCode.OK, result.stderr
 
     with SQLiteStorage(str(project / "continuum.db")) as store:

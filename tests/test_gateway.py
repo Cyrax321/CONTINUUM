@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import threading
 from pathlib import Path
 
@@ -17,9 +18,12 @@ import pytest
 from continuum.actions import ActionLedger
 from continuum.events import EventType
 from continuum.gateway import (
+    Decision,
     GatewayConfigError,
     GatewayServer,
+    Route,
     load_gateway_config,
+    render_key,
 )
 from continuum.models import ActionStatus, Run
 from continuum.storage import SQLiteStorage
@@ -76,10 +80,26 @@ def post(addr: str, path: str, body: dict[str, object], host: str = "api.example
     return resp.status, data
 
 
+def recv_until_close(sock: socket.socket) -> bytes:
+    chunks = []
+    while chunk := sock.recv(4096):
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def claim(db: str, key: str) -> str:
     with SQLiteStorage(db) as store:
         outcome = ActionLedger(store, "run_1").claim("send_invoice", {}, key=key)
     return outcome.key
+
+
+def test_public_gateway_names_are_exported() -> None:
+    namespace: dict[str, object] = {}
+    exec("from continuum.gateway import *", namespace)
+
+    assert namespace["Route"] is Route
+    assert namespace["Decision"] is Decision
+    assert namespace["render_key"] is render_key
 
 
 def test_config_loading_and_validation(tmp_path: Path) -> None:
@@ -279,3 +299,151 @@ def test_oversized_body_is_refused_with_413(db: str, gateway: str) -> None:
     conn.close()
     assert resp.status == 413
     assert "exceeds" in body["error"]
+
+
+def test_malformed_content_length_returns_400(db: str, gateway: str) -> None:
+    conn = http.client.HTTPConnection(gateway, timeout=10)
+    conn.request(
+        "POST",
+        "/v1/invoices",
+        body=b'{"id": "1"}',
+        headers={
+            "Host": "api.example.com",
+            "Content-Type": "application/json",
+            "Content-Length": "invalid",
+        },
+    )
+    resp = conn.getresponse()
+    body = json.loads(resp.read())
+    conn.close()
+    assert resp.status == 400
+    assert "malformed Content-Length" in body["error"]
+
+
+def test_chunked_transfer_encoding_returns_400(db: str, gateway: str) -> None:
+    conn = http.client.HTTPConnection(gateway, timeout=10)
+    conn.request(
+        "POST",
+        "/v1/invoices",
+        body=b'e\r\n{"id": "1"}\r\n0\r\n\r\n',
+        headers={
+            "Host": "api.example.com",
+            "Content-Type": "application/json",
+            "Transfer-Encoding": "chunked",
+        },
+    )
+    resp = conn.getresponse()
+    body = json.loads(resp.read())
+    conn.close()
+    assert resp.status == 400
+    assert "transfer encoding is not supported" in body["error"]
+    assert resp.getheader("Connection") == "close"
+
+
+def test_duplicate_content_length_returns_400(db: str, gateway: str) -> None:
+    host, port = gateway.split(":")
+    request = (
+        b"POST /v1/invoices HTTP/1.1\r\n"
+        b"Host: api.example.com\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: 4\r\n"
+        b"Content-Length: 9\r\n"
+        b"\r\n"
+        b'{"id": "1"}'
+    )
+    with socket.create_connection((host, int(port)), timeout=10) as sock:
+        sock.sendall(request)
+        response = recv_until_close(sock)
+
+    assert b"400 Bad Request" in response
+    assert b"Connection: close" in response
+    assert b"multiple Content-Length headers are not supported" in response
+
+
+def test_transfer_encoding_closes_gateway_connection(db: str, gateway: str) -> None:
+    host, port = gateway.split(":")
+    request = (
+        b"POST /v1/invoices HTTP/1.1\r\n"
+        b"Host: api.example.com\r\n"
+        b"Transfer-Encoding: gzip\r\n"
+        b"Transfer-Encoding: chunked\r\n"
+        b"\r\n"
+        b"1\r\nx\r\n0\r\n\r\n"
+        b"POST /v1/invoices HTTP/1.1\r\n"
+        b"Host: api.example.com\r\n"
+        b"Content-Length: 0\r\n"
+        b"\r\n"
+    )
+    with socket.create_connection((host, int(port)), timeout=10) as sock:
+        sock.sendall(request)
+        response = recv_until_close(sock)
+
+    assert response.count(b"HTTP/1.1") == 1
+    assert b"400 Bad Request" in response
+    assert b"Connection: close" in response
+    assert b"transfer encoding is not supported" in response
+    assert b"501" not in response
+
+
+def test_compacted_consumed_authority_still_denies(db: str, gateway: str) -> None:
+    from continuum.actions.authority import record_authority_consumed
+    from continuum.cli import main
+
+    with SQLiteStorage(db) as store:
+        record_authority_consumed(store, "run_1", "spent", via_action_id="original-action")
+    assert main(["--db", db, "compact", "run_1", "--force"]) == 0
+    status, body = post(gateway, "/v1/invoices", {"id": "new", "authority_id": "spent"})
+    assert status == 403
+    assert "spent" in body["reason"] and "consumed at seq" in body["reason"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({"id": "INV-2", "payment": {"auth_token": "spent"}}, id="dict-nested"),
+        pytest.param({"id": "INV-2", "payment": {"auth": ["spent"]}}, id="list-nested"),
+    ],
+)
+def test_nested_consumed_authority_still_denies(db: str, gateway: str, payload: dict) -> None:
+    """A spent authority nested in the body must not smuggle past the gateway (#1074)."""
+    from continuum.actions.authority import record_authority_consumed
+
+    with SQLiteStorage(db) as store:
+        record_authority_consumed(store, "run_1", "spent", via_action_id="original-action")
+    status, resp = post(gateway, "/v1/invoices", payload)
+    assert status == 403
+    assert "spent" in resp["reason"] and "consumed at seq" in resp["reason"]
+
+
+@pytest.mark.parametrize("bad_length", ["abc", "-5"])
+def test_malformed_length_smuggled_body_is_never_dispatched(
+    db: str, gateway: str, bad_length: str
+) -> None:
+    """A refused body must not become the next request on a live socket (#611).
+
+    The refused head carries no trustable body boundary, so the gateway must
+    answer once and close. Whatever the client already wrote stays unread and
+    must never be parsed as a second request.
+    """
+    host, port = gateway.split(":")
+    smuggled = (
+        b"POST /v1/invoices HTTP/1.1\r\n"
+        b"Host: api.example.com\r\n"
+        b"Content-Length: 11\r\n"
+        b"\r\n"
+        b'{"id":"X1"}'
+    )
+    request = (
+        b"POST /v1/invoices HTTP/1.1\r\n"
+        b"Host: api.example.com\r\n"
+        b"Content-Length: " + bad_length.encode() + b"\r\n"
+        b"\r\n" + smuggled
+    )
+    with socket.create_connection((host, int(port)), timeout=10) as sock:
+        sock.sendall(request)
+        response = recv_until_close(sock)
+
+    assert response.count(b"HTTP/1.1") == 1
+    assert b"400 Bad Request" in response
+    assert b"Connection: close" in response
+    assert b"malformed Content-Length" in response

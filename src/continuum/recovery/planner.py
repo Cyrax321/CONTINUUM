@@ -7,7 +7,7 @@ Ordering is not cosmetic. Reconciling an uncertain side effect must come before
 any new work, because until the ledger knows whether that GitHub issue exists,
 the agent cannot safely act on the assumption that it does or does not.
 Similarly, a stale dependency must be re-pinned before the findings derived from
-it are re-derived — repairing in the wrong order produces work that is stale the
+it are re-derived. Repairing in the wrong order produces work that is stale the
 moment it completes.
 
 Steps are declarative. The planner does not execute anything; it produces the
@@ -103,6 +103,7 @@ class RepairStep(BaseModel):
         return f"{self.kind.value}:{self.target}"
 
     def render(self) -> str:
+        """Render this step as a single human-readable status line, prefixed with [human] when human action is required, else [auto]."""
         mark = "[human]" if self.requires_human else "[auto] "
         detail = f" - {self.reason}" if self.reason else ""
         return f"{mark} {self.kind.value} {self.target}{detail}"
@@ -123,10 +124,12 @@ class RepairPlan(BaseModel):
 
     @property
     def blocking(self) -> tuple[RepairStep, ...]:
+        """The blocking steps, in original order."""
         return tuple(s for s in self.steps if s.blocking)
 
     @property
     def requires_human(self) -> bool:
+        """Check if any step in this plan needs a person to step in. Returns True if at least one step has requires_human=True."""
         return any(s.requires_human for s in self.steps)
 
     @property
@@ -135,9 +138,18 @@ class RepairPlan(BaseModel):
         return self.steps[0] if self.steps else None
 
     def of_kind(self, kind: RepairKind) -> tuple[RepairStep, ...]:
+        """Get only the steps that match a specific RepairKind.
+
+        Args:
+            kind: The RepairKind to filter by.
+
+        Returns:
+            All steps where step.kind is the given kind, in original order.
+        """
         return tuple(s for s in self.steps if s.kind is kind)
 
     def render(self) -> str:
+        """Render every step as a numbered list, or "No repairs required." when the plan is empty."""
         if not self.steps:
             return "No repairs required."
         return "\n".join(f"  {i}. {s.render()}" for i, s in enumerate(self.steps, 1))
@@ -158,7 +170,7 @@ def _step_for(entry: ComponentValidationEntry, *, strict_unknown: bool = True) -
                 reason=entry.detail,
                 # An unverifiable resource normally needs a person, because
                 # nobody knows what is true. Callers who opted into tolerating
-                # uncertainty get an automatic step instead — the policy has to
+                # uncertainty get an automatic step instead: the policy has to
                 # hold here too, or the setting would be silently ignored.
                 requires_human=entry.status is StateStatus.UNKNOWN and strict_unknown,
             )
@@ -215,7 +227,7 @@ def plan_repairs(
 
     Steps are deduplicated by identity and sorted so that prerequisites precede
     the work that depends on them. Sorting is stable and total, so the same
-    inputs always yield the same plan — a contract that varied between runs
+    inputs always yield the same plan, since a contract that varied between runs
     would be impossible to audit.
 
     ``unprojectable`` is ``(sequence, event_type, reason)`` for a log whose fold

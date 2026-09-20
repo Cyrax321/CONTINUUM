@@ -265,15 +265,15 @@ These are real but non-launch-critical; left open as contributor work.
 
 | Issue | One-line impact | Disposition |
 | --- | --- | --- |
-| #29 | `ActionLedger.reconcile(occurred=False)` leaves stale `external_id`/`result` | Open |
-| #30 | `FileProvider` reports a missing file as `version=None`, so diff marks it `changed` not `removed` | Open |
-| #33 | `identity_tokens` drops plain-word resource ids (requires digit/`@`/`.`) | Open |
-| #34 | `ActionLedger scoped_to_run=False` does not enforce global uniqueness across runs as documented | Open |
-| #36 | `identity_tokens` drops purely-numeric resource ids, so cross-session fallback fails on numeric ids | Open |
-| #42 | Strict mode: uncertain side effect yields `REQUEST_HUMAN` but an auto-reconcile step silently ignores `strict_unknown` | Open |
-| #43 | Two checkpoints at the same state version collapse to one in `continuum history` | Open |
-| #45 | `claim(on_unknown=)` resolution is not persisted, so the ledger stays uncertain after call-time resolution | Open |
-| #49 | `StateValidator._check_model` reports model-specific assumptions `VALID` when `expected_model` is `None` (fail-open) | Open |
+| #29 | `ActionLedger.reconcile(occurred=False)` leaves stale `external_id`/`result` | Closed: `reconcile` clears `external_id`, `result`, and `result_hash` on occurred-false path (`src/continuum/actions/ledger.py`) |
+| #30 | `FileProvider` reports a missing file as `version=None`, so diff marks it `changed` not `removed` | Closed: `FileProvider.capture` omits missing files entirely so diff classifies them `REMOVED` (`src/continuum/environment/snapshot.py`) |
+| #33 | `identity_tokens` drops plain-word resource ids (requires digit/`@`/`.`) | Closed: `_is_strong_token` accepts plain words of sufficient length (`src/continuum/actions/idempotency.py`) |
+| #34 | `ActionLedger scoped_to_run=False` does not enforce global uniqueness across runs as documented | Closed: cross-run uniqueness limitation clarified in `idempotency_key` docstring (`src/continuum/actions/idempotency.py`) |
+| #36 | `identity_tokens` drops purely-numeric resource ids, so cross-session fallback fails on numeric ids | Closed: `identity_tokens` collects integer scalars as tokens (`src/continuum/actions/idempotency.py`) |
+| #42 | Strict mode: uncertain side effect yields `REQUEST_HUMAN` but an auto-reconcile step silently ignores `strict_unknown` | Closed: `plan_repairs` marks reconcile steps `requires_human` in strict mode (`src/continuum/recovery/planner.py`) |
+| #43 | Two checkpoints at the same state version collapse to one in `continuum history` | Closed: `cmd_history` lists every checkpoint row instead of keying by version (`src/continuum/cli/main.py`) |
+| #45 | `claim(on_unknown=)` resolution is not persisted, so the ledger stays uncertain after call-time resolution | Closed: `claim` records an `on_unknown` resolution as an `ACTION_RECONCILED` event (`src/continuum/actions/ledger.py`) |
+| #49 | `StateValidator._check_model` reports model-specific assumptions `VALID` when `expected_model` is `None` (fail-open) | Closed: `_check_model` reports `UNKNOWN` when assumptions exist but either model is unknown (`src/continuum/state/validator.py`) |
 
 ### 5.2 Open behavioral questions (not yet filed / not yet resolved)
 

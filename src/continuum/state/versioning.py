@@ -63,6 +63,14 @@ def canonical_state_json(state: SemanticState) -> str:
 
 
 class VersionEntry(BaseModel):
+    """An immutable, content-addressed node in a run's state version chain.
+
+    Carries the full :class:`~continuum.models.SemanticState` snapshot at
+    a specific version index, its cryptographic content fingerprint, the
+    parent version's fingerprint, an optional commit reason, and a UTC
+    timestamp.
+    """
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     version: int
@@ -88,14 +96,20 @@ class VersionChain:
 
     @property
     def entries(self) -> tuple[VersionEntry, ...]:
+        """Return all committed version entries in ascending sequence order.
+
+        Returns an immutable tuple snapshot of the internal version chain.
+        """
         return tuple(self._entries)
 
     @property
     def head(self) -> VersionEntry | None:
+        """Return the newest committed version entry, or ``None`` if empty."""
         return self._entries[-1] if self._entries else None
 
     @property
     def current(self) -> SemanticState | None:
+        """Return the latest semantic state in the chain, or ``None`` if empty."""
         head = self.head
         return head.state if head else None
 
@@ -125,6 +139,11 @@ class VersionChain:
         return entry
 
     def at(self, version: int) -> VersionEntry:
+        """Retrieve the version entry at sequence index ``version``.
+
+        Raises :class:`KeyError` if no entry with that version number exists
+        in this chain.
+        """
         for entry in self._entries:
             if entry.version == version:
                 return entry

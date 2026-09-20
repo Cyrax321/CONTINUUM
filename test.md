@@ -88,7 +88,7 @@ through the repair.
 
 ## Findings
 
-### F1  -  Distinct actions deduplicated against each other
+### <a id="f1"></a>F1  -  Distinct actions deduplicated against each other
 
 **Severity:** high (silently skips a real side effect)
 **Status:** fixed during the audit, by the maintainer, while testing was in progress
@@ -122,7 +122,7 @@ genuine re-renderings still match. Integers now tokenize.
 `test_a_differing_amount_counts_whether_it_is_a_number_or_a_string`)  -  the sharpest
 form of the rule, where one token is shared and the distinguishing value is numeric.
 
-### F2  -  Environment drift was detected but did not block resume
+### <a id="f2"></a>F2  -  Environment drift was detected but did not block resume
 
 **Severity:** high (reports state as verified when it is not  -  explicitly in scope per `SECURITY.md`)
 **Status:** fixed in this change
@@ -158,7 +158,7 @@ the dependency by appending `DEPENDENCY_DECLARED` straight to storage  -  someth
 no MCP client can do  -  which is how the gap survived a suite that covered the
 machinery.
 
-### F3  -  `list_actions` under-reported the interrupted row
+### <a id="f3"></a>F3  -  `list_actions` under-reported the interrupted row
 
 **Severity:** low (misleading recovery diagnostics)
 **Status:** fixed in this change
@@ -169,7 +169,7 @@ An action left `STARTED` by a crash reported `side_effect_uncertain: false` whil
 would read said the opposite. `side_effect_uncertain` is only set on *escalation*
 to `UNKNOWN`, which has not happened yet for a freshly interrupted claim.
 
-### F4  -  WAL "self-healing" could destroy committed transactions
+### <a id="f4"></a>F4  -  WAL "self-healing" could destroy committed transactions
 
 **Severity:** high blast radius, low reachability (a latent durability bug, not observed live)
 **Status:** fixed in this change

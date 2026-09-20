@@ -6,7 +6,337 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A padded argument token can no longer reset the authorization-bound retry
+  budget (#1052).** The bucket was derived from every argument token, and the
+  arguments are caller-controlled noise plus the real resource, so keeping the
+  idempotency key fixed while varying one throwaway field (a `trace_id`, a
+  request id) moved every retry into a fresh bucket at its full allowance. A
+  `budgets.json` cap of 2 that refused a third identical attempt stayed open
+  indefinitely while each retry carried a new token. `ActionLedger.claim` now
+  derives the bucket from the record the claim defers to when one exists, which
+  is the identity the ledger itself has already decided the attempt is, and
+  settlement paths already derived from those same stored arguments, so a retry
+  and its confirmation share one bucket by construction. Fresh-key minting for
+  a fixed resource still shares the bucket as before (#390, #413). A caller
+  minting both a fresh key and fresh noise per attempt presents no identity the
+  ledger can see and remains on the token fallback -- the documented residual,
+  since declaring such fields `volatile` at every call site is not a fix: a
+  caller that wants around the cap simply forgets to declare them.
+
+### Changed
+
+- **The TUI `tree` view fetches the run once instead of twice (#1157).**
+  `family_lines` in `src/continuum/tui/model.py` called
+  `storage.get_run(run_id)` twice and discarded the first result: the first
+  call was the run-existence guard, the second fetched the record the header
+  actually renders. Both hit storage for the same row, and on the SQLite and
+  Postgres backends that is a round trip on a view an operator re-renders
+  while watching a run tree. The assignment now does both jobs: `run =
+  storage.get_run(run_id)` raises `RunNotFound` for a missing run exactly as
+  the standalone guard did, so no behaviour changes beyond the spared query.
+  The neighbouring views (`checkpoint_rows`, `action_rows`, `event_rows`,
+  `budget_rows`) already fetched the row exactly once for the same guard
+  purpose, so this removes the outlier.
+
+- **The advisory verdict contract is now stated where a reader can find it (#1031).**
+  `RecoveryDecision` and its `permits()` method describe themselves as
+  advisory, not enforcing, and name the four enforcement seams a caller can
+  opt into instead (host gate, HTTP gateway, replay guard, observation hooks),
+  none of which is enabled by a plain install. README gains a "The verdict is
+  advisory, not enforced" subsection under "What CONTINUUM Is Not", and
+  `docs/recovery_walkthrough.md` gains "The verdict is advisory", which points
+  out that the CLI exit code, not the verdict, is what gates a chained
+  pipeline and that calling `CheckpointManager.restore` directly keeps the
+  verdict but drops that enforcement. Behaviour is unchanged: `permits()` had
+  no product caller and still has none, so this documents the existing
+  contract rather than altering it.
+
+### Removed
+
+- **Dead `DuplicateAction` and `LeaseError` exception classes (#1115).**
+  `DuplicateAction` (`continuum.actions.ledger`) and `LeaseError`
+  (`continuum.concurrency.lease`) were exported exceptions that no code path
+  could raise: duplicate attempts are handled via `fresh=False` outcomes,
+  `UnknownSideEffect`, or `GrantDenied`, while lease contention is signaled by
+  `acquire() -> False`. Dead exception definitions and exports removed.
+- **Dead `observations_evidence_lines` helper (#867).** The function in
+  `src/continuum/recovery/observations.py` was defined once and called
+  nowhere: leftover scaffolding from #208 whose engine-side rendering at
+  `recovery/engine.py` formats the same evidence its own way. Dead code in a
+  safety-critical path misled the next reader into thinking contract evidence
+  flows through it. No callers, not exported through `__all__`; recoverable
+  from history (355ba76) if a future surface needs that exact rendering.
+
+### Fixed
+
+- **Webhook dedup now survives a compaction inside the re-notify window
+  (#1186).** `_within_dedup_window` scanned only the live event tail for the
+  `NOTIFICATION_SENT` / `NOTIFICATION_FAILED` rows the dedup state lives in,
+  but `compact_run` archives exactly those rows. A compaction inside an
+  endpoint's re-notify window (default 3600s) therefore made the next blocked
+  assessment deliver the same verdict again. This is the precise spam the dedup
+  exists to prevent, and in the failure direction that always means more
+  noise: an operator who was paged once and compacted the long blocked run to
+  shrink the log, as the docs suggest, gets paged again for the same standing
+  blockage, and once archived, on every subsequent assessment until the
+  window expires. The scan now reads `read_all_events`, the merged
+  archive-aware history every other durable-state consumer already uses
+  (`ledger._replay`, `gateway`, `provenance_for_run`, the reconcilers).
+  Archived rows keep their original timestamps, so the window computation
+  itself is unchanged and the expired-window path still rings again on time.
+- **The docs-count guard now reads `references/` and the translated READMEs,
+  and the stale counts they held are re-synced (#1109, #1071).** The guard in
+  `tests/test_docs_counts.py` watched only three files, so `references/testing.md`
+  and `references/install.md` quietly stated a collected total of 2,241 while
+  `README.md` stated 2,278, and all five translated READMEs still reported 2,195
+  collected with a 1,380-test narrative. None of those files could fail the
+  guard. Its scope is now the three required docs plus every `README*.md` and
+  every `references/*.md`: a doc that states no total is skipped, and a doc
+  that states a wrong one fails. The collected total is also matched in the
+  `pytest -q` verify comment, whose shape every translation keeps even after
+  all its prose is rephrased, so that one pattern reads all six READMEs.
+  `references/testing.md`, `references/install.md`, and the translated READMEs
+  now carry the same figures as `README.md`.
+
+- **`load_reconcilers` now refuses a registry missing the `probes` wrapper
+  instead of silently loading it as empty (#1062).** A file that maps action
+  types at the top level (`{"send_invoice": {...}}`) instead of nesting them
+  under `probes` is valid JSON, so `raw.get("probes", {})` and
+  `raw.get("probes") or {}` both defaulted to `{}` and the loader returned an
+  empty registry with no warning. Every uncertain action of that type then
+  read as having no probe registered, and nothing in that message pointed at
+  the missing wrapper as the cause. `load_reconcilers` now raises
+  `ReconcilerConfigError` naming the top-level keys it found and the `probes`
+  wrapper they belong under. An empty file (`{}`) is unaffected and still
+  loads as a valid empty registry. `gate.py` has the identical pattern for its
+  `tools` wrapper; left alone here since it's outside this issue's scope.
+
+  The three guidance call sites that read the registry (`resume` in the CLI,
+  the TUI's recovery view, and the MCP server's `continuum_resume`) each
+  caught every exception around `load_reconcilers` and fell back to an empty
+  probe list, so the new diagnostic above was getting silently absorbed the
+  same way the old empty-dict default was. Each now lets `ReconcilerConfigError`
+  through, matching how it already handles other errors: the CLI's existing
+  top-level `ValueError` handler prints it and exits non-zero, the TUI
+  prepends it to the rendered steps rather than dropping the run's guidance
+  entirely, and the MCP server raises it as a `ToolError` so the calling agent
+  sees it.
+
+- **A tampered checkpoint is reported as corrupted, not as missing (#1059).**
+  Both checkpoint resolvers wrapped `storage.get_checkpoint` in a bare
+  `except Exception: pass`, so a record whose body failed validation or whose
+  sealed integrity hash no longer matched was silently retried as a version
+  number and finally reported as a lookup miss. `resolve_checkpoint` and
+  `_anchor_for` now let `CorruptedRecord` through, wrapping it in the same
+  `RewindError`/`ValueError` the resolvers already raise, but naming the
+  corruption instead of pointing the operator at a typo or a missing version.
+  The tamper-evidence the storage layer raises is the one signal an operator
+  most needs on this path, and it was the signal both resolvers converted into
+  noise. A genuine lookup miss still falls through to the version and
+  source-sequence strategies exactly as before.
+
+- **`continuum attest-keygen` writes the private key owner-only (#1056).** The
+  command wrote an unencrypted PKCS8 Ed25519 private key with
+  `Path.write_text`, which creates the file at 0666 masked by the ambient umask
+  (0644 out of the box, readable by every local user on the host) while its
+  own output told the operator to keep it secret. Anyone with read access to the
+  file or a backup copy could produce validly-signed attestations for a tampered
+  event chain. The key is now created through `os.open` with an explicit 0600
+  mode, so it is owner-only from the moment it appears with no window at 0644,
+  and a pre-existing wider-mode file being overwritten is narrowed too, since
+  `open(2)` ignores the mode argument for a file that already exists. The public
+  key stays world-readable, as intended. The command now reports the mode it
+  applied next to the existing "keep the private key secret" line, so an operator
+  on a surprising filesystem can see what they actually got. Two tests pin the
+  property on POSIX (created mode, narrowing of a pre-existing 0644 key,
+  reported mode in output); Windows has no POSIX permission bits and is
+  skipped, matching the `tests/test_retry_budgets.py` precedent. A third test
+  covers the file-descriptor leak guard in the write helper on every platform.
+- **Every run-completion path now clears the instant-resume pointer (#394).**
+  `.continuum/resume.json` is written on every checkpoint so a `SessionStart`
+  hook can banner the interrupted run without opening the database. A run
+  closed as completed is no longer interrupted, but only `continuum complete`
+  removed the pointer; the TUI's and the dashboard HITL button's `complete_run`
+  claimed to mirror that command and did not, so completing a run from either
+  left the next session banner surfacing finished work as the active run. The
+  cleanup is now a single helper (`continuum.checkpoint.clear_resume_pointer`)
+  all three paths route through. A pointer naming any other run is left in
+  place, and an unreadable or undeletable file, or one holding valid JSON that
+  is not an object, is tolerated rather than failing the completion.
+  `tests/test_resume_pointer.py` pins the helper and each of the three
+  completion paths, and was verified to fail without the fix.
+
+- **The horizon `abort_condition_year` scenario now reaches abort (#1028).**
+  The scenario was labelled `correct_mode="abort"` but drove the abort through
+  `DECISION_INVALIDATED`, an event the recovery engine never routes to `ABORT`
+  (decision invalidation escalates to `REQUEST_HUMAN` instead). The scenario
+  failed by construction and capped the published horizon accuracy at 0.60
+  without any real regression in decision quality. `ABORT` is reachable only
+  through the risk policy (`recovery/risk.py` maps `side_effect_duplicate` to
+  `ABORT`), so the scenario now emits that `RISK_OBSERVED` event and exercises
+  the mechanism that exists. Published accuracy moves 0.60 to 0.80, and
+  `references/bench.md` plus the README bench section regenerate from the real
+  run. Two tests pin the property: a fast unit test asserting the
+  `side_effect_duplicate -> abort` mapping holds, and a slow benchmark test
+  asserting the scenario reaches abort, so a future engine change that drops
+  the risk path turns the suite red instead of silently deflating the figure.
+  `quarterly_drift_year` still fails (label `repair`, actual `request_human`)
+  and is deliberately left alone: whether dataset drift should be repaired
+  rather than escalated is an open labelling question, not a defect.
+
 ### Added
+
+- **Curated briefing by provenance (#742).** `continuum briefing` no longer
+  rehydrates the newest agent-authored reasoning summary verbatim. A pure,
+  deterministic curation layer (`continuum.recovery.briefing_curation`) builds
+  the resume context from the sealed recovery contract, validated semantic
+  state, system-derived attempt lessons (#313), trajectory reports (#393) and
+  the engine-recorded informed-retry block (#265), each section labeled
+  `verified` / `system` / `agent` with an inclusion reason, most trusted
+  first. Stale, invalidated and requires-review evidence and findings are
+  quarantined under a "do not trust" header with reasons instead of silently
+  disappearing; agent summaries whose environment pins no longer hold are
+  omitted from the rehydrated context and noted with the reason. The verbatim
+  summary remains reachable through the explicit `continuum briefing
+  --raw-summary` diagnostic. `tests/test_briefing_curation.py` pins ordering,
+  provenance labels, quarantine, omission, determinism and the size caps;
+  recovery verdicts and safety semantics are unchanged.
+
+### Fixed
+
+- **MCP and sidecar ledger writes now carry `EXTERNAL_AGENT` (#653).**
+  `ContinuumMCP.ledger` and `SidecarServer._ledger` construct their
+  `ActionLedger` with `source=AGENT_SOURCE`, matching the `EXTERNAL_AGENT`
+  stamp both servers already put on their direct appends and widening the
+  #612 thin-adapter fix to the remote-agent surfaces. Agent-asserted effects
+  reported over MCP or the sidecar no longer self-certify as trusted local
+  work: recovery verdicts for affected runs lean toward human review.
+  `tests/test_mcp_sidecar_provenance.py` pins the new derivation; both tests
+  fail on the old default. The bare `ActionLedger` default stays
+  `DETERMINISTIC`, so local writers are unchanged.
+
+- **Cleared the `noqa` backlog flagged by RUF100 (#951).** Removed 42 unused
+  `# noqa` directives (rules not enabled in the repo's ruff `select`) from
+  `src/`, `tests/`, and `examples/`, while keeping the ~26 that still suppress
+  real, active violations (`F401`/`E402`/`B017`/`B018`) — optional-dependency
+  availability probes and intentional mid-module imports in examples/tests.
+  `ruff check`, `ruff format --check`, `mypy src/continuum`, and the pytest
+  suite remain green.
+
+### Changed
+
+- **Unified StateExtractor protocol (#783).** `plugins/seams.py` previously
+  declared its own `StateExtractor` Protocol with a `(trajectory, environment)`
+  signature that was incompatible with the canonical `(ExtractionContext)`
+  Protocol in `state/extractor.py`. The seams module now re-exports the
+  canonical protocol from `state/extractor.py`, so the plugin registry and the
+  core library share one contract. The `ExtractionContext` dataclass (with
+  `base` for composite chaining) is now the single shape every extractor
+  accepts. Covered by `tests/test_plugins.py` and `tests/test_extractor.py`.
+
+### Added
+
+- **Nightly bench publish CI (#570).** New `.github/workflows/bench-nightly.yml`
+  runs the full benchmark suite on a nightly schedule (plus manual dispatch)
+  and commits the refreshed tables when the numbers move. `benchmarks/run.py`
+  grew a `--publish` flag that also refreshes a new latest-results block in
+  `references/bench.md`; plain runs behave exactly as before, so local trees
+  stay clean. Both tables regenerate idempotently between `BENCH` markers
+  from real runner numbers only.
+
+- **The installed `continuum-mcp` entry point is exercised over real stdio (#834).**
+  `tests/test_mcp_entrypoint.py` spawns the console script a host actually
+  spawns (by absolute path, through pipes, no shell) and drives
+  `initialize` plus `tools/list`; the `python -m continuum.mcp` fallback form
+  gets the same handshake. A Windows-only test pins the mechanism behind
+  `CONNECTION_CLOSED` (#699): `CreateProcess` resolves a bare command name
+  against the calling process's PATH, never the environment passed to the
+  child, so the suite can now tell a broken entry point (#697) from an
+  unreachable one.
+- **Raw-wire framing is pinned by the suite (#839).** The smoke script already
+  reports whether response frames end `LF` or `CRLF`; the gap was that no test
+  asserted it. `tests/test_mcp_entrypoint.py` now drives `initialize` +
+  `tools/list` over binary pipes (a text-mode pipe applies universal newlines
+  and rewrites `\r\n` to `\n`, hiding the difference) and asserts every
+  response frame ends `b"\r\n"` on Windows (the upstream SDK defect,
+  modelcontextprotocol/python-sdk#2433, documented in `docs/api/mcp.md`) and
+  `b"\n"` elsewhere, so an upstream fix or a local regression becomes a CI
+  failure instead of a Windows-only user report. The frame parser accepts
+  either terminator, pinning that client-side tolerance too. With the framing
+  assertions the issue's test plan is complete: entry-point realism landed in
+  #881, the install matrix (#837) runs the smoke over the console script on
+  all three OSes, and this closes the raw-bytes half.
+- **Completed actions record consumed inputs for restore-point admissibility (#558).**
+  `ActionLedger.complete` and `reconcile` accept an optional `consumed_inputs`
+  mapping (`checkpoint_seq`, `event_positions`, `component_ids`, `action_ids`),
+  validated and stored on the action row and in the `action_index` projection.
+  Rows written before the field existed load as empty and stay admissible. The
+  MCP `complete` and `reconcile` tools and the sidecar `complete_action` and
+  `reconcile_action` handlers forward the field, so agent-driven callers can
+  declare what state an effect was computed from.
+- **Plan-aware bench scenario reports zero duplicate work (#468).**
+  `plan_aware_resume_skips_completed_units` starts a 5-unit linear plan via
+  `PLAN_UPSERT`, completes 2 units, reprojects from the log as a post-crash
+  resume would, and asserts units 1-2 never re-execute while 3-5 remain,
+  recording the duplicate count in the report metrics. It runs in CI through
+  the parametrized phase-6 suite.
+- Shared signed webhook delivery primitive for human notification (#305).
+  `continuum.recovery.notify` posts JSON with an HMAC-SHA256 signature when
+  `CONTINUUM_WEBHOOK_SECRET` is set and plain JSON otherwise, always
+  fail-open. The liveness watch webhook path now routes through it with
+  identical wire behavior when unconfigured.
+
+- **Documented three-file ruff rev lockstep (#689).** CONTRIBUTING.md now
+  names all three places the ruff version lives (the `ruff==` pin in
+  `pyproject.toml`, `rev` in `.pre-commit-config.yaml`, and the `rev` quoted
+  in CONTRIBUTING.md itself) and the test that enforces them; the pin test's
+  failure message says "version skew, not a broken test" and lists the three
+  files to bump, so a dependabot PR that trips it (#627) is readable as
+  drift. The pre-commit ecosystem's absence from dependabot is recorded in a
+  comment there and pinned by a test: its updates cannot be grouped with pip
+  bumps and would break the lockstep in their own PR.
+
+- **External probe for consumed authorities via reconcilers.json (#557).**
+  `reconcile --authority <id>` runs the configured authority probe with the
+  recorded consumption payload on stdin; `valid=true` appends
+  `AUTHORITY_RECONCILED` and clears the consumed mark, `valid=false` keeps it
+  blocked, and anything else leaves it blocked. Covered by
+  `tests/test_authority_probe.py`, including the negative test that a restore
+  does not resurrect.
+
+- **Liveness watchdog and risk-informed recovery (#302, #303).**
+  Cadence contracts drive `continuum watch`, which appends
+  `LIVENESS_SILENCE_DETECTED` on breach and `LIVENESS_RECOVERED` on recovery
+  (webhook delivery is fail-open); `RISK_OBSERVED` ingestion maps through
+  `.continuum/risk-policy.json` with risks arriving as `EXTERNAL_MONITOR`
+  witnesses, and the contract carries a `triggering_risks` section. Covered
+  by the liveness, risk, and watch suites.
+
+- **Reconciler registry accepts documented shapes and refuses bool timeouts (#322).**
+  Probe entries require a command and a positive numeric timeout; a boolean
+  timeout is refused rather than read as seconds. The registry shape and the
+  default timeout are pinned by `tests/test_reconcilers.py`.
+
+- **Bench harness records byte counts, revalidation calls, and resume tokens (#568).**
+  Per-strategy counters flow into the shared report envelope, covered by
+  `tests/test_benchmark_counters.py`.
+
+- **`examples/demo.ipynb`, the crash-recovery walkthrough as a notebook (#283).**
+  The lowest-friction way to watch a recovery was `docker run`, which still wants
+  a daemon; this wants a browser. Colab and Binder badges in the Quick Start
+  table open it, and its first cell installs CONTINUUM only when the import
+  fails, so the one file runs on both and from a clone unchanged. The walkthrough
+  is the one `examples/crash_recovery_agent.py` prints, driven through the library
+  instead of the CLI: a real child process is killed at document 400 by a real
+  `os._exit(9)`, the dataset moves v3 to v4, `RecoveryEngine.assess` answers
+  `REQUEST_HUMAN` and `continuum resume` would exit 20, a probe reconciles the
+  side effect nobody could vouch for, and the run finishes at 1,000 documents
+  with zero duplicates and one GitHub issue. It writes to a temporary directory,
+  not to `demo-run/`, and deletes it in the last cell.
+  `tests/test_demo_notebook.py` executes the cells as a plain script, so a
+  renamed API cannot rot the first thing a new reader runs. No library change.
 
 - **`.pre-commit-config.yaml`, pinned to the ruff CI runs (#537).**
   `CONTRIBUTING.md` described the file instead of shipping it, so
@@ -22,7 +352,232 @@ All notable changes to this project are documented here. The format follows
   environments without the project's dependencies, where its results are not
   trustworthy. Contributor tooling, no runtime change.
 
+- **`hooks install` wires the compaction checkpoint (#449).** Claude Code fires
+  `PreCompact` immediately before it compacts the transcript: the one
+  interruption the harness announces in advance, and until now the only
+  lifecycle hook the installer left for the operator to hand-edit into
+  `.claude/settings.json`. Forgetting it meant compaction could discard
+  reasoning that was never recorded, which is the loss this project exists to
+  prevent. `continuum hooks install claude-code` now writes a `PreCompact`
+  entry running the new `continuum precompact` command, alongside the
+  SessionStart and PostToolUse hooks; `--no-precompact` skips it and
+  `hooks remove` takes it out with the rest. It is on by default, unlike
+  `--with-gate`, because a gate can deny a tool call and so changes how the
+  agent behaves, while this only seals state the run already has.
+
+  The documented recipe could not be installed verbatim: it names one run
+  (`continuum checkpoint my-task --reason "pre-compact"`) while `hooks install`
+  runs once and runs come and go. So `continuum precompact` resolves the run
+  itself, as `observe` and `briefing` do, and records the checkpoint with
+  trigger `context_pressure` (the harness-side, involuntary form of the signal
+  `ContextPressurePolicy` can only see when the agent volunteers its own token
+  counts). Beside the checkpoint it writes the two snapshots the guide promises,
+  at the paths the guide already names, so a recipe scripted against
+  `.continuum/precompact-resume.json` or `.continuum/precompact-verify.json`
+  keeps working. Those paths are reported in posix form on every platform, since
+  the guide names one spelling and recipes read them straight out of the JSON.
+  The checkpoint also refreshes `.continuum/resume.json`, which is what lets the
+  next session's SessionStart briefing detect the interruption without opening
+  the database at all.
+
+  The hook never fails its host. With no active run it exits 0 having sealed
+  nothing, and a snapshot it cannot write is reported in `failures` while the
+  checkpoint stands: that is the durable half, and it is already in the
+  hash-chained log. An explicit `--run-id` naming a run that does not exist is
+  still an error, since an operator who baked the wrong id into a hook command
+  needs to hear it.
+
+  The compaction recipe the guide published for hand-editing is recognised as
+  this project's own, so `hooks install` adopts it (one entry, repointed) instead
+  of appending a second hook to fire beside it, and `hooks remove` takes it out
+  rather than leaving a `continuum checkpoint` writing to a database the operator
+  believes they detached from. It cannot be recognised by shape, the way every
+  other installed hook is, because it predates the `precompact` subcommand and
+  ends in a redirect; the snapshot filenames this project named are the
+  fingerprint instead, and a command has to invoke the `continuum` CLI as well
+  before either verb will touch it. `--no-precompact` now takes out an entry an
+  earlier install wrote, rather than only declining to write one, and is the
+  supported way to keep a hand-written recipe that pins a single run: it removes
+  the command the installer writes and leaves what the operator wrote alone.
+
+  Codex and Gemini get no `PreCompact` entry: neither harness exposes a
+  compaction event, as both guides state, and wiring a hook to an event that
+  never fires would look like durability without being any. Codex observation
+  stays `^Bash$|^shell$`, now pinned by a test against both pages that document
+  it, so the profile and the guides fail together instead of drifting apart.
+
+- **Deterministic authorization identity from keys or resource tokens (#412,
+  PR #430).** Budgets need a bucket that survives an agent minting a fresh
+  idempotency key: with one bucket per key, a retry loop that re-renders its
+  key gets a fresh allowance every attempt and the cap means nothing. New
+  `resolve_authorization_id(action_type, key, arguments, *, volatile, ledger)`
+  in `src/continuum/actions/idempotency.py` derives that identity with a stated
+  precedence. An explicit key wins and arguments are ignored, so the id is
+  `stable_hash({type, key})` and the same pair resolves the same on any
+  machine. With no key, the id is the hash of the canonical leaf tokens of the
+  arguments, which collapses the renderings of one operation that differ only
+  in shape: a renamed field (`invoice_id` against `invoice`), a relative path
+  against an absolute one, a derived form such as `INV-001.sent` against
+  `INV-001`. A token under three characters or on the fixed weak/stopword lists
+  (`sent`, `true`, `tmp`, `file`, `the`, `and`, and the rest) is dropped, so
+  arguments made only of those resolve to `None`, as do arguments with neither
+  a key nor a distinctive token; that leaves the caller unbound and
+  byte-identical to before. When a ledger is supplied, only a *unique* completed
+  or interrupted match anchors the id; an ambiguous
+  multi-match returns `None` rather than guessing a bucket. Action-type drift
+  is deliberately not bridged, because two different action types are two
+  different operations. The helper reuses `identity_tokens`, `leaf_tokens`,
+  `location_tokens` and the existing stem/suffix rule rather than introducing a
+  second identity scheme, so a claim and a budget cannot disagree about what
+  the same operation is. Covered by `tests/test_authorization_identity.py`.
+
+- **Authorization-bound budget drawdown on claim (#413).** The identity above
+  is what `ActionLedger` now binds budgets to. `_budget_authorization_id`
+  deliberately passes neither the explicit key nor the ledger: passing the key
+  would give each rotated key its own bucket and undo the cap fix, and
+  anchoring on the ledger would let a prior failed attempt make its own retry
+  look unbound. A malformed registry fails closed with `LedgerError` rather
+  than proceeding unaccounted, while a `budgets.json` that does not exist means
+  budgets are unconfigured and nothing is drawn down, so runs without an
+  authorization registry stay byte-identical. `CONTINUUM_BUDGETS_PATH`
+  overrides the registry location. `continuum budget <run>` gained an
+  `AUTHORIZATION` table and a matching `authorization_budgets` JSON key, so a
+  drawdown is observable without reading the raw registry. Covered by
+  `tests/test_budget_drawdown.py`.
+
+- **Docstrings on every function in `gateway.py`, `dashboard/app.py` and
+  `cli/main.py` (#538).** The three files most recently hardened carried
+  undocumented functions, and `cli/main.py` sat at 47/59 = 79.7%, just under the
+  80% CodeRabbit threshold, so the next unrelated PR touching any of them
+  inherited a failing pre-merge check for code it did not write. All 30 are now
+  documented and each file reads 100%: 16/16, 12/12 and 59/59. The additions say
+  what the caller needs rather than restating the signature - which surfaces are
+  read-only, where an exit status carries the recovery verdict, why an oversized
+  dashboard body is drained before the 413, why `benchmark` cannot touch the
+  configured database, why a missing run answers 404 rather than 200. The
+  issue's file list is partly stale: `gateway.py`'s `_body` and `_handle` are
+  named as gaps but already documented on `main`, so the audit was rerun with an
+  AST pass over the three files rather than taken from the list. Docstrings only,
+  105 insertions and no deletions, no runtime change.
+
+- **`references/adapters.md` covers the thin hook adapters and the two transport
+  seams (#267).** The adapter reference documented the class-based adapters and
+  stopped there, so three shipped integrations and two seams lived only in README
+  bullets and source docstrings: `install_crewai_hooks`, `wrap_autogen_tool` and
+  `wrap_pydantic_ai_hooks` in `src/continuum/adapters/thin.py`, the enforcing
+  `continuum gateway` proxy, and the `continuum.otel` span processor. Someone who
+  opened the reference to wire CrewAI found no mention of it and could reasonably
+  conclude it was unsupported. Two new sections now mirror the README table, give
+  a snippet per surface, and state the parts that are easy to get wrong: `key_fn`
+  on a hook surface takes `(tool_name, args_dict)` rather than the wrapped
+  function's `(*args, **kwargs)`, the gateway settles a claim from the real
+  response status while the OTel bridge only observes and never blocks, and the
+  `[otel]` extra pins `opentelemetry-api` while `make_span_processor` imports
+  from `opentelemetry.sdk.trace`. Writing it surfaced one discrepancy, documented
+  rather than papered over: `thin.py`'s module docstring says provenance is
+  `EXTERNAL_AGENT`, but `ActionLedger` passes no source, so its events land with
+  `append_event`'s `Origin.DETERMINISTIC` default and a thin-adapter run is not
+  held for review the way an MCP-reported one is. Docs-only, no runtime change.
+
+- **`src/continuum/adapters/thin.py` is fully documented (#680, follows #607).**
+  The thin hook adapters carried 12 undocumented public names (14 counting the
+  two async capability methods the issue's AST snippet misses because
+  `ast.AsyncFunctionDef` is not `ast.FunctionDef`), including the entry points
+  contributors actually call: the three `*_available` probes, the shared
+  guard's `ledger`, `claim`, `complete` and `fail`, the CrewAI `before`/`after`
+  hooks and their `uninstall`, the AutoGen `run_json_wrapped`, and
+  `ContinuumPydanticHooks`. Every docstring says what a caller needs: what the
+  name binds or settles, what it returns, and the pass-through/no-op rules that
+  keep wrapping durability-only. Docstrings only, no runtime change.
+
+- **`src/continuum/recovery/planner.py` is fully documented (#806).**
+  The planner's `RepairStep` and `RepairPlan` classes carried 5 undocumented
+  (or blank-docstring) public names: `RepairStep.render`, `RepairPlan.render` and
+  `RepairPlan.requires_human`, `RepairPlan.blocking`, and `RepairPlan.of_kind`.
+  Every docstring says what a caller needs: what `render` formats and how the
+  `[auto]`/`[human]` prefix is chosen, what `requires_human` and `blocking`
+  filter down to and in what order, and what `of_kind` matches on. Docstrings
+  only, no runtime change.
+
 ### Fixed
+
+- **Dashboard HITL actions remain visible after compaction (#809).** The dashboard
+  now folds the full archived and live event history when listing uncertain
+  actions, so an operator can still see and reconcile a claim whose action
+  events moved into the archive.
+- Thin-adapter ledger writes carry EXTERNAL_AGENT provenance (#612).
+  `ContinuumToolGuard` claims about framework-executed tools were recorded
+  `deterministic`, so agent-asserted effects laundered to trusted and derived
+  provenance hid the writer. `ActionLedger` accepts a `source` (default
+  unchanged) and the guard stamps `EXTERNAL_AGENT`, matching its docstring
+  and the OpenAI adapter. Denial records stay deterministic as ledger verdicts.
+- Provenance listings paginate with --limit/--offset, display only (#597).
+  `continuum provenance` and `continuum impact` truncate the rendered nodes
+  (JSON carries nodes_total/nodes_hidden and downstream totals) while the
+  in-memory graph behind staleness stays whole. `--limit 0` is refused.
+- FINDING_ADDED accepts caused_by causal links like decisions and actions (#597).
+  Findings derived from evidence link back under the same 32-id, 1-128-char
+  caps and unknown-id refusal, validated on every append path (memory log,
+  SQLite, Postgres) behind one shared CAUSED_BY_TYPES constant. The graph
+  fold already edges any node type, so finding-to-evidence edges appear with
+  no projection change. PLAN_UPSERT nodes stay a separate design question.
+- `watch --max-silence` override wins without an open claim (#670).
+  The override kept the default phase scopes, so the `otherwise` scope
+  (3600s) silently replaced the flag value. The override contract now
+  carries empty scopes and falls back to the requested seconds.
+- `health` and `watch` honor the global `--json` flag (#677).
+  Both re-registered the flag on their subparser, whose default silently
+  replaced the global value, so machine output never appeared. The subparser
+  defaults are now SUPPRESS: both flag positions work and trailing `--json`
+  keeps working.
+
+- **`reconcile --auto` settles archived actions and probes authorities with
+  full consumption context after compaction (#647).**
+  `ActionLedger.pending` folds archived plus live events, but
+  `reconcilers._key_for` folded only the live tail, so one action claimed
+  before a compaction aborted the whole settle report with `LookupError`;
+  `settle_authority` scanned only live events for the `AUTHORITY_CONSUMED`
+  row, silently handing the probe a bare `authority_id` payload without
+  `consumer_run_id`, `via_action_id`, or `sequence`. Both now read full
+  history via `read_all_events`, the same archive-aware pattern the library
+  reconciliation path already used. Covered by `tests/test_reconcilers.py`
+  and `tests/test_authority_probe.py`.
+- The missing-MCP-extra subprocess test now imports the working tree even when
+  CONTINUUM is not installed or an older copy is installed (#810).
+- Runs compact more than once: the anchor checkpoint folds full history (#648).
+  It read only the live tail, so after the first compaction RUN_STARTED lived
+  in the archive and the second compact died with ValueError: could not be
+  anchored. Checkpointing a compacted run works again.
+
+- Preserve archived action history in grant and authority enforcement, CLI and
+  gateway gate decisions, cross-run action scans, and memory enumeration and
+  forensic joins (#615, #616). Compaction no longer hides spent authority or
+  memory records from those consumers. Existing uncertainty checks still govern
+  unfinished retries; forgetting records continues to enumerate external deletion
+  targets and append a tombstone, without deleting external data itself.
+
+- **The published image's default command runs the demo again (#280).**
+  `Dockerfile` installs the sources root-owned under `/opt/continuum` and then
+  drops to an unprivileged user, while `examples/crash_recovery_agent.py` pinned
+  its `demo-run` workspace to the source tree. So `docker run --rm
+  ghcr.io/cyrax321/continuum`, the image's documented default command, died with
+  `PermissionError: [Errno 13] Permission denied:
+  '/opt/continuum/demo-run/worker.py'` before printing a line, while the publish
+  workflow's `continuum --version` smoke test passed on that same image. The
+  workspace is now resolved against the working directory, which `Dockerfile`
+  already sets to a writable `/home/continuum` for exactly this reason. Every
+  documented entry point (`./try-it.sh`, `try-it.ps1`, and the README's
+  `python examples/crash_recovery_agent.py`) runs from the repository root, where
+  the workspace resolves to the same `demo-run` directory as before, so local
+  behaviour is unchanged.
+
+- **`resolve_authorization_id` docstring matches the token predicate (#613).**
+  The function claimed that "status words" never produce an id. There is no
+  status-word category: a token is dropped only when it is shorter than three
+  characters or appears in `_WEAK_TOKENS` or `_STOPWORDS`. Words such as
+  `pending` and `queued` therefore bind an id, and the old sentence contradicted
+  testing. The same false "status words" claim in `identity_tokens` is corrected
+  for consistency. Wording only; no runtime change.
 
 - Make `continuum complete` idempotent for runs that are already completed (#356).
 
@@ -143,7 +698,86 @@ All notable changes to this project are documented here. The format follows
   CONTINUUM hooks found in <path>` when there was nothing to do), and the
   subcommand's `--help` line says what it removes. The `removed` boolean in
   `--json` is unchanged.
->>>>>>> 4e27e6f (fix(hooks): default the remove path to the client profile, like install (#580))
+
+- **The serve HTTP transport fails closed on body framing (#533).** `do_POST`
+  read the body as `int(self.headers.get("Content-Length") or 0)`, so
+  `Content-Length: abc` raised `ValueError` out of the handler and the
+  connection closed with no response at all: to the caller a refusal is
+  indistinguishable from a dead sidecar. A `Content-Length` that is not a
+  non-negative integer, including one that is present but blank, is now
+  `400 {"error": "invalid Content-Length: ..."}`. Only that one connection was
+  ever lost, since each is handled on its own thread, which is what made the
+  crash quiet enough to go unnoticed.
+
+  The same read never checked `Transfer-Encoding`. A client that omitted
+  `Content-Length` and sent a chunked body had `length` read as `0`, so the
+  request was dispatched as though its body were empty while the stream itself
+  was never bounded, which is how a chunked body got past a cap the other two
+  HTTP surfaces enforce. `chunked` (case-insensitive, anywhere in the comma
+  list) is now refused with 400 rather than decoded, after draining up to
+  `SIDECAR_DRAIN_LIMIT_BYTES` so the client can finish writing and read the
+  refusal instead of dying on a broken pipe; framing that does not parse is
+  `400 invalid chunked Transfer-Encoding`.
+
+  The transport had no body cap at all, so `MAX_SIDECAR_BODY_BYTES` (1 MB,
+  matching the dashboard rather than the gateway's 10 MB, since neither surface
+  forwards a caller's payload anywhere) is refused with 413 from the header,
+  before the body is read. The happy path is unchanged: an absent
+  `Content-Length`, or a valid `0`, still dispatches the empty object, so a
+  method that takes no params stays callable with no body.
+
+  A refusal that leaves the body unread has to close the connection.
+  `protocol_version` is `HTTP/1.1`, so the socket stays open unless the handler
+  says otherwise, and two of the 400s answered without a trustable body
+  boundary: unparseable chunk framing stops the drain mid-stream, and a
+  `Content-Length` that is not a number cannot say how many bytes to discard.
+  Whatever the client had already written was then read as the next request on
+  that same connection, so a body crafted to look like a request line was
+  dispatched as one. That is the request smuggling class rather than a plain
+  desync, and it stayed invisible because every test sent `Connection: close`.
+  Both branches now set `close_connection` before answering, matching the
+  unbounded drain path. Refusals whose boundary is known still keep the
+  connection alive: an oversize `Content-Length` drained in full, and a chunked
+  body drained to its terminal chunk. To make that second guarantee real, the
+  drain now checks that each chunk ends with its terminating CRLF instead of
+  consuming two bytes blindly, so a missing terminator is `malformed` rather
+  than a silent resync onto the middle of the next chunk header.
+
+- **A valid-JSON request that is not a JSON object is answered on both sidecar
+  transports instead of killing one and hanging up on the other (#582).** Body
+  framing was already fail-closed; the payload *shape* was not, and each
+  transport then failed in the way it had been written not to. On stdio,
+  `rid = req.get("id")` sat one line above the guard whose own comment reads
+  "report, never crash the loop", so a single `[]` line raised `AttributeError`
+  where nothing was catching, exited the process 1, and took every later request
+  on that long-lived session with it. On HTTP, `do_POST` already spelled out the
+  right answer, but raised it inside a `try` that caught only
+  `json.JSONDecodeError`, so the refusal escaped the handler and the connection
+  closed with no response at all: the caller saw `RemoteDisconnected`, which is
+  what a crashed sidecar looks like, three lines below code that knew the answer
+  was 400. Both now reach one shared check, since these two had already drifted
+  here: stdio answers `{"id": null, "error": {"type": "bad_request", "message":
+  "body must be a JSON object"}}` and reads the next request, and HTTP answers
+  `400 {"error": "body must be a JSON object"}`. The id is null because a
+  non-object request has nowhere to put one. Object requests, absent and empty
+  bodies (still the empty params object, so a method needing no params stays
+  callable), and the existing answers for genuinely malformed JSON are
+  unchanged.
+
+## [0.1.2] - 2026-08-31
+
+### Fixed
+
+- **Version reconciliation after `v0.1.2` was tagged without the version bump
+  (#838).** The `v0.1.2` tag and its GitHub Release (67 commits over
+  `v0.1.0`: the `tree --limit` fix #544, the rewind carry-forward passthrough
+  #531, the hook-installer refactor #536, and docs) shipped while
+  `pyproject.toml` and `src/continuum/__init__.py` still declared `0.1.0`, so
+  every artifact built from the tag self-reported as 0.1.0. This section and
+  the version bump align the declared version with the newest tag, and the
+  release checklist now compares `pyproject.toml`, the tag, and PyPI so the
+  drift cannot recur silently. PyPI still serves 0.1.0 until the maintainer
+  publishes the reconciling 0.1.2 build.
 
 ## [0.1.0] - 2026-08-27
 
@@ -321,7 +955,9 @@ All notable changes to this project are documented here. The format follows
   probes, executable guidance, gateway, OTel bridge, action index);
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
-  the enforced-durability work complete; test counts are current (1224).
+  the enforced-durability work complete; test counts are current
+  (~2,423 collected, ~2,395 passed, ~28 skipped on a minimal env).
+  <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
   request bodies above 10 MB with 413, draining (without buffering) up to a

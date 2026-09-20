@@ -45,3 +45,12 @@ current environment: which resources changed, and how.
 ### `render() -> str`
 
 A human-readable validation report.
+
+## Restore-point admissibility
+
+Validation also answers whether a checkpoint is safe to resume from at all.
+`check_admissibility` in `src/continuum/state/validator.py` takes the
+checkpoint and the downstream actions and reports inadmissible when a
+completed action consumed inputs produced after the checkpoint. The engine
+refuses plain resume on an inadmissible anchor instead of resuming into a
+commitment the log contradicts.

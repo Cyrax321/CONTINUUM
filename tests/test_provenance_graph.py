@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +11,12 @@ from continuum.events import EventType
 from continuum.models import Run
 from continuum.provenance.graph import build_provenance_graph, downstream_of
 from continuum.storage.sqlite import SQLiteStorage
+
+#: The worktree's src, so the subprocess imports the tree under test rather
+#: than whatever continuum happens to be installed (the sibling tests that
+#: spawn the CLI all do this; the ones that did not were the portability gaps
+#: called out in issue #837).
+WORKTREE_SRC = str(Path(__file__).resolve().parents[1] / "src")
 
 
 # Use CLI helper from tests
@@ -20,7 +27,11 @@ def _run(*args: str, db: str | None = None):
         if db
         else [sys.executable, "-m", "continuum.cli"] + list(args)
     )
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(filter(None, [WORKTREE_SRC, os.environ.get("PYTHONPATH")])),
+    }
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     return result.returncode, result.stdout, result.stderr
 
 

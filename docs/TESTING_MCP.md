@@ -1,6 +1,6 @@
 # CONTINUUM MCP test report
 
-Adversarial verification of the CONTINUUM MCP server: all 11 registered tools,
+Adversarial verification of the CONTINUUM MCP server: all 12 registered tools,
 their failure modes, and the guarantees that must not move.
 
 - **Date:** 2026-08-24
@@ -16,7 +16,7 @@ their failure modes, and the guarantees that must not move.
 | `python -m pytest` | 1361 passed, 24 skipped, stable across consecutive runs |
 | `ruff check` / `ruff format --check` | clean on every changed file |
 | `mypy src` | 25 errors, identical to baseline (missing stubs for the optional `mcp` extra and `cryptography`) |
-| In-process audit, all 11 tools | 23 of 23 assertions passed |
+| In-process audit, all 12 tools | 23 of 23 assertions passed |
 | Adversarial probe round 2 | 14 of 14 assertions passed |
 | Adversarial probe round 3 | 14 of 16, both failures diagnosed (one probe bug, one real finding) |
 | Live MCP audit through the running server | all fixes confirmed present |
@@ -48,12 +48,13 @@ fix carries a test that fails without it.
 
 ## Tool coverage
 
-All 11 tools were exercised. None was covered by inspection alone.
+All 12 tools were exercised. None was covered by inspection alone.
 
 | Tool | Exercised with |
 |---|---|
 | `continuum_record_progress` | valid, `completed > total`, negative counters, blank and whitespace `run_id`, unicode goal |
 | `continuum_record_summary` | full structured payload, 20 KB oversized note |
+| `continuum_record_plan` | valid upsert on an existing run, blank `plan_id`, empty `units`, duplicate unit `id`, invalid status |
 | `continuum_checkpoint` | with and without `env`, unknown run, version increment |
 | `continuum_validate` | no `env`, matching `env`, drifted `env`, `expected_model`, unknown run |
 | `continuum_resume` | by id, no id (active-run path), unknown run, `expected_model`, both guidance branches |

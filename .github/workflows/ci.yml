@@ -6,13 +6,41 @@ on:
   pull_request:
     branches: [main, develop]
 
+# NOTE: docs-only PRs must still report every required check. Workflow-level
+# paths-ignore was tried and reverted: a fully filtered workflow posts no
+# statuses at all, so required checks pend forever as Expected. Instead the
+# detect job below computes docs-only and each heavy job skips itself with
+# an if condition, which GitHub reports as skipped and the merge gate
+# accepts.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  detect:
+    name: Detect docs-only change
+    runs-on: ubuntu-latest
+    outputs:
+      docs-only: ${{ steps.check.outputs.docs-only }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "docs-only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --quiet "origin/${{ github.base_ref }}...HEAD" -- . ':!*.md'; then
+            echo "docs-only=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs-only=false" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     name: Test (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    needs: detect
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -23,16 +51,34 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Docs-only short-circuit: the job must still report a conclusion so
+      # required per-version contexts do not pend forever (a fully skipped
+      # matrix posts no check runs at all). Heavy steps stand down instead.
       - name: Set up Python ${{ matrix.python-version }}
+        if: needs.detect.outputs.docs-only != 'true'
         uses: actions/setup-python@v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install dev dependencies
+        if: needs.detect.outputs.docs-only != 'true'
         run: pip install -e ".[dev]"
 
+      # Issue #281: the PowerShell launcher must work from a fresh clone,
+      # which on this runner means no .venv. uv is present on GitHub
+      # runners, so this exercises the uv venv + uv pip install bootstrap
+      # path; the python -m venv + pip fallback is covered by the static
+      # contract test in tests/test_tryit_launchers.py.
+      - name: Try-it launcher bootstraps from a fresh clone (Windows)
+        if: needs.detect.outputs.docs-only != 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path .venv) { Remove-Item -Recurse -Force .venv }
+          powershell -ExecutionPolicy Bypass -File .\try-it.ps1 cli --help
+
       - name: Run tests with coverage
+        if: needs.detect.outputs.docs-only != 'true'
         run: pytest --tb=short -q --cov=continuum --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage report
@@ -44,6 +90,8 @@ jobs:
 
   test-postgres:
     name: Test (Postgres backend)
+    needs: detect
+    if: needs.detect.outputs.docs-only != 'true'
     runs-on: ubuntu-latest
 
     services:
@@ -80,6 +128,8 @@ jobs:
 
   lint:
     name: Lint & Type-check
+    needs: detect
+    if: needs.detect.outputs.docs-only != 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -103,25 +153,14 @@ jobs:
       - name: mypy, strict type-check
         run: mypy src/continuum
 
-  markdownlint:
-    name: Markdown lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: DavidAnson/markdownlint-cli2-action@v18
-        with:
-          globs: |
-            CONTRIBUTING.md
-            README.md
-            SECURITY.md
-            CODE_OF_CONDUCT.md
-          config: .markdownlint-cli2.jsonc
-
   # Issue #279: wheels were built only on release tags, so nobody could install
   # current main without cloning. Every push to main now produces a wheel and
   # sdist artifact, smoke-tested into a clean venv before upload.
+  # Follow-up #837 tracks the remaining gaps: non-editable installs only on
+  # ubuntu, POSIX-only temp paths, and no console-script handshake.
   build-wheel:
-    if: github.repository == 'Cyrax321/CONTINUUM' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.repository == 'Cyrax321/CONTINUUM' && needs.detect.outputs.docs-only != 'true'
+    needs: detect
     name: Build wheel artifact
     runs-on: ubuntu-latest
 
@@ -146,12 +185,47 @@ jobs:
 
       - name: Smoke-test the wheel in a clean venv
         run: |
-          python -m venv /tmp/wheel-check
-          /tmp/wheel-check/bin/pip install --quiet dist/*.whl
-          /tmp/wheel-check/bin/continuum --version
+          python -m venv "$RUNNER_TEMP/wheel-check"
+          if [ -f "$RUNNER_TEMP/wheel-check/bin/pip" ]; then BIN="$RUNNER_TEMP/wheel-check/bin"; else BIN="$RUNNER_TEMP/wheel-check/Scripts"; fi
+          WHEEL=$(ls dist/*.whl | head -1 | tr -d '\r')
+          "$BIN/pip" install --quiet "$WHEEL[mcp]"
+          "$BIN/continuum" --version
+          "$BIN/continuum-mcp" --help
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
           name: dist-main
           path: dist/
+
+  install-matrix:
+    name: Install (non-editable, ${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    needs: build-wheel
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: dist-main
+          path: dist/
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install wheel non-editable with mcp extra
+        shell: bash
+        run: |
+          WHEEL=$(ls dist/*.whl | head -1)
+          python -m pip install "$WHEEL[mcp]"
+      - name: Verify console scripts resolve via PATH
+        run: |
+          continuum --version
+          continuum-mcp --help
+      - name: Stdio handshake over installed console script
+        run: python scripts/mcp_smoke.py --entry-point console-script

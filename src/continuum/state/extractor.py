@@ -4,9 +4,9 @@ An extractor turns a trajectory (the run's recorded events) plus an environment
 into semantic state. The deterministic extractor is the default and the only
 one required: it folds the event log and calls nothing external.
 
-The optional LLM extractor exists for state that was never recorded structurally
-— free-text reasoning a framework did not emit as events. It is constrained by
-design:
+The optional LLM extractor exists for state that was never recorded
+structurally: free-text reasoning a framework did not emit as events. It is
+constrained by design:
 
 * It runs only when explicitly enabled and given a callable; there is no
   provider SDK, no network default, no API key handling.
@@ -37,7 +37,7 @@ from continuum.models import (
     SemanticState,
     StateStatus,
 )
-from continuum.state.semantic import ProjectionReport, project_incremental
+from continuum.state.semantic import ProjectionReport, _as_str_list, project_incremental
 
 __all__ = [
     "ExtractionContext",
@@ -69,7 +69,13 @@ class StateExtractor(Protocol):
 
     name: str
 
-    def extract(self, context: ExtractionContext) -> SemanticState: ...
+    def extract(self, context: ExtractionContext) -> SemanticState:
+        """Derive semantic state from an extraction context.
+
+        Implementations must be side-effect free and should fold events onto
+        any base state supplied in ``context``.
+        """
+        ...
 
 
 class DeterministicExtractor:
@@ -81,6 +87,13 @@ class DeterministicExtractor:
         self.last_report: ProjectionReport | None = None
 
     def extract(self, context: ExtractionContext) -> SemanticState:
+        """Fold recorded events into deterministic semantic state.
+
+        Applies events from ``context.trajectory`` onto ``context.base`` (or
+        from scratch when base is absent) using :func:`project_incremental`.
+        Updates :attr:`last_report` with projection metrics and returns the
+        resulting state.
+        """
         state, report = project_incremental(
             context.run_id,
             context.trajectory,
@@ -106,9 +119,10 @@ LLMCallable = Callable[[ExtractionContext, SemanticState], LLMProposal]
 class LLMExtractor:
     """Optional enrichment layer over a base extractor.
 
-    ``llm`` is supplied by the caller — CONTINUUM has no provider dependency.
-    If it raises, extraction falls back to the deterministic result rather than
-    failing the run: losing an optional enrichment must never cost a recovery.
+    ``llm`` is supplied by the caller, since CONTINUUM has no provider
+    dependency. If it raises, extraction falls back to the deterministic result
+    rather than failing the run: losing an optional enrichment must never cost a
+    recovery.
     """
 
     name = "llm"
@@ -126,6 +140,15 @@ class LLMExtractor:
         self.last_error: Exception | None = None
 
     def extract(self, context: ExtractionContext) -> SemanticState:
+        """Enrich base state with candidate proposals from the configured model.
+
+        Runs the underlying base extractor first. If disabled, returns the base
+        state directly. When enabled, invokes the LLM callable and merges
+        suggested decisions, findings, and pending work tagged as
+        ``Origin.LLM`` and ``REQUIRES_REVIEW``. If the LLM callable raises,
+        records the exception in :attr:`last_error` and falls back to base
+        state so recovery is never blocked.
+        """
         state = self._base.extract(context)
         if not self.enabled:
             return state
@@ -133,7 +156,7 @@ class LLMExtractor:
         try:
             proposal = self._llm(context, state)
             return self._merge(state, proposal)
-        except Exception as exc:  # noqa: BLE001 - enrichment must never break recovery
+        except Exception as exc:
             self.last_error = exc
             return state
 
@@ -155,7 +178,7 @@ class LLMExtractor:
                     decision_id=decision_id,
                     decision=str(raw.get("decision", "")),
                     reason=str(raw.get("reason", "")),
-                    evidence=[str(e) for e in raw.get("evidence", [])],
+                    evidence=_as_str_list(raw.get("evidence")),
                     status=StateStatus.REQUIRES_REVIEW,
                     provenance=provenance,
                 )
@@ -173,7 +196,7 @@ class LLMExtractor:
                 Finding(
                     finding_id=finding_id,
                     claim=str(raw.get("claim", "")),
-                    evidence=[str(e) for e in raw.get("evidence", [])],
+                    evidence=_as_str_list(raw.get("evidence")),
                     confidence=min(max(confidence, 0.0), 1.0),
                     status=StateStatus.REQUIRES_REVIEW,
                     provenance=provenance,
@@ -220,6 +243,13 @@ class CompositeExtractor:
             raise ValueError("CompositeExtractor requires at least one extractor")
 
     def extract(self, context: ExtractionContext) -> SemanticState:
+        """Run each configured extractor in sequence, chaining intermediate states.
+
+        The first extractor receives the full context and folds recorded
+        trajectory events. Downstream extractors receive the accumulated state
+        as ``context.base`` with an empty trajectory, preventing double-counting
+        of events while allowing successive enrichments.
+        """
         first, *rest = self._extractors
         state = first.extract(context)
         for extractor in rest:

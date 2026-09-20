@@ -27,7 +27,7 @@ and replays one append-only, hash-chained event log per run.
 | Checkpoint | `checkpoint/` | `CheckpointManager`, policy stack (`policy.py`), `build_recovery_context` |
 | Recovery | `recovery/` | `RecoveryEngine.assess()`, `planner.py` (repair plan), `contract.py` |
 | Adapters | `adapters/` | `AgentAdapter` base + Generic / LangChain / LangGraph / OpenAI |
-| MCP | `mcp/` | `server.py` (10 stdio tools), `authz.py` (allowlist + shared secret) |
+| MCP | `mcp/` | `server.py` (12 stdio tools), `authz.py` (allowlist + shared secret) |
 | Serve | `serve/` | newline-JSON sidecar mirroring the MCP surface |
 | CLI | `cli/` | `argparse` commands, exit codes as verdict |
 | Environment | `environment/` | `EnvironmentProvider` ABC + File/Git/Value/Callable/Static providers |
@@ -842,9 +842,9 @@ reproducible evidence. It rests on two layers:
 
 ### 17.3 Tests
 
-- `tests/test_phase6.py` (15 tests): every scenario runs green under the harness,
+- `tests/test_phase6.py` (17 tests: 14 scenario tests plus 3 harness self-checks): every scenario runs green under the harness,
   plus harness self-checks (recorded failure, recorded exception, report +
-  summary). `benchmarks/run.py` executes all 12 scenarios and emits a report.
+  summary). `benchmarks/run.py` executes all 14 scenarios and emits a report.
 - The pre-existing `tests/test_benchmark.py` (CONTINUUM-Bench) continues to pass.
 
 ### 17.4 Baseline vs final test result

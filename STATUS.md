@@ -17,10 +17,9 @@ believed, and what is neither.
 
 ---
 
-## In flight: unprojectable logs degrade instead of dying (#383, PR #385)
+## Unprojectable logs degrade instead of dying (2026-08-25)
 
-As of 2026-08-25, PR #383's fix is open on `fix/degrade-unprojectable-fold`
-(three commits), reviewed through two rounds. The fold accepts
+PR #385 (fix for #383) was merged on 2026-08-25. The fold accepts
 `on_unprojectable="raise"|"degrade"` (default byte-for-byte unchanged);
 degrade returns the last-good prefix marked `SemanticState.status=INVALID`
 naming where folding stopped; recovery decides REQUEST_HUMAN and the contract

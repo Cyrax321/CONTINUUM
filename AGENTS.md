@@ -13,7 +13,7 @@ Guidance for AI coding agents (and their operators) working in this repository.
 
 ## Commit and push conventions
 
-- No em dashes (—) anywhere in commit messages, code comments, or docs.
+- No em dashes (U+2014) anywhere in commit messages, code comments, or docs.
   Use commas, periods, or parentheses instead.
 - No AI attribution or fingerprints: no "Generated with [tool]", no AI
   co-author trailers, no comments naming an AI agent or tool. Commits and

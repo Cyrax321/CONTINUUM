@@ -81,3 +81,110 @@ may use mutating tools; read-only tools stay open.
 
 The policy object and the errors raised when a caller is not permitted, did not
 identify itself, or failed authentication.
+
+## Confirmation token flow
+
+Runs created or updated via MCP carry `Origin.EXTERNAL_AGENT`, meaning their
+goal and progress are self-reported. To uphold the anti-self-certification
+guarantee, `continuum_resume` marks these runs with `REQUIRES_REVIEW`
+(`mode="request_human"`). While progress recording and checkpointing continue
+to operate normally, the run cannot resume without review. Confirming records a
+`REVIEW_CONFIRMED` event, clearing the review requirement.
+
+### Host CLI fallback
+
+By default, confirmation over MCP is disabled and fail-closed. Calling
+`continuum_confirm` over MCP refuses every caller with `NotAuthenticated`. The
+default and recommended workflow is human-driven out-of-band: an operator
+confirms the run on the host machine using the CLI:
+
+```bash
+continuum confirm <run_id>
+```
+
+This writes a `REVIEW_CONFIRMED` event with `Origin.HUMAN`, attesting the run
+without exposing confirmation credentials over MCP. Operators can also confirm
+only specific components using `--scope goal` or `--scope progress`.
+
+### `CONTINUUM_MCP_CONFIRM_TOKEN`
+
+To permit confirmation over MCP, an operator must explicitly set the
+`CONTINUUM_MCP_CONFIRM_TOKEN` environment variable.
+
+When configured:
+
+- The calling client must be included in the mutating allowlist
+  (`CONTINUUM_MCP_MUTATING_CLIENTS` or `.continuum/mcp-policy.json`).
+- The caller must present this exact token in the handshake's
+  `_meta.authToken`.
+- **Disjoint credential requirement**: The confirmation secret must be
+  distinct from all mutating credentials. At server startup,
+  `_reject_reused_confirmation_secret` verifies that
+  `CONTINUUM_MCP_CONFIRM_TOKEN` does not match `CONTINUUM_MCP_TOKEN` or any
+  entry in `CONTINUUM_MCP_CLIENT_TOKENS`. If an overlap is found, startup
+  raises `ValueError`. An agent trusted to record progress must never also
+  hold the secret required to confirm that progress.
+
+### `load_confirm(expected=None, *, env=None) -> ConfirmPolicy`
+
+Resolve the confirmation policy. Precedence: explicit `expected` argument,
+then the `CONTINUUM_MCP_CONFIRM_TOKEN` environment variable, then the refusing
+default. Unlike `load_auth`, an unset variable refuses every caller rather than
+leaving the tool open.
+
+### `ConfirmPolicy(expected=None, *, source="default (refusing)")`
+
+Gates `continuum_confirm` behind a dedicated secret. When no secret is
+configured, `disabled` is `True` and `verify(token)` raises
+`NotAuthenticated`, instructing the operator to run
+`continuum confirm <run_id>` on the host. When configured, `verify(token)`
+raises `NotAuthenticated` unless `token` matches the configured secret.
+
+
+## Budget authorization
+
+Retry budgets bound to an authorization identity keep one logical operation
+drawing from one bucket even when callers mint fresh keys. Three pieces:
+
+### `resolve_authorization_id(action_type, key=None, arguments=None, *, volatile=(), ledger=None)`
+
+Stable identity for budget binding, derived from a key or tokens
+(`src/continuum/actions/idempotency.py`). Precedence: an explicit stable key
+wins and ignores arguments; otherwise the id derives from distinctive resource
+tokens (short, weak, and stopword tokens are dropped); operations with neither
+return `None` and stay unbound, preserving today's behavior byte-identically.
+
+### The bucket follows the ledger's own verdict
+
+The token derivation reads every argument, and arguments are caller-controlled
+noise plus the real resource, so the bucket is only as stable as the arguments
+it was computed from. `ActionLedger.claim` therefore derives the bucket from the
+record the claim *defers to* when one exists -- the caller held the idempotency
+key fixed, or the token fallback recognised a prior attempt -- rather than from
+the incoming arguments. A retry that pads a throwaway `trace_id` or request id
+is the same operation the ledger already recorded, so it draws from that
+record's bucket and cannot reset the cap by padding (issue #1052). Settlements
+derive from the same stored arguments, so a retry and its confirmation share one
+bucket by construction.
+
+The residual is deliberate and documented: a caller that mints both a fresh key
+*and* fresh noise per attempt presents no identity the ledger can see, and stays
+on the token fallback as before. Declaring such fields `volatile` at every call
+site is not the fix, because a caller that wants around the cap simply forgets
+to declare them.
+
+### `CONTINUUM_BUDGETS_PATH`
+
+Registry location for authorization budgets. Read from the
+`CONTINUUM_BUDGETS_PATH` environment variable, falling back to the default
+path when unset. A missing registry file means unbound, never an error.
+
+### The AUTHORIZATION table
+
+`continuum budget <run_id>` prints an `AUTHORIZATION` section after the
+per-action rows whenever authorization-bound budgets exist, with per-bucket
+`COUNT`, `MAX`, and `REMAINING` columns keyed by `action_type` and the
+authorization id prefix. Draw-down semantics are pinned by
+`tests/test_budget_drawdown.py`: distinct authorizations keep independent
+budgets, settlements draw down the same counter, and weak-token operations
+leave no budget entry.

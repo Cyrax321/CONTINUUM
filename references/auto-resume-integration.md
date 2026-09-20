@@ -71,7 +71,7 @@ Registered in `.mcp.json` (project root):
 ```json
 {
   "mcpServers": {
-    "continuum": {
+    "continuum-mcp": {
       "command": "continuum-mcp",
       "args": ["--db", "continuum.db"],
       "env": { "CONTINUUM_MCP_MUTATING_CLIENTS": "claude-code" }
@@ -82,7 +82,7 @@ Registered in `.mcp.json` (project root):
 
 - Spawns as a stdio MCP server; it opens `continuum.db` in the current working
   directory.
-- **Eleven tools**, split read-only vs mutating:
+- **Twelve tools**, split read-only vs mutating:
   `continuum_record_progress`, `continuum_checkpoint`,
   `continuum_record_summary`, `continuum_intercept_action`,
   `continuum_complete_action`, `continuum_fail_action`,
@@ -241,7 +241,7 @@ coarser than desired.
 
 ### P7. Per-session token floor
 Every session pays for the system prompt (`CLAUDE.md`) plus the schemas of all
-eleven MCP tools, regardless of how little work is done. For many short
+twelve MCP tools, regardless of how little work is done. For many short
 resume checks this fixed cost dominates.
 
 ---
@@ -327,7 +327,7 @@ continuum --db continuum.db events guide     # the recorded section trail
 
 ## 10. Key files to read
 
-- `src/continuum/mcp/server.py`  -  `build_server`, `ContinuumMCP`, the 11 tools,
+- `src/continuum/mcp/server.py`  -  `build_server`, `ContinuumMCP`, the 12 tools,
   `continuum_resume` (optional `run_id`, returns `goal`).
 - `src/continuum/storage/sqlite.py`  -  `get_active_run`, `list_runs`, run table.
 - `src/continuum/recovery/engine.py`  -  `RecoveryEngine.assess` (mode decision).

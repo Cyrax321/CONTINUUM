@@ -2,7 +2,7 @@
 
 A contract is the machine-readable answer to "what am I allowed to do now?".
 It names what was verified, what was invalidated, what must happen before
-normal work resumes, and — critically — the *single* next permitted action.
+normal work resumes, and (critically) the *single* next permitted action.
 
 One action, not a set. If a contract listed everything currently allowed, an
 agent could pick the convenient one and skip reconciling the side effect it was
@@ -12,7 +12,7 @@ and the ordering meaningful.
 Contracts are deterministic: the same state, environment and ledger always
 produce a byte-identical contract. That is what makes them auditable, diffable
 and safe to compare in tests. They are sealed with an integrity hash for the
-same reason checkpoints are — a contract that could be edited between issue and
+same reason checkpoints are: a contract that could be edited between issue and
 enforcement would gate nothing.
 """
 
@@ -33,17 +33,39 @@ from continuum.recovery.planner import RepairPlan
 from continuum.security.hashing import stable_hash
 from continuum.state.validator import ValidationOutcome
 
-__all__ = ["build_contract", "seal_contract", "verify_contract"]
+__all__ = [
+    "build_contract",
+    "render_contract",
+    "seal_contract",
+    "verify_contract",
+]
 
 
 def _identifier(component: Component, component_id: str | None) -> str:
     return f"{component.value}:{component_id}" if component_id else component.value
 
 
+def _hashable_payload(contract: RecoveryContract) -> dict[str, Any]:
+    """Payload the integrity hash covers.
+
+    ``created_at`` is wall-clock metadata, not terms. ``liveness`` carries one
+    wall-clock reading too (``last_append_age``, seconds since the last append
+    at assessment time), so two assessments of an unchanged run would seal
+    different hashes without this: the age is display, while the verdict fields
+    (``breached``, ``threshold_seconds``, ``phase``, ``breaches``) stay covered.
+    """
+    payload = contract.model_dump(mode="json", exclude={"integrity_hash", "created_at"})
+    liveness = payload.get("liveness")
+    if isinstance(liveness, dict):
+        payload["liveness"] = {
+            key: value for key, value in liveness.items() if key != "last_append_age"
+        }
+    return payload
+
+
 def seal_contract(contract: RecoveryContract) -> RecoveryContract:
     """Attach an integrity hash covering the contract's terms."""
-    payload = contract.model_dump(mode="json", exclude={"integrity_hash", "created_at"})
-    return contract.model_copy(update={"integrity_hash": stable_hash(payload)})
+    return contract.model_copy(update={"integrity_hash": stable_hash(_hashable_payload(contract))})
 
 
 def verify_contract(contract: RecoveryContract) -> bool:
@@ -55,8 +77,7 @@ def verify_contract(contract: RecoveryContract) -> bool:
     """
     if contract.integrity_hash is None:
         return False
-    payload = contract.model_dump(mode="json", exclude={"integrity_hash", "created_at"})
-    if contract.integrity_hash == stable_hash(payload):
+    if contract.integrity_hash == stable_hash(_hashable_payload(contract)):
         return True
     legacy = contract.model_dump(
         mode="json", exclude={"integrity_hash", "created_at", "evidence", "reason"}
@@ -75,6 +96,8 @@ def build_contract(
     evidence: list[str] | None = None,
     scope: Iterable[str] | None = None,
     post_checkpoint_observations: list[dict[str, Any]] | None = None,
+    liveness: dict[str, object] | None = None,
+    triggering_risks: list[str] | None = None,
     admissibility: Any | None = None,
 ) -> RecoveryContract:
     """Assemble a sealed, deterministic contract.
@@ -122,7 +145,16 @@ def build_contract(
             f"projection (invalid: log stops folding at sequence {state.unprojectable_at_sequence})"
         )
 
-    next_action = plan.first.action_name if plan.first else None
+    # A repair step is only "the next allowed action" under a mode that
+    # permits repair. A risk-driven ROLLBACK or ABORT can coexist with a
+    # non-empty plan, and advertising the plan's first step there would hand
+    # any caller gating on permits() a green light on a run the engine has
+    # declared must not proceed (issue #1058). required_actions still lists
+    # the work for an auditor; nothing is permitted until the mode changes.
+    if safety in (RecoverySafety.BLOCKED, RecoverySafety.UNSAFE):
+        next_action = None
+    else:
+        next_action = plan.first.action_name if plan.first else None
 
     if reason is None:
         reason = validation.report.reason
@@ -161,6 +193,8 @@ def build_contract(
         evidence=evidence,
         reason=reason,
         post_checkpoint_observations=post_checkpoint_observations or [],
+        liveness=liveness,
+        triggering_risks=triggering_risks or [],
         created_at=utcnow(),
     )
     return seal_contract(contract)

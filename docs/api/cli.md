@@ -4,6 +4,12 @@ The `continuum` command is the command-line surface, also usable in scripts. Exi
 codes are a safety contract: only a verified-safe run exits `0`, so
 `continuum resume "$RUN" && ./start-agent.sh` cannot launch onto stale state.
 
+Typing bare `continuum` at an interactive terminal opens the full-screen
+dashboard on its landing splash (issue #782); piped or non-terminal output,
+`--json`, and platforms without curses print the help text instead, so scripts
+that run `continuum` blind never find a curses screen where they expected
+usage text.
+
 ```bash
 continuum <command> [args]                    # storage defaults to ./continuum.db
 continuum --db <url-or-path> <command>        # storage URL or path (default: continuum.db)
@@ -33,7 +39,7 @@ continuum --json <command>                    # machine-readable output
 | `checkpoint <run_id>` | Force a state checkpoint. |
 | `observe` | Record one observed tool completion. Mutates storage. |
 | `gateway` | Run the enforcing HTTP proxy for registered upstreams. Mutates storage. |
-| `briefing` | Session-start context: active run, progress, next steps. Read-only. |
+| `briefing [--run-id <id>] [--raw-summary]` | Session-start context, curated by provenance: verified contract facts and system-derived lessons before agent-authored summaries, stale items quarantined with reasons. Read-only; `--raw-summary` is the diagnostic path to the verbatim agent summary (#742). |
 | `gate` | Decide whether a tool call may proceed (pre-tool-use hook). Read-only. |
 | `hooks` | Manage host-side observation hooks. |
 | `verify <run_id>` | Re-audit the event chain for tampering. |
@@ -46,7 +52,20 @@ continuum --json <command>                    # machine-readable output
 | `attest <run_id>` | Sign a run's event chain into an attestation document. |
 | `attest-verify <run_id> --attest <file>` | Verify a signed attestation against the live chain. |
 | `serve` | Run the Tier 0 newline-delimited JSON sidecar (no MCP dependency). |
-| `dashboard` | Serve the dashboard (presentation over run data). |
+| `dashboard` | Serve the dashboard (presentation over run data). Listens on port 8000 by default (`--port`). |
+| `tui [--refresh <seconds>]` | Full-screen terminal dashboard: monitor and control runs, read-only until an action is confirmed (`q` quits). |
+| `export-evidence` | Export evidence as content-addressed JSON lines. Read-only. |
+| `forget` | Enumerate and tombstone memory records for a tenant. Mutates unless --dry-run. See [memory governance](../guides/memory_governance.md). |
+| `health` | Advisory prefix-trust health check. Read-only. |
+| `impact` | Show downstream impact of an evidence item. Read-only. |
+| `merge` | Merge into a run at an anchor. Mutates storage. |
+| `precompact` | Checkpoint before context compaction (PreCompact hook). Mutates the run. |
+| `provenance` | Show provenance DAG. Read-only. |
+| `record-plan` | Record a structured plan upsert. Mutates storage. |
+| `restore` | Restore a run to an anchor checkpoint. Mutates storage. |
+| `rewind` | Rewind workspace and projection to a checkpoint. |
+| `watch` | Watch a run for liveness breach, optionally notify via webhook. See [liveness watch](../guides/liveness-watch.md). |
+| `notify-test [run_id]` | POST a test notification to every endpoint in the webhook registry. Verifies wiring without a real blockage. See [webhooks](../guides/webhooks.md). |
 
 ## Examples
 
@@ -90,3 +109,101 @@ output.
 with per-pin status (`present`, `absent`, `unverifiable`), grace deadline, and
 flagged set. Flagged pins render prominently in human text as `[!!]` lines
 coloured on TTY and plain when piped, byte-identical modulo colour (issue #419).
+
+The authority-probe flow (`--authority`, verdicts, unblocking) is walked through
+in `docs/guides/authority-probes.md`.
+
+`reconcile <run_id>` reads its probe registry from `.continuum/reconcilers.json`
+unless `--config <path>` names another file, and each probe's `timeout` is in
+seconds and optional:
+
+```json
+{
+  "probes": {
+    "send_invoice": {"command": "check-outbox", "timeout": 30},
+    "charge_card": {"command": "check-ledger"}
+  }
+}
+```
+
+`charge_card` gets the default of 10 seconds. A `timeout` that is not a positive
+number is refused rather than clamped, and the `probes` wrapper is required: a
+file that maps action types at the top level registers nothing, so `reconcile`
+reports every uncertain action as having no probe rather than saying the registry
+was wrong (issue #322).
+
+## hooks
+
+`continuum hooks install` writes host-side observation hooks into agent
+settings files (for example `.claude/settings.json`, `.gemini/settings.json`, or
+`.codex/hooks.json`).
+
+Supported clients (`CLIENT_PROFILES` in `src/continuum/clienthooks.py`):
+
+| Profile | Settings file | Events | Write matcher | Any matcher |
+|:--|:--|:--|:--|:--|
+| `claude-code` | `.claude/settings.json` | `SessionStart`, `PostToolUse`, `PreToolUse`, `PreCompact` | `Write|Edit|MultiEdit|NotebookEdit` | `*` |
+| `gemini` | `.gemini/settings.json` | `SessionStart`, `AfterTool`, `BeforeTool` | `write_file|replace` | `.*` |
+| `codex` | `.codex/hooks.json` | `SessionStart`, `PostToolUse`, `PreToolUse` | `^Bash$|^shell$` | `^Bash$|^shell$` |
+
+By default, `hooks install` configures up to three entries (depending on the
+client profile; event names and matchers below are Claude Code's, see the
+per-client notes for Gemini and Codex):
+
+- **`PostToolUse` (`observe`)**: intercepts file modifications (matching
+  `Write|Edit|MultiEdit|NotebookEdit` on Claude Code) and runs
+  `continuum observe` to record file writes as `TOOL_COMPLETED` events with
+  path, size, and sha256 hash. Gemini uses the `AfterTool` event with the
+  `write_file|replace` matcher, and Codex observes shell calls only
+  (`^Bash$|^shell$`).
+- **`SessionStart` (`briefing`)**: runs `continuum briefing` to inject the active
+  run id, goal, progress, and recovery next steps at session start or resume.
+  For a ready-made out-of-band alternative that prints `continuum --json resume`
+  (no model turn), see [`scripts/session_start_resume.sh`](../../scripts/session_start_resume.sh).
+- **`PreCompact` (`precompact`)**: runs `continuum precompact` to seal a
+  checkpoint before context compaction discards unverified transcript state
+  (configured by default on clients with a compaction event, such as Claude Code).
+
+When `--with-gate` is passed, an additional entry is installed:
+
+- **`PreToolUse` (`gate`)**: intercepts tool calls and runs `continuum gate`
+  to deny unregistered or unclaimed side effects before they fire. The matcher
+  is client specific: `*` on Claude Code, `.*` on Gemini (`BeforeTool`), and
+  `^Bash$|^shell$` on Codex, which only sees shell calls.
+
+### Flags
+
+- **`--db <path>`**: bakes a specific database path into each hook command (for
+  example `continuum --db /abs/path.db observe`), ensuring hook processes running
+  from the project root resolve the intended database without ambiguity.
+- **`--with-gate`**: installs the `PreToolUse` gate hook in addition to the default
+  hooks.
+- **`--no-precompact`**: skips installing the `PreCompact` checkpoint hook, and
+  removes one if an earlier install wrote it.
+- **`--settings <path>`**: writes to a custom settings file path instead of the
+  default location determined by the client profile.
+
+The installed commands are baked in at install time and take one of two shapes:
+
+- **`continuum` on PATH**: an absolute path to the resolved executable, for
+  example `/usr/local/bin/continuum observe`.
+- **Editable / interpreter-only installs**: `/path/to/python -m continuum.cli observe`
+  when no `continuum` executable is found on PATH.
+
+To inspect what was installed, view the target settings file:
+
+```bash
+continuum hooks install claude-code --db /tmp/test.db --with-gate
+cat .claude/settings.json
+```
+
+If the command paths become stale after moving a virtualenv or interpreter,
+re-running `continuum hooks install` updates the baked command paths while preserving
+existing targets.
+
+To remove all installed CONTINUUM hooks from a client settings file:
+
+```bash
+continuum hooks remove claude-code
+```
+

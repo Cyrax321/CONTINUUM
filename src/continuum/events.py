@@ -35,6 +35,7 @@ from continuum.security.hashing import make_id, stable_hash
 
 __all__ = [
     "EventType",
+    "CAUSED_BY_TYPES",
     "Event",
     "EventLog",
     "IntegrityViolation",
@@ -70,7 +71,7 @@ class EventType(StrEnum):
     # semantic state
     # DECISION_CREATED payload may include caused_by: list[str] (1-128 chars each, max 32,
     # default []). Unknown ids raise ValueError. Field is hash-covered and old events
-    # without it load as [].
+    # without it load as []. FINDING_ADDED accepts the same links (issue #597).
     DECISION_CREATED = "DECISION_CREATED"
     DECISION_INVALIDATED = "DECISION_INVALIDATED"
     EVIDENCE_ADDED = "EVIDENCE_ADDED"
@@ -122,8 +123,16 @@ class EventType(StrEnum):
     # authority (issue #269): a claim tried to reuse a consumed single-use grant
     GRANT_DENIED = "GRANT_DENIED"
 
+    # liveness (issue #302): silence as signal
+    LIVENESS_SILENCE_DETECTED = "LIVENESS_SILENCE_DETECTED"
+    LIVENESS_RECOVERED = "LIVENESS_RECOVERED"
+
+    # risk (issue #303): real-time risk signal
+    RISK_OBSERVED = "RISK_OBSERVED"
+
     # authority lifecycle (issue #289/#555): one-time credential was consumed
     AUTHORITY_CONSUMED = "AUTHORITY_CONSUMED"
+    AUTHORITY_RECONCILED = "AUTHORITY_RECONCILED"
 
     # structured attempt memory (issue #313): durable falsification lesson
     ATTEMPT_LESSON = "ATTEMPT_LESSON"
@@ -141,6 +150,25 @@ class EventType(StrEnum):
 
     # precompact hook: context compaction boundary for agents that summarize history
     PRECOMPACT_HOOK = "PRECOMPACT_HOOK"
+    MEMORY_TOMBSTONED = "MEMORY_TOMBSTONED"
+
+    # outbound notifications (issue #305): the bell next to the HITL door.
+    # Recorded facts, not state: delivery is best-effort and never gates a
+    # verdict. FAILED is the dead-letter row an operator finds by polling the
+    # log when the bell did not ring.
+    NOTIFICATION_SENT = "NOTIFICATION_SENT"
+    NOTIFICATION_FAILED = "NOTIFICATION_FAILED"
+
+
+#: Event types whose payloads may carry ``caused_by`` causal links
+#: (issues #551, #597). Findings joined decisions and actions here:
+#: a finding derived from evidence links back to it under the same
+#: 32-id, 1-128-char caps and unknown-id refusal.
+CAUSED_BY_TYPES = (
+    EventType.DECISION_CREATED,
+    EventType.ACTION_RECORDED,
+    EventType.FINDING_ADDED,
+)
 
 
 class AppendOnlyViolation(RuntimeError):
@@ -193,7 +221,7 @@ class Event(BaseModel):
     Included in ``content()`` deliberately. A trust marker outside the hash
     could be edited without breaking verification, which would make it useless
     for the one job it has. The cost is that chains written before this field
-    existed no longer verify — accepted as a clean break rather than carrying a
+    existed no longer verify, accepted as a clean break rather than carrying a
     permanently-untrusted legacy tier.
     """
 
@@ -231,6 +259,12 @@ class Event(BaseModel):
 
 
 class IntegrityViolation(BaseModel):
+    """Description of a single integrity failure discovered during chain audit.
+
+    Records the failure classification, run identifier, and optional event
+    metadata (sequence number and event ID) along with explanatory detail.
+    """
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: str
@@ -283,7 +317,7 @@ class EventLog:
     ) -> Event:
         """Append an event and return the sealed (hashed) record."""
         chain = self._by_run.setdefault(run_id, [])
-        if type in (EventType.DECISION_CREATED, EventType.ACTION_RECORDED) and payload is not None:
+        if type in CAUSED_BY_TYPES and payload is not None:
             caused_by = payload.get("caused_by") if isinstance(payload, Mapping) else None
             if caused_by is not None:
                 if not isinstance(caused_by, list):
@@ -336,20 +370,29 @@ class EventLog:
     # -- reading ---------------------------------------------------------- #
 
     def runs(self) -> tuple[str, ...]:
+        """Return all distinct run identifiers present in the log."""
         return tuple(self._by_run)
 
     def events(self, run_id: str, *, after_sequence: int = 0) -> tuple[Event, ...]:
+        """Return recorded events for a run in sequence order.
+
+        Optionally filters for events whose sequence number is strictly greater
+        than ``after_sequence``.
+        """
         chain = self._by_run.get(run_id, ())
         return tuple(e for e in chain if e.sequence > after_sequence)
 
     def by_type(self, run_id: str, type: EventType) -> tuple[Event, ...]:
+        """Return all events for a run matching the specified event type."""
         return tuple(e for e in self._by_run.get(run_id, ()) if e.type is type)
 
     def head(self, run_id: str) -> Event | None:
+        """Return the most recent event appended for a run, or None if empty."""
         chain = self._by_run.get(run_id)
         return chain[-1] if chain else None
 
     def last_sequence(self, run_id: str) -> int:
+        """Return the highest sequence number recorded for a run, or 0 if empty."""
         return len(self._by_run.get(run_id, ()))
 
     def __iter__(self) -> Iterator[Event]:
@@ -368,7 +411,7 @@ class EventLog:
         so an edited event is reported twice: ``TAMPERED_CONTENT`` on the event
         itself and ``BROKEN_CHAIN`` on its successor, whose link no longer
         matches. The walk then re-syncs, because untampered events remain
-        internally consistent — so the violation list localises damage instead
+        internally consistent, so the violation list localises damage instead
         of flooding.
 
         Trust is expressed separately by ``trusted_through``: only the prefix
@@ -382,6 +425,7 @@ class EventLog:
         truncated = False
 
         def record(kind: str, rid: str, event: Event, detail: str) -> None:
+            """Record an integrity violation if under the maximum violation limit."""
             nonlocal truncated
             if len(violations) >= max_violations:
                 truncated = True

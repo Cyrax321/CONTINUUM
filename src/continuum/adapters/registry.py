@@ -20,6 +20,14 @@ from continuum.models import EnvironmentSnapshot
 from continuum.recovery.engine import RecoveryDecision
 from continuum.storage import Storage
 
+__all__ = [
+    "AdapterRegistry",
+    "get_adapter",
+    "list_adapters",
+    "recover",
+    "register_adapter",
+]
+
 
 class AdapterRegistry:
     """Maps adapter names to lazy factories that return adapter classes."""
@@ -43,9 +51,11 @@ class AdapterRegistry:
         return factory()
 
     def names(self) -> list[str]:
+        """Sorted names of all registered adapters."""
         return sorted(self._factories)
 
     def all(self) -> Mapping[str, type]:
+        """Instantiate every registered adapter, keyed by name."""
         return {name: self.get(name) for name in self.names()}
 
 

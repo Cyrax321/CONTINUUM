@@ -52,8 +52,33 @@ The value returned by `restore`. `state` is the resumed state, `checkpoint` the
 checkpoint it was based on, and `pending_events` the number of events replayed
 after it.
 
+## clear_resume_pointer
+
+`continuum.checkpoint.manager.clear_resume_pointer(run_id) -> bool`
+
+The inverse of the checkpoint's resume-pointer write. Every checkpoint writes
+`.continuum/resume.json` so a `SessionStart` hook can banner the interrupted
+run without opening the database; a run closed as completed is no longer
+interrupted, so this removes the pointer when it names `run_id`. Every path
+that closes a run, `continuum complete`, the TUI, and the dashboard HITL
+button, routes through here, so a completion cannot leave the next session
+banner surfacing finished work.
+
+A pointer naming a different run is left in place. A missing, unreadable, or
+undeletable file, or one holding valid JSON that is not an object, is not an
+error: the pointer is a cache, and failing its removal would cost the
+completion itself.
+
 ## Policy
 
 The default `CheckpointPolicy` honors triggers (manual, interval, event,
 semantic, context-pressure, hybrid). Supply a custom `policy` to `CheckpointManager`
 to tune when checkpoints are taken.
+
+## Pre-compaction checkpoint
+
+Context compaction destroys unrecorded reasoning, so the boundary gets its
+own checkpoint. The `precompact` command checkpoints at the compaction
+boundary and is wired as a PreCompact hook by `hooks install`, resolving the
+current run at install time so one hook serves every run. See the
+`precompact` row in `docs/api/cli.md`.

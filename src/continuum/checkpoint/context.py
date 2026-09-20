@@ -1,6 +1,6 @@
 """Bounded recovery context.
 
-When an agent resumes, it needs to be told what it was doing — but handing it
+When an agent resumes, it needs to be told what it was doing, but handing it
 the transcript defeats the purpose. This module renders the *minimum sufficient
 context*: what the goal is, what is verified, what is no longer trustworthy, and
 what it is allowed to do next.
@@ -54,7 +54,7 @@ _NEVER_DROPPED = frozenset(
     {
         "CURRENT GOAL",
         "VERIFIED PROGRESS",
-        "STALE STATE — DO NOT RELY ON",
+        "STALE STATE: DO NOT RELY ON",
     }
 )
 
@@ -74,6 +74,11 @@ class ContextSection:
     """Lower is more important; high-priority sections survive truncation."""
 
     def render(self) -> str:
+        """Format the section as a titled text block with indented lines.
+
+        Returns an empty string if ``lines`` is empty, otherwise returns the
+        title followed by each line indented by two spaces.
+        """
         if not self.lines:
             return ""
         body = "\n".join(f"  {line}" for line in self.lines)
@@ -81,6 +86,11 @@ class ContextSection:
 
     @property
     def estimated_tokens(self) -> int:
+        """Approximate token count for the rendered section.
+
+        Uses the characters-per-token heuristic from :func:`estimate_tokens`
+        for budget calculations without requiring an external tokenizer.
+        """
         return estimate_tokens(self.render())
 
 
@@ -95,6 +105,12 @@ class RecoveryContext:
     notes: tuple[str, ...] = field(default=())
 
     def render(self) -> str:
+        """Render the complete briefing text across all populated sections.
+
+        Joins non-empty rendered sections with double newlines. If sections were
+        omitted to satisfy a token budget, appends a truncation notice naming
+        the dropped section titles.
+        """
         blocks = [section.render() for section in self.sections if section.lines]
         text = "\n\n".join(blocks)
         if self.truncated:
@@ -104,6 +120,11 @@ class RecoveryContext:
 
     @property
     def estimated_tokens(self) -> int:
+        """Approximate token count for the complete rendered briefing.
+
+        Evaluates the full rendered text against the characters-per-token
+        heuristic to check compliance with context-window budgets.
+        """
         return estimate_tokens(self.render())
 
     def __str__(self) -> str:
@@ -186,7 +207,7 @@ def _stale_section(state: SemanticState) -> ContextSection:
     if dangling:
         lines.append(f"evidence cited but unavailable: {', '.join(dangling)}")
 
-    return ContextSection("STALE STATE — DO NOT RELY ON", tuple(lines), priority=2)
+    return ContextSection("STALE STATE: DO NOT RELY ON", tuple(lines), priority=2)
 
 
 def _review_section(state: SemanticState) -> ContextSection:
