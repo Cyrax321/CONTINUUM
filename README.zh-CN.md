@@ -94,7 +94,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI 入口
 continuum-mcp --help             # MCP 服务器入口（需要 [mcp] 或 [dev]）
-pytest -q                        # 最小环境中约 2,397 个收集，约 2,320 个通过，约 27 个跳过（具体数量因环境而异）
+pytest -q                        # 最小环境中约 2,241 个收集，约 2,216 个通过，约 25 个跳过（具体数量因环境而异）
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI 强制的三扇门禁
 ```
@@ -187,7 +187,7 @@ python demo-run/generate_crash_visual.py
 | 环境重验证 | 恢复前每个检查点组件都会对照当前世界进行验证 |
 | 可溯源状态 | 智能体报告的进度被标记为 `REQUIRES_REVIEW`，永不自我认证 |
 | 恢复引擎 | 七种恢复模式，带有确定性的密封下一步合约 |
-| 默认拒绝的 MCP 服务器 | 十一个工具，读写与变更分离，调用者 allowlist |
+| 默认拒绝的 MCP 服务器 | 十二个工具，读写与变更分离，调用者 allowlist |
 | 框架适配器 | 通用 Python、OpenAI Agents SDK、LangGraph 和 LangChain 集成 |
 | 安全规划循环 | 双信号观测验证将高风险分支提升至 REQUIRES_REVIEW |
 | 周期性重验证 | 按计划重新检查环境，在一个周期内捕获运行中漂移 |
@@ -227,7 +227,7 @@ CONTINUUM 针对真实 LLM 智能体、真实协议边界和硬进程崩溃进�
 - **第三方客户端**：Gemini CLI 和 Kilo Code 通过 stdio JSON-RPC 对接真实 SQLite 存储，验证多智能体共存和鉴权隔离。
 - **协议合规**：使用 `@modelcontextprotocol/inspector --cli` 在进程死亡间端到端驱动，变更工具默认拒绝并位于 `CONTINUUM_MCP_MUTATING_CLIENTS` 后，外部声明降级为 `REQUIRES_REVIEW`（`safe: false`）。
 - **自愈**：硬杀的服务器在启动时通过单次重试清理孤立的 SQLite `-wal`/`-shm` 伴生文件来恢复。
-- **规模**：约 2,397 个测试被收集（约 2,320 通过，其余在缺少可选服务时跳过），覆盖 Python 3.11、3.12 和 3.13（单元、`hypothesis` 属性测试、并发、对抗）。CONTINUUM-Bench 运行五个崩溃场景加一个专门的参数漂移场景，对 CONTINUUM 测量到 0 重复工作和 0 重复副作用，而对朴素重放则为完全重复，另有一个 14 场景恢复正确性套件（`continuum.benchmark.phase6`）将持久执行调研中的崩溃点编码为可执行断言。
+- **规模**：约 2,241 个测试被收集（约 2,216 通过，其余在缺少可选服务时跳过），覆盖 Python 3.11、3.12 和 3.13（单元、`hypothesis` 属性测试、并发、对抗）。CONTINUUM-Bench 运行五个崩溃场景加一个专门的参数漂移场景，对 CONTINUUM 测量到 0 重复工作和 0 重复副作用，而对朴素重放则为完全重复，另有一个 14 场景恢复正确性套件（`continuum.benchmark.phase6`）将持久执行调研中的崩溃点编码为可执行断言。
 - **对抗审计**：完整 MCP 面已在真实协议上被审计，发现并修复了三个缺陷。方法和复现步骤见 [test.md](test.md)。
 
 <!-- BENCH:START -->
@@ -255,7 +255,7 @@ uv pip install -e ".[mcp]"
 CONTINUUM_MCP_MUTATING_CLIENTS=your-client-name continuum-mcp
 ```
 
-通过 stdio 的十一个工具。其中三个是只读的（`continuum_validate`、`continuum_resume`、`continuum_list_actions`），八个会变更。副作用采用两阶段（声明、执行、完成），变更工具默认位于 allowlist 之后。智能体报告的状态以 `Origin.EXTERNAL_AGENT` 可溯源性记录并标记为 `REQUIRES_REVIEW`。
+通过 stdio 的十二个工具。其中三个是只读的（`continuum_validate`、`continuum_resume`、`continuum_list_actions`），九个会变更。副作用采用两阶段（声明、执行、完成），变更工具默认位于 allowlist 之后。智能体报告的状态以 `Origin.EXTERNAL_AGENT` 可溯源性记录并标记为 `REQUIRES_REVIEW`。
 
 验证细节，包括启动时的崩溃恢复和端到端 Claude Code 测试，见 [references/mcp.md](references/mcp.md)。如果已注册的服务器报告 `CONNECTION_CLOSED`，原因几乎总是 `PATH` 解析而非服务器本身：[docs/api/mcp.md](docs/api/mcp.md#troubleshooting) 有诊断和两种修复方法。
 
@@ -343,7 +343,7 @@ CONTINUUM 围绕一个不变量组织：**每个事实都携带其来源，信�
 | 接缝 | 如何连接 | 它为你带来什么 |
 |:--|:--|:--|
 | 1 进程内 | `GenericAgentAdapter.intercept_action(...)` 和 `wrap_tool(key_fn=...)` 用于 LangChain、LangGraph、OpenAI Agents SDK | Python 框架，可信写入 |
-| 2 MCP 服务器 | `continuum-mcp` 通过 stdio 的 12 个工具（`continuum_record_progress`、`continuum_intercept_action`、`continuum_complete_action` 等） | 任意支持 MCP 的客户端，3 个只读 + 8 个变更，allowlist `CONTINUUM_MCP_MUTATING_CLIENTS` |
+| 2 MCP 服务器 | `continuum-mcp` 通过 stdio 的 12 个工具（`continuum_record_progress`、`continuum_intercept_action`、`continuum_complete_action` 等） | 任意支持 MCP 的客户端，3 个只读 + 9 个变更，allowlist `CONTINUUM_MCP_MUTATING_CLIENTS` |
 | 3 CLI 生命周期钩子 | `continuum hooks install claude-code --with-gate` 也支持 `gemini` 和 `codex` | 编码 CLI：`SessionStart briefing`、`PostToolUse observe`、`PreToolUse gate`，无需 CLAUDE.md |
 | 4 强制 HTTP 网关 | `continuum gateway --port 8765` 配合 `.continuum/gateway.json` | 任意语言，任意外发 HTTP 必须有声明，网关从真实状态码结算 |
 | 5 OpenTelemetry 桥 | `make_span_processor(storage)` | 任意已追踪应用，跨度成为 `TOOL_COMPLETED` 证据 |
@@ -409,7 +409,7 @@ Schema v6。SQLite 为主，Postgres 经 CI 验证。单一日志，多重投影
 
 ### 模块映射，一库多面
 
-CONTINUUM 是一个库（`src/continuum`，124 个模块）加上大型测试套件（161 个测试文件，约 2,397 个测试）。所有模块追加并重放同一个哈希链事件日志：
+CONTINUUM 是一个库（`src/continuum`，126 个模块）加上大型测试套件（170 个测试文件，约 2,241 个测试）。所有模块追加并重放同一个哈希链事件日志：
 
 | 模块 | 职责 |
 |:--|:--|
@@ -431,7 +431,7 @@ CONTINUUM 是一个库（`src/continuum`，124 个模块）加上大型测试套
 | `mcp/` | 12 个 stdio 工具加上鉴权 `authz.py` token 鉴权、allowlist、确认 token |
 | `serve/` | Sidecar stdio JSON 线路 + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Web 仪表板 `app.py` `hitl.py` 带 HITL 按钮确认、对账和完成，前缀信任建议，钉扎 |
-| `cli/` | 38 个 argparse 命令，退出码即裁决，`runs、start、inspect、resume、verify、health、tree、benchmark、attest、dashboard` |
+| `cli/` | 46 个 argparse 命令，退出码即裁决，`runs、start、inspect、resume、verify、health、tree、benchmark、attest、dashboard` |
 | `otel.py` | OpenTelemetry 跨度处理器桥 |
 | `benchmark/` | CONTINUUM-Bench  harness，5 个崩溃场景 + 参数漂移 + 14 场景恢复套件 |
 
@@ -472,7 +472,7 @@ continuum attest <run_id> --key signer.pem       # 为外部验证者签署链�
 continuum hooks install claude-code --with-gate   # 编码 CLI：证据、简报、门控
 continuum gateway --port 8765                     # 面向其他一切的强制 HTTP 代理
 provider.add_span_processor(continuum.otel.make_span_processor(storage))  # OTel 转证据
-continuum-mcp                                     # 任意支持 MCP 的端：十一工具服务器
+continuum-mcp                                     # 任意支持 MCP 的端：十二工具服务器
 continuum briefing                                # 会话开始上下文注入
 continuum budget <run_id>                        # 重试预算使用报告
 continuum tree <parent_run_id>                   # 多智能体层级视图
@@ -527,7 +527,7 @@ CONTINUUM 位于持久执行、幂等副作用追踪和针对 LLM 智能体的�
 
 在 2026 年初，我看到长时间运行的智能体在恢复而非推理上失败。检查点被视为继续的证明，而非待验证的证据。调研 Temporal、LangGraph、ACRFence 2603.20625 和 self conditioning 2509.09677 后，我发现缺口是一个可移植的验证基座，它会问：给定时间 T 的状态和当下的世界，继续是否仍然安全。
 
-在三周内，我从一个不变量出发构建了 CONTINUUM：每个事实都携带其来源。结果是一个带 `verify()` 的哈希链日志、带稳定键去重的账本、阻止未声明效应的门控与网关，以及密封合约的恢复引擎。五个接缝将同一日志暴露给 Claude Code、LangGraph、LangChain、OpenAI、HTTP 和 OpenTelemetry。经真实杀死和约 2,397 个测试验证，它在朴素重放打印 `50` 的地方打印 `0 重复`。
+在三周内，我从一个不变量出发构建了 CONTINUUM：每个事实都携带其来源。结果是一个带 `verify()` 的哈希链日志、带稳定键去重的账本、阻止未声明效应的门控与网关，以及密封合约的恢复引擎。五个接缝将同一日志暴露给 Claude Code、LangGraph、LangChain、OpenAI、HTTP 和 OpenTelemetry。经真实杀死和 1380 个测试验证，它在朴素重放打印 `50` 的地方打印 `0 重复`。
 
 CONTINUUM 由 **Anandhu P Shaji**（[@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/)）创建并由原始创建者维护。基于 [Apache-2.0](LICENSE) 开源。社区贡献欢迎通过 [CONTRIBUTING.md](CONTRIBUTING.md)，并在 [AUTHORS.md](AUTHORS.md) 和 [graphs/contributors](https://github.com/Cyrax321/CONTINUUM/graphs/contributors) 中致谢。
 
