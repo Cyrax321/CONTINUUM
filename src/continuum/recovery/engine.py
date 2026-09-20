@@ -394,11 +394,14 @@ class RecoveryEngine:
             from continuum.recovery.health import advisory_for_storage
 
             liveness_advisory = advisory_for_storage(self.storage, run_id)
-            # Count prior breaches as DETECTED events
+            # Count prior breaches as DETECTED events. Fold the archived prefix
+            # in via the shared fetch: a silence detected before a compaction
+            # still counts, so the breach total cannot reset to zero and
+            # understate how often the run went quiet (same archive-blindness
+            # family as issue #553).
             try:
-                evs = self.storage.read_events(run_id)
                 liveness_breaches = sum(
-                    1 for e in evs if e.type == EventType.LIVENESS_SILENCE_DETECTED
+                    1 for e in archive_aware_events if e.type == EventType.LIVENESS_SILENCE_DETECTED
                 )
             except Exception:
                 liveness_breaches = 0
@@ -414,10 +417,12 @@ class RecoveryEngine:
             from continuum.recovery.risk import evaluate_risk, load_risk_policy
 
             policy = load_risk_policy()
+            # Fold the archived prefix in via the shared fetch so compaction
+            # cannot empty triggering_risks by sealing the only RISK_OBSERVED
+            # events away from this scan -- the downgrade would always be
+            # toward less caution (#1050).
             try:
-                risk_events = [
-                    e for e in self.storage.read_events(run_id) if e.type == EventType.RISK_OBSERVED
-                ]
+                risk_events = [e for e in archive_aware_events if e.type == EventType.RISK_OBSERVED]
             except Exception:
                 risk_events = []
             best_mode = None
@@ -474,7 +479,11 @@ class RecoveryEngine:
         # still deny. A later AUTHORITY_RECONCILED with valid true clears the
         # map inside collect_consumed_authorities.
         try:
-            consumed_authorities = collect_consumed_authorities(self.storage.read_events(run_id))
+            # Fold the archived prefix in via the shared fetch: an authority
+            # consumed before a compaction still blocks resume, and the
+            # AUTHORITY_RECONCILED that clears it may live in the archived
+            # prefix too (#1050).
+            consumed_authorities = collect_consumed_authorities(archive_aware_events)
         except Exception:
             # An empty map is the *unblocked* answer, and this block exists to
             # be the check that survives a degraded log: when the ledger
