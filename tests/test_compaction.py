@@ -288,10 +288,12 @@ def test_a_key_with_no_archived_claim_still_gets_a_fresh_slot(db: str) -> None:
 
 def test_action_index_covers_the_archive_after_rebuild(tmp_path: Path) -> None:
     """The derived index must not forget archived claims (PR #260 review):
-    after compaction it lags until rebuilt, then cross-run lookups see the
-    archived completion again. A second run interleaves global insertion
-    order, so the post-compaction fold provably differs from what the
-    incremental index recorded."""
+    after compaction the claim lives only in ``events_archive``, so a
+    rebuild that ignored the archive would drop it and cross-run lookups
+    would lose the archived completion. Compaction is storage relocation,
+    not a semantic change, so the store still reads clean afterwards -- the
+    renumbering the archive-first merge does is tolerated rather than
+    treated as drift (#1322)."""
     path = str(tmp_path / "idx.db")
     with SQLiteStorage(path) as store:
         store.create_run_started(Run(run_id="r1", goal="one"))
@@ -302,14 +304,22 @@ def test_action_index_covers_the_archive_after_rebuild(tmp_path: Path) -> None:
         store.create_run_started(Run(run_id="r2", goal="two"))
         store.append_event("r2", EventType.TASK_UPDATED, {"n": 1})
 
-        store.compact_run("r1")
-        assert store.action_index_drift() > 0
-        store.rebuild_action_index()
-        assert store.action_index_drift() == 0
         key = str(idempotency_key("process_doc", None, scope="r1", key="doc:1"))
+        assert store.action_index_drift() == 0
+
+        store.compact_run("r1")
+        # The incremental writer's row survived the move; the fold agrees.
+        assert store.action_index_drift() == 0
         foreign = store.foreign_action(key, exclude_run="r2")
-    assert foreign is not None
-    assert foreign.status is ActionStatus.COMPLETED
+        assert foreign is not None
+        assert foreign.status is ActionStatus.COMPLETED
+
+        store.rebuild_action_index()
+        # Rebuild wipes and refolds; only the archive still carries the claim.
+        assert store.action_index_drift() == 0
+        foreign = store.foreign_action(key, exclude_run="r2")
+        assert foreign is not None
+        assert foreign.status is ActionStatus.COMPLETED
 
 
 # --- capability gate and projection hygiene -------------------------------------- #

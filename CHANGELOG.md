@@ -52,6 +52,31 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The action index no longer reads as dirty just because a *different* run
+  was compacted (#1322).** Both engines fold `events_archive` ahead of
+  `events` as though the two were disjoint segments. Within a run that holds;
+  across runs it does not -- archiving one run renumbers its action events
+  below another run's still-live ones, so the fold crowns a winner the
+  incremental writer never stored and the projection reads dirty on a store
+  nobody tampered with. The comparison now rests on what a row *asserts*
+  (which run owns the key, which action it points at, the status that action
+  reached) and never on `updated_seq`: that column has no consumer that needs
+  it exact, since `key` is the projection's primary key so at most one row per
+  key exists and `foreign_action`'s `ORDER BY updated_seq DESC` can never
+  choose between candidates. A key written by two runs is adjudicated only
+  when the stored row and the fold agree on which run's write won -- the
+  stored row is the latest write by construction, since the writer upserts on
+  every action event, so a run disagreement is the fold being wrong, not the
+  projection. Compaction is storage relocation rather than a semantic change,
+  and the index now says so.
+
+- **`PostgresStorage.rebuild_action_index` now reports the rows it corrected
+  (#1267).** It rebuilt the projection but unconditionally returned `0`, so
+  `continuum verify --repair-index` reported "0 row(s) corrected" while
+  repairing. The count now mirrors the SQLite engine under the same
+  criterion as `action_index_drift`, so a repair reports the drift that
+  called for it.
+
 - **Webhook dedup now survives a compaction inside the re-notify window
   (#1186).** `_within_dedup_window` scanned only the live event tail for the
   `NOTIFICATION_SENT` / `NOTIFICATION_FAILED` rows the dedup state lives in,
@@ -937,7 +962,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,397 collected, ~2,320 passed, ~27 skipped on a minimal env).
+  (~2,403 collected, ~2,322 passed, ~28 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

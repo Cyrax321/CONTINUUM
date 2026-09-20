@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from continuum.actions import ActionLedger
+from continuum.checkpoint import CheckpointManager
 from continuum.cli import ExitCode
 from continuum.events import EventType
 from continuum.models import Action, ActionStatus, Run, UnknownSideEffect
@@ -175,6 +176,27 @@ def test_spurious_rows_count_as_drift_and_are_removed(store: SQLiteStorage) -> N
     assert store.action_index_drift() == 0
 
 
+def test_a_row_the_log_authorizes_but_the_projection_lost_reads_dirty(
+    store: SQLiteStorage,
+) -> None:
+    """The other half of drift: a key the fold sees whose stored row is gone.
+    A projection that silently dropped a row is exactly the loss drift exists
+    to catch, and a repair must restore it and report doing so."""
+    outcome = make_run(store, "run_1").claim("send_invoice", {}, key="invoice:22")
+    assert store.action_index_drift() == 0
+
+    # Delete the projection row only; the log still authorizes it.
+    store._connection.execute("DELETE FROM action_index WHERE key = ?", (outcome.key,))
+    assert store.action_index_drift() == 1
+
+    corrections = store.rebuild_action_index()
+    assert corrections >= 1, "a restored row the projection lost must be counted"
+    assert store.action_index_drift() == 0
+    found = store.foreign_action(outcome.key, exclude_run="none")
+    assert found is not None
+    assert found.status is ActionStatus.STARTED
+
+
 # --- engines without an index ---------------------------------------------------- #
 
 
@@ -297,6 +319,106 @@ def test_a_key_rewritten_by_another_run_is_global_last_write_wins(
     assert found is not None
     assert found.run_id == "run_2"
     assert found.status is ActionStatus.STARTED
+
+
+def test_a_contested_key_survives_another_run_being_compacted(
+    store: SQLiteStorage,
+) -> None:
+    """Compacting one run must not make another run's earlier write read
+    dirty (#1322).
+
+    The fold merges ``events_archive`` ahead of ``events``; that is true
+    within a run but not across runs. Compacting the later run renumbers its
+    archived action events below the earlier run's still-live ones, so the
+    fold crowns a different winner for a key both runs wrote than the
+    incremental writer stored. Comparing anything order-derived there
+    reported a healthy store as dirty; the criterion now compares what the
+    row *asserts* and adjudicates a contested key only when the row and the
+    fold agree on which run's write won.
+    """
+    from continuum.actions.idempotency import idempotency_key
+
+    make_run(store, "run_1")
+    make_run(store, "run_2")
+
+    # run_1 claims and completes the key first...
+    ledger = ActionLedger(store, "run_1")
+    completed = ledger.claim("send_invoice", {}, key="shared:9", scoped_to_run=False)
+    ledger.complete(completed.key, external_id="INV-A")
+
+    # ...then run_2 records the same key as a bare STARTED, later in wall
+    # time. The index row now belongs to run_2.
+    shared = idempotency_key("send_invoice", None, scope=None, key="shared:9")
+    store.append_event(
+        "run_2",
+        EventType.ACTION_RECORDED,
+        {
+            "key": str(shared),
+            "action": Action(
+                run_id="run_2", action_type="send_invoice", status=ActionStatus.STARTED
+            ).model_dump(mode="json"),
+        },
+    )
+    assert str(shared) == completed.key  # same key in both runs, unscoped
+    before = store.foreign_action(str(shared), exclude_run="nobody")
+    assert before is not None and before.run_id == "run_2"
+
+    # Compacting run_2 is the trigger: its ACTION_RECORDED moves to the
+    # archive and the fold now crowns run_1's earlier live completion,
+    # while the writer's row still belongs to run_2.
+    CheckpointManager(store).checkpoint("run_2")
+    store.compact_run("run_2")
+    assert store._canonical_index_rows()[str(shared)][0][1] == "run_1"
+    row = store._connection.execute(
+        "SELECT run_id, status FROM action_index WHERE key = ?", (str(shared),)
+    ).fetchone()
+    assert row["run_id"] == "run_2"
+
+    # The store is still clean: the row agrees with run_2's own log entry.
+    assert store.action_index_drift() == 0
+
+    # Compaction is relocation, not a semantic change, so the projection
+    # answers the same before and after.
+    after = store.foreign_action(str(shared), exclude_run="nobody")
+    assert after is not None
+    assert (after.run_id, after.action_id) == (before.run_id, before.action_id)
+
+
+def test_a_key_older_than_a_compacted_run_reads_clean_after_rebuild(
+    store: SQLiteStorage,
+) -> None:
+    """The same contested-key case, after a rebuild rewrites the row from
+    the fold's winner. The repair must not report a healthy store as dirty
+    for disagreeing with the log it just wrote (#1322)."""
+    from continuum.actions.idempotency import idempotency_key
+
+    make_run(store, "run_1")
+    make_run(store, "run_2")
+    ledger = ActionLedger(store, "run_1")
+    completed = ledger.claim("send_invoice", {}, key="shared:10", scoped_to_run=False)
+    ledger.complete(completed.key, external_id="INV-B")
+
+    shared = idempotency_key("send_invoice", None, scope=None, key="shared:10")
+    store.append_event(
+        "run_2",
+        EventType.ACTION_RECORDED,
+        {
+            "key": str(shared),
+            "action": Action(
+                run_id="run_2", action_type="send_invoice", status=ActionStatus.STARTED
+            ).model_dump(mode="json"),
+        },
+    )
+    CheckpointManager(store).checkpoint("run_2")
+    store.compact_run("run_2")
+
+    # The repair rewrites the row with the fold's winner, run_1's completion.
+    assert store.rebuild_action_index() >= 0
+    assert store.action_index_drift() == 0
+    found = store.foreign_action(str(shared), exclude_run="nobody")
+    assert found is not None
+    assert found.run_id == "run_1"
+    assert found.status is ActionStatus.COMPLETED
 
 
 def test_repair_refuses_when_the_chain_fails(tmp_path: Path) -> None:

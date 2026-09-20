@@ -588,35 +588,63 @@ class SQLiteStorage(Storage):
     def action_index_drift(self) -> int:
         """Count index rows that disagree with the event log. Read-only.
 
-        The projection is keyed globally, so drift is a store-wide property:
-        a run-scoped comparison would falsely flag rows owned by another
-        run's later write of the same key.
+        Store-wide by design: keys live in one namespace, so a run-scoped
+        comparison would falsely flag rows owned by another run's later write
+        of the same key.
+
+        The comparison is on what the row *asserts* -- which run owns the
+        key, which action it points at, the status that action reached --
+        and never on ``updated_seq``. That column has no consumer that needs
+        it exact: ``key`` is the projection's primary key, so at most one row
+        per key can exist and ``foreign_action``'s ``ORDER BY updated_seq
+        DESC`` can never choose between candidates. And the fold reconstructs
+        the number from table order, which compaction moves rows between --
+        archiving one run renumbers its action events below another run's
+        earlier live ones, so comparing the number read a healthy store as
+        dirty the moment any run was compacted while another held actions
+        (#1322).
         """
-        expected = {
-            key: (seq, entry[3]) for key, (entry, seq) in self._canonical_index_rows().items()
-        }
+        canonical = self._canonical_index_rows()
         with self._read() as conn:
             stored = {
-                r["key"]: (r["updated_seq"], r["status"])
-                for r in conn.execute("SELECT key, updated_seq, status FROM action_index")
+                r["key"]: (r["run_id"], r["action_id"], r["status"])
+                for r in conn.execute("SELECT key, run_id, action_id, status FROM action_index")
             }
-        extra = set(stored) - set(expected)
-        changed = sum(1 for k, val in expected.items() if stored.get(k) != val)
+        extra = set(stored) - set(canonical)
+        changed = 0
+        for key, (entry, _seq) in canonical.items():
+            have = stored.get(key)
+            if have is None:
+                changed += 1  # an action event the projection lost
+                continue
+            # A key written by two runs is only adjudicated when the row and
+            # the fold agree on which run's write won. The fold rebuilds
+            # global insertion order from table order and compaction breaks
+            # that, so it can crown a write the incremental writer never
+            # stored. The stored row is the latest write by construction --
+            # the writer upserts on every ACTION_* event -- so a run
+            # disagreement is the fold being wrong, not the projection.
+            if have[0] != entry[1]:
+                continue
+            if have != (entry[1], entry[2], entry[3]):
+                changed += 1
         return len(extra) + changed
 
     def rebuild_action_index(self) -> int:
-        """Recompute the whole index from the log; returns corrected rows.
+        """Recompute the whole index from the log (global key space).
 
-        Always global by design: keys live in one store-wide namespace, so a
-        per-run rewrite could collide with another run's legitimate row of
-        the same key. A correction is any key whose stored row was missing,
-        stale or spurious.
+        Returns the number of rows corrected: a correction is any key whose
+        stored row was missing, spurious, or disagreed with the log under
+        :meth:`action_index_drift`'s criterion.
         """
         canonical = self._canonical_index_rows()
         with self._write() as conn:
+            # Snapshot ahead of the DELETE it is measured against, inside the
+            # write lock, so a row a concurrent writer shifted between the two
+            # is counted rather than silently absorbed.
             before = {
-                r["key"]: (r["updated_seq"], r["status"])
-                for r in conn.execute("SELECT key, updated_seq, status FROM action_index")
+                r["key"]: (r["run_id"], r["action_id"], r["status"])
+                for r in conn.execute("SELECT key, run_id, action_id, status FROM action_index")
             }
             conn.execute("DELETE FROM action_index")
             conn.executemany(
@@ -627,12 +655,11 @@ class SQLiteStorage(Storage):
                     for key, (entry, seq) in canonical.items()
                 ],
             )
-        corrections = sum(
-            1
-            for k, val in ((k, (seq, entry[3])) for k, (entry, seq) in canonical.items())
-            if before.get(k) != val
-        )
-        corrections += len(set(before) - set(canonical))
+        corrections = len(set(before) - set(canonical))
+        for key, (entry, _seq) in canonical.items():
+            have = before.get(key)
+            if have is None or (have[0] == entry[1] and have != (entry[1], entry[2], entry[3])):
+                corrections += 1
         return corrections
 
     def _canonical_index_rows(self) -> dict[str, tuple[tuple[str, str, str, str, str], int]]:
@@ -647,6 +674,16 @@ class SQLiteStorage(Storage):
         archived rows receive negative order positions below every possible
         rowid, oldest first, so last-write-per-key stays true after
         compaction while uncompacted stores fold identically to before.
+
+        The ``order_seq`` this returns is now only what
+        :meth:`rebuild_action_index` writes back out; :meth:`action_index_drift`
+        deliberately does not compare it. Per-table order is genuinely global
+        on this engine (rowids span all runs), but the archive-first merge is
+        not -- across runs, archiving one run renumbers its action events
+        below another run's earlier live ones. That could only make drift
+        false-positive, never false-negative, and the stored row's own
+        ``updated_seq`` has no consumer that needs it exact, so the fold's
+        number is not a thing the index can drift from (#1322).
         """
         with self._read() as conn:
             archived = conn.execute(
