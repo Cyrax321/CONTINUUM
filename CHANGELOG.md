@@ -52,6 +52,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The recovery verdict no longer forgets pre-compaction risk, liveness, and
+  authority signals (#1050).** Three scans in `RecoveryEngine.assess` still read
+  the live event tail while the neighbouring confirmation, provenance, and
+  validation scans shared one archive-aware fetch (`read_all_events`): the
+  liveness breach count, the `RISK_OBSERVED` scan, and the consumed-authority
+  scan. `compact_run` archives the pre-anchor prefix, so all three silently
+  emptied the moment a run was compacted and the engine returned a verdict
+  computed over a deliberately truncated history — always in the less cautious
+  direction: a risk trigger the policy maps to `rollback` downgraded to
+  `request_human`, the breach count reset to zero, and a consumed authority
+  stopped blocking a `resume` the gate would still deny. The contract is the
+  auditable artifact a human or downstream gate acts on, so compaction removed
+  the very evidence that justified the cautious verdict. All three scans now
+  filter the shared archive-aware fetch, which also retires three redundant
+  live-tail reads; the existing `try/except` fallbacks are untouched, and the
+  authority block still degrades closed on an unreadable ledger (#1066). Three
+  regression tests, one per signal, mirror `test_confirmation_survives_compaction`
+  and assert the precondition that the event really did leave the live tail.
+
 - **Webhook dedup now survives a compaction inside the re-notify window
   (#1186).** `_within_dedup_window` scanned only the live event tail for the
   `NOTIFICATION_SENT` / `NOTIFICATION_FAILED` rows the dedup state lives in,
