@@ -168,3 +168,79 @@ def test_resume_with_changed_pinning_reports_the_diff(db: str) -> None:
     drift = "\n".join(payload["pinning_drift"])
     assert "prompt_sha256 changed" in drift
     assert "model_id newly pinned" in drift
+
+
+def test_resume_with_matching_pinning_has_no_drift_after_compaction(db: str) -> None:
+    """Compaction archives the pinning-carrying prefix (issue #1126).
+
+    The live tail then holds only the anchor marker, which carries
+    ``anchored_through``/``version`` and no pinning, so a drift fold over
+    ``read_events`` sees an empty record and reports every key as newly
+    pinned. The fold must read full history.
+    """
+    import io
+
+    from continuum.cli import main as cli_main
+    from continuum.events import EventType
+
+    _seed_pinned_run(db)
+
+    # Guard against a vacuous pass: the pinning event must actually land in
+    # the archived prefix, or the live tail would still hold it.
+    with SQLiteStorage(db) as store:
+        store.compact_run("pinned")
+        archived_types = [e.type for e in store.read_archived_events("pinned")]
+        live_types = [e.type for e in store.read_events("pinned")]
+    assert EventType.ACTION_RECORDED in archived_types
+    assert EventType.ACTION_RECORDED not in live_types
+
+    out, err = io.StringIO(), io.StringIO()
+    cli_main(
+        [
+            "--db",
+            db,
+            "--json",
+            "resume",
+            "pinned",
+            "--pinning",
+            json.dumps({"prompt_sha256": "aaa"}),
+        ],
+        out=out,
+        err=err,
+    )
+    payload = json.loads(out.getvalue())
+    assert payload["pinning_drift"] == []
+
+
+def test_resume_with_changed_pinning_reports_the_diff_after_compaction(db: str) -> None:
+    """Real drift still surfaces from the archive after compaction (issue #1126).
+
+    The masked direction matters as much as the false positive: a changed
+    hash would have rendered as 'newly pinned' over the live tail, and an
+    unpinned key would not have rendered at all.
+    """
+    import io
+
+    from continuum.cli import main as cli_main
+
+    _seed_pinned_run(db)
+    with SQLiteStorage(db) as store:
+        store.compact_run("pinned")
+
+    out, err = io.StringIO(), io.StringIO()
+    cli_main(
+        [
+            "--db",
+            db,
+            "--json",
+            "resume",
+            "pinned",
+            "--pinning",
+            json.dumps({"prompt_sha256": "bbb"}),
+        ],
+        out=out,
+        err=err,
+    )
+    payload = json.loads(out.getvalue())
+    drift = "\n".join(payload["pinning_drift"])
+    assert "prompt_sha256 changed" in drift
