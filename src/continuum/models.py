@@ -70,6 +70,12 @@ __all__ = [
     "DiffEntry",
     "StateDiff",
     "UnknownSideEffect",
+    "Frozen",
+    "Origin",
+    "Provenance",
+    "TrajectoryReport",
+    "validate_caused_by",
+    "PROJECTION_BOOKKEEPING",
 ]
 
 Frozen = ConfigDict(frozen=True, extra="forbid")
@@ -969,6 +975,19 @@ class Action(BaseModel):
     completed_at: datetime | None = None
     consumed_inputs: ConsumedInputs = Field(default_factory=ConsumedInputs)
     """Commitment inputs consumed to produce this action (issue #295)."""
+    budget_authorization_id: str | None = None
+    """The retry-budget bucket this attempt draws from (issue #1052).
+
+    Persisted rather than re-derived so the bucket survives whatever the caller
+    sends next. Token derivation reads the arguments, which are caller-controlled
+    noise plus the real resource, and the caller's ``volatile`` declaration names
+    which fields to drop; a retry that changes either one would otherwise compute
+    a different bucket from the same stored record and start its count over.
+    Pinning the id at first claim makes a retry and its settlement share one
+    counter by construction. ``None`` is a record that draws no authorization
+    budget at all, and is also the pre-#1052 legacy value, re-derived on the next
+    claim.
+    """
 
     @field_validator("origin_digest")
     @classmethod
