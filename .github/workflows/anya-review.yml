@@ -84,6 +84,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.ANYA_TOKEN }}
         run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "No review token available on this event (fork PR), standing down."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           PR="${{ github.event.inputs.pr }}"
           if [ -z "$PR" ] || [ "$PR" = "null" ]; then
             PR="${{ github.event.pull_request.number }}"

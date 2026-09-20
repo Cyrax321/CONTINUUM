@@ -42,6 +42,27 @@ from continuum.recovery.ledger import LedgerLockError
 from continuum.storage import SQLiteStorage
 from continuum.testing import environment_fixture
 
+__all__ = [
+    "ALL_SCENARIOS",
+    "env_multi",
+    "scenario_adapter_failure_across_environments",
+    "scenario_checkpoint_rollback_correctness",
+    "scenario_concurrent_recovery_safety",
+    "scenario_external_edit_drift",
+    "scenario_human_verdict_honored",
+    "scenario_large_state_recovery_latency",
+    "scenario_ledger_tamper_detected",
+    "scenario_missing_dependency_graph_fallback",
+    "scenario_multi_dependency_corruption",
+    "scenario_out_of_scope_side_effect",
+    "scenario_plan_aware_resume_skips_completed_units",
+    "scenario_recovery_lease_exhaustion",
+    "scenario_scoped_attempt_budget",
+    "scenario_single_dependency_corruption",
+    "scenario_transient_network_failure_on_install",
+    "seed_two",
+]
+
 
 def _new_store() -> SQLiteStorage:
     storage = SQLiteStorage(":memory:")
