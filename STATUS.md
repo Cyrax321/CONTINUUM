@@ -52,7 +52,12 @@ Ran against `main` at `8013f6a` in a clean worktree, Python 3.13
 
 ## Verified
 
-1047 tests collected, 1038 passing, 9 skipped, on Python 3.13 with `mcp 2.0.0` installed. The MCP
+2255 tests collected at `cef019d` on 2026-09-16 (2229 passing, 26 skipped, 0
+failed; Python 3.13.5, `mcp 2.0.0`), in a clean worktree. This is a snapshot,
+not a live figure: it drifts as features land, and the passed/skipped split
+varies by environment, which is why the docs-count guard in
+`tests/test_docs_counts.py` compares collected totals only. Recount with
+`python -m pytest --collect-only -p no:cacheprovider`. The MCP
 server tests are no longer excluded: they load and pass against `mcp>=2.0` (the
 version pinned in `pyproject.toml`). An earlier note recorded them as failing to
 load; that incompatibility is gone with the newer SDK. CI was green on Python
@@ -78,8 +83,9 @@ notices.
 
 ### Interfaces
 
-- **CLI** (`cli/`), 33 commands at `main` (`4453c72`, recounted by enumerating
-  the built parser on 2026-08-24), stdlib `argparse` only. Exit codes are a
+- **CLI** (`cli/`), 46 commands at `main` (`cef019d`, recounted on 2026-09-16
+  by enumerating the built parser's subparser choices), stdlib `argparse` only.
+  Exit codes are a
   safety contract: only a verified-safe run exits `0`, so
   `continuum resume "$RUN" && ./start-agent.sh` cannot launch onto stale state.
   Colour is TTY-aware and respects `NO_COLOR`; piped output is byte-identical
@@ -89,11 +95,11 @@ notices.
   integration, optional `langgraph` dependency.
 - **`OpenAIAgentAdapter`** (`adapters/openai.py`), OpenAI Agents SDK
   integration, optional `openai-agents` dependency.
-- **MCP server** (`mcp/server.py`), 11 tools over stdio: 3 read-only by
+- **MCP server** (`mcp/server.py`), 12 tools over stdio: 3 read-only by
   `read_only_hint` annotation (`continuum_validate`, `continuum_resume`,
-  `continuum_list_actions`) and 8 mutating, recounted from the tool
-  registrations on 2026-08-24. `continuum_confirm` was added alongside the
-  `REVIEW_CONFIRMED` event in the launch fixes.
+  `continuum_list_actions`) and 9 mutating, recounted at `cef019d` on
+  2026-09-16 from the `@server.tool(` registrations. `continuum_confirm` was
+  added alongside the `REVIEW_CONFIRMED` event in the launch fixes.
 
 ### MCP two-phase action interception
 
