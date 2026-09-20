@@ -49,6 +49,42 @@ def test_ingest_risk_fail_open_on_garbage(tmp_path: Path) -> None:
         assert len(store.read_events(run_id)) == 1
 
 
+def test_ingest_risk_keeps_caller_supplied_ts(tmp_path: Path) -> None:
+    # Issue #1075: a payload carrying ts but no timestamp took the
+    # mint-server-now branch, silently replacing the probe's observation
+    # time with CONTINUUM's ingestion time.
+    db = str(tmp_path / "risk_ts.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_ts"
+        store.create_run_started(Run(run_id=run_id, goal="caller ts"))
+        observed = "2020-01-01T00:00:00+00:00"
+        assert ingest_risk(store, run_id, {"trigger": "latency_anomaly", "ts": observed}) is True
+        assert store.read_events(run_id)[-1].payload["ts"] == observed
+
+
+def test_ingest_risk_honours_timestamp_spelling(tmp_path: Path) -> None:
+    # Issue #1075: a payload carrying timestamp but no ts took neither
+    # branch, so the recorded event had no ts at all.
+    db = str(tmp_path / "risk_timestamp.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_timestamp"
+        store.create_run_started(Run(run_id=run_id, goal="timestamp spelling"))
+        observed = "2020-02-02T00:00:00+00:00"
+        assert (
+            ingest_risk(store, run_id, {"trigger": "token_runaway", "timestamp": observed}) is True
+        )
+        assert store.read_events(run_id)[-1].payload["ts"] == observed
+
+
+def test_ingest_risk_mints_ts_only_when_caller_supplies_none(tmp_path: Path) -> None:
+    db = str(tmp_path / "risk_mint.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_mint"
+        store.create_run_started(Run(run_id=run_id, goal="mint"))
+        assert ingest_risk(store, run_id, {"trigger": "loop"}) is True
+        assert store.read_events(run_id)[-1].payload.get("ts")
+
+
 def test_policy_defaults_and_conservative(tmp_path: Path) -> None:
     # Defaults are loaded when file missing
     missing = tmp_path / "no_policy.json"
@@ -109,3 +145,57 @@ def test_risk_events_are_hash_chained(tmp_path: Path) -> None:
         report = store.verify_events(run_id)
         assert report.ok is True
         assert report.trusted_through[run_id] == 3
+
+
+def test_risk_rationale_names_every_trigger_of_the_winning_mode(tmp_path: Path) -> None:
+    # Issue #1057: equal-severity triggers each landed in triggering_risks
+    # but only the first was named in the rationale that becomes the sealed
+    # reason, leaving contributor event ids unexplained.
+    from continuum.recovery import RecoveryEngine
+
+    db = str(tmp_path / "risk_multi.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_multi"
+        store.create_run_started(Run(run_id=run_id, goal="multi trigger"))
+        ingest_risk(store, run_id, {"trigger": "error_cascade", "score": 0.9})
+        ingest_risk(store, run_id, {"trigger": "token_runaway", "score": 0.8})
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    assert decision.mode.value == "wait"
+    assert len(decision.contract.triggering_risks) == 2
+    assert "risk error_cascade, token_runaway triggers wait" in decision.rationale
+    assert decision.contract.reason == "risk error_cascade, token_runaway triggers wait"
+
+
+def test_risk_rationale_names_only_the_winning_mode_contributors(tmp_path: Path) -> None:
+    # A trigger proposing a less severe mode is not a contributor: the
+    # rollback winner's reason names the rollback trigger alone.
+    from continuum.recovery import RecoveryEngine
+
+    db = str(tmp_path / "risk_severe.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_severe"
+        store.create_run_started(Run(run_id=run_id, goal="severity ordering"))
+        ingest_risk(store, run_id, {"trigger": "error_cascade"})
+        ingest_risk(store, run_id, {"trigger": "meltdown"})
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    assert decision.mode.value == "rollback"
+    assert decision.contract.reason == "risk meltdown triggers rollback"
+
+
+def test_risk_rationale_dedupes_a_repeated_trigger(tmp_path: Path) -> None:
+    # The same trigger observed twice is one sentence, not two (#1042's
+    # failure mode must not be reintroduced by naming every contributor).
+    from continuum.recovery import RecoveryEngine
+
+    db = str(tmp_path / "risk_repeat.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_repeat"
+        store.create_run_started(Run(run_id=run_id, goal="repeat trigger"))
+        ingest_risk(store, run_id, {"trigger": "error_cascade"})
+        ingest_risk(store, run_id, {"trigger": "error_cascade"})
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    assert decision.contract.reason == "risk error_cascade triggers wait"
+    assert decision.contract.reason.count("error_cascade") == 1

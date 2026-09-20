@@ -6,7 +6,12 @@ from continuum.checkpoint.context import (
     build_recovery_context,
     estimate_tokens,
 )
-from continuum.checkpoint.manager import CheckpointError, CheckpointManager, RestoredRun
+from continuum.checkpoint.manager import (
+    CheckpointError,
+    CheckpointManager,
+    RestoredRun,
+    clear_resume_pointer,
+)
 from continuum.checkpoint.policy import (
     CheckpointDecision,
     CheckpointPolicy,
@@ -38,6 +43,7 @@ __all__ = [
     "RestoredRun",
     "SemanticPolicy",
     "build_recovery_context",
+    "clear_resume_pointer",
     "default_policy",
     "estimate_tokens",
 ]

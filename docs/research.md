@@ -14,7 +14,7 @@ These are the places where a real run already emits measured output. Read the ou
 
 - **CONTINUUM-Bench (minimal harness)** - `references/bench.md` documents the shipped harness in `src/continuum/benchmark/` (command `continuum benchmark`). It runs five scenarios (`process_crash`, `dataset_change`, `unknown_side_effect`, `partial_completion`, `early_crash`) and a dedicated argument-drift scenario against three strategies (`continuum`, `replay`, `naive_checkpoint`). The harness prints `duplicate_work_ratio`, `duplicate_side_effects`, `detected_stale`, `context_tokens`, `compression_ratio`.
 
-- **Recovery-correctness suite (Phase 6)** - `src/continuum/benchmark/phase6/` encodes crash points from the durable-execution survey as executable assertions. It is the 12-scenario suite referenced in `references/bench.md` and `STATUS.md`. Run via `pytest` (see `tests/test_benchmark.py` family).
+- **Recovery-correctness suite (Phase 6)** - `src/continuum/benchmark/phase6/` encodes crash points from the durable-execution survey as executable assertions. It is the 14-scenario suite defined by `ALL_SCENARIOS` in `src/continuum/benchmark/phase6/scenarios.py`. Run via `pytest` (see `tests/test_benchmark.py` family).
 
 - **Fault-injection chaos suite** - `benchmarks/fault_injection/` with runner `benchmarks/fault_injection/runner.py` and emitter `benchmarks/fault_injection/emitter.py`. Use `benchmarks/run.py` or the `continuum benchmark` integration to emit the shared envelope `{benchmark, generated_at, summary, results}`. The fault suite publishes `detection_rate`, `unsafe_resume_rate`, `false_positive_rate` (see its `README` and the merged docs for #397).
 

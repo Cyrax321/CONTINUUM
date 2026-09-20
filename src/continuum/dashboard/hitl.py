@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from continuum.actions import ActionLedger
+from continuum.checkpoint import clear_resume_pointer
 from continuum.events import EventType
 from continuum.models import ActionStatus, Origin
 from continuum.runs import close_run

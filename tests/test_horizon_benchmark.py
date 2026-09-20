@@ -176,7 +176,12 @@ def test_table_regenerates_from_runner_no_invented_numbers(tmp_path: Path) -> No
                     [sys.executable, str(root / "benchmarks/run.py")],
                     capture_output=True,
                     text=True,
-                    timeout=60,
+                    # The runner executes the full horizon, fault-injection and
+                    # crash-recovery suites, which takes minutes on a cold
+                    # Windows runner -- 60s timed out there (seen on this job
+                    # across unrelated PRs). Match the 600s the --publish test
+                    # below already grants the same script.
+                    timeout=600,
                     cwd=root,
                 )
                 assert result.returncode == 0, result.stderr

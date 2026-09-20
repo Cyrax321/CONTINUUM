@@ -85,3 +85,39 @@ def test_readme_module_map_command_count_matches_parser() -> None:
     assert documented == live, (
         f"README module map says {documented} argparse commands but the parser builds {live}"
     )
+
+
+def test_references_cli_documented_flag_defaults_match_parser() -> None:
+    """A documented `[--flag N]` default must match the parser's (#1102).
+
+    ``references/cli.md`` advertised the dashboard on port 8080 while the
+    parser and ``serve_dashboard`` both default to 8000. The reference is a
+    flat list of usage rows, so the guard reads the default each row prints
+    and compares it with the parser instead of pinning a literal, which also
+    covers the ``serve --port`` row (8765).
+    """
+    text = REF_CLI.read_text(encoding="utf-8")
+    subparsers = build_parser()._subparsers._group_actions[0].choices
+    defaults: dict[str, dict[str, int]] = {}
+    for name in ("dashboard", "serve"):
+        per_command: dict[str, int] = {}
+        for action in subparsers[name]._actions:
+            for flag in action.option_strings:
+                if isinstance(action.default, int):
+                    per_command[flag] = action.default
+        defaults[name] = per_command
+
+    checked = False
+    for line in text.splitlines():
+        match = re.match(r"^continuum (dashboard|serve)(.*)$", line)
+        if not match:
+            continue
+        command = match.group(1)
+        for flag, documented in re.findall(r"\[(--\S+)\s+(\d+)\]", match.group(2)):
+            checked = True
+            assert flag in defaults[command], f"{command} documents unknown flag {flag}"
+            live = defaults[command][flag]
+            assert int(documented) == live, (
+                f"{match.group(1)} {flag} documents {documented} but the parser defaults to {live}"
+            )
+    assert checked, "no [--flag N] default reached the guard; the regex drifted"
