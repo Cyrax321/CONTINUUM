@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -206,6 +207,151 @@ def test_replay_fails_when_the_stored_version_disagrees(db: str) -> None:
     assert code == ExitCode.CORRUPTED, err
     payload = json.loads(out)
     assert payload["verified"] is False
+
+
+# --- replay --upto over the full history (issue #1172) ------------------------ #
+
+
+@pytest.fixture
+def compacted(tmp_path: Path) -> Iterator[str]:
+    """A run with history on both sides of a mid-run checkpoint, then compacted.
+
+    Compaction archives 1-12 and leaves 13-14 live, so every window an operator
+    bisects with ``--upto`` lands partly or wholly inside the archive:
+    1 RUN_STARTED, 2-7 WORK_COMPLETED, 8 STATE_CHECKPOINTED (mid-run),
+    9-12 WORK_COMPLETED, 13 STATE_CHECKPOINTED (the anchor checkpoint),
+    14 EVENT_LOG_ANCHORED.
+    """
+    path = str(tmp_path / "upto.db")
+    with SQLiteStorage(path) as store:
+        store.create_run(Run(run_id="run_1", goal="windowed replay"))
+        store.append_event("run_1", EventType.RUN_STARTED, {"goal": "windowed replay", "total": 12})
+        for i in range(6):
+            store.append_event("run_1", EventType.WORK_COMPLETED, {"doc": i})
+        CheckpointManager(store).checkpoint("run_1")
+        for i in range(6, 10):
+            store.append_event("run_1", EventType.WORK_COMPLETED, {"doc": i})
+    code, _, err = run("--db", path, "compact", "run_1", "--force")
+    assert code is ExitCode.OK, err
+    yield path
+
+
+def test_replay_upto_succeeds_on_a_compacted_run_for_every_window(compacted: str) -> None:
+    """Issue #1172: ``--upto`` failed on every compacted run for every N.
+
+    RUN_STARTED is archived, so no value of N reaches it in the live tail and
+    the guard's advice to increase --upto was unanswerable -- 999 failed the
+    same as 11 on a run whose last sequence was 13. The window now spans the
+    archived prefix, the way ``continuum events`` already does.
+    """
+    for upto in (1, 6, 8, 11, 12, 13, 14, 999):
+        code, out, err = run("--db", compacted, "--json", "replay", "run_1", "--upto", str(upto))
+        assert code is ExitCode.OK, (upto, err)
+        assert json.loads(out)["verified"] is True, upto
+
+
+def test_replay_upto_windows_the_state_not_just_the_exit_code(compacted: str) -> None:
+    """A window that ends inside the archive must report that prefix's state,
+    not the anchor checkpoint's. Returning the boundary state for any window
+    would pass the exit-code test while certifying nothing about the window."""
+    code, out, err = run("--db", compacted, "--json", "replay", "run_1", "--upto", "6")
+    assert code is ExitCode.OK, err
+    payload = json.loads(out)
+    assert payload["events_replayed"] == 6
+    assert payload["source_sequence"] == 6
+    assert payload["completed"] == 5  # RUN_STARTED plus WORK_COMPLETED at 2-6
+
+    code, out, err = run("--db", compacted, "--json", "replay", "run_1", "--upto", "11")
+    assert code is ExitCode.OK, err
+    payload = json.loads(out)
+    assert payload["events_replayed"] == 11
+    assert payload["source_sequence"] == 11
+    assert payload["completed"] == 9  # 2-7 and 9-11, skipping the checkpoint at 8
+
+
+def test_replay_upto_windows_a_compacted_run_like_a_live_one(
+    compacted: str, tmp_path: Path
+) -> None:
+    """The contract ``continuum events`` already holds (issue #532): a compacted
+    run reads the same as one that was never compacted.
+
+    The replayed window state is what is compared. The stored versions differ
+    (compaction records a checkpoint of its own), so ``verification`` text and
+    past-boundary event counts are not expected to line up, but the state the
+    window was asked for must.
+    """
+    live = str(tmp_path / "live.db")
+    with SQLiteStorage(live) as store:
+        store.create_run(Run(run_id="run_1", goal="windowed replay"))
+        store.append_event("run_1", EventType.RUN_STARTED, {"goal": "windowed replay", "total": 12})
+        for i in range(6):
+            store.append_event("run_1", EventType.WORK_COMPLETED, {"doc": i})
+        CheckpointManager(store).checkpoint("run_1")
+        for i in range(6, 10):
+            store.append_event("run_1", EventType.WORK_COMPLETED, {"doc": i})
+
+    for upto in (1, 6, 11, 12, 14, 999):
+        _, live_out, _ = run("--db", live, "--json", "replay", "run_1", "--upto", str(upto))
+        _, dead_out, _ = run("--db", compacted, "--json", "replay", "run_1", "--upto", str(upto))
+        live_payload, dead_payload = json.loads(live_out), json.loads(dead_out)
+        assert live_payload["completed"] == dead_payload["completed"], upto
+        assert live_payload["source_sequence"] == min(upto, 12), upto
+        assert dead_payload["source_sequence"] == min(upto, 14), upto
+        assert live_payload["verified"] is True and dead_payload["verified"] is True, upto
+
+
+def test_replay_upto_still_detects_a_tampered_stored_version_when_compacted(compacted: str) -> None:
+    """Routing windowed requests through the anchored branch must not retire
+    replay's corruption contract (PR #253 review, now with --upto supplied)."""
+    with SQLiteStorage(compacted) as store:
+        row = store._connection.execute(
+            "SELECT version, state FROM versions WHERE run_id = 'run_1' "
+            "ORDER BY version DESC LIMIT 1"
+        ).fetchone()
+        mutated = SemanticState.model_validate_json(row["state"])
+        mutated = mutated.model_copy(
+            update={"goal": mutated.goal.model_copy(update={"description": "tampered goal"})}
+        )
+        store._connection.execute(
+            "UPDATE versions SET state = ?, fingerprint = ? WHERE run_id = 'run_1' AND version = ?",
+            (mutated.model_dump_json(), state_fingerprint(mutated), row["version"]),
+        )
+    code, out, err = run("--db", compacted, "--json", "replay", "run_1", "--upto", "7")
+    assert code is ExitCode.CORRUPTED, err
+    assert json.loads(out)["verified"] is False
+
+
+def test_replay_upto_below_run_started_names_the_real_boundary_when_compacted(
+    compacted: str,
+) -> None:
+    """The guard is still reachable on a compacted run, and now that it reads
+    the archive it fires only for a window that genuinely excludes
+    RUN_STARTED -- the message is true where it points."""
+    code, _, err = run("--db", compacted, "replay", "run_1", "--upto", "0")
+    assert code is ExitCode.ERROR
+    assert (
+        "--upto 0 excludes the RUN_STARTED event for run 'run_1'; "
+        "increase --upto or omit it to replay from the beginning"
+    ) in err
+
+
+def test_read_all_events_bounds_the_archive_read_in_the_engine(compacted: str) -> None:
+    """``upto`` must reach the engine, not just filter in Python (PR #1179
+    review).
+
+    Compaction exists to bound replay cost on long-lived runs. A windowed read
+    that materialized the whole archive and discarded most of it would undo
+    that for every narrow window, so the bound belongs in the SQL.
+    """
+    with SQLiteStorage(compacted) as store:
+        assert [e.sequence for e in store.read_archived_events("run_1", upto=6)] == list(
+            range(1, 7)
+        )
+        assert [e.sequence for e in store.read_all_events("run_1", upto=6)] == list(range(1, 7))
+        # Unbounded still returns the archive plus the live tail.
+        assert [e.sequence for e in store.read_all_events("run_1")] == list(range(1, 15))
+        # A bound past the boundary keeps the live tail too.
+        assert [e.sequence for e in store.read_all_events("run_1", upto=13)] == list(range(1, 14))
 
 
 def test_inspect_and_status_survive_compaction(db: str) -> None:

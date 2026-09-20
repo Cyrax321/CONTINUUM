@@ -3371,60 +3371,86 @@ def cmd_replay(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     # Check existence first: otherwise a typo'd name reports "never recorded
     # RUN_STARTED", which diagnoses the wrong problem entirely.
     storage.get_run(args.run_id)
-    events = storage.read_events(args.run_id, upto=args.upto)
+    # The window covers the run's full history, archived prefix included, so a
+    # compacted run windows the same as one that was never compacted (issue
+    # #1172). Compaction archives RUN_STARTED, and reading only the live tail
+    # made every --upto on a compacted run fail with advice that could not
+    # help: the event was in events_archive, not behind the window. This is the
+    # same read cmd_events uses, so the two commands agree on what "the event
+    # log" is. The bound is pushed into the engine, so a narrow window on a
+    # heavily compacted run does not materialize the whole archive to discard
+    # most of it.
+    events = storage.read_all_events(args.run_id, upto=args.upto)
 
     stored = storage.latest_version(args.run_id)
-    anchored = any(e.type is EventType.EVENT_LOG_ANCHORED for e in events) and stored is not None
-    if anchored and args.upto is None and stored is not None:
-        # Compacted run (#239): fold the restored checkpoint state forward
-        # over the post-anchor tail; the archived prefix lives in
-        # events_archive and is deep-audited by verify.
-        from continuum.state.semantic import project_incremental
-
+    # A run is anchored when its *live* tail still carries the marker. An anchor
+    # that has itself been archived belongs to a compaction a later one
+    # superseded (#648): a window can contain it and still end short of the
+    # current boundary, and restoring the current checkpoint would then serve
+    # the boundary's state for a window that asked for an earlier one.
+    anchored = any(e.type is EventType.EVENT_LOG_ANCHORED for e in storage.read_events(args.run_id))
+    if anchored and stored is not None:
         base = CheckpointManager(storage).restore(args.run_id, replay=False).state
-        # The anchor event sits exactly at the base boundary; folding it would
-        # trip the monotonic-sequence check.
-        tail = [e for e in events if e.sequence > base.source_sequence]
-        state, _report = project_incremental(args.run_id, tail, base=base)
-        # Verify for real: re-fold only the stored version's own prefix and
-        # compare fingerprints, exactly as the plain path's
-        # _verify_against_stored does. A hardcoded pass here silently retired
-        # the corruption contract for every compacted run.
-        at_stored, _ = project_incremental(
-            args.run_id,
-            [e for e in tail if e.sequence <= stored.source_sequence],
-            base=base,
-            on_unprojectable="degrade",
-        )
-        matches = state_fingerprint(at_stored) == state_fingerprint(stored)
-        where = f"checkpoint v{stored.version} at sequence {stored.source_sequence}"
-        verification = (
-            f"anchored run: {'matches' if matches else 'DOES NOT match'} stored {where}; "
-            f"{len(tail)} tail event(s) folded, prefix audited in events_archive"
-        )
-        payload = {
-            "run_id": args.run_id,
-            "events_replayed": len(events),
-            "completed": state.progress.completed,
-            "source_sequence": state.source_sequence,
-            "verified": matches,
-            "verification": verification,
-        }
-        _emit(
-            payload,
-            f"Anchored replay: folded {where} + {len(tail)} tail event(s)\n"
-            f"Verification: {verification}",
-            as_json=args.json,
-            stream=out,
-            palette=getattr(args, "_palette", None),
-        )
-        if not matches:
-            print(
-                f"replayed state does not match the stored version for run {args.run_id}",
-                file=err,
+        if args.upto is None or args.upto > base.source_sequence:
+            # Compacted run (#239): fold the restored checkpoint state forward
+            # over the post-anchor tail; the archived prefix lives in
+            # events_archive and is deep-audited by verify. A windowed request
+            # reaches this branch too (#1172): the tail below is already cut by
+            # the window, so --upto narrows what is folded without shutting the
+            # anchored path out.
+            from continuum.state.semantic import project_incremental
+
+            # The anchor event sits exactly at the base boundary; folding it
+            # would trip the monotonic-sequence check. Everything the archive
+            # holds is at or before that boundary, so this also drops the
+            # archived prefix.
+            tail = [e for e in events if e.sequence > base.source_sequence]
+            state, _report = project_incremental(args.run_id, tail, base=base)
+            # Verify for real: re-fold only the stored version's own prefix and
+            # compare fingerprints, exactly as the plain path's
+            # _verify_against_stored does. A hardcoded pass here silently
+            # retired the corruption contract for every compacted run.
+            at_stored, _ = project_incremental(
+                args.run_id,
+                [e for e in tail if e.sequence <= stored.source_sequence],
+                base=base,
+                on_unprojectable="degrade",
             )
-            return ExitCode.CORRUPTED
-        return ExitCode.OK
+            matches = state_fingerprint(at_stored) == state_fingerprint(stored)
+            where = f"checkpoint v{stored.version} at sequence {stored.source_sequence}"
+            verification = (
+                f"anchored run: {'matches' if matches else 'DOES NOT match'} stored {where}; "
+                f"{len(tail)} tail event(s) folded, prefix audited in events_archive"
+            )
+            payload = {
+                "run_id": args.run_id,
+                "events_replayed": len(events),
+                "completed": state.progress.completed,
+                "source_sequence": state.source_sequence,
+                "verified": matches,
+                "verification": verification,
+            }
+            _emit(
+                payload,
+                f"Anchored replay: folded {where} + {len(tail)} tail event(s)\n"
+                f"Verification: {verification}",
+                as_json=args.json,
+                stream=out,
+                palette=getattr(args, "_palette", None),
+            )
+            if not matches:
+                print(
+                    f"replayed state does not match the stored version for run {args.run_id}",
+                    file=err,
+                )
+                return ExitCode.CORRUPTED
+            return ExitCode.OK
+        # The window ends at or before the anchor boundary, so everything it
+        # covers sits in the archived prefix. The checkpoint holds the state
+        # *at* the boundary, past what was asked for, and folding it forward
+        # over an empty tail would report the boundary's state for an earlier
+        # window. The plain path below folds that prefix from scratch instead,
+        # which is exactly what an uncompacted run does for the same window.
 
     if args.upto is not None and not any(e.type == EventType.RUN_STARTED for e in events):
         raise ValueError(
@@ -3494,7 +3520,10 @@ def _verify_against_stored(run_id: str, storage: Storage) -> tuple[bool | None, 
     stored = storage.latest_version(run_id)
     if stored is None:
         return None, "skipped (no stored version to compare against)"
-    prefix = storage.read_events(run_id, upto=stored.source_sequence)
+    # The stored prefix may live in events_archive: a compacted run's boundary
+    # checkpoint derives from archived events, and reading only the live tail
+    # would replay nothing and report a sound version as corrupt (issue #1172).
+    prefix = storage.read_all_events(run_id, upto=stored.source_sequence)
     replayed = project(run_id, prefix, on_unprojectable="degrade")
     where = f"version {stored.version} at sequence {stored.source_sequence}"
     if replayed.status is StateStatus.INVALID:

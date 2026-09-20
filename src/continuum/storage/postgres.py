@@ -660,12 +660,16 @@ class PostgresStorage(Storage):
 
         return {"archived": max(archived, 0)}
 
-    def read_archived_events(self, run_id: str) -> Sequence[Event]:
+    def read_archived_events(self, run_id: str, *, upto: int | None = None) -> Sequence[Event]:
         """Compacted events from the archive, oldest first."""
+        query = "SELECT * FROM events_archive WHERE run_id = %s"
+        params: list[Any] = [run_id]
+        if upto is not None:
+            query += " AND sequence <= %s"
+            params.append(upto)
+        query += " ORDER BY sequence ASC"
         with self._read():
-            rows = self._connection.execute(
-                "SELECT * FROM events_archive WHERE run_id = %s ORDER BY sequence ASC", (run_id,)
-            ).fetchall()
+            rows = self._connection.execute(query, params).fetchall()
         return [self._row_to_event(row) for row in rows]
 
     def foreign_action(self, key: str, *, exclude_run: str) -> Action | None:
