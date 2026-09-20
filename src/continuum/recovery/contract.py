@@ -29,12 +29,14 @@ from continuum.models import (
     StateValidationResult,
     utcnow,
 )
+from continuum.recovery.ledger import BudgetStatus
 from continuum.recovery.planner import RepairPlan
 from continuum.security.hashing import stable_hash
 from continuum.state.validator import ValidationOutcome
 
 __all__ = [
     "build_contract",
+    "render_budget",
     "render_contract",
     "seal_contract",
     "verify_contract",
@@ -43,6 +45,22 @@ __all__ = [
 
 def _identifier(component: Component, component_id: str | None) -> str:
     return f"{component.value}:{component_id}" if component_id else component.value
+
+
+def render_budget(budget: BudgetStatus) -> str:
+    """One evidence line naming the budget scope and what it has left.
+
+    Counts and the scope name only: why the attempts failed and what they
+    touched are not budget facts, so they stay out of anything a contract
+    prints (issue #744).
+    """
+    label = budget.scope if budget.scope is not None else "global"
+    line = f"recovery budget: scope {label}: {budget.attempts} of {budget.max_attempts} attempts used, {budget.remaining} remaining"
+    if budget.escalated:
+        return f"{line}; human required (escalated)"
+    if budget.exhausted:
+        return f"{line}; exhausted, human required"
+    return line
 
 
 def _hashable_payload(contract: RecoveryContract) -> dict[str, Any]:
@@ -95,6 +113,7 @@ def build_contract(
     reason: str | None = None,
     evidence: list[str] | None = None,
     scope: Iterable[str] | None = None,
+    budget: BudgetStatus | None = None,
     post_checkpoint_observations: list[dict[str, Any]] | None = None,
     liveness: dict[str, object] | None = None,
     triggering_risks: list[str] | None = None,
@@ -113,7 +132,9 @@ def build_contract(
 
     When ``scope`` names specific dependency resources, the contract records that
     the recovery was localized to them, so an auditor can see at a glance that
-    clean parts of the state were intentionally preserved.
+    clean parts of the state were intentionally preserved. ``budget`` carries
+    that scoping to the attempt allowance (issue #744): it records which
+    dependency's budget the recovery charges and how much of it remains.
     """
     verified: list[str] = []
     invalidated: list[str] = []
@@ -181,6 +202,13 @@ def build_contract(
                 *evidence,
                 f"localized recovery scoped to: {', '.join(named)}",
             ]
+    # The budget line follows the localization line deliberately: the scope
+    # says what the repair was confined to, the budget says what that confinement
+    # cost. A scope that fell back to the run-wide bucket is reported as such,
+    # because a reader who saw a named scope here and none above would assume
+    # the localization applied when it did not (issue #744).
+    if budget is not None:
+        evidence = [*evidence, render_budget(budget)]
 
     contract = RecoveryContract(
         run_id=run_id,

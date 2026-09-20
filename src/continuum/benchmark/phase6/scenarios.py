@@ -57,6 +57,7 @@ __all__ = [
     "scenario_out_of_scope_side_effect",
     "scenario_plan_aware_resume_skips_completed_units",
     "scenario_recovery_lease_exhaustion",
+    "scenario_scoped_attempt_budget",
     "scenario_single_dependency_corruption",
     "scenario_transient_network_failure_on_install",
     "seed_two",
@@ -178,6 +179,45 @@ def scenario_recovery_lease_exhaustion(ctx: ScenarioContext) -> None:
     ctx.attempts = ledger.attempts("run_1")
     assert ledger.attempts("run_1") == 3
     assert ledger.requires_human("run_1", max_attempts=3) is True
+
+
+def scenario_scoped_attempt_budget(ctx: ScenarioContext) -> None:
+    """A noisy dependency cannot spend another dependency's budget (#744).
+
+    The counterpart to ``recovery_lease_exhaustion``: the same three attempts,
+    this time attributable, gate only the dependency that earned them.
+    """
+    ledger = RecoveryLedger(MemoryLedgerBackend())
+    for _ in range(3):
+        ledger.record_attempt("run_1", scope="dataset", max_attempts=3)
+    ctx.attempts = ledger.attempts("run_1", scope="dataset")
+    assert ledger.requires_human("run_1", scope="dataset", max_attempts=3) is True
+
+    # The point of the budget: "other" keeps its full allowance and its own
+    # account, so a safe repair path for it stays open.
+    assert ledger.requires_human("run_1", scope="other", max_attempts=3) is False
+    assert ledger.record_attempt("run_1", scope="other") == 1
+
+    # An ownership-less query still escalates, through the scoped marker rather
+    # than a count: unknown ownership must not read a known escalation as clean.
+    assert ledger.requires_human("run_1", max_attempts=3) is True
+
+    # Conflicting ownership opens no private budget: the attempt charges the
+    # run-wide bucket, which the escalation above already gates.
+    ledger.record_attempt("run_1", scope=["dataset", "other"])
+    assert ledger.attempts("run_1") == 1
+    assert ledger.attempts("run_1", scope="other") == 1
+
+    # The contract carries the scope and what is left of it to a reader.
+    store = _new_store()
+    seed_two(store)
+    decision = RecoveryEngine(store, ledger=ledger).assess(
+        "run_1", current_environment=env_multi(dataset="v4", other="v3"), scope={"dataset"}
+    )
+    assert any(
+        str(e).startswith("recovery budget:") and "scope dataset" in str(e)
+        for e in decision.contract.evidence
+    )
 
 
 def scenario_out_of_scope_side_effect(ctx: ScenarioContext) -> None:
@@ -392,6 +432,7 @@ ALL_SCENARIOS: list[tuple[str, ScenarioFn]] = [
     ("external_edit_drift", scenario_external_edit_drift),
     ("ledger_tamper_detected", scenario_ledger_tamper_detected),
     ("recovery_lease_exhaustion", scenario_recovery_lease_exhaustion),
+    ("scoped_attempt_budget", scenario_scoped_attempt_budget),
     ("out_of_scope_side_effect", scenario_out_of_scope_side_effect),
     ("adapter_failure_across_environments", scenario_adapter_failure_across_environments),
     ("checkpoint_rollback_correctness", scenario_checkpoint_rollback_correctness),

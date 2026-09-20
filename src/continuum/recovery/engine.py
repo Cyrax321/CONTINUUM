@@ -56,6 +56,7 @@ from continuum.models import (
     StateStatus,
 )
 from continuum.recovery.contract import build_contract
+from continuum.recovery.ledger import BudgetStatus, RecoveryLedger, resolve_scope
 from continuum.recovery.observations import collect_observations
 from continuum.recovery.planner import RepairPlan, plan_repairs
 from continuum.recovery.summary import build_informed_retry
@@ -213,11 +214,18 @@ class RecoveryEngine:
         *,
         validator: StateValidator | None = None,
         strict_unknown: bool = True,
+        ledger: RecoveryLedger | None = None,
     ) -> None:
         self.storage = storage
         self.validator = validator or StateValidator(strict_unknown=strict_unknown)
         self.strict_unknown = strict_unknown
         self._manager = CheckpointManager(storage)
+        # Optional (issue #744): a recovery ledger to read the attempt budget
+        # from. Absent it, contracts carry no budget line and every decision is
+        # byte-identical to before. Present, it is only ever read here: spending
+        # the allowance is the caller's job (a resume attempt), not the
+        # assessment's, so assess stays free of side effects.
+        self._ledger = ledger
 
     def assess(
         self,
@@ -529,6 +537,7 @@ class RecoveryEngine:
             plan=plan,
             reason=reason,
             scope=scope,
+            budget=self._budget_for(run_id, scope, plan),
             post_checkpoint_observations=observations,
             liveness=liveness_section,
             triggering_risks=triggering_risks,
@@ -578,6 +587,26 @@ class RecoveryEngine:
             pass
 
         return decision
+
+    def _budget_for(
+        self, run_id: str, scope: Iterable[str] | None, plan: RepairPlan
+    ) -> BudgetStatus | None:
+        """The attempt budget this decision charges, or ``None`` when unknown.
+
+        Ownership is the assessment scope together with the dependencies the
+        plan's own steps name: they must agree on one dependency, otherwise the
+        attempt is unattributable and :func:`resolve_scope` returns the run-wide
+        bucket rather than charging a dependency the repair may not belong to.
+        The budget is advisory evidence in the contract; it never participates
+        in the decision, so a ledger that cannot be read costs a line of
+        evidence and nothing else.
+        """
+        if self._ledger is None:
+            return None
+        try:
+            return self._ledger.budget(run_id, scope=resolve_scope(scope, *plan.scopes))
+        except Exception:
+            return None
 
     # -- the decision rule ------------------------------------------------ #
 

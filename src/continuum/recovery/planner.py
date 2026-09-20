@@ -97,6 +97,15 @@ class RepairStep(BaseModel):
 
     requires_human: bool = False
 
+    scope: str | None = None
+    """The dependency whose recovery-attempt budget this step charges.
+
+    ``None`` means the plan could not attribute the work to exactly one
+    dependency, so the attempt falls back to the run-wide bucket (issue #744).
+    A step can carry at most one scope: work spanning two dependencies charges
+    neither of their private budgets, which is the conservative reading.
+    """
+
     @property
     def action_name(self) -> str:
         """The permitted-action identifier a contract gates on."""
@@ -137,6 +146,17 @@ class RepairPlan(BaseModel):
         """The only step permitted to run next."""
         return self.steps[0] if self.steps else None
 
+    @property
+    def scopes(self) -> tuple[str, ...]:
+        """Dependency budgets this plan charges, sorted and de-duplicated.
+
+        More than one entry means the plan spans several dependencies, so a
+        single budget scope cannot be named for it: the caller must fall back to
+        the run-wide bucket rather than picking one and charging the other's
+        noise to it (issue #744).
+        """
+        return tuple(sorted({s.scope for s in self.steps if s.scope is not None}))
+
     def of_kind(self, kind: RepairKind) -> tuple[RepairStep, ...]:
         """Get only the steps that match a specific RepairKind.
 
@@ -173,6 +193,10 @@ def _step_for(entry: ComponentValidationEntry, *, strict_unknown: bool = True) -
                 # uncertainty get an automatic step instead: the policy has to
                 # hold here too, or the setting would be silently ignored.
                 requires_human=entry.status is StateStatus.UNKNOWN and strict_unknown,
+                # The finding names the dependency that moved, so the attempt
+                # is chargeable to it (issue #744). A finding with no component
+                # id names no owner and stays run-wide.
+                scope=entry.component_id or None,
             )
         case Component.EVIDENCE:
             return RepairStep(kind=RepairKind.REDERIVE_EVIDENCE, target=target, reason=entry.detail)
@@ -278,6 +302,10 @@ def plan_repairs(
                     f"may not have occurred"
                 ),
                 requires_human=needs_person,
+                # The action's own tag names the dependency it could have touched,
+                # which is the ownership signal the budget needs (issue #744). An
+                # untagged action owns nothing, so it charges the run-wide bucket.
+                scope=action.dep_scope,
             )
         )
 
