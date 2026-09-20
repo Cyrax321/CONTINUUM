@@ -59,8 +59,11 @@ log for audit.
 
 ## Where else the advisory appears
 
-`continuum resume` appends the same liveness reading to its verdict,
-read-only:
+`continuum resume` appends the same liveness reading to its verdict. The
+reading is not read-only in its effect: the recovery engine folds a breach
+into a `WAIT` proposal (never a rollback), and when that is the most cautious
+signal it wins, so resume exits 20 for the same reason `watch` does. On a
+quiet run the two commands agree:
 
 ```bash
 continuum --db $DB resume live-demo
@@ -71,6 +74,11 @@ Next permitted action: continue
 
 Liveness: ok, silence 22.8s within threshold 3600s (phase otherwise).
 ```
+
+That sample is a healthy run, which is why it reads `ok` and still exits 0.
+Breached runs report the breach in the same block and exit 20 instead, so a
+chained `continuum resume "$RUN" && ./start-agent.sh` will not launch an
+agent onto a run that went quiet past its contract.
 
 `continuum health` stays scoped to the prefix-trust score; liveness lives
 with the commands that act on quiet.
@@ -92,8 +100,12 @@ your own secret path or bearer check.
 
 ## Rules worth knowing
 
-- Watch never gates: breach exits 20 and appends audit events, but resume
-  decisions stay with the recovery engine.
+- `watch` never gates on its own: breach exits 20 and appends audit events
+  without touching state. But `resume` reads the same advisory and does act
+  on it, proposing `WAIT` at the engine, so a breach can be the reason resume
+  exits 20. Advisory here means "never auto-rollback", not "cannot block you".
+- The threshold is a gate you set, not a passive annotation. A low
+  `max_silence_seconds` will turn otherwise-green runs into blocked ones.
 - Silence is measured from the last event timestamp with an injected clock,
   so the check is deterministic and testable, not wall-clock flaky.
 - A run with no events at all is never breached: there is no silence to

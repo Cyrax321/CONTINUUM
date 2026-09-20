@@ -54,13 +54,13 @@ CONTINUUM はより狭く、より難しい問いを立てます。エージェ�
 
 ## クイックスタート
 
-PyPI に `continuum-agent` 0.1.0 として公開。`pip install continuum-agent` を実行（固定する場合は `pip install continuum-agent==0.1.0`）。リリースタグではビルド済み wheel が [GitHub Releases](https://github.com/Cyrax321/CONTINUUM/releases) に添付される。
+PyPI に `continuum-agent` 0.1.2 として公開。`pip install continuum-agent` を実行（固定する場合は `pip install continuum-agent==0.1.2`）。リリースタグではビルド済み wheel が [GitHub Releases](https://github.com/Cyrax321/CONTINUUM/releases) に添付される。
 
 ゼロセットアップのパス（クローンもインストールも公開も不要）：
 
 | パス | 方法 |
 |:--|:--|
-| PyPI からインストール | `pip install continuum-agent==0.1.0` してから `continuum --help` |
+| PyPI からインストール | `pip install continuum-agent==0.1.2` してから `continuum --help` |
 | クラッシュリカバリを端から端まで見る | `docker run --rm ghcr.io/cyrax321/continuum` |
 | Docker 経由で CLI を使う | `docker run --rm ghcr.io/cyrax321/continuum continuum --help` |
 | クローンせずに CLI を実行 | `uvx --from git+https://github.com/Cyrax321/CONTINUUM.git continuum --help` |
@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI エントリーポイント
 continuum-mcp --help             # MCP サーバーエントリーポイント（[mcp] または [dev] が必要）
-pytest -q                        # 最小環境で約 2,163 件収集、約 2,030 件通過、約 23 件スキップ（正確な数は異なる）
+pytest -q                        # 最小環境で約 2,407 件収集、約 2,361 件通過、約 41 件スキップ（正確な数は異なる）
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI が強制する三つのゲート
 ```
@@ -228,7 +228,7 @@ CONTINUUM はモックの単体テストだけでなく、実際の LLM エー�
 - **サードパーティクライアント**：Gemini CLI と Kilo Code が stdio JSON-RPC でライブ SQLite ストアに対して接続し、マルチエージェント共存と認可の分離を検証。
 - **プロトコル準拠**：`@modelcontextprotocol/inspector --cli` でプロセス死を跨いで端から端まで駆動。変更ツールはデフォルトで `CONTINUUM_MCP_MUTATING_CLIENTS` の背後で拒否され、外部クレームは `REQUIRES_REVIEW`（`safe: false`）に降格する。
 - **自己修復**：ハードキルされたサーバーは起動時に一度だけのリトライで孤立した SQLite `-wal`/`-shm` サイドカーをクリーンアップして回復する。
-- **スケール**：約 2,163 件のテストが収集され（約 2,030 が通過、残りはオプションサービスなしでスキップ）、Python 3.11、3.12、3.13 で実行（unit、`hypothesis` によるプロパティベース、並行性、敵対的）。CONTINUUM-Bench は五つのクラッシュシナリオに加え専用の argument-drift シナリオを実行し、CONTINUUM について 0 の重複作業と 0 の重複副作用を、単純な再生については完全な重複を測定する。さらに 12 シナリオのリカバリ正確性スイート（`continuum.benchmark.phase6`）が耐久実行サーベイのクラッシュポイントを実行可能なアサーションとして符号化する。
+- **スケール**：約 2,402 件のテストが収集され（約 2,361 が通過、残りはオプションサービスなしでスキップ）、Python 3.11、3.12、3.13 で実行（unit、`hypothesis` によるプロパティベース、並行性、敵対的）。CONTINUUM-Bench は五つのクラッシュシナリオに加え専用の argument-drift シナリオを実行し、CONTINUUM について 0 の重複作業と 0 の重複副作用を、単純な再生については完全な重複を測定する。さらに 14 シナリオのリカバリ正確性スイート（`continuum.benchmark.phase6`）が耐久実行サーベイのクラッシュポイントを実行可能なアサーションとして符号化する。
 - **敵対的監査**：完全な MCP 面がライブプロトコル上で監査され、三つの欠陥が見つかり修正された。手法と再現手順は [test.md](test.md) にある。
 
 ## MCP 統合
@@ -394,7 +394,7 @@ RESUME < REPAIR_AND_RESUME < REPLAN < WAIT < REQUEST_HUMAN < ROLLBACK < ABORT
 
 ### モジュールマップ、一つのライブラリ、多くの面
 
-CONTINUUM は一つのライブラリ（`src/continuum`、124 モジュール）に加え大規模なテストスイート（161 テストファイル、約 2,163 テスト）である。すべてのモジュールは一つのハッシュチェーンイベントログに追記し再生する。
+CONTINUUM は一つのライブラリ（`src/continuum`、124 モジュール）に加え大規模なテストスイート（161 テストファイル、約 2,402 テスト）である。すべてのモジュールは一つのハッシュチェーンイベントログに追記し再生する。
 
 | モジュール | 役割 |
 |:--|:--|
@@ -418,7 +418,7 @@ CONTINUUM は一つのライブラリ（`src/continuum`、124 モジュール）
 | `dashboard/` | Web ダッシュボード `app.py` `hitl.py` と HITL ボタン確認、照合、完了、接頭辞信頼助言、ピン留め |
 | `cli/` | 38 の argparse コマンド、終了コードが評決、`runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | OpenTelemetry スパンプロセッサーブリッジ |
-| `benchmark/` | CONTINUUM-Bench ハーネス、5 つのクラッシュシナリオ + 引数ドリフト + 12 シナリオのリカバリスイート |
+| `benchmark/` | CONTINUUM-Bench ハーネス、5 つのクラッシュシナリオ + 引数ドリフト + 14 シナリオのリカバリスイート |
 
 ### 正直な制限
 
@@ -499,7 +499,7 @@ CONTINUUM は耐久実行、冪等な副作用追跡、LLM エージェントの
 ## ステータスと制限
 
 - **テスト済み**：このツリーの 2026-08-24 監査での完全な実行で 1,360 合格 + 23 スキップ。CI は Python 3.11、3.12、3.13 でスイートを強制し、カウントはプラットフォームや Postgres などのオプションサービスにより異なる（[STATUS.md](STATUS.md) を参照）。MCP 面もライブプロトコル上で敵対的に監査済み。[test.md](test.md) を参照。
-- **PyPI では `continuum-agent` 0.1.0**（`pip install continuum-agent`、クローンは `pip install .` で依然として動作。クイックスタートを参照）。
+- **PyPI では `continuum-agent` 0.1.2**（`pip install continuum-agent`、クローンは `pip install .` で依然として動作。クイックスタートを参照）。
 - **MCP 呼び出し元認証はデプロイごとに任意。** `CONTINUUM_MCP_TOKEN` が設定されているとき、サーバーは呼び出し元が `initialize` ハンドシェイクの `_meta.authToken` でその共有秘密を提示しない限り、すべての変更ツールを拒否する。呼び出し元ごとの秘密は `CONTINUUM_MCP_CLIENT_TOKENS`（`name:secret` ペア）経由で利用可能。トークンが何も設定されていない場合、認可は宣言されたアイデンティティのみによる（歴史的なデフォルト、ローカルな単一ユーザー利用のために保持）。
 - **MCP 経由で自己報告された状態を確認するには別の秘密が必要。** `continuum_confirm` はオペレーターが `CONTINUUM_MCP_CONFIRM_TOKEN` を設定するまで、すべての呼び出し元を拒否する。進捗を記録することを許されたエージェントがそれを確認することも許されてはならないからである。デフォルトのパスは人間に導かれたままである。ホストで `continuum confirm <run_id>` を実行する。
 - **未構築のコンポーネント**：クラウド API（フェーズ 13）。
@@ -512,7 +512,7 @@ CONTINUUM は耐久実行、冪等な副作用追跡、LLM エージェントの
 
 2026 年初頭、長時間実行されるエージェントが推論ではなくリカバリで失敗するのを見た。チェックポイントは検証すべき証拠ではなく、継続するための証明として扱われていた。Temporal、LangGraph、ACRFence 2603.20625、self conditioning 2509.09677 を調査し、ギャップが移植可能な検証基盤であることを見つけた。それは、時刻 T の状態と今の世界が与えられたとき、継続しても安全かを問うものである。
 
-三週間で私は一つの不変条件から CONTINUUM を構築した。すべての事実はその起源を持つ。結果は `verify()` を持つハッシュチェーンログ、安定したキー重複排除を持つ台帳、未請求の効果をブロックするゲートとゲートウェイ、そして契約を封印するリカバリエンジンである。五つの継ぎ目が同じログを Claude Code、LangGraph、LangChain、OpenAI、HTTP、OpenTelemetry に公開する。実際のキルと 1380 のテストで検証され、単純な再生が `50` と印字するところで `0 重複` と印字する。
+三週間で私は一つの不変条件から CONTINUUM を構築した。すべての事実はその起源を持つ。結果は `verify()` を持つハッシュチェーンログ、安定したキー重複排除を持つ台帳、未請求の効果をブロックするゲートとゲートウェイ、そして契約を封印するリカバリエンジンである。五つの継ぎ目が同じログを Claude Code、LangGraph、LangChain、OpenAI、HTTP、OpenTelemetry に公開する。実際のキルと約 2,402 のテストで検証され、単純な再生が `50` と印字するところで `0 重複` と印字する。
 
 CONTINUUM は **Anandhu P Shaji**（[@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/)）によって作成され、原作者によって保守されている。オープンソースであり [Apache-2.0](LICENSE) の下にある。コミュニティの貢献は [CONTRIBUTING.md](CONTRIBUTING.md) 経由で歓迎され、[AUTHORS.md](AUTHORS.md) と [graphs/contributors](https://github.com/Cyrax321/CONTINUUM/graphs/contributors) でクレジットされる。
 

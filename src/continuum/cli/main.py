@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import sqlite3
+import stat
 import sys
 from collections.abc import Sequence
 from datetime import datetime
@@ -31,7 +32,12 @@ from typing import Any
 
 from continuum import __version__
 from continuum.actions import ActionLedger
-from continuum.checkpoint import CheckpointError, CheckpointManager, CheckpointTrigger
+from continuum.checkpoint import (
+    CheckpointError,
+    CheckpointManager,
+    CheckpointTrigger,
+    clear_resume_pointer,
+)
 from continuum.cli.colour import Palette
 from continuum.cli.exitcodes import ExitCode, exit_code_for
 from continuum.clienthooks import (
@@ -82,6 +88,7 @@ from continuum.storage import (
     ConcurrentWriteError,
     CorruptedRecord,
     RunNotFound,
+    SchemaVersionError,
     Storage,
     StorageError,
     open_storage,
@@ -895,15 +902,24 @@ def _human_steps(decision: Any, run_id: str) -> list[str]:
     """Executable next steps for this decision, derived from live config.
 
     Read-only: the reconciler registry and gate config are inspected, never
-    executed. Absent files simply mean fewer shortcuts to suggest.
+    executed. Absent files simply mean fewer shortcuts to suggest. A
+    malformed registry is not: it is an operator mistake that should reach
+    `main`'s `ValueError` handler rather than degrade to an empty registry
+    with no signal something is wrong (issue #1062).
     """
     from continuum.gate import DEFAULT_GATE_CONFIG_PATH
-    from continuum.reconcilers import DEFAULT_RECONCILERS_PATH, load_reconcilers
+    from continuum.reconcilers import (
+        DEFAULT_RECONCILERS_PATH,
+        ReconcilerConfigError,
+        load_reconcilers,
+    )
     from continuum.recovery.guidance import human_steps_for
 
     try:
         probes = load_reconcilers(Path(DEFAULT_RECONCILERS_PATH))
         probed: list[str] = list(probes)
+    except ReconcilerConfigError:
+        raise
     except Exception:
         probed = []
     gate_configured = Path(DEFAULT_GATE_CONFIG_PATH).exists()
@@ -1107,9 +1123,17 @@ def cmd_watch(args: argparse.Namespace, storage: Storage, out: Any, err: Any) ->
         return 1
 
     breached = bool(advisory.get("breached"))
-    # Append liveness events as needed (mutating only on breach/recovery)
+    # Append liveness events as needed (mutating only on breach/recovery).
+    # The episode scan walks the full history including the archived prefix
+    # (read_all_events) so compaction cannot break the state machine: without
+    # it, a compacted run whose DETECTED lives in the archive looks like it
+    # never breached, minting a duplicate DETECTED for the same episode and
+    # never minting LIVENESS_RECOVERED (issue #1072).
     try:
-        events = storage.read_events(run_id)
+        try:
+            events = storage.read_all_events(run_id)
+        except Exception:
+            events = storage.read_events(run_id)
         last_liveness = None
         for ev in reversed(events):
             if ev.type.value in ("LIVENESS_SILENCE_DETECTED", "LIVENESS_RECOVERED"):
@@ -1244,6 +1268,97 @@ def cmd_health(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     return ExitCode.OK
 
 
+def _notify_blocked_run(
+    storage: Storage,
+    run_id: str,
+    mode: str,
+    payload: dict[str, Any],
+    decision: Any,
+    args: argparse.Namespace,
+    err: Any,
+) -> None:
+    """Deliver blocked-run notifications per the webhook registry (issue #305).
+
+    Never raises and never changes the caller's verdict: a malformed registry
+    warns and skips, delivery outcomes print one line each, and every
+    failure is already dead-lettered in the event log by ``notify_blocked``.
+    """
+    from continuum.recovery.webhooks import (
+        DEFAULT_WEBHOOKS_PATH,
+        WebhookConfigError,
+        load_webhook_registry,
+        notify_blocked,
+    )
+
+    config = Path(getattr(args, "webhooks_config", None) or DEFAULT_WEBHOOKS_PATH)
+    try:
+        registry = load_webhook_registry(config)
+    except WebhookConfigError as exc:
+        print(f"warning: {exc}; notification skipped", file=err)
+        return
+    if not registry.endpoints:
+        return
+    records = notify_blocked(
+        storage, run_id, mode=mode, payload=payload, contract=decision.contract, registry=registry
+    )
+    for record in records:
+        if record.status == "sent":
+            print(f"notification sent: {record.url}", file=err)
+        elif record.status == "failed":
+            print(f"warning: {record.url}: {record.detail}", file=err)
+        # A skipped record stays silent: dedup doing its job is not news.
+
+
+def cmd_notify_test(args: argparse.Namespace, storage: None, out: Any, err: Any) -> int:
+    """POST a test notification to every configured webhook endpoint (issue #305).
+
+    A wiring probe, not a state transition: it bypasses dedup by design,
+    writes nothing to the event log, and requires no run, so an operator can
+    verify the registry, the network path, and the receiver's signature check
+    without manufacturing a real blockage. Exits non-zero when any endpoint
+    refuses, because a bell that cannot ring is the failure being probed for.
+    """
+    from continuum.recovery.notify import post_webhook
+    from continuum.recovery.webhooks import (
+        DEFAULT_WEBHOOKS_PATH,
+        NOTIFY_TEST_EVENT,
+        WebhookConfigError,
+        load_webhook_registry,
+    )
+
+    config = Path(args.webhooks_config) if args.webhooks_config else Path(DEFAULT_WEBHOOKS_PATH)
+    try:
+        registry = load_webhook_registry(config)
+    except WebhookConfigError as exc:
+        print(f"error: {exc}", file=err)
+        return ExitCode.ERROR
+    if not registry.endpoints:
+        print(
+            f"error: no endpoints registered in {config}; "
+            "see docs/guides/webhooks.md for the registry format",
+            file=err,
+        )
+        return ExitCode.ERROR
+
+    payload: dict[str, Any] = {"event": NOTIFY_TEST_EVENT}
+    if args.run_id:
+        payload["run_id"] = args.run_id
+    if registry.dashboard_base_url and args.run_id:
+        payload["dashboard_url"] = f"{registry.dashboard_base_url}/runs/{args.run_id}"
+
+    failed = False
+    for endpoint in registry.endpoints:
+        if post_webhook(endpoint.url, payload, secret=endpoint.secret, timeout=endpoint.timeout):
+            print(f"delivered: {endpoint.url}", file=out)
+        else:
+            failed = True
+            print(f"failed: {endpoint.url}", file=err)
+    if failed:
+        print("one or more endpoints refused the test notification", file=err)
+        return ExitCode.ERROR
+    return ExitCode.OK
+
+
 def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Report how a run may resume. Read-only unless ``--repair`` is given."""
     run_id = args.run_id
@@ -1256,6 +1371,27 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             )
             return 2
         run_id = active.run_id
+    # Terminal runs have nothing to resume (#1197). Exit non-zero so
+    # `continuum resume && ./start-agent.sh` cannot continue onto a closed run.
+    run = storage.get_run(run_id)
+    if run.status in (
+        RunStatus.COMPLETED,
+        RunStatus.ABORTED,
+        RunStatus.FAILED,
+        RunStatus.CRASHED,
+    ):
+        msg = f"Run {run_id} is terminal ({run.status.value}); nothing to resume."
+        payload = {
+            "run_id": run_id,
+            "status": run.status.value,
+            "error": "terminal_run",
+            "message": msg,
+            "safe": False,
+        }
+        # Machine JSON on stdout (same as every other resume _emit); text stays human-readable.
+        _emit(payload, msg, as_json=args.json, stream=out)
+        # UNSAFE (30): run exists but resuming is not safe (distinct from NOT_FOUND / 2).
+        return ExitCode.UNSAFE
     engine = RecoveryEngine(storage, strict_unknown=not args.tolerate_unknown)
     decision = engine.assess(
         run_id,
@@ -1377,6 +1513,15 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         stream=out,
         palette=getattr(args, "_palette", None),
     )
+
+    # The bell next to the HITL door (issue #305): a blocked run pushes its
+    # verdict to the operator's webhook endpoints so nobody has to poll to
+    # learn a run is parked. Opt-in via .continuum/webhooks.json; dedup on
+    # (run_id, mode, contract hash) keeps a cron re-running resume from
+    # spamming, and delivery failure is dead-lettered, never raised - the
+    # verdict above is already final.
+    if presented_mode == RecoveryMode.REQUEST_HUMAN.value:
+        _notify_blocked_run(storage, run_id, presented_mode, payload, decision, args, err)
 
     if effective_mode is not RecoveryMode.RESUME and not args.repair:
         print(
@@ -1670,6 +1815,7 @@ def cmd_complete(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     """
     run = storage.get_run(args.run_id)  # raises RunNotFound -> NOT_FOUND
     if run.status is RunStatus.COMPLETED:
+        clear_resume_pointer(args.run_id)
         _emit(
             {
                 "run_id": args.run_id,
@@ -1700,15 +1846,8 @@ def cmd_complete(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     updated = run.touch(status=RunStatus.COMPLETED)
     storage.update_run(updated)
     # Instant resume file tracks the most recent checkpoint; a completed run
-    # is no longer interrupted, so remove the file if it refers to this run.
-    try:
-        resume_path = Path(".continuum/resume.json")
-        if resume_path.exists():
-            data = json.loads(resume_path.read_text(encoding="utf-8"))
-            if data.get("run_id") == args.run_id:
-                resume_path.unlink()
-    except Exception:
-        pass
+    # is no longer interrupted, so the pointer must not keep naming it.
+    clear_resume_pointer(args.run_id)
     payload = {
         "run_id": args.run_id,
         "status": updated.status.value,
@@ -2237,40 +2376,44 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     # Fast path for SessionStart hook: check resume.json before touching DB.
     # This keeps the hook silent and fast when no interrupted run exists.
     resume_path = Path(".continuum/resume.json")
-    if not args.run_id and getattr(args, "hook_event_name", "SessionStart") == "SessionStart":
-        if not resume_path.exists():
-            # Silent when no interrupted run, as required for token floor.
-            return ExitCode.OK
-        # When file exists, inject its banner out of band before the full
-        # briefing. The file was written on the last checkpoint and contains
-        # the run_id that the hook should surface.
+    if (
+        not args.run_id
+        and getattr(args, "hook_event_name", "SessionStart") == "SessionStart"
+        and not resume_path.exists()
+    ):
+        # Silent when no interrupted run, as required for token floor.
+        return ExitCode.OK
+
+    # The file was written on the last checkpoint. Read it once and validate
+    # the run it names before anything is surfaced: a stale file must not
+    # advertise a run the database no longer holds, because the banner's
+    # resume command could only fail (issue #1063).
+    resume_run: str | None = None
+    resume_run_completed = False
+    unrecoverable_run: str | None = None
+    if resume_path.exists():
         try:
             resume_data = json.loads(resume_path.read_text(encoding="utf-8"))
-            banner_run = resume_data.get("run_id")
-            if banner_run:
-                # Verify the run is still active (not completed) before
-                # surfacing, but do it without a full project if possible.
-                # A quick existence check is enough; the full briefing below
-                # will do the thorough assessment.
-                pass
         except Exception:
             # Corrupt file is not a blocker; fall through to normal briefing
             # which will do the DB check and report correctly.
-            pass
+            resume_data = None
+        if isinstance(resume_data, dict):
+            candidate = resume_data.get("run_id")
+            if isinstance(candidate, str) and candidate:
+                try:
+                    resume_run_completed = storage.get_run(candidate).status is RunStatus.COMPLETED
+                    resume_run = candidate
+                except Exception:
+                    unrecoverable_run = candidate
 
     run_id = args.run_id
     if not run_id:
         # Prefer the resume.json run_id when present, as it was written at
         # checkpoint time and is available without a DB scan. Fall back to
         # the active-run query for cases where the file is stale or missing.
-        if resume_path.exists():
-            try:
-                resume_data = json.loads(resume_path.read_text(encoding="utf-8"))
-                candidate = resume_data.get("run_id")
-                if candidate and storage.get_run(candidate):
-                    run_id = candidate
-            except Exception:
-                pass
+        if resume_run:
+            run_id = resume_run
         if not run_id:
             active = storage.get_active_run()
             run_id = active.run_id if active else None
@@ -2296,45 +2439,44 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     contract = decision.contract
     state = decision.state
 
+    # Diagnostic path (issue #742): the raw agent summary stays reachable,
+    # verbatim, for an operator debugging the curation. Explicit opt-in, so
+    # the default briefing is the curated one.
+    if getattr(args, "raw_summary", False):
+        summaries = [
+            e for e in storage.read_events(run_id) if e.type is EventType.REASONING_SUMMARY
+        ]
+        if not summaries:
+            print(f"No reasoning summary recorded for {run_id}.", file=out)
+            return ExitCode.OK
+        payload = dict(summaries[-1].payload)
+        print(json.dumps(payload, indent=2, ensure_ascii=False), file=out)
+        return ExitCode.OK
+
     lines: list[str] = []
-    # Instant resume banner (issue #394): when .continuum/resume.json exists
-    # it was written on the last checkpoint and names the interrupted run.
-    # Inject a banner out of band so the SessionStart hook surfaces the run
-    # without the agent having to discover and call resume itself.
-    if Path(".continuum/resume.json").exists():
-        try:
-            _resume = json.loads(Path(".continuum/resume.json").read_text(encoding="utf-8"))
-            _banner_run = _resume.get("run_id")
-            if _banner_run:
-                lines.append(f"Interrupted run {_banner_run} – resume pending")
-                lines.append(f"  run: continuum resume {_banner_run} --json")
-                lines.append("")
-        except Exception:
-            pass
+    # Instant resume banner (issue #394): surface the interrupted run the
+    # file named so the SessionStart hook points the agent at resume without
+    # it having to discover the command itself. Only for a run the database
+    # still holds, that is not completed, and that this briefing actually
+    # covers; a file naming a run that is gone gets a note instead of a
+    # resume command that cannot work (issue #1063).
+    if resume_run and not resume_run_completed and run_id == resume_run:
+        lines.append(f"Interrupted run {resume_run} – resume pending")
+        lines.append(f"  run: continuum resume {resume_run} --json")
+        lines.append("")
+    elif unrecoverable_run:
+        lines.append(f"Interrupted run {unrecoverable_run} is no longer in the database")
+        lines.append("")
     lines += [
         f"CONTINUUM active run: {run_id}",
-        f"goal: {state.goal.description}",
-        f"progress: {state.progress.completed}/{state.progress.total or '?'} completed"
-        + (f", {state.progress.failed} failed" if state.progress.failed else ""),
-        f"recovery: {decision.mode.value} (safe={decision.safe})",
     ]
-    # Newest reasoning summary (#235): the resumed agent inherits the dead
-    # session's plan state, not just its progress counters.
-    summaries = [e for e in storage.read_events(run_id) if e.type is EventType.REASONING_SUMMARY]
-    if summaries:
-        summary = summaries[-1].payload.get("summary", {})
-        lines.append("where the last session left off (self-authored):")
-        for item in summary.get("plan_stack", [])[:3]:
-            lines.append(f"  plan: {item}")
-        for d in summary.get("decisions", [])[-3:]:
-            what = d.get("what", "")
-            why = d.get("why", "")
-            lines.append(f"  decision: {what}" + (f" ({why})" if why else ""))
-        for q in summary.get("open_questions", [])[:3]:
-            lines.append(f"  open: {q}")
-        ws = summary.get("working_set", [])
-        if ws:
-            lines.append(f"  working set: {', '.join(map(str, ws[:5]))}")
+    # Curated resume context (issue #742): provenance-labeled sections,
+    # verified first, agent material last, stale items quarantined with
+    # reasons. Pure and deterministic; the verdict is an input, never changed.
+    from continuum.recovery.briefing_curation import curate_briefing, render_curated_briefing
+
+    curated = curate_briefing(storage, run_id, decision)
+    lines += render_curated_briefing(curated)
 
     obs = contract.post_checkpoint_observations[:5]
     if obs:
@@ -2342,27 +2484,6 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
         lines += [
             f"  [{o.get('status', '?')}] {o.get('path', '')}" for o in obs if not o.get("truncated")
         ]
-    # Informed retry (#265): the engine's account of prior attempts, next to
-    # the agent's own summary above. Absent history means no section.
-    if decision.informed_retry:
-        from continuum.recovery.summary import render_informed_retry
-
-        lines.append("what previous attempts changed (engine-recorded):")
-        lines += [f"  {line}" for line in render_informed_retry(decision.informed_retry)]
-    # Structured attempt memory (issue #313): after verified state before open questions.
-    if state.attempt_lessons:
-        from continuum.recovery.summary import render_attempt_lesson
-
-        lines.append("attempt lessons (system-derived):")
-        for lesson in state.attempt_lessons:
-            lines += [f"  {line}" for line in render_attempt_lesson(lesson)]
-    # Sleep-time trajectory reports (issue #393): distilled from archived history
-    if getattr(state, "trajectory_reports", None):
-        from continuum.analysis.trajectory_report import render_trajectory_report
-
-        lines.append("trajectory reports (sleep-time, system-derived):")
-        for report in state.trajectory_reports:
-            lines += [f"  {line}" for line in render_trajectory_report(report)]
     if steps:
         lines.append("next steps:")
         lines += [f"  {i}. {t}" for i, t in enumerate(steps, 1)]
@@ -2376,6 +2497,9 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
             "safe": decision.safe,
             "context": context,
             "human_steps": steps,
+            "curated_sections": curated["sections"],
+            "quarantine": curated["quarantine"],
+            "omitted": curated["omitted"],
             "attempt_lessons": [lesson.model_dump(mode="json") for lesson in state.attempt_lessons],
             "trajectory_reports": [
                 report.model_dump(mode="json") for report in state.trajectory_reports
@@ -3457,19 +3581,52 @@ def cmd_benchmark(args: argparse.Namespace, storage: Storage, out: Any, err: Any
     return ExitCode.OK
 
 
+def _write_private_key(path: Path, pem: str) -> int:
+    """Write an unencrypted private key PEM at 0600 and return the mode applied.
+
+    The PEM is PKCS8 with no encryption, so the file mode is the only barrier
+    between the key material and every other local user. ``Path.write_text``
+    would create it at 0666 masked by the ambient umask (0644 out of the box),
+    which is world-readable. Opening through ``os.open`` with an explicit mode
+    creates the file owner-only from the start, with no window at 0644.
+
+    A pre-existing file is narrowed too: ``open(2)`` ignores the mode argument
+    when the file already exists, so a 0644 key being overwritten would keep its
+    old mode without the explicit ``chmod``.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+    except Exception:
+        os.close(fd)
+        raise
+    with handle:
+        handle.write(pem)
+    # The mode argument above is ignored when the path already existed, so an
+    # overwritten key still needs narrowing.
+    os.chmod(path, 0o600)
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
 def cmd_attest_keygen(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Generate an Ed25519 signer key pair for event-chain attestation.
 
     Does not touch storage: key custody is the operator's responsibility, so the
-    tool only writes the two PEM files and says where they went.
+    tool only writes the two PEM files and says where they went. The private key
+    is written owner-only (0600): it is unencrypted PKCS8, so a world-readable
+    file would hand raw signing material to every local user (#1056).
     """
     private_pem, public_pem = generate_keypair()
     priv_path = Path(args.out) if args.out else Path("signer.pem")
     pub_path = Path(args.pub) if args.pub else priv_path.with_suffix(priv_path.suffix + ".pub")
-    priv_path.write_text(private_pem, encoding="utf-8")
+    applied = _write_private_key(priv_path, private_pem)
     pub_path.write_text(public_pem, encoding="utf-8")
     payload = {"private_key": str(priv_path), "public_key": str(pub_path)}
-    text = f"Wrote private key {priv_path} and public key {pub_path}. Keep the private key secret."
+    text = (
+        f"Wrote private key {priv_path} (mode {applied:o}, owner-only) and "
+        f"public key {pub_path}. Keep the private key secret."
+    )
     _emit(payload, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
     return ExitCode.OK
 
@@ -3757,6 +3914,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="JSON object of environment pins to diff against the run (issue #241).",
     )
+    resume.add_argument(
+        "--webhooks-config",
+        dest="webhooks_config",
+        default=None,
+        help="webhook registry to notify on request_human (default: .continuum/webhooks.json).",
+    )
+
+    notify_test = add(
+        "notify-test", cmd_notify_test, "POST a test notification to every configured webhook."
+    )
+    notify_test.add_argument(
+        "run_id",
+        nargs="?",
+        default=None,
+        help="optional run id to include in the test payload's deep link.",
+    )
+    notify_test.add_argument(
+        "--webhooks-config",
+        dest="webhooks_config",
+        default=None,
+        help="webhook registry to probe (default: .continuum/webhooks.json).",
+    )
 
     confirm = with_env(
         with_run(add("confirm", cmd_confirm, "Confirm self-reported state so the run may resume."))
@@ -3930,6 +4109,13 @@ def build_parser() -> argparse.ArgumentParser:
         dest="hook_event_name",
         default="SessionStart",
         help=argparse.SUPPRESS,
+    )
+    briefing.add_argument(
+        "--raw-summary",
+        dest="raw_summary",
+        action="store_true",
+        default=False,
+        help="print the raw agent reasoning summary verbatim (diagnostic; default is the curated briefing).",
     )
 
     precompact = with_env(
@@ -4209,6 +4395,11 @@ def _bare_invocation(
 
     try:
         storage = open_storage(args.db)
+    except SchemaVersionError as exc:
+        # A newer database must never be downgraded or silently replaced. Keep
+        # the branded launcher usable, but make the incompatibility visible in
+        # the splash and direct the operator to a compatible --db path.
+        return int(run_tui(None, database_error=str(exc), err=err))
     except (StorageError, ValueError, NotImplementedError, RuntimeError) as exc:
         print(f"error: {exc}", file=err)
         return ExitCode.ERROR
@@ -4256,7 +4447,7 @@ def main(
 
     # hooks never touches a run, so it must not create an empty database as a
     # side effect of editing a settings file.
-    if args.command in ("benchmark", "attest-keygen", "serve", "hooks"):
+    if args.command in ("benchmark", "attest-keygen", "serve", "hooks", "notify-test"):
         return int(args.func(args, None, out, err))
 
     # Instant resume detection (issue #394): SessionStart hook reads
@@ -4287,6 +4478,13 @@ def main(
 
     try:
         return int(args.func(args, storage, out, err))
+    except FileNotFoundError as exc:
+        # An operator-supplied input file that does not exist is an ordinary
+        # operator mistake (--attest, --key, --payload-file typed from memory),
+        # not an internal failure. Naming the path is what the traceback would
+        # have made the reader dig for. See issue #1143.
+        print(f"error: file not found: {exc.filename or exc}", file=err)
+        return ExitCode.ERROR
     except (RunNotFound, CheckpointNotFound) as exc:
         print(f"error: {exc}", file=err)
         return ExitCode.NOT_FOUND

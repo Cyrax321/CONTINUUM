@@ -39,7 +39,7 @@ continuum --json <command>                    # machine-readable output
 | `checkpoint <run_id>` | Force a state checkpoint. |
 | `observe` | Record one observed tool completion. Mutates storage. |
 | `gateway` | Run the enforcing HTTP proxy for registered upstreams. Mutates storage. |
-| `briefing` | Session-start context: active run, progress, next steps. Read-only. |
+| `briefing [--run-id <id>] [--raw-summary]` | Session-start context, curated by provenance: verified contract facts and system-derived lessons before agent-authored summaries, stale items quarantined with reasons. Read-only; `--raw-summary` is the diagnostic path to the verbatim agent summary (#742). |
 | `gate` | Decide whether a tool call may proceed (pre-tool-use hook). Read-only. |
 | `hooks` | Manage host-side observation hooks. |
 | `verify <run_id>` | Re-audit the event chain for tampering. |
@@ -65,6 +65,7 @@ continuum --json <command>                    # machine-readable output
 | `restore` | Restore a run to an anchor checkpoint. Mutates storage. |
 | `rewind` | Rewind workspace and projection to a checkpoint. |
 | `watch` | Watch a run for liveness breach, optionally notify via webhook. See [liveness watch](../guides/liveness-watch.md). |
+| `notify-test [run_id]` | POST a test notification to every endpoint in the webhook registry. Verifies wiring without a real blockage. See [webhooks](../guides/webhooks.md). |
 
 ## Examples
 

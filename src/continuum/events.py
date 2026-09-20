@@ -146,6 +146,13 @@ class EventType(StrEnum):
     # memory governance (issue #304, #567): per-tenant tombstone for erasure
     MEMORY_TOMBSTONED = "MEMORY_TOMBSTONED"
 
+    # outbound notifications (issue #305): the bell next to the HITL door.
+    # Recorded facts, not state: delivery is best-effort and never gates a
+    # verdict. FAILED is the dead-letter row an operator finds by polling the
+    # log when the bell did not ring.
+    NOTIFICATION_SENT = "NOTIFICATION_SENT"
+    NOTIFICATION_FAILED = "NOTIFICATION_FAILED"
+
 
 #: Event types whose payloads may carry ``caused_by`` causal links
 #: (issues #551, #597). Findings joined decisions and actions here:

@@ -121,6 +121,15 @@ always names exactly where a grant came from.
 : The database path the server opens when `--db` is not passed on the command
 line (default `./continuum.db`).
 
+`CONTINUUM_MCP_SLIM`
+: Set to `1` to ship a read-only server. The tool table above lists twelve tools
+-- nine mutating, three read-only -- and slim removes the nine mutating ones,
+leaving `continuum_resume`, `continuum_validate` and `continuum_list_actions`.
+The variable is checked inside `build_server`, so every caller path that
+constructs a server honours it, not just the CLI entry point. It is off by
+default and is not a security boundary on its own: it shrinks what a caller can
+ask for, but the allowlist above is still what decides who may ask.
+
 ## build_server
 
 `continuum.mcp.server.build_server(database=None, *, policy=None, auth=None) -> tuple[Server, Storage]`
@@ -247,6 +256,12 @@ repository does instead:
   framing in its output: a Windows run reports `CRLF (\r\n)`, a Linux run
   reports `LF (\n)`. Run it when a Windows client fails in a way a Linux one
   does not.
+- The suite pins the framing on the raw wire
+  (`tests/test_mcp_entrypoint.py`): binary pipes, no newline translation, an
+  assert that every response frame ends `b"\r\n"` on Windows and `b"\n"`
+  elsewhere. If the SDK ever fixes #2433, that assert is what turns the change
+  into a visible CI failure instead of a silent behaviour shift, and this
+  section follows it.
 - A strict client has to tolerate both terminators or fail everywhere on
   Windows; if yours does not, that is the client side of the upstream issue,
   not a CONTINUUM configuration.

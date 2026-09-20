@@ -18,7 +18,11 @@ Three behaviours are pinned here:
    environment it passes (the mechanism behind ``CONNECTION_CLOSED``, and the reason
    registration must bake resolved paths rather than rely on the host's PATH);
 3. ``python -m continuum.mcp`` (the form ``continuum mcp install`` falls back to when
-   no executable is on PATH) completes the same handshake.
+   no executable is on PATH) completes the same handshake;
+4. the raw wire framing is observed, not assumed: every response frame ends
+   ``\r\n`` on Windows (the upstream SDK defect, modelcontextprotocol/
+   python-sdk#2433) and ``\n`` elsewhere, and the frame parses under either
+   terminator (issue #839).
 """
 
 from __future__ import annotations
@@ -135,6 +139,107 @@ def test_console_script_handshake_over_stdio(tmp_path: Any) -> None:
 def test_module_fallback_handshake_over_stdio(tmp_path: Any) -> None:
     """``python -m continuum.mcp`` (the no-executable fallback ``mcp install`` bakes)."""
     _handshake([sys.executable, "-u", "-m", "continuum.mcp"], tmp_path / "module.db")
+
+
+# --------------------------------------------------------------------------- #
+# raw-wire framing (issue #839)
+# --------------------------------------------------------------------------- #
+
+
+def _parse_raw_frame(line: bytes) -> tuple[dict[str, Any], bytes]:
+    """Parse one raw response frame, returning it with its exact terminator.
+
+    The raw-bytes half of the handshake harness: a text-mode pipe would apply
+    universal newlines and rewrite ``\\r\\n`` to ``\\n``, hiding the framing
+    difference this exists to observe. Raises on a frame that ends any other
+    way (no terminator at all, or a bare ``\\r``), because those are exactly
+    the corruptions a strict NDJSON client chokes on.
+    """
+    assert line, "server closed the connection before answering"
+    assert line.endswith(b"\n"), f"frame does not end with a line feed: {line[-8:]!r}"
+    terminator = b"\r\n" if line.endswith(b"\r\n") else b"\n"
+    return json.loads(line[: -len(terminator)]), terminator
+
+
+def _spawn_raw(cmd: list[str], db: Path) -> subprocess.Popen[bytes]:
+    """Start the server with binary pipes, the way a strict NDJSON client would.
+
+    The environment is a copy of the parent's (Windows children denied
+    ``SystemRoot`` die during interpreter startup, issue #211) with the
+    database steered through ``CONTINUUM_DB``, exactly as ``_spawn`` does;
+    only the pipe decoding differs.
+    """
+    env = dict(os.environ)
+    env["CONTINUUM_DB"] = str(db)
+    return subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+
+
+def test_response_framing_is_pinned_on_the_raw_wire(tmp_path: Any) -> None:
+    """Every response frame ends ``\\r\\n`` on Windows, ``\\n`` elsewhere (#839).
+
+    On Windows the MCP SDK terminates stdio frames with CRLF
+    (modelcontextprotocol/python-sdk#2433): Claude Code absorbs it, strict
+    NDJSON clients reject every frame, and the failure only shows on that
+    platform. This pin is what turns that from a user report into a CI
+    failure: if upstream fixes the defect, the assert flips and the docs
+    follow; if our own side regresses, it says so here rather than in the
+    field. The module form is spawned because the framing belongs to the
+    SDK's writer, not the entry point that reached it.
+    """
+    proc = _spawn_raw([sys.executable, "-u", "-m", "continuum.mcp"], tmp_path / "framing.db")
+    try:
+        assert proc.stdin is not None and proc.stdout is not None
+        request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "framing-test", "version": "0"},
+            },
+        }
+        proc.stdin.write((json.dumps(request) + "\n").encode("utf-8"))
+        proc.stdin.flush()
+        reply, first_terminator = _parse_raw_frame(proc.stdout.readline())
+        assert reply["result"]["serverInfo"]["name"] == "continuum-mcp", reply
+
+        proc.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
+        proc.stdin.flush()
+        proc.stdin.write(b'{"jsonrpc":"2.0","id":2,"method":"tools/list"}\n')
+        proc.stdin.flush()
+        listed, second_terminator = _parse_raw_frame(proc.stdout.readline())
+        assert len(listed["result"]["tools"]) == TOOL_COUNT
+
+        assert first_terminator == second_terminator, "framing changed mid-session"
+        expected = b"\r\n" if sys.platform == "win32" else b"\n"
+        assert first_terminator == expected, (
+            f"frames end {first_terminator!r} but the documented contract on "
+            f"{sys.platform} is {expected!r}; if the SDK fixed #2433 on Windows, "
+            "update this pin and docs/api/mcp.md together"
+        )
+    finally:
+        _stop(proc)
+
+
+@pytest.mark.parametrize("terminator", [b"\n", b"\r\n"])
+def test_frame_parsing_tolerates_both_terminators(terminator: bytes) -> None:
+    """Our client-side reader must accept the frame under either terminator.
+
+    Tolerating both is the whole contract (#839): the server emits one or the
+    other depending on platform, and the reader a host or test drives has to
+    parse both rather than assume the platform it was written on.
+    """
+    line = b'{"jsonrpc":"2.0","id":1,"result":{"ok":true}}' + terminator
+    parsed, observed = _parse_raw_frame(line)
+    assert parsed == {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}
+    assert observed == terminator
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="documents Windows CreateProcess resolution")

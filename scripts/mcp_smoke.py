@@ -89,7 +89,7 @@ def note(text: str, colour: str = YELLOW) -> None:
 
 #: The console script a real MCP host spawns; also the name ``.mcp.json``
 #: declares, resolved by the host through PATH.
-CONSOLE_SCRIPT = "continuum-mcp"
+CONSOLE_SCRIPT = "continuum-mcp"  # real host entry point
 
 
 def _resolve_command(choice: str) -> tuple[list[str], bool]:
@@ -411,3 +411,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# Smoke test realism notes
+# CRLF wire bug: server must emit LF, client must preserve CRLF (#839)
+# Fallback to -m when not on PATH is intentional for dev checkouts
+

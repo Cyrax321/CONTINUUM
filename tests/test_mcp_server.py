@@ -795,6 +795,31 @@ async def test_resume_without_run_id_targets_the_active_run(server_ctx: tuple[An
     assert resumed["goal"] == "Analyze 100 documents"
 
 
+async def test_resume_surfaces_a_malformed_reconciler_registry_as_a_tool_error(
+    server_ctx: tuple[Any, Any],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registry missing the ``probes`` wrapper must not degrade to silence.
+
+    The guidance probe around ``load_reconcilers`` used to catch every
+    exception and fall back to an empty registry, so a resuming agent got
+    "no probe registered" with no hint the config itself was wrong (#1062).
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".continuum").mkdir()
+    (tmp_path / ".continuum" / "reconcilers.json").write_text(
+        '{"send_invoice": {"command": "check-outbox"}}'
+    )
+    server, _ = server_ctx
+    await seed_run(server)
+
+    with pytest.raises(ToolError, match="send_invoice"):
+        await call(server, "continuum_resume", run_id="run_1")
+
+
 @pytest.mark.asyncio
 async def test_deterministic_state_still_resumes_cleanly(
     server_ctx: tuple[Any, Any],

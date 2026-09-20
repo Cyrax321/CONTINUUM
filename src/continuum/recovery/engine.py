@@ -89,7 +89,14 @@ _SAFETY_FOR_MODE: dict[RecoveryMode, RecoverySafety] = {
 
 @dataclass(frozen=True, slots=True)
 class RecoveryDecision:
-    """The engine's verdict, with everything needed to justify it."""
+    """The engine's verdict, with everything needed to justify it.
+
+    Advisory by default: this object describes the state of the run, it does
+    not control the process that asked about it (#1031). Nothing in the library
+    stops a caller from resuming after a verdict other than ``RESUME``. See
+    :meth:`permits` for the enforcement seams that do exist, none of which is
+    enabled without explicit configuration.
+    """
 
     run_id: str
     mode: RecoveryMode
@@ -127,7 +134,28 @@ class RecoveryDecision:
         return self.contract.next_allowed_action
 
     def permits(self, action: str) -> bool:
-        """Whether ``action`` is the one step the contract currently allows."""
+        """Whether ``action`` is the one step the contract currently allows.
+
+        Advisory, not enforcing. This reports what the contract allows; it does
+        not stop a caller from proceeding. CONTINUUM computes the verdict, it
+        does not supervise the process that asked for it (#1031).
+
+        A caller can ignore a ``False`` return and act anyway, and nothing in
+        the library will intervene. If you need the verdict *enforced*, that is
+        a separate seam and none of them is on by default:
+
+        * the host gate (``continuum gate``, :mod:`continuum.recovery.gate`)
+        * the HTTP gateway (``continuum gateway``, :mod:`continuum.gateway`)
+        * the replay guard (:mod:`continuum.replayguard`)
+        * observation hooks (``continuum hooks install``,
+          :mod:`continuum.clienthooks`)
+
+        Each must be configured explicitly; a plain ``pip install
+        continuum-agent`` gets none of them. The one enforcement that does ship
+        enabled is the CLI exit code: ``continuum resume`` exits non-zero unless
+        the run is verified safe, so ``continuum resume "$RUN" && ./start.sh``
+        cannot launch onto stale state (see :mod:`continuum.cli.exitcodes`).
+        """
         if self.mode is RecoveryMode.RESUME:
             return True
         return action == self.contract.next_allowed_action
@@ -366,11 +394,13 @@ class RecoveryEngine:
             from continuum.recovery.health import advisory_for_storage
 
             liveness_advisory = advisory_for_storage(self.storage, run_id)
-            # Count prior breaches as DETECTED events
+            # Count prior breaches as DETECTED events. The archived prefix
+            # folds in via the shared fetch, so a silence detected before a
+            # compaction still counts: the live tail alone would reset the
+            # breach count to zero (same archive-blindness family as #553).
             try:
-                evs = self.storage.read_events(run_id)
                 liveness_breaches = sum(
-                    1 for e in evs if e.type == EventType.LIVENESS_SILENCE_DETECTED
+                    1 for e in archive_aware_events if e.type == EventType.LIVENESS_SILENCE_DETECTED
                 )
             except Exception:
                 liveness_breaches = 0
@@ -386,15 +416,16 @@ class RecoveryEngine:
             from continuum.recovery.risk import evaluate_risk, load_risk_policy
 
             policy = load_risk_policy()
+            # Archive-aware: the shared fetch walks the archived prefix too, so
+            # compaction cannot empty triggering_risks by sealing the only
+            # RISK_OBSERVED events away from this scan.
             try:
-                risk_events = [
-                    e for e in self.storage.read_events(run_id) if e.type == EventType.RISK_OBSERVED
-                ]
+                risk_events = [e for e in archive_aware_events if e.type == EventType.RISK_OBSERVED]
             except Exception:
                 risk_events = []
             best_mode = None
-            best_trigger = None
             triggering: list[str] = []
+            triggers: list[str] = []
             for risk_ev in risk_events:
                 trig = risk_ev.payload.get("trigger")
                 if not isinstance(trig, str):
@@ -408,14 +439,21 @@ class RecoveryEngine:
                     continue
                 if best_mode is None or SEVERITY[candidate] > SEVERITY[best_mode]:
                     best_mode = candidate
-                    best_trigger = trig
                     triggering = [risk_ev.event_id]
+                    triggers = [trig]
                 elif SEVERITY[candidate] == SEVERITY[best_mode]:
                     triggering.append(risk_ev.event_id)
+                    if trig not in triggers:
+                        triggers.append(trig)
             if best_mode is not None:
                 risk_mode = best_mode
                 triggering_risks = triggering
-                risk_rationale = f"risk {best_trigger} triggers {best_mode.value}"
+                # Name every trigger that proposed the winning mode, not just
+                # the first: the ids in triggering_risks are all contributors
+                # to the verdict the sealed reason justifies (issue #1057).
+                # Deduplicated by trigger so an equal-severity repeat does not
+                # duplicate the sentence the way #1042's double-append did.
+                risk_rationale = f"risk {', '.join(sorted(triggers))} triggers {best_mode.value}"
         except Exception:
             triggering_risks = []
             risk_mode = None
@@ -439,14 +477,28 @@ class RecoveryEngine:
         # still deny. A later AUTHORITY_RECONCILED with valid true clears the
         # map inside collect_consumed_authorities.
         try:
-            consumed_authorities = collect_consumed_authorities(self.storage.read_events(run_id))
+            # Archive-aware: an authority consumed before a compaction still
+            # blocks resume, and the AUTHORITY_RECONCILED that clears it may
+            # live in the archived prefix too.
+            consumed_authorities = collect_consumed_authorities(archive_aware_events)
         except Exception:
-            consumed_authorities = {}
+            # An empty map is the *unblocked* answer, and this block exists to
+            # be the check that survives a degraded log: when the ledger
+            # cannot be read, degrade to the most cautious verdict instead of
+            # asserting a safety conclusion the engine could not compute
+            # (issue #1066).
+            consumed_authorities = None
         if consumed_authorities:
             mode = RecoveryMode.REQUEST_HUMAN
             rationale = (
                 *rationale,
                 f"consumed authority blocks resume: {sorted(consumed_authorities)}",
+            )
+        elif consumed_authorities is None:
+            mode = RecoveryMode.REQUEST_HUMAN
+            rationale = (
+                *rationale,
+                "consumed authority ledger unreadable: cannot clear the resume block",
             )
 
         reason = "; ".join(rationale) if rationale else validation.report.reason
@@ -499,7 +551,7 @@ class RecoveryEngine:
             plan=plan,
         )
 
-        return RecoveryDecision(
+        decision = RecoveryDecision(
             run_id=run_id,
             mode=mode,
             contract=contract,
@@ -512,6 +564,20 @@ class RecoveryEngine:
             tail_evidence=tail_evidence,
             informed_retry=informed_retry,
         )
+
+        # Process-wide counters (#1032). Imported lazily: observability imports
+        # RecoveryDecision from this module, so a top-level import would be
+        # circular. Collection is best-effort and never affects the verdict: a
+        # caller who resets or replaces the collector still gets the same
+        # decision, and a failure here must not change a safety property.
+        try:
+            from continuum.observability import collect_from_decision
+
+            collect_from_decision(decision)
+        except Exception:
+            pass
+
+        return decision
 
     # -- the decision rule ------------------------------------------------ #
 
@@ -646,21 +712,6 @@ class RecoveryEngine:
             rationale_text = risk_rationale or f"risk triggers {risk_mode.value}"
             proposals.append((risk_mode, rationale_text))
 
-        # Liveness breach maps to WAIT, never auto-rollback (issue #302)
-        # Silence tells us nothing about what to roll back, only that a human
-        # or lease-recovery decision is needed. WAIT is the most cautious
-        # signal that still allows a lease to be recovered without human.
-        if liveness_advisory is not None and bool(liveness_advisory.get("breached")):
-            silence = liveness_advisory.get("silence_seconds")
-            threshold = liveness_advisory.get("threshold_seconds")
-            phase = liveness_advisory.get("phase") or "otherwise"
-            proposals.append(
-                (
-                    RecoveryMode.WAIT,
-                    f"liveness breach: silence {silence:.1f}s exceeds threshold {threshold}s (phase {phase})",
-                )
-            )
-
         # A goal that is no longer valid cannot be repaired by re-running work.
         if any(
             e.component.value == "goal" and e.status is not StateStatus.VALID
@@ -684,5 +735,11 @@ class RecoveryEngine:
         # entry. Both facts are asserted by tests rather than defended by dead
         # branches here.
         mode = max(proposals, key=lambda p: SEVERITY[p[0]])[0]
-        rationale = tuple(reason for proposed, reason in proposals if proposed is mode)
+        # dict.fromkeys dedups while preserving order: two proposals of the
+        # winning mode that carry the same sentence (the pasted-twice
+        # liveness block of #1042 did exactly that) must read as one reason,
+        # not as two observations that never happened.
+        rationale = tuple(
+            dict.fromkeys(reason for proposed, reason in proposals if proposed is mode)
+        )
         return mode, rationale

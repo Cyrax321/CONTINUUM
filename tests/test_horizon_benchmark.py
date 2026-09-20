@@ -44,6 +44,57 @@ def test_judge_labels_exist_for_every_scenario_and_disagreements_resolved() -> N
 
 
 @pytest.mark.slow
+def test_abort_scenario_reaches_abort_through_the_risk_path() -> None:
+    """The abort scenario must exercise a mechanism the engine really has.
+
+    DECISION_INVALIDATED does not produce an abort proposal, so a scenario that
+    drives abort through it fails by construction and deflates the published
+    accuracy figure without any real regression in decision quality (#1028).
+    The engine reaches ABORT only through the risk policy
+    (recovery/risk.py: side_effect_duplicate -> ABORT). This pins that path end
+    to end: if the engine drops it, this test and the scenario both fail, and
+    the number moves visibly instead of silently.
+    """
+    from benchmarks.horizon.runner import run_single_horizon
+
+    result = run_single_horizon("abort_condition_year")
+    assert result.passed, (
+        f"abort_condition_year did not reach abort: got "
+        f"{result.metrics['actual_mode']}, notes={result.notes}"
+    )
+    assert result.metrics["actual_mode"] == "abort"
+    assert result.metrics["correct_mode"] == "abort"
+
+
+def test_the_engines_abort_path_is_reachable_independently_of_the_scenario() -> None:
+    """The mechanism the abort scenario depends on is real engine behaviour.
+
+    A regression that removes the risk -> abort mapping would otherwise only
+    show up as a slow benchmark failure. This is the fast unit-level guard for
+    the same property, so it runs in every CI matrix job.
+    """
+    from continuum.events import EventType
+    from continuum.models import Origin, Run
+    from continuum.recovery import RecoveryEngine
+    from continuum.storage import SQLiteStorage
+
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="abort_probe", goal="probe"))
+    storage.append_event("abort_probe", EventType.RUN_STARTED, {"goal": "probe"})
+    storage.append_event(
+        "abort_probe",
+        EventType.RISK_OBSERVED,
+        {"trigger": "side_effect_duplicate", "score": 1.0},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+    decision = RecoveryEngine(storage).assess("abort_probe")
+    assert decision.mode.value == "abort", (
+        f"side_effect_duplicate risk should reach abort, got {decision.mode.value}"
+    )
+    assert decision.safe is False
+
+
+@pytest.mark.slow
 def test_all_six_metrics_emitted_per_run_and_rendered() -> None:
     from benchmarks.horizon.emitter import emit_horizon_report
     from benchmarks.horizon.runner import run_horizon_suite
@@ -125,7 +176,12 @@ def test_table_regenerates_from_runner_no_invented_numbers(tmp_path: Path) -> No
                     [sys.executable, str(root / "benchmarks/run.py")],
                     capture_output=True,
                     text=True,
-                    timeout=60,
+                    # The runner executes the full horizon, fault-injection and
+                    # crash-recovery suites, which takes minutes on a cold
+                    # Windows runner -- 60s timed out there (seen on this job
+                    # across unrelated PRs). Match the 600s the --publish test
+                    # below already grants the same script.
+                    timeout=600,
                     cwd=root,
                 )
                 assert result.returncode == 0, result.stderr

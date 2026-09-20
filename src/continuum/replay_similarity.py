@@ -37,6 +37,12 @@ __all__ = [
 
 
 class SimilarityKind(StrEnum):
+    """Strategies used to compute replay similarity scores.
+
+    The selected strategy supplies the score used for replay and fork
+    decisions.
+    """
+
     EXACT = "exact"
     FUZZY = "fuzzy"
     EMBEDDING = "embedding"
@@ -44,6 +50,12 @@ class SimilarityKind(StrEnum):
 
 @dataclass(frozen=True)
 class SimilarityConfig:
+    """Configure similarity scoring and replay/fork decisions.
+
+    ``kind`` selects the comparison strategy. The replay and fork thresholds
+    classify the score produced by that strategy.
+    """
+
     kind: SimilarityKind = SimilarityKind.EXACT
     """Which comparison strategy to use."""
     replay_threshold: float = 0.90
@@ -60,6 +72,12 @@ def token_set(text: str) -> frozenset[str]:
 
 
 def jaccard(a: frozenset[str], b: frozenset[str]) -> float:
+    """Return token-set similarity.
+
+    Two empty sets score ``1.0``. If only one set is empty, the score is
+    ``0.0``.
+    """
+
     if not a and not b:
         return 1.0
     if not a or not b:
