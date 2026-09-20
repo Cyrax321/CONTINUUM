@@ -18,6 +18,10 @@ from continuum.adapters.generic import GenericAgentAdapter
 from continuum.recovery.engine import RecoveryEngine
 from continuum.storage.base import Storage
 
+__all__ = [
+    "FilesystemSandboxAdapter",
+]
+
 
 class FilesystemSandboxAdapter(GenericAgentAdapter):
     """A filesystem-backed sandbox that records commands as idempotent actions."""

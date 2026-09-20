@@ -35,13 +35,25 @@ class ChildStatus:
 
 
 def children_of(storage: Storage, run_id: str) -> list[Run]:
+    """The runs parented by ``run_id``, including children recorded before the
+    ``parent_run_id`` column existed.
+
+    Those older rows carry the link in ``Run.metadata`` only, and a legacy
+    child is still a child: the recovery verdict, the family view, and the
+    CLI tree must all resolve it the same way, or the display would show a
+    child the aggregate does not account for.
+    """
     from continuum.models import Run as RunModel
 
-    return [
-        r
-        for r in storage.list_runs(limit=None)
-        if getattr(r, "parent_run_id", None) == run_id and isinstance(r, RunModel)
-    ]
+    resolved: list[Run] = []
+    for run in storage.list_runs(limit=None):
+        if not isinstance(run, RunModel):
+            continue
+        if run.parent_run_id == run_id:
+            resolved.append(run)
+        elif run.parent_run_id is None and dict(run.metadata).get("parent_run_id") == run_id:
+            resolved.append(run)  # the pre-column convention
+    return resolved
 
 
 def roll_up_children(

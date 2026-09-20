@@ -24,6 +24,11 @@ from dataclasses import dataclass
 
 from continuum.models import SemanticState
 
+__all__ = [
+    "DependencyGraph",
+    "ImpactedSet",
+]
+
 
 @dataclass(frozen=True, slots=True)
 class ImpactedSet:
