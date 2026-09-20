@@ -34,6 +34,13 @@ from continuum.models import EnvironmentSnapshot, EnvResource, Run
 from continuum.recovery import RecoveryEngine
 from continuum.storage import SQLiteStorage
 
+__all__ = [
+    "EnvironmentFixture",
+    "FixtureAdapter",
+    "InjectedFailures",
+    "environment_fixture",
+]
+
 
 @dataclass(frozen=True, slots=True)
 class InjectedFailures:

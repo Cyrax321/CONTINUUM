@@ -11,9 +11,24 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+__all__ = [
+    "ControlledScenario",
+    "SCENARIOS",
+    "by_name",
+]
+
 
 @dataclass(frozen=True, slots=True)
 class ControlledScenario:
+    """One row of ground truth: a failure mode and the recovery it must get.
+
+    The fields are read by the harness, never by recovery itself:
+    ``checkpoint_version`` and ``environment_version`` describe the state the
+    scenario constructs (a moved pin, a changed model), and ``expected`` is
+    the ``RecoveryMode`` name the assessment must propose for that state.
+    ``description`` is prose for the results table, not a graded input.
+    """
+
     scenario: str
     checkpoint_version: str
     environment_version: str
@@ -40,14 +55,14 @@ SCENARIOS: tuple[ControlledScenario, ...] = (
         scenario="tool_failure",
         checkpoint_version="v1",
         environment_version="v1",
-        expected="RETRY",
+        expected="RESUME",
         description="Tool returns error, retry is safe",
     ),
     ControlledScenario(
         scenario="api_timeout",
         checkpoint_version="v1",
         environment_version="v1",
-        expected="RETRY",
+        expected="REQUEST_HUMAN",
         description="External API timed out, side effect uncertain",
     ),
     ControlledScenario(
@@ -103,6 +118,12 @@ SCENARIOS: tuple[ControlledScenario, ...] = (
 
 
 def by_name(name: str) -> ControlledScenario:
+    """Return the scenario row with ``scenario == name``.
+
+    Raises ``KeyError`` when no scenario carries that name; the message
+    names the unknown scenario so a typo in a benchmark invocation is
+    diagnosable from the traceback alone.
+    """
     for scenario in SCENARIOS:
         if scenario.scenario == name:
             return scenario

@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
+from typing import Any
+
+import pytest
 
 from continuum.actions.authority import record_authority_consumed
 from continuum.events import EventType
@@ -297,3 +300,41 @@ def test_probe_for_an_authority_that_was_never_consumed_settles_with_a_bare_id(
         assert report.settled is True
     finally:
         storage.close()
+
+
+def test_unreadable_authority_ledger_degrades_to_request_human(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #1066: a failed ledger read must not clear the resume block.
+
+    The consumed-authority block used to substitute an empty map when the
+    event read failed, and an empty map is the *unblocked* answer: a run
+    holding an unreconciled consumed credential got a resume verdict the
+    moment the log became unreadable mid-assessment.
+    """
+    import continuum.recovery.engine as engine_mod
+    from continuum.storage.base import CorruptedRecord
+
+    db = str(tmp_path / "auth_unreadable.db")
+    with SQLiteStorage(db) as storage:
+        storage.create_run(Run(run_id="run_1", goal="g"))
+        storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+        record_authority_consumed(storage, "run_1", "auth-123")
+
+    # Baseline: a readable ledger blocks the run, as designed.
+    with SQLiteStorage(db) as storage:
+        baseline = RecoveryEngine(storage).assess("run_1", replay=False)
+    assert baseline.mode.value == "request_human"
+
+    def unreadable(events: object) -> dict[str, Any]:
+        raise CorruptedRecord("events table: unreadable page (transient)")
+
+    monkeypatch.setattr(engine_mod, "collect_consumed_authorities", unreadable)
+    with SQLiteStorage(db) as storage:
+        decision = RecoveryEngine(storage).assess("run_1", replay=False)
+
+    # Degrade to the most cautious verdict, not the unblocked one.
+    assert decision.mode.value == "request_human"
+    assert decision.contract.recovery_status.value == "requires_human"
+    assert decision.permits("anything") is False
+    assert any("unreadable" in line for line in decision.rationale)
