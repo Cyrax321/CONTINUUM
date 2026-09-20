@@ -154,6 +154,25 @@ wins and ignores arguments; otherwise the id derives from distinctive resource
 tokens (short, weak, and stopword tokens are dropped); operations with neither
 return `None` and stay unbound, preserving today's behavior byte-identically.
 
+### The bucket follows the ledger's own verdict
+
+The token derivation reads every argument, and arguments are caller-controlled
+noise plus the real resource, so the bucket is only as stable as the arguments
+it was computed from. `ActionLedger.claim` therefore derives the bucket from the
+record the claim *defers to* when one exists -- the caller held the idempotency
+key fixed, or the token fallback recognised a prior attempt -- rather than from
+the incoming arguments. A retry that pads a throwaway `trace_id` or request id
+is the same operation the ledger already recorded, so it draws from that
+record's bucket and cannot reset the cap by padding (issue #1052). Settlements
+derive from the same stored arguments, so a retry and its confirmation share one
+bucket by construction.
+
+The residual is deliberate and documented: a caller that mints both a fresh key
+*and* fresh noise per attempt presents no identity the ledger can see, and stays
+on the token fallback as before. Declaring such fields `volatile` at every call
+site is not the fix, because a caller that wants around the cap simply forgets
+to declare them.
+
 ### `CONTINUUM_BUDGETS_PATH`
 
 Registry location for authorization budgets. Read from the

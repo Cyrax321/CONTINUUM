@@ -53,6 +53,9 @@ __all__ = [
     "decide",
     "collect_consumed_authorities",
     "is_authority_consumed",
+    "collect_argument_values",
+    "find_consumed_authority",
+    "consumed_authority_reason",
 ]
 
 #: Where the gate configuration lives, relative to the project root the hook
@@ -114,6 +117,94 @@ def is_authority_consumed(authority_id: str, consumed: Mapping[str, Any] | None)
     if not consumed:
         return False
     return authority_id in consumed
+
+
+#: Depth the argument walk descends. Nesting beyond this is not a shape any
+#: real tool argument takes, and the bound keeps a hostile payload from turning
+#: a safety check into unbounded work (issue #1074).
+_MAX_ARGUMENT_DEPTH = 8
+
+#: Cap on collected values, for the same reason: the check stops early rather
+#: than walk an exhaustively large structure.
+_MAX_ARGUMENT_VALUES = 10_000
+
+
+def collect_argument_values(
+    arguments: Any,
+    *,
+    max_depth: int = _MAX_ARGUMENT_DEPTH,
+    max_values: int = _MAX_ARGUMENT_VALUES,
+) -> list[str]:
+    """Every string value in an argument structure, at any depth.
+
+    The authority-resurrection checks are value-based by design: they match on
+    the authority id itself rather than on the field name carrying it, so drift
+    in argument *names* cannot resurrect a spent credential (issue #289b).
+    Argument *shape* drift defeats a top-level-only scan in exactly the same
+    way -- ``{"payment": {"auth_token": "cred-1"}}`` is an ordinary argument
+    shape for a credentials tool -- so the walk recurses through nested
+    mappings and sequences as well (issue #1074).
+
+    Bounded: the walk stops at ``max_depth`` and after ``max_values`` strings,
+    so the check stays cheap on hostile input.
+    """
+    values: list[str] = []
+    stack: list[tuple[Any, int]] = [(arguments, 0)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, str):
+            values.append(item)
+            if len(values) >= max_values:
+                break
+            continue
+        if depth >= max_depth:
+            continue
+        if isinstance(item, Mapping):
+            stack.extend((value, depth + 1) for value in item.values())
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            stack.extend((value, depth + 1) for value in item)
+    return values
+
+
+def find_consumed_authority(
+    arguments: Any,
+    consumed_authorities: Mapping[str, Any] | None,
+) -> tuple[str | None, Any]:
+    """The first consumed authority appearing anywhere in ``arguments``.
+
+    Returns ``(authority_id, event)``, or ``(None, None)`` when no argument
+    value is a consumed authority. Value-based and shape-agnostic, so a spent
+    credential is refused whether it sits at the top level or nested in a dict
+    or list (issue #1074). This is the shared scan the gate, the gateway and
+    the ledger's claim all use, so the three cannot disagree about depth.
+    """
+    if not consumed_authorities:
+        return None, None
+    for value in collect_argument_values(arguments):
+        ev = consumed_authorities.get(value)
+        if ev is not None:
+            return value, ev
+    return None, None
+
+
+def consumed_authority_reason(authority_id: str, ev: Any) -> str:
+    """The denial message for a resurrected authority, shared by every enforcer.
+
+    Accepts the event object the storage returns and the dict form some tests
+    and callers use, so the message cannot drift between the gate, the gateway
+    and the ledger.
+    """
+    if hasattr(ev, "sequence"):
+        seq: Any = ev.sequence
+        payload: Any = getattr(ev, "payload", {}) or {}
+    else:
+        seq = ev.get("sequence", "?")
+        payload = ev.get("payload", {}) or {}
+    consumer = payload.get("consumer_run_id", "?") if isinstance(payload, Mapping) else "?"
+    return (
+        f"Authority {authority_id!r} consumed at seq {seq} by run {consumer!r}. "
+        "Obtain a fresh authority."
+    )
 
 
 @dataclass(frozen=True)
@@ -279,24 +370,15 @@ def decide(
     # Authority resurrection check (issue #289b): if any string value in the
     # tool input matches a consumed authority, refuse before any ledger check.
     # The check is value-based rather than field-name based so that drift in
-    # argument names does not resurrect spent authority. The message names the
-    # original consumption event so the operator can audit the lineage.
+    # argument names does not resurrect spent authority. The scan is also
+    # shape-agnostic: a value nested in a dict or list is still found, so
+    # nesting the authority one level deep cannot resurrect it either
+    # (issue #1074). The message names the original consumption event so the
+    # operator can audit the lineage.
     if consumed_authorities:
-        for _value in tool_input.values():
-            if isinstance(_value, str) and is_authority_consumed(_value, consumed_authorities):
-                # collect_consumed_authorities stores the Event itself as the
-                # map value, so the sequence and payload come straight off it.
-                # There is no dict-shaped map in the contract, so there is no
-                # fallback ladder to keep in step with (#1154).
-                ev = consumed_authorities[_value]
-                payload = ev.payload or {}
-                consumer = payload.get("consumer_run_id", "?")
-                return Decision(
-                    False,
-                    f"Authority {_value!r} consumed at seq {ev.sequence} by run {consumer!r}. "
-                    "Obtain a fresh authority.",
-                )
-        # Top-level values only; a nested spent authority is #1074, not here.
+        spent_id, ev = find_consumed_authority(tool_input, consumed_authorities)
+        if spent_id is not None:
+            return Decision(False, consumed_authority_reason(spent_id, ev))
 
     if config is None:
         return Decision(True, "no gate configured")

@@ -394,11 +394,13 @@ class RecoveryEngine:
             from continuum.recovery.health import advisory_for_storage
 
             liveness_advisory = advisory_for_storage(self.storage, run_id)
-            # Count prior breaches as DETECTED events
+            # Count prior breaches as DETECTED events. The archived prefix
+            # folds in via the shared fetch, so a silence detected before a
+            # compaction still counts: the live tail alone would reset the
+            # breach count to zero (same archive-blindness family as #553).
             try:
-                evs = self.storage.read_events(run_id)
                 liveness_breaches = sum(
-                    1 for e in evs if e.type == EventType.LIVENESS_SILENCE_DETECTED
+                    1 for e in archive_aware_events if e.type == EventType.LIVENESS_SILENCE_DETECTED
                 )
             except Exception:
                 liveness_breaches = 0
@@ -414,10 +416,11 @@ class RecoveryEngine:
             from continuum.recovery.risk import evaluate_risk, load_risk_policy
 
             policy = load_risk_policy()
+            # Archive-aware: the shared fetch walks the archived prefix too, so
+            # compaction cannot empty triggering_risks by sealing the only
+            # RISK_OBSERVED events away from this scan.
             try:
-                risk_events = [
-                    e for e in self.storage.read_events(run_id) if e.type == EventType.RISK_OBSERVED
-                ]
+                risk_events = [e for e in archive_aware_events if e.type == EventType.RISK_OBSERVED]
             except Exception:
                 risk_events = []
             best_mode = None
@@ -474,14 +477,28 @@ class RecoveryEngine:
         # still deny. A later AUTHORITY_RECONCILED with valid true clears the
         # map inside collect_consumed_authorities.
         try:
-            consumed_authorities = collect_consumed_authorities(self.storage.read_events(run_id))
+            # Archive-aware: an authority consumed before a compaction still
+            # blocks resume, and the AUTHORITY_RECONCILED that clears it may
+            # live in the archived prefix too.
+            consumed_authorities = collect_consumed_authorities(archive_aware_events)
         except Exception:
-            consumed_authorities = {}
+            # An empty map is the *unblocked* answer, and this block exists to
+            # be the check that survives a degraded log: when the ledger
+            # cannot be read, degrade to the most cautious verdict instead of
+            # asserting a safety conclusion the engine could not compute
+            # (issue #1066).
+            consumed_authorities = None
         if consumed_authorities:
             mode = RecoveryMode.REQUEST_HUMAN
             rationale = (
                 *rationale,
                 f"consumed authority blocks resume: {sorted(consumed_authorities)}",
+            )
+        elif consumed_authorities is None:
+            mode = RecoveryMode.REQUEST_HUMAN
+            rationale = (
+                *rationale,
+                "consumed authority ledger unreadable: cannot clear the resume block",
             )
 
         reason = "; ".join(rationale) if rationale else validation.report.reason
@@ -695,21 +712,6 @@ class RecoveryEngine:
             rationale_text = risk_rationale or f"risk triggers {risk_mode.value}"
             proposals.append((risk_mode, rationale_text))
 
-        # Liveness breach maps to WAIT, never auto-rollback (issue #302)
-        # Silence tells us nothing about what to roll back, only that a human
-        # or lease-recovery decision is needed. WAIT is the most cautious
-        # signal that still allows a lease to be recovered without human.
-        if liveness_advisory is not None and bool(liveness_advisory.get("breached")):
-            silence = liveness_advisory.get("silence_seconds")
-            threshold = liveness_advisory.get("threshold_seconds")
-            phase = liveness_advisory.get("phase") or "otherwise"
-            proposals.append(
-                (
-                    RecoveryMode.WAIT,
-                    f"liveness breach: silence {silence:.1f}s exceeds threshold {threshold}s (phase {phase})",
-                )
-            )
-
         # A goal that is no longer valid cannot be repaired by re-running work.
         if any(
             e.component.value == "goal" and e.status is not StateStatus.VALID
@@ -733,5 +735,11 @@ class RecoveryEngine:
         # entry. Both facts are asserted by tests rather than defended by dead
         # branches here.
         mode = max(proposals, key=lambda p: SEVERITY[p[0]])[0]
-        rationale = tuple(reason for proposed, reason in proposals if proposed is mode)
+        # dict.fromkeys dedups while preserving order: two proposals of the
+        # winning mode that carry the same sentence (the pasted-twice
+        # liveness block of #1042 did exactly that) must read as one reason,
+        # not as two observations that never happened.
+        rationale = tuple(
+            dict.fromkeys(reason for proposed, reason in proposals if proposed is mode)
+        )
         return mode, rationale

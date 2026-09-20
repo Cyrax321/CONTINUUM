@@ -25,6 +25,14 @@ from continuum.benchmark.phase6.metrics import (
     ScenarioResult,
 )
 
+__all__ = [
+    "ScenarioContext",
+    "ScenarioFn",
+    "run_benchmark",
+    "run_scenario",
+    "write_report",
+]
+
 ScenarioFn = Callable[["ScenarioContext"], None]
 
 

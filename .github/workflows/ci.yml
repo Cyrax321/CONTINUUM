@@ -65,6 +65,18 @@ jobs:
         if: needs.detect.outputs.docs-only != 'true'
         run: pip install -e ".[dev]"
 
+      # Issue #281: the PowerShell launcher must work from a fresh clone,
+      # which on this runner means no .venv. uv is present on GitHub
+      # runners, so this exercises the uv venv + uv pip install bootstrap
+      # path; the python -m venv + pip fallback is covered by the static
+      # contract test in tests/test_tryit_launchers.py.
+      - name: Try-it launcher bootstraps from a fresh clone (Windows)
+        if: needs.detect.outputs.docs-only != 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path .venv) { Remove-Item -Recurse -Force .venv }
+          powershell -ExecutionPolicy Bypass -File .\try-it.ps1 cli --help
+
       - name: Run tests with coverage
         if: needs.detect.outputs.docs-only != 'true'
         run: pytest --tb=short -q --cov=continuum --cov-report=xml --cov-report=term-missing

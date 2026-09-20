@@ -128,3 +128,35 @@ def test_fault_corpus_has_expected_classes() -> None:
     all_names = {f.name for f in FAULT_CLASSES}
     assert "dropped_constraint" in all_names
     assert "laundered_lesson" in all_names
+
+
+def test_emitter_rate_is_order_independent() -> None:
+    """The published suite rate must not depend on result order (#1061).
+
+    The emitter used to read the suite-level rate off ``results[0]`` on the
+    premise that every result carries the same aggregates. That is false: the
+    clean control scenario reports only its own false-positive rate, so a
+    control placed first published a detection rate of ``0`` for a suite that
+    detected every fault. The rate is now the mean over the scenarios that
+    reported it, so a reorder changes nothing.
+    """
+    import os
+    import tempfile
+
+    report = run_benchmark_suite()
+    # The premise the old code relied on: the control measures no detection.
+    control = next(r for r in report.results if r.scenario == "fault_control_clean")
+    assert "detection_rate" not in control.metrics
+
+    def published(rep):
+        out = os.path.join(tempfile.mkdtemp(), "fi")
+        json_path, _ = emit_fault_injection_report(rep, out)
+        return json.loads(Path(json_path).read_text())["summary"]["detection_rate"]
+
+    baseline = published(report)
+    assert baseline == 1.0
+    # Rotate every result through the front; any dependence on results[0]
+    # surfaces as a change in the published figure.
+    for _ in range(len(report.results)):
+        report.results.append(report.results.pop(0))
+        assert published(report) == baseline

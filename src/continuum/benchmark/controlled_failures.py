@@ -11,6 +11,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+__all__ = [
+    "ControlledScenario",
+    "SCENARIOS",
+    "by_name",
+]
+
 
 @dataclass(frozen=True, slots=True)
 class ControlledScenario:
@@ -49,14 +55,14 @@ SCENARIOS: tuple[ControlledScenario, ...] = (
         scenario="tool_failure",
         checkpoint_version="v1",
         environment_version="v1",
-        expected="RETRY",
+        expected="RESUME",
         description="Tool returns error, retry is safe",
     ),
     ControlledScenario(
         scenario="api_timeout",
         checkpoint_version="v1",
         environment_version="v1",
-        expected="RETRY",
+        expected="REQUEST_HUMAN",
         description="External API timed out, side effect uncertain",
     ),
     ControlledScenario(
