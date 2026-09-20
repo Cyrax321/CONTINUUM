@@ -155,6 +155,35 @@ def test_each_put_lands_provenance_tagged_state_checkpointed_events(db: str) -> 
     assert started and started[0].source is Origin.EXTERNAL_AGENT
 
 
+def test_run_started_payload_round_trips_and_chain_verifies(db: str) -> None:
+    # Issue #1088: the RUN_STARTED row was written with a hardcoded "{}"
+    # payload while its seal was computed over the real one, so every
+    # native-checkpointer run was born with a broken hash chain.
+    s = saver(db)
+    s.put(cfg("t4"), mk_checkpoint(str(uuid.uuid4()), {}), {}, {})
+    with SQLiteStorage(db) as store:
+        started = [e for e in store.read_events("lg-t4") if e.type is EventType.RUN_STARTED]
+        assert started and started[0].payload == {
+            "goal": "LangGraph thread t4",
+            "total": 0,
+        }
+        report = store.verify_events("lg-t4")
+    assert report.ok, list(report.violations)
+
+
+def test_put_run_can_be_projected_by_recovery_engine(db: str) -> None:
+    # The ProjectionError path from issue #1088: with the chain intact the
+    # run must carry a goal and be assessable, not just verifiable.
+    from continuum.recovery import RecoveryEngine
+
+    s = saver(db)
+    s.put(cfg("t5"), mk_checkpoint(str(uuid.uuid4()), {"n": 1}), {}, {})
+    with SQLiteStorage(db) as store:
+        engine = RecoveryEngine(store)
+        decision = engine.assess("lg-t5")
+    assert decision.run_id == "lg-t5"
+
+
 # --- integration: a real StateGraph resumes across instances ------------------ #
 
 
