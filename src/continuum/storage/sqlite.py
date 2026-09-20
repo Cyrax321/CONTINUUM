@@ -508,14 +508,22 @@ class SQLiteStorage(Storage):
         needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
         if needs_fresh_anchor:
             try:
+                manager = CheckpointManager(self)
+                # The anchor must project over full history: after an earlier
+                # compaction the live tail begins at the anchor markers with
+                # no RUN_STARTED, so a live-only fold would conclude the run
+                # never started (issue #648). Per-turn checkpoint evaluation
+                # deliberately keeps the cheaper live-tail read.
+                state = manager.project_current(run_id, full_history=True)
                 # The anchor becomes the newest checkpoint, so it inherits the
                 # environment the run validated against: writing it without one
                 # would leave a compacted run with no snapshot to diff a resumed
                 # capture against, and every resource would read as unknown
                 # (issue #762).
                 anchored = self.latest_checkpoint(run_id)
-                CheckpointManager(self).checkpoint(
+                manager.checkpoint(
                     run_id,
+                    state=state,
                     force_version=True,
                     environment=anchored.environment if anchored is not None else None,
                 )
@@ -526,13 +534,11 @@ class SQLiteStorage(Storage):
         if storage_version is None:
             raise ValueError(f"run {run_id!r} could not be anchored: no projectable state")
         # The anchor marker is appended at the head of the log in the
-        # transaction below, so its sequence is the current head + 1.
+        # transaction below, so its sequence is the current head + 1. The
+        # guard lives on the shared base so the Postgres backend cannot drop
+        # it again (issue #1078).
         anchor_sequence = self.last_sequence(run_id) + 1
-        if through_sequence is not None and through_sequence >= anchor_sequence:
-            raise ValueError(
-                f"through_sequence {through_sequence} would archive the anchor marker"
-                f" at sequence {anchor_sequence}: the live log must retain its anchor"
-            )
+        self._validate_compaction_bound(through_sequence, anchor_sequence)
         through = (
             through_sequence
             if through_sequence is not None

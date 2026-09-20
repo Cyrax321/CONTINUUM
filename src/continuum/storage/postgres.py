@@ -596,6 +596,14 @@ class PostgresStorage(Storage):
         reached the archive, so verify would trust a genesis that was never
         earned. The connection runs in autocommit mode, so the explicit
         ``transaction()`` block is what makes the three writes atomic.
+
+        ``through_sequence`` must stay below the anchor marker's sequence:
+        the live log always retains its anchor, so a value at or above it is
+        rejected (issue #705) instead of silently deleting the anchor and
+        every live row, which would leave the next append minting a fresh
+        genesis and fork the hash chain away from the archive. The check is
+        shared with the SQLite backend so the two cannot drift apart again
+        (issue #1078).
         """
         from continuum.checkpoint.manager import CheckpointManager
 
@@ -604,14 +612,22 @@ class PostgresStorage(Storage):
         needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
         if needs_fresh_anchor:
             try:
+                manager = CheckpointManager(self)
+                # The anchor must project over full history: after an earlier
+                # compaction the live tail begins at the anchor markers with
+                # no RUN_STARTED, so a live-only fold would conclude the run
+                # never started (issue #648). Per-turn checkpoint evaluation
+                # deliberately keeps the cheaper live-tail read.
+                state = manager.project_current(run_id, full_history=True)
                 # The anchor becomes the newest checkpoint, so it inherits the
                 # environment the run validated against: writing it without one
                 # would leave a compacted run with no snapshot to diff a resumed
                 # capture against, and every resource would read as unknown
                 # (issue #762).
                 anchored = self.latest_checkpoint(run_id)
-                CheckpointManager(self).checkpoint(
+                manager.checkpoint(
                     run_id,
+                    state=state,
                     force_version=True,
                     environment=anchored.environment if anchored is not None else None,
                 )
@@ -621,6 +637,13 @@ class PostgresStorage(Storage):
         storage_version = lv
         if storage_version is None:
             raise ValueError(f"run {run_id!r} could not be anchored: no projectable state")
+        # The anchor marker is appended at the head of the log in the
+        # transaction below, so its sequence is the current head + 1. Without
+        # this bound the DELETE below would take the marker and every live
+        # row after it, and the next append would mint a fresh genesis that
+        # forks the live chain from the archive.
+        anchor_sequence = self.last_sequence(run_id) + 1
+        self._validate_compaction_bound(through_sequence, anchor_sequence)
         through = (
             through_sequence
             if through_sequence is not None

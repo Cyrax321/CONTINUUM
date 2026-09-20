@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import sqlite3
+import stat
 import sys
 from collections.abc import Sequence
 from datetime import datetime
@@ -31,7 +32,12 @@ from typing import Any
 
 from continuum import __version__
 from continuum.actions import ActionLedger
-from continuum.checkpoint import CheckpointError, CheckpointManager, CheckpointTrigger
+from continuum.checkpoint import (
+    CheckpointError,
+    CheckpointManager,
+    CheckpointTrigger,
+    clear_resume_pointer,
+)
 from continuum.cli.colour import Palette
 from continuum.cli.exitcodes import ExitCode, exit_code_for
 from continuum.clienthooks import (
@@ -93,6 +99,7 @@ from continuum.storage import (
     ConcurrentWriteError,
     CorruptedRecord,
     RunNotFound,
+    SchemaVersionError,
     Storage,
     StorageError,
     open_storage,
@@ -1380,9 +1387,17 @@ def cmd_watch(args: argparse.Namespace, storage: Storage, out: Any, err: Any) ->
         return 1
 
     breached = bool(advisory.get("breached"))
-    # Append liveness events as needed (mutating only on breach/recovery)
+    # Append liveness events as needed (mutating only on breach/recovery).
+    # The episode scan walks the full history including the archived prefix
+    # (read_all_events) so compaction cannot break the state machine: without
+    # it, a compacted run whose DETECTED lives in the archive looks like it
+    # never breached, minting a duplicate DETECTED for the same episode and
+    # never minting LIVENESS_RECOVERED (issue #1072).
     try:
-        events = storage.read_events(run_id)
+        try:
+            events = storage.read_all_events(run_id)
+        except Exception:
+            events = storage.read_events(run_id)
         last_liveness = None
         for ev in reversed(events):
             if ev.type.value in ("LIVENESS_SILENCE_DETECTED", "LIVENESS_RECOVERED"):
@@ -1620,6 +1635,27 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             )
             return 2
         run_id = active.run_id
+    # Terminal runs have nothing to resume (#1197). Exit non-zero so
+    # `continuum resume && ./start-agent.sh` cannot continue onto a closed run.
+    run = storage.get_run(run_id)
+    if run.status in (
+        RunStatus.COMPLETED,
+        RunStatus.ABORTED,
+        RunStatus.FAILED,
+        RunStatus.CRASHED,
+    ):
+        msg = f"Run {run_id} is terminal ({run.status.value}); nothing to resume."
+        payload = {
+            "run_id": run_id,
+            "status": run.status.value,
+            "error": "terminal_run",
+            "message": msg,
+            "safe": False,
+        }
+        # Machine JSON on stdout (same as every other resume _emit); text stays human-readable.
+        _emit(payload, msg, as_json=args.json, stream=out)
+        # UNSAFE (30): run exists but resuming is not safe (distinct from NOT_FOUND / 2).
+        return ExitCode.UNSAFE
     engine = RecoveryEngine(storage, strict_unknown=not args.tolerate_unknown)
     decision = engine.assess(
         run_id,
@@ -2043,6 +2079,7 @@ def cmd_complete(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     """
     run = storage.get_run(args.run_id)  # raises RunNotFound -> NOT_FOUND
     if run.status is RunStatus.COMPLETED:
+        clear_resume_pointer(args.run_id)
         _emit(
             {
                 "run_id": args.run_id,
@@ -2073,15 +2110,8 @@ def cmd_complete(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     updated = run.touch(status=RunStatus.COMPLETED)
     storage.update_run(updated)
     # Instant resume file tracks the most recent checkpoint; a completed run
-    # is no longer interrupted, so remove the file if it refers to this run.
-    try:
-        resume_path = Path(".continuum/resume.json")
-        if resume_path.exists():
-            data = json.loads(resume_path.read_text(encoding="utf-8"))
-            if data.get("run_id") == args.run_id:
-                resume_path.unlink()
-    except Exception:
-        pass
+    # is no longer interrupted, so the pointer must not keep naming it.
+    clear_resume_pointer(args.run_id)
     payload = {
         "run_id": args.run_id,
         "status": updated.status.value,
@@ -2610,40 +2640,44 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     # Fast path for SessionStart hook: check resume.json before touching DB.
     # This keeps the hook silent and fast when no interrupted run exists.
     resume_path = Path(".continuum/resume.json")
-    if not args.run_id and getattr(args, "hook_event_name", "SessionStart") == "SessionStart":
-        if not resume_path.exists():
-            # Silent when no interrupted run, as required for token floor.
-            return ExitCode.OK
-        # When file exists, inject its banner out of band before the full
-        # briefing. The file was written on the last checkpoint and contains
-        # the run_id that the hook should surface.
+    if (
+        not args.run_id
+        and getattr(args, "hook_event_name", "SessionStart") == "SessionStart"
+        and not resume_path.exists()
+    ):
+        # Silent when no interrupted run, as required for token floor.
+        return ExitCode.OK
+
+    # The file was written on the last checkpoint. Read it once and validate
+    # the run it names before anything is surfaced: a stale file must not
+    # advertise a run the database no longer holds, because the banner's
+    # resume command could only fail (issue #1063).
+    resume_run: str | None = None
+    resume_run_completed = False
+    unrecoverable_run: str | None = None
+    if resume_path.exists():
         try:
             resume_data = json.loads(resume_path.read_text(encoding="utf-8"))
-            banner_run = resume_data.get("run_id")
-            if banner_run:
-                # Verify the run is still active (not completed) before
-                # surfacing, but do it without a full project if possible.
-                # A quick existence check is enough; the full briefing below
-                # will do the thorough assessment.
-                pass
         except Exception:
             # Corrupt file is not a blocker; fall through to normal briefing
             # which will do the DB check and report correctly.
-            pass
+            resume_data = None
+        if isinstance(resume_data, dict):
+            candidate = resume_data.get("run_id")
+            if isinstance(candidate, str) and candidate:
+                try:
+                    resume_run_completed = storage.get_run(candidate).status is RunStatus.COMPLETED
+                    resume_run = candidate
+                except Exception:
+                    unrecoverable_run = candidate
 
     run_id = args.run_id
     if not run_id:
         # Prefer the resume.json run_id when present, as it was written at
         # checkpoint time and is available without a DB scan. Fall back to
         # the active-run query for cases where the file is stale or missing.
-        if resume_path.exists():
-            try:
-                resume_data = json.loads(resume_path.read_text(encoding="utf-8"))
-                candidate = resume_data.get("run_id")
-                if candidate and storage.get_run(candidate):
-                    run_id = candidate
-            except Exception:
-                pass
+        if resume_run:
+            run_id = resume_run
         if not run_id:
             active = storage.get_active_run()
             run_id = active.run_id if active else None
@@ -2684,20 +2718,19 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
         return ExitCode.OK
 
     lines: list[str] = []
-    # Instant resume banner (issue #394): when .continuum/resume.json exists
-    # it was written on the last checkpoint and names the interrupted run.
-    # Inject a banner out of band so the SessionStart hook surfaces the run
-    # without the agent having to discover and call resume itself.
-    if Path(".continuum/resume.json").exists():
-        try:
-            _resume = json.loads(Path(".continuum/resume.json").read_text(encoding="utf-8"))
-            _banner_run = _resume.get("run_id")
-            if _banner_run:
-                lines.append(f"Interrupted run {_banner_run} – resume pending")
-                lines.append(f"  run: continuum resume {_banner_run} --json")
-                lines.append("")
-        except Exception:
-            pass
+    # Instant resume banner (issue #394): surface the interrupted run the
+    # file named so the SessionStart hook points the agent at resume without
+    # it having to discover the command itself. Only for a run the database
+    # still holds, that is not completed, and that this briefing actually
+    # covers; a file naming a run that is gone gets a note instead of a
+    # resume command that cannot work (issue #1063).
+    if resume_run and not resume_run_completed and run_id == resume_run:
+        lines.append(f"Interrupted run {resume_run} – resume pending")
+        lines.append(f"  run: continuum resume {resume_run} --json")
+        lines.append("")
+    elif unrecoverable_run:
+        lines.append(f"Interrupted run {unrecoverable_run} is no longer in the database")
+        lines.append("")
     lines += [
         f"CONTINUUM active run: {run_id}",
     ]
@@ -3812,19 +3845,52 @@ def cmd_benchmark(args: argparse.Namespace, storage: Storage, out: Any, err: Any
     return ExitCode.OK
 
 
+def _write_private_key(path: Path, pem: str) -> int:
+    """Write an unencrypted private key PEM at 0600 and return the mode applied.
+
+    The PEM is PKCS8 with no encryption, so the file mode is the only barrier
+    between the key material and every other local user. ``Path.write_text``
+    would create it at 0666 masked by the ambient umask (0644 out of the box),
+    which is world-readable. Opening through ``os.open`` with an explicit mode
+    creates the file owner-only from the start, with no window at 0644.
+
+    A pre-existing file is narrowed too: ``open(2)`` ignores the mode argument
+    when the file already exists, so a 0644 key being overwritten would keep its
+    old mode without the explicit ``chmod``.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+    except Exception:
+        os.close(fd)
+        raise
+    with handle:
+        handle.write(pem)
+    # The mode argument above is ignored when the path already existed, so an
+    # overwritten key still needs narrowing.
+    os.chmod(path, 0o600)
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
 def cmd_attest_keygen(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Generate an Ed25519 signer key pair for event-chain attestation.
 
     Does not touch storage: key custody is the operator's responsibility, so the
-    tool only writes the two PEM files and says where they went.
+    tool only writes the two PEM files and says where they went. The private key
+    is written owner-only (0600): it is unencrypted PKCS8, so a world-readable
+    file would hand raw signing material to every local user (#1056).
     """
     private_pem, public_pem = generate_keypair()
     priv_path = Path(args.out) if args.out else Path("signer.pem")
     pub_path = Path(args.pub) if args.pub else priv_path.with_suffix(priv_path.suffix + ".pub")
-    priv_path.write_text(private_pem, encoding="utf-8")
+    applied = _write_private_key(priv_path, private_pem)
     pub_path.write_text(public_pem, encoding="utf-8")
     payload = {"private_key": str(priv_path), "public_key": str(pub_path)}
-    text = f"Wrote private key {priv_path} and public key {pub_path}. Keep the private key secret."
+    text = (
+        f"Wrote private key {priv_path} (mode {applied:o}, owner-only) and "
+        f"public key {pub_path}. Keep the private key secret."
+    )
     _emit(payload, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
     return ExitCode.OK
 
@@ -4632,6 +4698,11 @@ def _bare_invocation(
 
     try:
         storage = open_storage(args.db)
+    except SchemaVersionError as exc:
+        # A newer database must never be downgraded or silently replaced. Keep
+        # the branded launcher usable, but make the incompatibility visible in
+        # the splash and direct the operator to a compatible --db path.
+        return int(run_tui(None, database_error=str(exc), err=err))
     except (StorageError, ValueError, NotImplementedError, RuntimeError) as exc:
         print(f"error: {exc}", file=err)
         return ExitCode.ERROR
@@ -4710,6 +4781,13 @@ def main(
 
     try:
         return int(args.func(args, storage, out, err))
+    except FileNotFoundError as exc:
+        # An operator-supplied input file that does not exist is an ordinary
+        # operator mistake (--attest, --key, --payload-file typed from memory),
+        # not an internal failure. Naming the path is what the traceback would
+        # have made the reader dig for. See issue #1143.
+        print(f"error: file not found: {exc.filename or exc}", file=err)
+        return ExitCode.ERROR
     except (RunNotFound, CheckpointNotFound) as exc:
         print(f"error: {exc}", file=err)
         return ExitCode.NOT_FOUND
