@@ -71,6 +71,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The retry budget now gates only claims that would open a new attempt slot,
+  and reads the ledger through the same resolution `claim` does (#1080).**
+  `continuum_intercept_action` ran its budget gate against an exact-key lookup
+  of its own, so it could refuse a state `claim` would have answered. The
+  reachable case was an interrupted attempt: the record sits STARTED because
+  the process died between claim and complete, its own slot counts against it,
+  and a re-claim at an exhausted budget was answered "raise the retry budget"
+  when the ledger's answer was UnknownSideEffect, that the outcome is unknown
+  and a reconciliation is owed. An operator pointed at the budget is pointed at
+  the wrong knob, since nothing was retried and the work may already have
+  happened. The exact-key lookup also diverged in shape from `claim`'s
+  drift-tolerant resolution, which is what let the two readers disagree at all.
+
+  `ActionLedger.resolve_claim` is now that resolution, shared by `claim` and by
+  the gate: the exact argument-hash key, then another run holding the same
+  unscoped key, then the identity-token fallback for argument drift. It reports
+  whether `claim` would record a new attempt slot, and only that case is gated.
+  Callers passing an explicit key are unaffected: the key hashes verbatim, so
+  no drift is possible and the derived key is the stored key.
 - **Webhook dedup now survives a compaction inside the re-notify window
   (#1186).** `_within_dedup_window` scanned only the live event tail for the
   `NOTIFICATION_SENT` / `NOTIFICATION_FAILED` rows the dedup state lives in,
@@ -956,7 +975,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,402 collected, ~2,361 passed, ~41 skipped on a minimal env).
+  (~2,416 collected, ~2,388 passed, ~28 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
