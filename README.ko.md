@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI 진입점
 continuum-mcp --help             # MCP 서버 진입점 ([mcp] 또는 [dev] 필요)
-pytest -q                        # 최소 환경에서 약 2,195개 수집, 약 2,030개 통과, 약 23개 스킵 (정확한 수는 환경에 따라 다름)
+pytest -q                        # 최소 환경에서 약 2,410개 수집, 약 2,361개 통과, 약 41개 스킵 (정확한 수는 환경에 따라 다름)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI가 강제하는 세 가지 게이트
 ```
@@ -228,7 +228,7 @@ CONTINUUM은 목업 단위 테스트뿐만 아니라 실제 LLM 에이전트, �
 - **서드파티 클라이언트**: Gemini CLI와 Kilo Code가 stdio JSON-RPC로 라이브 SQLite 저장소에 연결되어 다중 에이전트 공존과 인가 분리를 검증.
 - **프로토콜 준수**: `@modelcontextprotocol/inspector --cli`로 프로세스 죽음을 가로질러 엔드투엔드로 구동. 변경 도구는 기본적으로 `CONTINUUM_MCP_MUTATING_CLIENTS` 뒤에서 거부되며, 외부 클레임은 `REQUIRES_REVIEW`(`safe: false`)로 강등된다.
 - **자기 치유**: 하드킬된 서버는 시작 시 한 번의 재시도로 고립된 SQLite `-wal`/`-shm` 사이드카를 정리하여 복구한다.
-- **규모**: 약 2,195개 테스트가 수집됨(약 2,030개 통과, 나머지는 선택적 서비스 없이 스킵), Python 3.11, 3.12, 3.13에서 실행(unit, `hypothesis` 기반 속성 테스트, 동시성, 적대적). CONTINUUM-Bench는 다섯 개의 크래시 시나리오에 전용 argument-drift 시나리오를 더해 실행하며, CONTINUUM에 대해 0 중복 작업과 0 중복 사이드 이펙트를, 단순 재생에 대해 완전한 중복을 측정한다. 추가로 14 시나리오 복구 정확성 스위트(`continuum.benchmark.phase6`)가 내구성 실행 서베이의 크래시 지점을 실행 가능한 어설션으로 인코딩한다.
+- **규모**: 약 2,402개 테스트가 수집됨(약 2,361개 통과, 나머지는 선택적 서비스 없이 스킵), Python 3.11, 3.12, 3.13에서 실행(unit, `hypothesis` 기반 속성 테스트, 동시성, 적대적). CONTINUUM-Bench는 다섯 개의 크래시 시나리오에 전용 argument-drift 시나리오를 더해 실행하며, CONTINUUM에 대해 0 중복 작업과 0 중복 사이드 이펙트를, 단순 재생에 대해 완전한 중복을 측정한다. 추가로 14 시나리오 복구 정확성 스위트(`continuum.benchmark.phase6`)가 내구성 실행 서베이의 크래시 지점을 실행 가능한 어설션으로 인코딩한다.
 - **적대적 감사**: 전체 MCP 표면이 라이브 프로토콜 위에서 감사되었고, 세 가지 결함이 발견되어 수정되었다. 방법과 재현 단계는 [test.md](test.md)에 있다.
 
 ## MCP 통합
@@ -394,7 +394,7 @@ RESUME < REPAIR_AND_RESUME < REPLAN < WAIT < REQUEST_HUMAN < ROLLBACK < ABORT
 
 ### 모듈 맵, 하나의 라이브러리, 많은 표면
 
-CONTINUUM은 하나의 라이브러리(`src/continuum`, 124 모듈) plus 대규모 테스트 스위트(161 테스트 파일, 약 2,195 테스트)이다. 모든 모듈은 하나의 해시 체인 이벤트 로그에 추가하고 재생한다.
+CONTINUUM은 하나의 라이브러리(`src/continuum`, 124 모듈) plus 대규모 테스트 스위트(161 테스트 파일, 약 2,402 테스트)이다. 모든 모듈은 하나의 해시 체인 이벤트 로그에 추가하고 재생한다.
 
 | 모듈 | 역할 |
 |:--|:--|
@@ -512,7 +512,7 @@ CONTINUUM은 내구성 있는 실행, 멱등한 사이드 이펙트 추적, LLM 
 
 2026년 초, 장시간 실행되는 에이전트가 추론이 아니라 복구에서 실패하는 것을 보았다. 체크포인트는 검증해야 할 증거가 아니라 계속하기 위한 증명으로 취급되고 있었다. Temporal, LangGraph, ACRFence 2603.20625, self conditioning 2509.09677을 조사한 결과, 간극이 이식 가능한 검증 기판임을 발견했다. 그것은, 시간 T의 상태와 지금의 세계가 주어졌을 때, 계속하는 것이 여전히 안전한지를 묻는 것이다.
 
-3주 만에 나는 하나의 불변식으로부터 CONTINUUM을 구축했다. 모든 사실은 그 기원을 가진다. 결과는 `verify()`를 가진 해시 체인 로그, 안정적인 키 중복排除를 가진 원장, 청구되지 않은 효과를 차단하는 게이트와 게이트웨이, 그리고 계약을 봉인하는 복구 엔진이다. 다섯 개의 심이 동일한 로그를 Claude Code, LangGraph, LangChain, OpenAI, HTTP, OpenTelemetry에 노출한다. 실제 킬과 1380개의 테스트로 검증되었으며, 단순한 재생이 `50`으로 출력하는 곳에서 `0 중복`으로 출력한다.
+3주 만에 나는 하나의 불변식으로부터 CONTINUUM을 구축했다. 모든 사실은 그 기원을 가진다. 결과는 `verify()`를 가진 해시 체인 로그, 안정적인 키 중복排除를 가진 원장, 청구되지 않은 효과를 차단하는 게이트와 게이트웨이, 그리고 계약을 봉인하는 복구 엔진이다. 다섯 개의 심이 동일한 로그를 Claude Code, LangGraph, LangChain, OpenAI, HTTP, OpenTelemetry에 노출한다. 실제 킬과 약 2,402개의 테스트로 검증되었으며, 단순한 재생이 `50`으로 출력하는 곳에서 `0 중복`으로 출력한다.
 
 CONTINUUM은 **Anandhu P Shaji**([@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/))에 의해 생성되었고 원저자에 의해 유지된다. 오픈 소스이며 [Apache-2.0](LICENSE) 하에 있다. 커뮤니티 기여는 [CONTRIBUTING.md](CONTRIBUTING.md)를 통해 환영되며, [AUTHORS.md](AUTHORS.md)와 [graphs/contributors](https://github.com/Cyrax321/CONTINUUM/graphs/contributors)에서 크레딧을 받는다.
 

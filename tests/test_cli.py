@@ -434,6 +434,21 @@ def test_validate_with_dashboard_renders_the_phase_14_dashboard(db: str) -> None
     assert "safe to resume:" in out
 
 
+def test_validate_with_dashboard_feeds_metrics_collector(db: str) -> None:
+    from continuum.observability import VALIDATIONS_RUN, get_metrics, reset_metrics
+
+    reset_metrics()
+    try:
+        code, out, _ = run("--db", db, "validate", "run_1", "--env", "dataset=v3", "--dashboard")
+        assert code == ExitCode.OK
+        assert "CONTINUUM RECOVERY DASHBOARD" in out
+        snap = get_metrics().snapshot()
+        assert snap["counters"].get(VALIDATIONS_RUN, 0) == 1
+        assert snap["gauges"].get("validation.components", 0) >= 1
+    finally:
+        reset_metrics()
+
+
 def test_validate_without_dashboard_stays_machine_friendly(db: str) -> None:
     code, out, _ = run("--db", db, "validate", "run_1", "--env", "dataset=v3")
     assert code == ExitCode.OK
@@ -813,6 +828,71 @@ def test_attest_keygen_writes_pem_files(tmp_path: Path) -> None:
     assert priv.exists()
     assert (tmp_path / "signer.pem.pub").exists()
     assert "PRIVATE KEY" in priv.read_text()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="permission bits are a POSIX concept (#1056)")
+def test_attest_keygen_writes_the_private_key_owner_only(tmp_path: Path) -> None:
+    """The private PEM is unencrypted, so 0644 would hand it to every local user."""
+    import stat
+
+    priv = tmp_path / "signer.pem"
+    code, out, _ = run("attest-keygen", "--out", str(priv))
+    assert code == ExitCode.OK
+    assert stat.S_IMODE(priv.stat().st_mode) == 0o600
+    # The public key is meant to be shareable, so it keeps the ambient mode a
+    # plain write_text would give it, compared against a reference rather than
+    # a literal 0o644, which would break under a stricter umask.
+    reference = tmp_path / "reference.txt"
+    reference.write_text("public", encoding="utf-8")
+    assert stat.S_IMODE((tmp_path / "signer.pem.pub").stat().st_mode) == stat.S_IMODE(
+        reference.stat().st_mode
+    )
+    # The operator is told the mode they actually got, in the same line of text.
+    assert "mode 600" in out
+
+
+@pytest.mark.skipif(os.name != "posix", reason="permission bits are a POSIX concept (#1056)")
+def test_attest_keygen_narrows_a_preexisting_world_readable_key(tmp_path: Path) -> None:
+    """An overwritten 0644 key keeps its old mode under open(2), so narrow it."""
+    import stat
+
+    priv = tmp_path / "signer.pem"
+    priv.write_text("stale placeholder", encoding="utf-8")
+    os.chmod(priv, 0o644)
+    assert stat.S_IMODE(priv.stat().st_mode) == 0o644
+
+    code, out, _ = run("attest-keygen", "--out", str(priv))
+    assert code == ExitCode.OK
+    assert stat.S_IMODE(priv.stat().st_mode) == 0o600
+    assert priv.read_text() != "stale placeholder"
+
+
+def test_write_private_key_closes_the_fd_if_wrapping_fails(tmp_path: Path, monkeypatch) -> None:
+    """A failure to wrap the fd must not leak it (#1056)."""
+    import errno
+    import importlib
+
+    # `continuum.cli.main` the attribute is the re-exported entry point, not
+    # this module, so reach the module itself by name.
+    cli_main = importlib.import_module("continuum.cli.main")
+
+    wrapped: list[int] = []
+
+    def failing_fdopen(fd: int, *args: object, **kwargs: object) -> object:
+        wrapped.append(fd)
+        raise OSError(errno.EIO, "simulated failure")
+
+    monkeypatch.setattr(os, "fdopen", failing_fdopen)
+
+    with pytest.raises(OSError):
+        cli_main._write_private_key(tmp_path / "signer.pem", "unused")
+
+    assert wrapped, "os.fdopen was never reached"
+    for fd in wrapped:
+        # The guard closed the fd, so it is no longer a valid descriptor.
+        with pytest.raises(OSError) as exc:
+            os.fstat(fd)
+        assert exc.value.errno == errno.EBADF
 
 
 def test_attest_and_verify_round_trip(db: str, tmp_path: Path) -> None:
