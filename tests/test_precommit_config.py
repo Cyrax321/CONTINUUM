@@ -141,14 +141,19 @@ def test_hooks_are_scoped_to_the_directories_ci_lints() -> None:
     )
     linted = _ci_lint_directories()
     assert linted, "found no ruff invocation in the CI lint job"
-    # benchmarks/ is not ruff-clean and CI does not lint it: in scope, the hooks
-    # would fail on a tree nobody touched.
-    assert "benchmarks" not in linted
+    # demo-run/ and _bugaudit/ are not ruff-clean and CI does not lint them: in
+    # scope, the hooks would fail on a tree nobody touched.
+    assert "demo-run" not in linted
+    assert "_bugaudit" not in linted
+    assert "benchmarks" in linted
     for hook_id, pattern in patterns.items():
         for directory in linted:
             assert re.match(pattern, f"{directory}/module.py"), (
                 f"{hook_id} does not cover {directory}/, which CI lints"
             )
-        assert not re.match(pattern, "benchmarks/run.py"), (
-            f"{hook_id} covers benchmarks/, which CI does not lint"
+        assert not re.match(pattern, "demo-run/worker.py"), (
+            f"{hook_id} covers demo-run/, which CI does not lint"
+        )
+        assert not re.match(pattern, "_bugaudit/check_env.py"), (
+            f"{hook_id} covers _bugaudit/, which CI does not lint"
         )
