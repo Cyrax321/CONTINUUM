@@ -1,0 +1,41 @@
+{
+  "category": "forward-extension",
+  "contract": {
+    "audit_provenance": {
+      "policy": "v2-preview",
+      "sealed_by": "continuum 0.3"
+    },
+    "checkpoint_version": 3,
+    "contract_version": 2,
+    "created_at": "2026-09-18T05:28:51.312712Z",
+    "evidence": [
+      "external_dependency:dataset: version drift v3 -> v4"
+    ],
+    "integrity_hash": "239091cc4be4b40c067cba8cb60900cca5fec127deebfc80c37f192ab8c54eba",
+    "invalidated": [
+      "external_dependency:dataset (CONFLICTED)"
+    ],
+    "liveness": null,
+    "next_allowed_action": "revalidate_dependency:dataset",
+    "post_checkpoint_observations": [],
+    "reason": "dataset changed after the last checkpoint; repair before resume",
+    "recovery_status": "requires_repair",
+    "required_actions": [
+      "revalidate_dependency:dataset"
+    ],
+    "run_id": "run_compat_1",
+    "triggering_risks": [],
+    "verified": [
+      "goal",
+      "plan:step-2"
+    ]
+  },
+  "contract_version": 2,
+  "digest_input": null,
+  "expected": {
+    "reason": "unsupported contract version 2",
+    "verified": false
+  },
+  "name": "forward-extension",
+  "note": "A future version 2 carries a hash-covered field this build does not know. It must fail closed rather than guess what the digest covers."
+}

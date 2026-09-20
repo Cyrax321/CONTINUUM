@@ -1,0 +1,35 @@
+{
+  "category": "legacy",
+  "contract": {
+    "checkpoint_version": 3,
+    "contract_version": 0,
+    "created_at": "2026-09-18T05:28:51.322874Z",
+    "evidence": [],
+    "integrity_hash": "97c50be47c478e6609ee27b013c31fe9e2feec96e9f96f48b304694bc977aaa5",
+    "invalidated": [
+      "external_dependency:dataset (CONFLICTED)"
+    ],
+    "liveness": null,
+    "next_allowed_action": "revalidate_dependency:dataset",
+    "post_checkpoint_observations": [],
+    "reason": "",
+    "recovery_status": "requires_repair",
+    "required_actions": [
+      "revalidate_dependency:dataset"
+    ],
+    "run_id": "run_compat_1",
+    "triggering_risks": [],
+    "verified": [
+      "goal",
+      "plan:step-2"
+    ]
+  },
+  "contract_version": 0,
+  "digest_input": "{\"checkpoint_version\":3,\"invalidated\":[\"external_dependency:dataset (CONFLICTED)\"],\"liveness\":null,\"next_allowed_action\":\"revalidate_dependency:dataset\",\"post_checkpoint_observations\":[],\"recovery_status\":\"requires_repair\",\"required_actions\":[\"revalidate_dependency:dataset\"],\"run_id\":\"run_compat_1\",\"triggering_risks\":[],\"verified\":[\"goal\",\"plan:step-2\"]}",
+  "expected": {
+    "reason": "the version-0 digest excludes evidence and reason",
+    "verified": true
+  },
+  "name": "legacy-no-evidence",
+  "note": "Sealed before evidence and reason existed. Its digest omits them, so it still verifies under version 0."
+}
