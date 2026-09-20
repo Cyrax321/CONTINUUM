@@ -55,9 +55,11 @@ from continuum.models import (
     SemanticState,
     StateStatus,
 )
+from continuum.plugins import Registry, ValidationRule
 from continuum.recovery.contract import build_contract
 from continuum.recovery.observations import collect_observations
 from continuum.recovery.planner import RepairPlan, plan_repairs
+from continuum.recovery.rules import active_rules, apply_rule_findings, run_validation_rules
 from continuum.recovery.summary import build_informed_retry
 from continuum.state.validator import StateValidator, ValidationOutcome, check_admissibility
 from continuum.storage.base import Storage
@@ -175,7 +177,8 @@ class RecoveryDecision:
             label = entry.component.value.replace("_", " ")
             identifier = f" {entry.component_id}" if entry.component_id else ""
             detail = f" - {entry.detail}" if entry.detail else ""
-            lines.append(f"  {mark} {label}{identifier}{detail}")
+            rule = f" [rule:{entry.rule}]" if entry.rule else ""
+            lines.append(f"  {mark} {label}{identifier}{detail}{rule}")
 
         if self.uncertain_actions:
             lines.append("")
@@ -213,11 +216,35 @@ class RecoveryEngine:
         *,
         validator: StateValidator | None = None,
         strict_unknown: bool = True,
+        validation_rules: Iterable[ValidationRule] | None = None,
+        registry: Registry | None = None,
     ) -> None:
+        """Build an engine.
+
+        ``validation_rules`` are domain staleness rules (issue #761) run after
+        built-in validation, merged most-cautious-wins. A rule may raise a
+        component's status, never lower it. None by default: an engine with no
+        rules behaves exactly as before, and nothing is auto-discovered.
+
+        ``registry`` is the registry-backed spelling of the same thing: every
+        service in it satisfying the :class:`~continuum.plugins.ValidationRule`
+        protocol is treated as a rule. Rules from both sources add together.
+        Registration stays explicit either way; CONTINUUM never loads a rule
+        from a path or an entry point.
+        """
         self.storage = storage
         self.validator = validator or StateValidator(strict_unknown=strict_unknown)
         self.strict_unknown = strict_unknown
         self._manager = CheckpointManager(storage)
+        self._validation_rules: tuple[object, ...] = tuple(validation_rules or ())
+        if registry is not None:
+            # A seam is a Protocol: structural selection, then narrowing.
+            registered = tuple(
+                service
+                for service in registry.all_matching(ValidationRule)
+                if isinstance(service, ValidationRule)
+            )
+            self._validation_rules = (*self._validation_rules, *registered)
 
     def assess(
         self,
@@ -228,6 +255,7 @@ class RecoveryEngine:
         replay: bool = True,
         scope: Iterable[str] | None = None,
         source_graph: SourceDependencyGraph | None = None,
+        validation_rules: Iterable[ValidationRule] | None = None,
     ) -> RecoveryDecision:
         """Decide how ``run_id`` may resume, without changing anything.
 
@@ -245,6 +273,17 @@ class RecoveryEngine:
         Passing ``source_graph`` (the source-level graph from
         :mod:`continuum.analysis`) records on the returned decision every file
         whose imports belong to a scoped dependency.
+
+        ``validation_rules`` are domain staleness rules (issue #761) run over
+        the projected state in addition to any the engine was constructed with.
+        Rules are read-only: they receive the state and the current environment
+        and nothing else, so they can neither mutate storage, emit events, nor
+        change this repair plan. Their findings are namespaced by rule name and
+        sealed into the contract. A rule can only add caution; a crashing,
+        duplicate-named or malformed rule reports a ``validation_rule`` entry
+        asking for review instead of being ignored. Rules are not filtered by
+        ``scope``: a domain rule that knows a decision is unauthorized is not
+        made wrong by the caller asking about one dependency.
         """
         # Degrade, not raise (issue #383): the engine's whole job is to answer
         # "where does this run stand", and a poisoned log is precisely the run
@@ -381,6 +420,21 @@ class RecoveryEngine:
                 report=new_report,
                 environment_diff=validation.environment_diff,
             )
+
+        # Domain validation rules (issue #761). Built-in validation asks whether
+        # the state still matches the environment; a domain rule knows
+        # staleness that question cannot reach. Rules run last, over the state
+        # built-in validation already revised, and their findings merge by
+        # maximum caution so a rule can escalate but never launder. With no
+        # rules configured this block returns the input untouched, which is
+        # what keeps the default path byte-identical.
+        rules = active_rules(self._validation_rules, validation_rules)
+        if rules:
+            rule_findings = run_validation_rules(rules, validation.state, current_environment)
+            validation = apply_rule_findings(
+                validation, rule_findings, strict_unknown=self.validator.strict_unknown
+            )
+
         plan = plan_repairs(
             validation.report.statuses,
             uncertain_actions=uncertain,

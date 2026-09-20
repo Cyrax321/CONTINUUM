@@ -23,6 +23,7 @@ from typing import Any
 
 from continuum.models import (
     Component,
+    ComponentValidationEntry,
     RecoveryContract,
     RecoverySafety,
     StateStatus,
@@ -45,7 +46,38 @@ def _identifier(component: Component, component_id: str | None) -> str:
     return f"{component.value}:{component_id}" if component_id else component.value
 
 
-def _hashable_payload(contract: RecoveryContract) -> dict[str, Any]:
+def _namespaced(entry: ComponentValidationEntry) -> str:
+    """The component identifier, with the rule that reported it (issue #761).
+
+    A rule's findings are namespaced by its identifier so an operator reading
+    ``invalidated`` or ``evidence`` can tell a built-in finding from a domain
+    one, and can see *which* domain rule spoke. Built-in findings carry no
+    suffix and read exactly as before.
+    """
+    ident = _identifier(entry.component, entry.component_id)
+    if not entry.rule:
+        return ident
+    return f"{ident} [rule:{entry.rule}]"
+
+
+#: Additive fields a contract sealed before they existed carries no key for.
+#:
+#: ``created_at`` is excluded separately: it is wall-clock metadata, not terms.
+#: A stored contract from before a group existed verifies only when its digest
+#: is recomputed without that group's keys, so each is tried; the alternative
+#: is a contract that stops verifying on upgrade. Rule findings (#761) reach
+#: the contract only as text inside ``verified``/``invalidated``/``evidence``,
+#: never as their own key, so they add no group here: a contract with no rule
+#: findings seals byte-identically to one assessed before #761.
+_ADDITIVE_FIELDS: tuple[frozenset[str], ...] = (
+    frozenset(),
+    frozenset({"evidence", "reason"}),
+)
+
+
+def _hashable_payload(
+    contract: RecoveryContract, *, excluded: frozenset[str] = frozenset()
+) -> dict[str, Any]:
     """Payload the integrity hash covers.
 
     ``created_at`` is wall-clock metadata, not terms. ``liveness`` carries one
@@ -53,8 +85,11 @@ def _hashable_payload(contract: RecoveryContract) -> dict[str, Any]:
     at assessment time), so two assessments of an unchanged run would seal
     different hashes without this: the age is display, while the verdict fields
     (``breached``, ``threshold_seconds``, ``phase``, ``breaches``) stay covered.
+
+    ``excluded`` drops the additive fields of a contract sealed before they
+    existed, so an upgrade does not invalidate a stored contract.
     """
-    payload = contract.model_dump(mode="json", exclude={"integrity_hash", "created_at"})
+    payload = contract.model_dump(mode="json", exclude={"integrity_hash", "created_at", *excluded})
     liveness = payload.get("liveness")
     if isinstance(liveness, dict):
         payload["liveness"] = {
@@ -71,18 +106,16 @@ def seal_contract(contract: RecoveryContract) -> RecoveryContract:
 def verify_contract(contract: RecoveryContract) -> bool:
     """Whether a contract still matches the terms it was sealed with.
 
-    Two digests are accepted so contracts sealed *before* ``evidence``/``reason``
-    existed still verify: their stored hash was computed over the terms without
-    those fields, so we also try the legacy payload that excludes them.
+    Several digests are accepted so a contract sealed before an additive field
+    existed still verifies: its stored hash was computed over terms that lacked
+    that field's key, so the digest is recomputed without each group of them.
     """
     if contract.integrity_hash is None:
         return False
-    if contract.integrity_hash == stable_hash(_hashable_payload(contract)):
-        return True
-    legacy = contract.model_dump(
-        mode="json", exclude={"integrity_hash", "created_at", "evidence", "reason"}
+    return any(
+        contract.integrity_hash == stable_hash(_hashable_payload(contract, excluded=group))
+        for group in _ADDITIVE_FIELDS
     )
-    return contract.integrity_hash == stable_hash(legacy)
 
 
 def build_contract(
@@ -128,7 +161,7 @@ def build_contract(
         state.status is StateStatus.INVALID and state.unprojectable_at_sequence is not None
     )
     for entry in validation.report.statuses:
-        name = _identifier(entry.component, entry.component_id)
+        name = _namespaced(entry)
         if entry.status is StateStatus.VALID:
             if projection_broken:
                 name = f"{name} (through sequence {state.source_sequence})"
@@ -206,11 +239,7 @@ def _validation_evidence(report: StateValidationResult) -> list[str]:
     These are exactly the per-component details the validator already produced;
     nothing here is fabricated. Sorted so the contract stays deterministic.
     """
-    return sorted(
-        f"{e.component.value}{f':{e.component_id}' if e.component_id else ''}: {e.detail}"
-        for e in report.statuses
-        if e.detail
-    )
+    return sorted(f"{_namespaced(e)}: {e.detail}" for e in report.statuses if e.detail)
 
 
 def render_contract(contract: RecoveryContract) -> str:
