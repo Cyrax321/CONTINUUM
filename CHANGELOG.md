@@ -71,6 +71,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The Codex embed guide no longer offers a config key that no code reads
+  (#1161).** `docs/guides/embed-codex.md` told an operator who cannot route a
+  file write through Bash that the durability alternative was `continuum
+  observe` via the adapter's `checkpoint_node`, or via `monitored_commands` in
+  `.continuum/config`. The second half was invented: no loader exists for a
+  `.continuum/config` file, and `monitored_commands` is defined and consulted
+  nowhere in `src/`, `tests/`, or the other docs. It was written into the guide
+  by the embeddability sprint commit (9e655be) and never wired. The guide
+  now offers only the `checkpoint_node` route, which is real
+  (`src/continuum/adapters/langgraph.py`, `langchain.py`) and does not depend
+  on Codex traversing the tool call at all, and it names the two source files
+  so the claim is checkable. This is the fallback an operator reaches for when
+  the shell-routing workaround above it does not apply, which is exactly the
+  `apply_patch` case the surrounding paragraph is about, so leaving the key in
+  place sent the reader to a dead end at the moment the guide is most needed.
+  Prose-only; no runtime or behaviour change.
 - **Webhook dedup now survives a compaction inside the re-notify window
   (#1186).** `_within_dedup_window` scanned only the live event tail for the
   `NOTIFICATION_SENT` / `NOTIFICATION_FAILED` rows the dedup state lives in,
@@ -956,7 +972,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,402 collected, ~2,361 passed, ~41 skipped on a minimal env).
+  (~2,406 collected, ~2,379 passed, ~27 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
