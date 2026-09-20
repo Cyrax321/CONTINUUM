@@ -765,32 +765,34 @@ _NON_PROJECTING = frozenset(
         EventType.LIVENESS_RECOVERED,
         # risk (issue #303): real-time risk signal, never state
         EventType.RISK_OBSERVED,
-        # lineage (issue #259): restore/merge markers recording that an edit
-        # happened, sibling to RUN_FORKED above. The fold reads their effect
-        # off the log boundary itself, not out of these events.
+        # restore/merge lineage (issue #1169): markers that a run's history was
+        # spliced, read by the CLI lineage views; the splice itself replays
+        # events that carry the state change, the marker carries none.
         EventType.RUN_RESTORED,
         EventType.RUN_MERGED,
-        # human-in-the-loop: a confirmation receipt, never state
+        # review (issue #1169): recorded by the HITL confirm verb and read by
+        # the engine as a gate fact; confirming is an audit trail entry, not a
+        # state mutation.
         EventType.REVIEW_CONFIRMED,
-        # agent cognition (issue #235): the briefing surface reads this
-        # straight off the log; the projection does not fold it into state
-        EventType.REASONING_SUMMARY,
-        # perception and planning (security extension): the perception/branch
-        # ledger is consulted by its own readers, not by the state fold
-        EventType.PERCEPTION_OBSERVED,
-        EventType.BRANCH_RESOLVED,
-        # authority lifecycle (issue #289/#555): consumption and reconciliation
-        # are audit facts -- the enforcement reads them from the log
+        # authority (issue #1169): consumed/reconciled authorities are read by
+        # the gate and the probe path; the verdict is a fact about the world,
+        # not a field of the run's state.
         EventType.AUTHORITY_CONSUMED,
         EventType.AUTHORITY_RECONCILED,
-        # memory governance (issue #304, #567): tombstone an operator finds
-        # by polling the log, never a projected field
-        EventType.MEMORY_TOMBSTONED,
-        # delivery receipts: best-effort and never gates a verdict. FAILED is
-        # the dead-letter row found by polling the log when the bell did not
-        # ring (see the enum's own note).
+        # perception/branch (issue #1169): the trust gate's ledger of what was
+        # observed and how a branch resolved.
+        EventType.PERCEPTION_OBSERVED,
+        EventType.BRANCH_RESOLVED,
+        # briefing (issue #1169): the summary surface reads these back; they
+        # describe reasoning that happened, they do not alter projected state.
+        EventType.REASONING_SUMMARY,
+        # notifications (issue #1169): delivery receipts, used by the webhook
+        # observer. Success or failure of a side channel is not state.
         EventType.NOTIFICATION_SENT,
         EventType.NOTIFICATION_FAILED,
+        # memory (issue #1169): a tombstone records that a memory entry was
+        # retired; it is a deletion record, not a projection input.
+        EventType.MEMORY_TOMBSTONED,
     }
 )
 
