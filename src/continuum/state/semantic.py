@@ -791,6 +791,14 @@ _NON_PROJECTING = frozenset(
         # ring (see the enum's own note).
         EventType.NOTIFICATION_SENT,
         EventType.NOTIFICATION_FAILED,
+        # subagent spanning: delegation-chain trace the provenance and adapter
+        # surfaces read back; a span records what happened, not run state.
+        EventType.SUBAGENT_SPAWNED,
+        EventType.SUBAGENT_COMPLETED,
+        EventType.SUBAGENT_FAILED,
+        # context compaction: a marker the validator reads to report what a
+        # compaction kept; the fold reads its effect off the log boundary.
+        EventType.PRECOMPACT_HOOK,
     }
 )
 

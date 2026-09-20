@@ -44,7 +44,9 @@ __all__ = [
 #: many short tokens sits lower. Used only for budgeting, never for billing.
 _CHARS_PER_TOKEN = 4
 
-_TERMINAL = frozenset({StateStatus.INVALID, StateStatus.STALE, StateStatus.CONFLICTED})
+_TERMINAL = frozenset(
+    {StateStatus.INVALID, StateStatus.PARTIAL, StateStatus.STALE, StateStatus.CONFLICTED}
+)
 
 #: Sections that survive budget truncation unconditionally, by exact title. The
 #: stale state must reach a resuming agent even if nothing else does.

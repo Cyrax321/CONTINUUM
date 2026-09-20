@@ -262,3 +262,53 @@ class GenericAgentAdapter(AgentAdapter):
             expected_model=expected_model,
             replay=replay,
         )
+
+    def spawn_subagent(
+        self,
+        parent_run_id: str,
+        subagent_run_id: str,
+        task_description: str,
+    ) -> None:
+        """Record a SUBAGENT_SPAWNED event linking parent to subagent run."""
+        self.storage.append_event(
+            parent_run_id,
+            EventType.SUBAGENT_SPAWNED,
+            {
+                "subagent_run_id": subagent_run_id,
+                "task_description": task_description,
+            },
+        )
+
+    def complete_subagent(
+        self,
+        parent_run_id: str,
+        subagent_run_id: str,
+        *,
+        success: bool = True,
+        result_summary: str | None = None,
+    ) -> None:
+        """Record SUBAGENT_COMPLETED or SUBAGENT_FAILED for a subagent run."""
+        event_type = (
+            EventType.SUBAGENT_COMPLETED if success else EventType.SUBAGENT_FAILED
+        )
+        payload: dict[str, Any] = {"subagent_run_id": subagent_run_id}
+        if result_summary:
+            payload["result_summary"] = result_summary
+        self.storage.append_event(parent_run_id, event_type, payload)
+
+    def compact_context(
+        self,
+        run_id: str,
+        *,
+        retained_events: int,
+        compacted_events: int,
+        summary: str | None = None,
+    ) -> None:
+        """Record a PRECOMPACT_HOOK event marking context compaction."""
+        payload: dict[str, Any] = {
+            "retained_events": retained_events,
+            "compacted_events": compacted_events,
+        }
+        if summary:
+            payload["summary"] = summary
+        self.storage.append_event(run_id, EventType.PRECOMPACT_HOOK, payload)

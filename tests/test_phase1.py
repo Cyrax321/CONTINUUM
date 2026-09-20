@@ -383,6 +383,7 @@ def test_source_vocabularies_remain_intact() -> None:
     }
     assert {s.value for s in StateStatus} == {
         "valid",
+        "partial",
         "stale",
         "conflicted",
         "unknown",

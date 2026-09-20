@@ -387,7 +387,6 @@ class RecoveryEngine:
             strict_unknown=self.validator.strict_unknown,
             unprojectable=unprojectable,
         )
-        # Liveness: silence as WAIT, never auto-rollback (issue #302)
         liveness_advisory = None
         liveness_breaches = 0
         try:

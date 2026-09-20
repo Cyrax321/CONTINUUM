@@ -808,6 +808,21 @@ def cmd_provenance(args: argparse.Namespace, storage: Storage, out: Any, err: An
         lines.append(
             f"  {node.sequence:>3}  {node.type.value:<18} {node.event_id[:8]}  origin={node.origin.value}  parents={parents_str}  children={children_str}  {node.label}"
         )
+    for span in graph.subagent_spans:
+        lines.append(
+            f"  subagent {span.get('subagent_run_id', '')[:8]}  status={span.get('status', 'active')}"
+        )
+    if graph.compactions:
+        compacted_total = 0
+        for compaction in graph.compactions:
+            try:
+                compacted_total += int(compaction.get("compacted_events") or 0)
+            except (TypeError, ValueError):
+                continue
+        lines.append(
+            f"  context compacted: {len(graph.compactions)} compaction(s), "
+            f"{compacted_total} pre-compaction event(s) summarised (evidence kept as partial)"
+        )
     if hidden:
         lines.append(
             f"  ... {hidden} of {len(ordered)} nodes hidden by paging; "

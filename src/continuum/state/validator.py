@@ -61,9 +61,14 @@ __all__ = [
 #: to resume in these cases via the repair plan, but the validator's own
 #: `safe_to_resume` disagreed with it, so anything reading the validation
 #: report directly got the wrong answer.
+#:
+#: PARTIAL belongs here too: a context-compacted component retains what the
+#: compaction summary kept but its full evidence trail is gone, so resuming as
+#: if the component were fully verified would be guessing in its own favour.
 _UNUSABLE = frozenset(
     {
         StateStatus.INVALID,
+        StateStatus.PARTIAL,
         StateStatus.STALE,
         StateStatus.CONFLICTED,
         StateStatus.EXPIRED,
@@ -290,6 +295,9 @@ class StateValidator:
             state = self._propagate(state, broken, entries)
             if events is not None:
                 state = self._propagate_caused_by(state, events, entries)
+            state = self._apply_compaction_status(
+                state, list(events) if events is not None else None, entries
+            )
             self._check_goal(state, entries)
             self._check_progress(state, entries)
             self._check_plan(state, entries)
@@ -410,6 +418,90 @@ class StateValidator:
             )
 
         return state.model_copy(update={"external_dependencies": updated})
+
+    @staticmethod
+    def _latest_compaction(events: list[Event] | None) -> Event | None:
+        """Return the most recent PRECOMPACT_HOOK event, if any."""
+        if not events:
+            return None
+        latest: Event | None = None
+        for event in events:
+            # Local import avoids a module cycle: continuum.events re-exports
+            # model helpers, while validator is imported from state paths.
+            from continuum.events import EventType
+
+            if event.type is EventType.PRECOMPACT_HOOK:
+                latest = event
+        return latest
+
+    @staticmethod
+    def _apply_compaction_status(
+        state: SemanticState,
+        events: list[Event] | None,
+        entries: list[ComponentValidationEntry],
+    ) -> SemanticState:
+        """Mark evidence folded before a compaction as PARTIAL.
+
+        A PRECOMPACT_HOOK records how many events the compaction kept versus
+        compacted away. Evidence whose source sequence predates the latest
+        compaction still represents what the summary retained, but its full
+        trail is gone, so it cannot be fully verified. Mark those components
+        PARTIAL rather than letting them read as authoritative.
+
+        Components already unusable keep their existing, more severe status:
+        PARTIAL downgrades VALID components only.
+        """
+        latest = StateValidator._latest_compaction(events)
+        if latest is None:
+            return state
+        payload = latest.payload if isinstance(latest.payload, dict) else {}
+        retained = payload.get("retained_events")
+        compacted = payload.get("compacted_events")
+        try:
+            retained = int(retained) if retained is not None else 0
+        except (TypeError, ValueError):
+            retained = 0
+        try:
+            compacted = int(compacted) if compacted is not None else 0
+        except (TypeError, ValueError):
+            compacted = 0
+        if retained <= 0 or compacted <= 0:
+            return state
+
+        detail = (
+            f"context compacted at sequence {latest.sequence}: "
+            f"{compacted} event(s) summarised, {retained} retained"
+        )
+        summary = payload.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            detail = f"{detail}; summary: {summary.strip()[:160]}"
+
+        evidence = []
+        changed = False
+        for item in state.evidence:
+            provenance = getattr(item, "provenance", None)
+            source_sequence = getattr(provenance, "source_sequence", None)
+            if (
+                item.status is StateStatus.VALID
+                and isinstance(source_sequence, int)
+                and source_sequence <= int(latest.sequence)
+                and source_sequence >= int(latest.sequence) - compacted
+            ):
+                evidence.append(item.model_copy(update={"status": StateStatus.PARTIAL}))
+                entries.append(
+                    ComponentValidationEntry(
+                        component=Component.EVIDENCE,
+                        component_id=item.evidence_id,
+                        status=StateStatus.PARTIAL,
+                        detail=detail,
+                    )
+                )
+                changed = True
+            else:
+                evidence.append(item)
+        if changed:
+            return state.model_copy(update={"evidence": evidence})
+        return state
 
     # -- propagation ------------------------------------------------------ #
 
