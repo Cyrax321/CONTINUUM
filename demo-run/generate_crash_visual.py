@@ -50,20 +50,26 @@ if SRC.is_dir():
 
 
 def run_worker(dataset: str) -> subprocess.CompletedProcess[str]:
+    # check=False: the first run deliberately os._exit(9)s at doc 399, and the
+    # transcript records that returncode rather than treating it as failure.
     return subprocess.run(
         [sys.executable, str(WORKER), str(DB), str(EFFECTS), dataset],
         env=ENV,
         capture_output=True,
         text=True,
+        check=False,
     )
 
 
 def cli(*argv: str) -> subprocess.CompletedProcess[str]:
+    # check=False: the dataset=v4 resume is the refusal path and exits non-zero
+    # by design; build_transcript reads .returncode to label it.
     return subprocess.run(
         [sys.executable, "-m", "continuum.cli", "--db", str(DB), *argv],
         env=ENV,
         capture_output=True,
         text=True,
+        check=False,
     )
 
 
@@ -108,6 +114,7 @@ def verdict_text() -> str:
         env=ENV,
         capture_output=True,
         text=True,
+        check=False,
     )
     return (result.stdout or result.stderr).strip()
 
@@ -118,6 +125,7 @@ def reconcile_text() -> str:
         env=ENV,
         capture_output=True,
         text=True,
+        check=False,
     )
     return (result.stdout or result.stderr).strip()
 
