@@ -17,6 +17,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+__all__ = [
+    "BenchmarkReport",
+    "RecoveryOutcome",
+    "ScenarioResult",
+]
+
 
 class RecoveryOutcome(StrEnum):
     """How a scenario's recovery behaved.

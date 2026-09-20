@@ -508,7 +508,14 @@ class SQLiteStorage(Storage):
         needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
         if needs_fresh_anchor:
             try:
-                CheckpointManager(self).checkpoint(run_id, force_version=True)
+                manager = CheckpointManager(self)
+                # The anchor must project over full history: after an earlier
+                # compaction the live tail begins at the anchor markers with
+                # no RUN_STARTED, so a live-only fold would conclude the run
+                # never started (issue #648). Per-turn checkpoint evaluation
+                # deliberately keeps the cheaper live-tail read.
+                state = manager.project_current(run_id, full_history=True)
+                manager.checkpoint(run_id, state=state, force_version=True)
             except Exception as exc:
                 raise ValueError(f"run {run_id!r} could not be anchored: {exc}") from exc
             lv = self.latest_version(run_id)
@@ -516,13 +523,11 @@ class SQLiteStorage(Storage):
         if storage_version is None:
             raise ValueError(f"run {run_id!r} could not be anchored: no projectable state")
         # The anchor marker is appended at the head of the log in the
-        # transaction below, so its sequence is the current head + 1.
+        # transaction below, so its sequence is the current head + 1. The
+        # guard lives on the shared base so the Postgres backend cannot drop
+        # it again (issue #1078).
         anchor_sequence = self.last_sequence(run_id) + 1
-        if through_sequence is not None and through_sequence >= anchor_sequence:
-            raise ValueError(
-                f"through_sequence {through_sequence} would archive the anchor marker"
-                f" at sequence {anchor_sequence}: the live log must retain its anchor"
-            )
+        self._validate_compaction_bound(through_sequence, anchor_sequence)
         through = (
             through_sequence
             if through_sequence is not None
