@@ -965,6 +965,206 @@ def _head_hash(db: str) -> str:
     return str(row[0])
 
 
+# --- portable lineage tokens (issue #760) ------------------------------------ #
+
+
+def _issuer_keypair(tmp_path: Path) -> tuple[Path, Path]:
+    from continuum.security.attestation import generate_keypair
+
+    priv_pem, pub_pem = generate_keypair()
+    priv = tmp_path / "issuer.pem"
+    pub = tmp_path / "issuer.pem.pub"
+    priv.write_text(priv_pem, encoding="utf-8")
+    pub.write_text(pub_pem, encoding="utf-8")
+    return priv, pub
+
+
+def test_lineage_issue_and_verify_round_trip(db: str, tmp_path: Path) -> None:
+    priv, pub = _issuer_keypair(tmp_path)
+
+    token_file = tmp_path / "run_1.lineage.json"
+    code, out, _ = run(
+        "--db",
+        db,
+        "lineage-issue",
+        "run_1",
+        "--key",
+        str(priv),
+        "--signer",
+        "ci-bot",
+        "--purpose",
+        "delegated code review",
+        "--audience",
+        "reviewer-svc",
+        "--out",
+        str(token_file),
+    )
+    assert code == ExitCode.OK, out
+    assert token_file.exists()
+    doc = json.loads(token_file.read_text(encoding="utf-8"))
+    assert doc["run_id"] == "run_1"
+    assert doc["purpose"] == "delegated code review"
+    assert doc["audience"] == "reviewer-svc"
+    assert doc["version"] == "lineage-v1"
+
+    code, out, _ = run(
+        "--db",
+        db,
+        "lineage-verify",
+        "run_1",
+        "--token",
+        str(token_file),
+        "--audience",
+        "reviewer-svc",
+        "--issuer-key",
+        str(pub),
+    )
+    assert code == ExitCode.OK, out
+    assert "VALID" in out
+    # The token carries no event history and no secrets, only bounded fields.
+    assert "goal" not in json.dumps(doc)
+
+
+def test_lineage_verify_rejects_the_wrong_audience(db: str, tmp_path: Path) -> None:
+    priv, pub = _issuer_keypair(tmp_path)
+    token_file = tmp_path / "run_1.lineage.json"
+    run(
+        "--db",
+        db,
+        "lineage-issue",
+        "run_1",
+        "--key",
+        str(priv),
+        "--purpose",
+        "delegated code review",
+        "--audience",
+        "reviewer-svc",
+        "--out",
+        str(token_file),
+    )
+
+    code, out, _ = run(
+        "--db",
+        db,
+        "lineage-verify",
+        "run_1",
+        "--token",
+        str(token_file),
+        "--audience",
+        "deploy-svc",
+        "--issuer-key",
+        str(pub),
+    )
+    assert code == ExitCode.CORRUPTED, out
+    assert "WRONG_AUDIENCE" in out
+    assert "audience mismatch" in out
+
+
+def test_lineage_verify_detects_a_chain_that_moved_after_issuance(db: str, tmp_path: Path) -> None:
+    """A token is evidence about a point in history, not a standing credential."""
+    priv, pub = _issuer_keypair(tmp_path)
+    token_file = tmp_path / "run_1.lineage.json"
+    run(
+        "--db",
+        db,
+        "lineage-issue",
+        "run_1",
+        "--key",
+        str(priv),
+        "--purpose",
+        "delegated code review",
+        "--out",
+        str(token_file),
+    )
+    with SQLiteStorage(db) as store:
+        store.append_event("run_1", EventType.WORK_COMPLETED, {"doc": 999})
+
+    code, out, _ = run(
+        "--db",
+        db,
+        "lineage-verify",
+        "run_1",
+        "--token",
+        str(token_file),
+        "--issuer-key",
+        str(pub),
+    )
+    assert code == ExitCode.CORRUPTED, out
+    # The contract the verifier re-derived no longer carries the sealed terms the
+    # token was issued over.
+    assert "BROKEN_REFERENCE" in out
+    assert "contract_integrity_hash" in out
+
+
+def test_lineage_verify_needs_no_store_at_all(db: str, tmp_path: Path) -> None:
+    """A downstream verifier with no access to the source store still checks the token."""
+    priv, pub = _issuer_keypair(tmp_path)
+    token_file = tmp_path / "run_1.lineage.json"
+    run(
+        "--db",
+        db,
+        "lineage-issue",
+        "run_1",
+        "--key",
+        str(priv),
+        "--purpose",
+        "delegated code review",
+        "--audience",
+        "reviewer-svc",
+        "--out",
+        str(token_file),
+    )
+
+    # No run_id, and a --db path that must not be created by a read-only check.
+    nowhere = tmp_path / "nowhere.db"
+    code, out, _ = run(
+        "--db",
+        str(nowhere),
+        "lineage-verify",
+        "--token",
+        str(token_file),
+        "--audience",
+        "reviewer-svc",
+        "--trusted-keys",
+        str(pub),
+    )
+    assert code == ExitCode.OK, out
+    assert "VALID" in out
+    assert not nowhere.exists()
+
+
+def test_lineage_issue_reports_a_missing_run(db: str, tmp_path: Path) -> None:
+    priv, _ = _issuer_keypair(tmp_path)
+    code, out, err = run(
+        "--db",
+        db,
+        "lineage-issue",
+        "ghost_run",
+        "--key",
+        str(priv),
+        "--purpose",
+        "delegated code review",
+    )
+    assert code == ExitCode.NOT_FOUND, err
+    assert "ghost_run" in err
+
+
+def test_lineage_verify_reports_a_missing_token(db: str, tmp_path: Path) -> None:
+    code, out, err = run(
+        "--db", db, "lineage-verify", "run_1", "--token", str(tmp_path / "nope.json")
+    )
+    assert code == ExitCode.NOT_FOUND, err
+    assert "cannot read token" in err
+
+
+def test_lineage_issue_requires_a_purpose(db: str, tmp_path: Path) -> None:
+    """A token with no purpose is an unbounded credential, so the flag is required."""
+    priv, _ = _issuer_keypair(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        run("--db", db, "lineage-issue", "run_1", "--key", str(priv))
+    assert exc.value.code == 2
+
+
 # --- provenance view (issue #148) ------------------------------------------- #
 
 

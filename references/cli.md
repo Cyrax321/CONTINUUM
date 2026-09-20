@@ -49,6 +49,10 @@ continuum tui [--refresh N]                      # full-screen terminal dashboar
 continuum attest-keygen                          # generate Ed25519 signer key pair
 continuum attest <run_id>                        # sign run event-chain attestation
 continuum attest-verify <run_id> --attest <file> # verify signed attestation against live chain
+continuum lineage-issue <run_id> --key <file>    # issue portable lineage token for delegated work
+      --purpose <text> [--audience <svc>] [--ttl N] [--out <file>]
+continuum lineage-verify [<run_id>] --token <file> # verify lineage token; exit 0 only when VALID
+      [--audience <svc>] [--issuer-key <file> | --trusted-keys <file>]
 continuum benchmark [--total N]                  # run CONTINUUM-Bench harness
 ```
 
