@@ -71,6 +71,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Postgres compaction no longer archives and deletes its own anchor marker
+  (#1078).** `SQLiteStorage.compact_run` refused an explicit `through_sequence`
+  at or above the anchor marker's sequence (#705), but `PostgresStorage.
+  compact_run` computed `through` straight from the argument and ran the
+  archive and delete over it, so a direct caller of the storage API could
+  remove the marker and every live row after it. The next append then minted a
+  fresh genesis with `prev_hash = None` and the live chain forked away from the
+  archive, defeating the single-transaction marker-plus-move that both engines
+  implement. The SQLite and Postgres engines now resolve the bound through one
+  shared helper, `continuum.storage.compaction.
+  resolve_compaction_bound`, so the anchor guard and the other safety checks
+  cannot drift apart between backends again. The CLI still calls
+  `compact_run` with no bound, so only a direct API caller could reach this;
+  that remains a real hole for a library whose storage is a public interface.
+  Behaviour on SQLite is unchanged, and the Postgres suite gains the anchor
+  rejection test the SQLite suite already had.
 - **Webhook dedup now survives a compaction inside the re-notify window
   (#1186).** `_within_dedup_window` scanned only the live event tail for the
   `NOTIFICATION_SENT` / `NOTIFICATION_FAILED` rows the dedup state lives in,
@@ -956,7 +972,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,402 collected, ~2,361 passed, ~41 skipped on a minimal env).
+  (~2,407 collected, ~2,379 passed, ~28 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
