@@ -223,6 +223,72 @@ def test_compact_archives_prefix_and_verify_stays_ok(storage: PostgresStorage) -
     assert storage.verify_events("pg_k").ok is True
 
 
+def test_pg_compact_rejects_through_sequence_that_would_eat_the_anchor(
+    storage: PostgresStorage,
+) -> None:
+    """Issue #1078: the Postgres backend kept every other safety check the
+    SQLite compaction makes but dropped this one. A through_sequence at or
+    above the anchor marker's sequence would archive and delete the marker and
+    every live row after it, so the next append mints a fresh genesis and forks
+    the hash chain away from the archive."""
+    make_run(storage, "pg_kg", "anchor guard")
+    for i in range(3):
+        storage.append_event("pg_kg", EventType.TASK_UPDATED, {"i": i})
+    pre_live = len(storage.read_events("pg_kg"))
+
+    with pytest.raises(ValueError, match="anchor"):
+        storage.compact_run("pg_kg", through_sequence=10_000)
+
+    # The rejected call leaves a healthy, verifiable log behind: nothing was
+    # archived, only the forced checkpoint marker was appended.
+    assert storage.verify_events("pg_kg").ok is True
+    live = storage.read_events("pg_kg")
+    assert len(live) == pre_live + 1
+    assert live[0].sequence == 1, "live rows must not have moved"
+    assert list(storage.read_archived_events("pg_kg")) == []
+
+    # A bounded value below the anchor still compacts normally.
+    result = storage.compact_run("pg_kg", through_sequence=1)
+    assert result["archived"] >= 1
+    assert [e.type for e in storage.read_events("pg_kg")][-1] is EventType.EVENT_LOG_ANCHORED
+    assert storage.verify_events("pg_kg").ok is True
+
+
+def test_pg_a_run_can_be_compacted_repeatedly(storage: PostgresStorage) -> None:
+    """Compact, work, compact, on Postgres too (issue #648, PR #715 review).
+
+    The second compact takes a fresh anchor checkpoint whose projection used
+    to fold the live tail only. After the first compaction that tail begins
+    at the anchor markers with no RUN_STARTED, so the anchor raised
+    "could not be anchored ... has no goal" on this backend exactly as it did
+    on SQLite before the fix. The SQLite regression test lives in
+    tests/test_compaction.py; this is its Postgres twin, so the second engine
+    is a verified surface for the same property, not a typed stub.
+    """
+    make_run(storage, "pg_kr", "long-lived task")
+    for i in range(3):
+        storage.append_event("pg_kr", EventType.TASK_UPDATED, {"i": i})
+    first = storage.compact_run("pg_kr")
+    assert first["archived"] > 0
+    assert storage.verify_events("pg_kr").ok is True
+
+    for i in range(3, 6):
+        storage.append_event("pg_kr", EventType.TASK_UPDATED, {"i": i})
+    archived_before = len(storage.read_archived_events("pg_kr"))
+    second = storage.compact_run("pg_kr")
+    assert second["archived"] > 0, "the second compact must archive the new prefix"
+    assert storage.verify_events("pg_kr").ok is True
+    # Only the new prefix moved: the archive grew by exactly what this compact
+    # reported, and the live tail still carries its anchor marker.
+    archived_after = len(storage.read_archived_events("pg_kr"))
+    assert archived_after - archived_before == second["archived"]
+    assert [e.type for e in storage.read_events("pg_kr")][-1] is EventType.EVENT_LOG_ANCHORED
+
+    # Restore still works on the twice-compacted run.
+    restored = CheckpointManager(storage).restore("pg_kr")
+    assert restored.state.run_id == "pg_kr"
+
+
 def test_pg_archive_tampering_fails_verify(storage: PostgresStorage) -> None:
     make_run(storage, "pg_kt", "tamper target")
     CheckpointManager(storage).checkpoint("pg_kt")

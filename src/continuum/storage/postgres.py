@@ -54,6 +54,10 @@ from continuum.storage.base import (
 )
 from continuum.storage.compaction import resolve_compaction_bound
 
+__all__ = [
+    "PostgresStorage",
+]
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS continuum_meta (
     key   TEXT PRIMARY KEY,

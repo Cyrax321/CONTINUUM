@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from continuum.actions.authority import record_authority_consumed
-from continuum.actions.ledger import ActionLedger
+from continuum.actions.ledger import ActionLedger, LedgerError, fold_action_events
 from continuum.events import EventType
 from continuum.gate import collect_consumed_authorities, decide
 from continuum.models import Run
@@ -204,3 +204,108 @@ def test_restore_does_not_resurrect() -> None:
         assert str(ev.sequence) in decision.reason
     finally:
         storage.close()
+
+
+# --- nesting must not resurrect a spent authority (#1074) ------------------ #
+
+_CONFIG = {"pay_invoice": {"key_template": "{invoice}", "action_type": "invoice_write"}}
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param({"invoice": "INV-2", "payment": {"auth_token": "auth-1"}}, id="dict-nested"),
+        pytest.param({"invoice": "INV-2", "payment": {"auth": ["auth-1"]}}, id="list-nested"),
+        pytest.param({"invoice": "INV-2", "auth": ["x", {"token": "auth-1"}]}, id="deeply-nested"),
+        pytest.param({"invoice": "INV-2", "authority_id": "auth-1"}, id="top-level"),
+    ],
+)
+def test_gate_denies_a_spent_authority_at_any_depth(arguments: dict) -> None:
+    """The scan is value-based and shape-agnostic: nesting cannot hide it."""
+    storage = _storage_with_run()
+    try:
+        ev = record_authority_consumed(storage, "run_1", "auth-1", via_action_id="act-1")
+        consumed = collect_consumed_authorities(storage.read_events("run_1"))
+        # A live claim exists for this key, so the only thing that can deny is
+        # the authority check -- otherwise the bypass hides behind an unrelated
+        # "no ledger claim" denial.
+        ActionLedger(storage, "run_1").claim("invoice_write", {"invoice": "INV-2"}, key="INV-2")
+        actions = fold_action_events(storage.read_all_events("run_1"))
+        decision = decide(
+            _CONFIG,
+            "pay_invoice",
+            arguments,
+            run_id="run_1",
+            actions_by_key=actions,
+            consumed_authorities=consumed,
+        )
+        assert not decision.allow
+        assert "auth-1" in decision.reason
+        assert "consumed at seq" in decision.reason
+        assert str(ev.sequence) in decision.reason
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param({"invoice": "INV-2", "payment": {"auth_token": "auth-1"}}, id="dict-nested"),
+        pytest.param({"invoice": "INV-2", "payment": {"auth": ["auth-1"]}}, id="list-nested"),
+    ],
+)
+def test_ledger_claim_refuses_a_spent_authority_at_any_depth(arguments: dict) -> None:
+    """The claim's detection is the same shared scan, not four field names."""
+    storage = _storage_with_run()
+    try:
+        record_authority_consumed(storage, "run_1", "auth-1", via_action_id="act-1")
+        ledger = ActionLedger(storage, "run_1")
+        with pytest.raises(LedgerError, match="auth-1"):
+            ledger.claim("invoice_write", arguments, key="INV-2")
+        # A GRANT_DENIED event was audited for the attempted resurrection.
+        denied = [e for e in storage.read_all_events("run_1") if e.type is EventType.GRANT_DENIED]
+        assert denied
+        assert denied[0].payload["authority_id"] == "auth-1"
+    finally:
+        storage.close()
+
+
+def test_a_fresh_authority_nested_is_not_false_positive_denied() -> None:
+    """The deepened scan must not start refusing authorities nobody spent."""
+    storage = _storage_with_run()
+    try:
+        consumed = collect_consumed_authorities(storage.read_events("run_1"))
+        assert consumed == {}
+        decision = decide(
+            _CONFIG,
+            "pay_invoice",
+            {"invoice": "INV-2", "payment": {"auth_token": "auth-fresh"}},
+            run_id="run_1",
+            actions_by_key={},
+            consumed_authorities=consumed,
+        )
+        # Not an authority denial: there is nothing consumed to resurrect.
+        assert "consumed at seq" not in decision.reason
+    finally:
+        storage.close()
+
+
+def test_the_argument_walk_is_bounded() -> None:
+    """A hostile payload cannot turn the safety check into unbounded work."""
+    from continuum.gate import collect_argument_values
+
+    # Deeper than the depth bound terminates rather than recursing forever.
+    deep: object = "leaf"
+    for _ in range(50):
+        deep = {"k": deep}
+    values = collect_argument_values(deep)
+    assert values == [], "a leaf past the depth bound is not collected"
+
+    # A wide payload stops at the value cap instead of walking it all.
+    wide = {f"k{i}": f"v{i}" for i in range(100_000)}
+    assert len(collect_argument_values(wide)) <= 10_000
+
+    # Non-string scalars are ignored, strings at every permitted depth found.
+    assert sorted(
+        collect_argument_values({"a": 1, "b": None, "c": {"d": ["x", 2, {"e": "y"}]}})
+    ) == ["x", "y"]
