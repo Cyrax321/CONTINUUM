@@ -328,8 +328,10 @@ def test_pg_action_index_covers_the_archive_after_rebuild(
     ledger.complete(outcome.key, external_id="doc:1")
     storage.compact_run("pg_ki")
 
-    assert storage.action_index_drift() > 0
-    storage.rebuild_action_index()
+    drift = storage.action_index_drift()
+    assert drift > 0
+    corrected = storage.rebuild_action_index()
+    assert corrected == drift
     assert storage.action_index_drift() == 0
     key = str(idempotency_key("process_doc", None, scope="pg_ki", key="doc:1"))
     foreign = storage.foreign_action(key, exclude_run="some_other_run")
