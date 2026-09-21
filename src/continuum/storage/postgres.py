@@ -278,8 +278,8 @@ class PostgresStorage(Storage):
         with self._write():
             try:
                 self._connection.execute(
-                    "INSERT INTO runs(run_id, goal, status, created_at, updated_at, metadata) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    "INSERT INTO runs(run_id, goal, status, created_at, updated_at, metadata, parent_run_id) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
                     (
                         run.run_id,
                         run.goal,
@@ -287,6 +287,7 @@ class PostgresStorage(Storage):
                         run.created_at.isoformat(),
                         run.updated_at.isoformat(),
                         json.dumps(dict(run.metadata), sort_keys=True),
+                        run.parent_run_id,
                     ),
                 )
             except self._psycopg.IntegrityError as exc:
@@ -303,8 +304,8 @@ class PostgresStorage(Storage):
         with self._write(), self._connection.transaction():
             try:
                 self._connection.execute(
-                    "INSERT INTO runs(run_id, goal, status, created_at, updated_at, metadata) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    "INSERT INTO runs(run_id, goal, status, created_at, updated_at, metadata, parent_run_id) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
                     (
                         run.run_id,
                         run.goal,
@@ -312,6 +313,7 @@ class PostgresStorage(Storage):
                         run.created_at.isoformat(),
                         run.updated_at.isoformat(),
                         json.dumps(dict(run.metadata), sort_keys=True),
+                        run.parent_run_id,
                     ),
                 )
             except self._psycopg.IntegrityError as exc:
@@ -395,6 +397,7 @@ class PostgresStorage(Storage):
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
                 metadata=json.loads(row["metadata"]),
+                parent_run_id=row["parent_run_id"],
             )
         except (ValueError, json.JSONDecodeError, TypeError) as exc:
             raise CorruptedRecord(f"run {row['run_id']!r} failed to load: {exc}") from exc

@@ -1448,7 +1448,12 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
         try:
             current = normalize_pinning(json.loads(args.pinning))
-            recorded = latest_pinning(storage.read_events(run_id))
+            # The newest pinning is usually an archived ACTION_RECORDED: the
+            # fold must see the prefix compaction moved, or a compacted run
+            # reads {} as its recorded pinning and reports every key as newly
+            # pinned (#1126). Mirrors the assess (#1050) and watch (#1072)
+            # folds over the same history.
+            recorded = latest_pinning(storage.read_all_events(run_id))
             drift_lines = compute_drift(recorded, current)
             if drift_lines:
                 text += "\n\nPinning drift (informational):\n" + "\n".join(
@@ -3394,7 +3399,17 @@ def cmd_replay(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     # Check existence first: otherwise a typo'd name reports "never recorded
     # RUN_STARTED", which diagnoses the wrong problem entirely.
     storage.get_run(args.run_id)
-    events = storage.read_events(args.run_id, upto=args.upto)
+    # Full log, archived prefix included, windowed by --upto: a compacted run
+    # must replay the same as one that was never compacted (#1172). Reading the
+    # live tail alone put RUN_STARTED in the archive, so every --upto value hit
+    # the guard below and advised raising N -- the one fix that cannot help,
+    # since the event had moved, not been excluded. Mirrors cmd_events, which
+    # reached this contract first (#532).
+    events = [
+        event
+        for event in storage.read_all_events(args.run_id)
+        if args.upto is None or event.sequence <= args.upto
+    ]
 
     stored = storage.latest_version(args.run_id)
     anchored = any(e.type is EventType.EVENT_LOG_ANCHORED for e in events) and stored is not None
@@ -3517,7 +3532,15 @@ def _verify_against_stored(run_id: str, storage: Storage) -> tuple[bool | None, 
     stored = storage.latest_version(run_id)
     if stored is None:
         return None, "skipped (no stored version to compare against)"
-    prefix = storage.read_events(run_id, upto=stored.source_sequence)
+    # The stored prefix starts at sequence 1, which compaction moves into
+    # events_archive: windowing the live tail by source_sequence reads an empty
+    # log on every compacted run and reports a healthy checkpoint as corrupt
+    # (#1172). The whole history is the prefix's actual source.
+    prefix = [
+        event
+        for event in storage.read_all_events(run_id)
+        if event.sequence <= stored.source_sequence
+    ]
     replayed = project(run_id, prefix, on_unprojectable="degrade")
     where = f"version {stored.version} at sequence {stored.source_sequence}"
     if replayed.status is StateStatus.INVALID:

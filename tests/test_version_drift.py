@@ -1,4 +1,8 @@
-"""Guard version drift between pyproject.toml, git tags, and README (#838)."""
+"""Guard version drift between pyproject.toml, CITATION.cff, git tags, and README.
+
+The sites a release must move together (#838), plus the citation file, which
+drifted two releases behind because no guard read it (#1120).
+"""
 
 from __future__ import annotations
 
@@ -26,6 +30,22 @@ def test_readme_pins_match_pyproject():
     v = _pyproject_version()
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert f"continuum-agent=={v}" in readme
+
+
+def test_citation_file_matches_pyproject():
+    """CITATION.cff must state the released version (#1120).
+
+    The citation file is what a downstream paper or dataset records, so a stale
+    entry is a silently wrong citation, not a cosmetic drift. It fell two
+    releases behind before the guard covered it.
+    """
+    text = (ROOT / "CITATION.cff").read_text(encoding="utf-8")
+    match = re.search(r"^version:\s*(\S+)", text, re.MULTILINE)
+    assert match, "CITATION.cff states no version"
+    assert match.group(1) == _pyproject_version(), (
+        f"CITATION.cff says {match.group(1)} but the package is "
+        f"{_pyproject_version()}: bump it with the rest of the release sites"
+    )
 
 
 def test_git_tag_exists_or_skip():

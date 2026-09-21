@@ -948,6 +948,90 @@ def test_identity_match_does_not_fire_for_an_explicit_key(ledger: ActionLedger) 
     assert second.fresh, "a distinct explicit key must still be a second action"
 
 
+# --- resolve_prior: the lookups claim performs, for a gate that runs first --- #
+#
+# The run-level retry budget (issue #240) is evaluated at the intercept site,
+# before claim opens a slot. A gate that answers a different question than the
+# one claim acts on settles against a key claim never records under, and an
+# exhausted budget then suppresses the dedup and reconciliation answers the gate
+# exists to pass through (issue #1080). resolve_prior exists so both sites ask
+# the same question, so its contract is pinned separately from claim's.
+
+
+def test_resolve_prior_returns_none_when_nothing_identifies_prior_work(
+    ledger: ActionLedger,
+) -> None:
+    """The only case in which a fresh slot opens."""
+    assert ledger.resolve_prior("send_invoice", {"invoice_id": "INV-1"}) is None
+
+
+def test_resolve_prior_answers_the_exact_key(ledger: ActionLedger) -> None:
+    """The stored key and the derived key agree when the arguments agree."""
+    claimed = ledger.claim("send_invoice", {"invoice_id": "INV-1"})
+    ledger.complete(claimed.key, external_id="INV-1.sent")
+
+    resolved = ledger.resolve_prior("send_invoice", {"invoice_id": "INV-1"})
+    assert resolved is not None
+    assert resolved[0] == claimed.key
+    assert resolved[1].status is ActionStatus.COMPLETED
+
+
+def test_resolve_prior_answers_the_stored_key_across_argument_drift(
+    ledger: ActionLedger,
+) -> None:
+    """A hash miss does not mean the work is new.
+
+    The caller settles against the key claim records under, which for an
+    identity match is the *stored* key, not the freshly-derived one. Returning
+    the derived key here would make a gate count a budget the claim never
+    draws on (issue #1080).
+    """
+    first = ledger.claim(
+        "send_invoice",
+        {"invoice_id": "INV-1", "target": "/tmp/outbox/INV-1.sent"},
+    )
+    ledger.complete(first.key, external_id="INV-1.sent")
+
+    drifted = ledger.resolve_prior("send_invoice", {"invoice": "INV-1"})
+    assert drifted is not None
+    assert drifted[0] == first.key, "must be the stored key, not the derived one"
+    assert drifted[1].external_id == "INV-1.sent"
+
+
+def test_resolve_prior_skips_the_drift_fallback_for_an_explicit_key(
+    ledger: ActionLedger,
+) -> None:
+    """An explicit key is the identity, so no drift is possible and nothing is
+    matched by tokens (issue #6's fallback would otherwise overrule the caller)."""
+    first = ledger.claim("send_reminder", {"to": "x@y.z"}, key="reminder-monday")
+    ledger.complete(first.key, external_id="msg_1")
+
+    # Same tokens, different explicit key: no fallback may bind them together.
+    assert ledger.resolve_prior("send_reminder", {"to": "x@y.z"}, key="reminder-tuesday") is None
+    # The same explicit key still resolves, to itself.
+    again = ledger.resolve_prior("send_reminder", {"to": "x@y.z"}, key="reminder-monday")
+    assert again is not None
+    assert again[0] == first.key
+
+
+def test_resolve_prior_agrees_with_claim_for_an_interrupted_action(
+    ledger: ActionLedger,
+) -> None:
+    """The interrupted case is the one the budget gate most often suppresses.
+
+    A STARTED record answers from the stored record rather than opening a slot,
+    and the gate must see that or an exhausted budget stands between a
+    recovering agent and the reconciliation it is owed.
+    """
+    claimed = ledger.claim("external.api_call", {"endpoint": "/charge"})
+    # Never completed and never failed: the caller died mid-action.
+
+    resolved = ledger.resolve_prior("external.api_call", {"endpoint": "/charge"})
+    assert resolved is not None
+    assert resolved[0] == claimed.key
+    assert resolved[1].status is ActionStatus.STARTED
+
+
 def test_identity_match_ignores_the_run_id_plumbing_token(ledger: ActionLedger) -> None:
     """continuum_run_id rides inside arguments and is common to every claim."""
     first = ledger.claim(
@@ -1107,3 +1191,45 @@ def test_reconciling_an_unknown_outcome_as_occurred_needs_no_prior_receipt(
     assert settled is not None
     assert settled.status is ActionStatus.COMPLETED
     assert settled.external_id == "found-it"
+
+
+def test_a_terminal_foreign_record_does_not_bypass_the_drift_fallback(
+    store: SQLiteStorage,
+) -> None:
+    """A FAILED record elsewhere leaves no live effect, so the local drift
+    fallback must still get its turn.
+
+    The old claim ordering ran ``_identity_match`` after setting a foreign
+    FAILED/COMPENSATED record aside, so a locally completed action under a
+    drifted key still deduplicated. When the lookups were extracted into
+    ``resolve_prior``, the foreign lookup returned immediately for any status,
+    and the fallback was never reached: the claim opened a fresh slot and
+    re-performed the effect, the exact duplicate-side-effect class this ledger
+    exists to prevent.
+    """
+    _seed_run(store, "runA")
+    _seed_run(store, "runB")
+    other = ActionLedger(store, "runA")
+    local = ActionLedger(store, "runB")
+
+    # Another run failed the same unscoped identity: no live effect there.
+    foreign = other.claim("send.invoice", {"invoice": "INV-9"}, scoped_to_run=False)
+    other.fail(foreign.key, "rejected before send", certain=True)
+
+    # This run already completed the same identity under a drifted key.
+    first = local.claim(
+        "send.invoice",
+        {"invoice_id": "INV-9", "target": "/tmp/outbox/INV-9.sent"},
+        scoped_to_run=False,
+    )
+    local.complete(first.key, external_id="EXT-9")
+
+    drifted = {"invoice": "INV-9"}
+    resolved = local.resolve_prior("send.invoice", drifted, scoped_to_run=False)
+    assert resolved is not None, "the local completed record must still be found"
+    assert resolved[0] == first.key, "must be the stored key, not the derived one"
+    assert resolved[1].status is ActionStatus.COMPLETED
+
+    replay = local.claim("send.invoice", drifted, scoped_to_run=False)
+    assert not replay.fresh, "the completed effect must not be re-performed"
+    assert replay.external_id == "EXT-9"
