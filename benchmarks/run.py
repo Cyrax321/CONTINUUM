@@ -225,6 +225,10 @@ def _append_continuum_bench(out_dir: str | Path) -> None:
 _SUITES: dict[str, str] = {
     "phase6": "recovery-correctness scenarios -> benchmarks/out/report.{json,md}",
     "continuum-bench": "crash-recovery byte counts -> merged into benchmarks/out/report.json",
+    "latency-matrix": (
+        "recovery latency SLO grid (#766) -> benchmarks/out/latency_matrix_report.{json,md}; "
+        "compares medians against benchmarks/latency_matrix/baseline.json"
+    ),
     "fault-injection": "chaos suite (#397) -> benchmarks/out/fault_injection_report.{json,md}",
     "horizon": (
         "horizon-scale suite (#398) -> benchmarks/out/horizon_report.{json,md}; "
@@ -285,6 +289,28 @@ def main() -> None:
     print(f"md:   {md_path}")
     # Append continuum byte-count bench (issue #568) without breaking the suite
     _append_continuum_bench(out_dir)
+
+    # Recovery latency-regression matrix (#766): assess latency across a
+    # deterministic grid, compared against the committed baseline. Guarded like
+    # the suites below so an observational measurement can never break the run.
+    try:
+        from benchmarks.latency_matrix import emitter as latency_emitter
+        from benchmarks.latency_matrix import runner as latency_runner
+
+        latency_report = latency_runner.run_matrix()
+        latency_json, latency_md = latency_emitter.emit_report(
+            latency_report, os.path.join(out_dir, "latency_matrix_report")
+        )
+        latency_emitter.print_summary(latency_report)
+        print(f"latency json: {latency_json}")
+        print(f"latency md:   {latency_md}")
+        if latency_report.regressions:
+            print(
+                f"latency-matrix: {len(latency_report.regressions)} regression(s) "
+                "against the committed baseline"
+            )
+    except Exception as exc:  # noqa: BLE001 - don't let the matrix break the suite
+        print(f"latency-matrix benchmark failed: {exc}")
 
     # Fault-injection chaos suite (#397), shares the emitter schema with #398
     try:

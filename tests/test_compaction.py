@@ -252,6 +252,41 @@ def test_bounded_size_after_compaction(db: str) -> None:
     assert live_rows <= 25
 
 
+def test_a_run_can_be_compacted_repeatedly(db: str) -> None:
+    """Compact, work, compact: repeated compaction succeeds (issue #648).
+
+    The second compact takes a fresh anchor checkpoint whose projection used
+    to fold the live tail only. After the first compaction that tail begins
+    at the anchor markers with no RUN_STARTED, so the anchor raised
+    "could not be anchored ... has no goal" and a long-lived run could never
+    be compacted again, accumulating an unbounded live tail instead.
+    """
+    for i in range(3):
+        work(db, i)
+    with SQLiteStorage(db) as store:
+        first = store.compact_run("run_1")
+        assert first["archived"] > 0
+        assert store.verify_events("run_1").ok
+
+    for i in range(3, 6):
+        work(db, i)
+    with SQLiteStorage(db) as store:
+        archived_before = len(store.read_archived_events("run_1"))
+        second = store.compact_run("run_1")
+        assert second["archived"] > 0, "the second compact must archive the new prefix"
+        assert store.verify_events("run_1").ok
+        # Only the new prefix moved: total archived grew by exactly what this
+        # compact reported, and the live tail still carries the anchor markers.
+        archived_after = len(store.read_archived_events("run_1"))
+        assert archived_after - archived_before == second["archived"]
+        live_types = [e.type for e in store.read_events("run_1")]
+        assert EventType.EVENT_LOG_ANCHORED in live_types
+
+    # Recovery still works on the twice-compacted run.
+    restored = CheckpointManager(SQLiteStorage(db)).restore("run_1")
+    assert restored.state.run_id == "run_1"
+
+
 # --- protected nodes keep working across compaction ------------------------------ #
 
 

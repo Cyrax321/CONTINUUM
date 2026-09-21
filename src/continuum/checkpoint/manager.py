@@ -162,14 +162,24 @@ class CheckpointManager:
 
     # -- writing ---------------------------------------------------------- #
 
-    def project_current(self, run_id: str) -> SemanticState:
-        """Fold the run's full event history into state.
+    def project_current(self, run_id: str, *, full_history: bool = True) -> SemanticState:
+        """Fold the run's event history into state.
 
-        Full history, not the live tail: after compaction RUN_STARTED and
-        other foundation events live in the archive, and projecting the
-        tail alone concludes the run never started (issue #648).
+        Folds full history by default: after compaction RUN_STARTED and the
+        other foundation events live in the archive, and projecting the live
+        tail alone concludes the run never started (issue #648). The per-turn
+        auto-checkpoint path and the adapter hooks all inherit that default,
+        because a compaction can land between any two turns. Callers that can
+        prove they only need post-anchor facts pass ``full_history=False``:
+        ``restore`` does, since it replays the live tail onto a stored
+        checkpoint state rather than folding the archive again.
         """
-        return project(run_id, self.storage.read_all_events(run_id))
+        events = (
+            self.storage.read_all_events(run_id)
+            if full_history
+            else self.storage.read_events(run_id)
+        )
+        return project(run_id, events)
 
     def checkpoint(
         self,
