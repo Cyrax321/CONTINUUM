@@ -9,6 +9,16 @@ existing, unsolved gap **auditable and detectable**, and gates it behind
 human review. Neither extension defeats the underlying attack. Nowhere do we
 claim to have "solved" a paper's open problem.
 
+> **Shipping status (issue #1030):** both extensions are **specified and
+> tested, not shipped.** The modules
+> (`src/continuum/security/trust_gate.py`, `src/continuum/security/revalidation.py`)
+> are complete and pass their tests, but nothing in the recovery engine,
+> validator, or any seam invokes them: no product caller exists. CONTINUUM
+> today revalidates at crash/resume only, exactly as it did before these
+> modules were added. Wiring them changes recovery semantics for every run
+> and is a maintainer roadmap decision; until it is made, read every present
+> tense below as describing the *design*, not the shipped behaviour.
+
 ---
 
 ## Extension 1, Secure Planning Loop

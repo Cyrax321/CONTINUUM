@@ -3,6 +3,11 @@
 This file records numbers for the Security Extension. It is filled in as the
 work unit progresses; anything marked PENDING is not yet measured.
 
+> **Shipping status (issue #1030):** the results below are from the modules'
+> own test suites. Neither extension has a product caller yet (the "PASSED"
+> lines prove the mechanism works in isolation, not that it runs in any
+> production path. CONTINUUM today revalidates at crash/resume only).
+
 ## Extension 1, Secure Planning Loop
 
 - Toy task (cookie-consent banner): PASSED. A high-risk branch gated behind a

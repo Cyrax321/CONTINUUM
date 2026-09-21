@@ -254,6 +254,41 @@ def test_pg_compact_rejects_through_sequence_that_would_eat_the_anchor(
     assert storage.verify_events("pg_kg").ok is True
 
 
+def test_pg_a_run_can_be_compacted_repeatedly(storage: PostgresStorage) -> None:
+    """Compact, work, compact, on Postgres too (issue #648, PR #715 review).
+
+    The second compact takes a fresh anchor checkpoint whose projection used
+    to fold the live tail only. After the first compaction that tail begins
+    at the anchor markers with no RUN_STARTED, so the anchor raised
+    "could not be anchored ... has no goal" on this backend exactly as it did
+    on SQLite before the fix. The SQLite regression test lives in
+    tests/test_compaction.py; this is its Postgres twin, so the second engine
+    is a verified surface for the same property, not a typed stub.
+    """
+    make_run(storage, "pg_kr", "long-lived task")
+    for i in range(3):
+        storage.append_event("pg_kr", EventType.TASK_UPDATED, {"i": i})
+    first = storage.compact_run("pg_kr")
+    assert first["archived"] > 0
+    assert storage.verify_events("pg_kr").ok is True
+
+    for i in range(3, 6):
+        storage.append_event("pg_kr", EventType.TASK_UPDATED, {"i": i})
+    archived_before = len(storage.read_archived_events("pg_kr"))
+    second = storage.compact_run("pg_kr")
+    assert second["archived"] > 0, "the second compact must archive the new prefix"
+    assert storage.verify_events("pg_kr").ok is True
+    # Only the new prefix moved: the archive grew by exactly what this compact
+    # reported, and the live tail still carries its anchor marker.
+    archived_after = len(storage.read_archived_events("pg_kr"))
+    assert archived_after - archived_before == second["archived"]
+    assert [e.type for e in storage.read_events("pg_kr")][-1] is EventType.EVENT_LOG_ANCHORED
+
+    # Restore still works on the twice-compacted run.
+    restored = CheckpointManager(storage).restore("pg_kr")
+    assert restored.state.run_id == "pg_kr"
+
+
 def test_pg_archive_tampering_fails_verify(storage: PostgresStorage) -> None:
     make_run(storage, "pg_kt", "tamper target")
     CheckpointManager(storage).checkpoint("pg_kt")
@@ -300,3 +335,32 @@ def test_pg_action_index_covers_the_archive_after_rebuild(
     foreign = storage.foreign_action(key, exclude_run="some_other_run")
     assert foreign is not None
     assert foreign.status is ActionStatus.COMPLETED
+
+
+def test_pg_run_without_a_parent_round_trips_null(storage: PostgresStorage) -> None:
+    """A parentless run must load back as parentless, not as a corrupt row."""
+    make_run(storage, "pg_solo", "solo")
+    assert storage.get_run("pg_solo").parent_run_id is None
+
+
+def test_pg_child_run_keeps_its_parent_after_the_round_trip(
+    storage: PostgresStorage,
+) -> None:
+    """A fork's lineage column must survive the write and the read (#1079).
+
+    ``children_of`` filters ``list_runs`` on ``parent_run_id``, so a dropped
+    column made the family resume block vacuous here while SQLite enforced it.
+    """
+    make_run(storage, "pg_par", "supervise")
+    storage.create_run_started(
+        Run(run_id="pg_kid", goal="work", parent_run_id="pg_par"),
+        source=Origin.HUMAN,
+    )
+
+    assert storage.get_run("pg_kid").parent_run_id == "pg_par"
+    assert storage.get_run("pg_par").parent_run_id is None
+
+    from continuum.recovery.family import children_of
+
+    assert [run.run_id for run in children_of(storage, "pg_par")] == ["pg_kid"]
+    assert children_of(storage, "pg_kid") == []
