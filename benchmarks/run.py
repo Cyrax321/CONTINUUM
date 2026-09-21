@@ -40,6 +40,24 @@ from continuum.benchmark import run_benchmark as run_continuum_benchmark
 from continuum.benchmark.phase6 import run_benchmark, scenarios, write_report
 
 
+def _mean_rate(results: Any, key: str) -> Any:
+    """Mean of a suite-level rate over the results that actually report it.
+
+    The fault-injection suite copies its suite-level rates onto every fault
+    scenario's metrics, but the clean control scenario carries only its own
+    false-positive rate, so dividing by ``len(results)`` would average the
+    suite against a scenario that never measured it. Results without the key
+    are skipped rather than counted as zero, which is what keeps the control
+    out of the detection average. ``summary()`` does not carry these keys at
+    all (#1060): the shared envelope counts outcomes only, so the rates have
+    to be read off the results the way the horizon columns above are.
+    """
+    values = [r.metrics[key] for r in results if key in r.metrics]
+    if not values:
+        return 0
+    return round(sum(values) / len(values), 3)
+
+
 def _bench_table_lines(horizon_report: Any, fault_report: Any | None = None) -> list[str]:
     """Build the bench table body from real runner numbers (no invented numbers)."""
     # Build table from real numbers
@@ -102,10 +120,11 @@ def _bench_table_lines(horizon_report: Any, fault_report: Any | None = None) -> 
         a = r.metrics.get("accuracy", "")
         lines.append(f"| {r.scenario} | {cycles} | {years} | {correct} | {actual} | {a} |")
     if fault_report is not None:
-        f_summary = fault_report.summary()
         lines.append("")
         lines.append(
-            f"Fault-injection: {f_summary.get('total', 0)} scenarios, detection {f_summary.get('detection_rate', 0)}, unsafe {f_summary.get('unsafe_resume_rate', 0)}"
+            f"Fault-injection: {len(fault_report.results)} scenarios, "
+            f"detection {_mean_rate(fault_report.results, 'detection_rate')}, "
+            f"unsafe {_mean_rate(fault_report.results, 'unsafe_resume_rate')}"
         )
     return lines
 
@@ -225,6 +244,10 @@ def _append_continuum_bench(out_dir: str | Path) -> None:
 _SUITES: dict[str, str] = {
     "phase6": "recovery-correctness scenarios -> benchmarks/out/report.{json,md}",
     "continuum-bench": "crash-recovery byte counts -> merged into benchmarks/out/report.json",
+    "latency-matrix": (
+        "recovery latency SLO grid (#766) -> benchmarks/out/latency_matrix_report.{json,md}; "
+        "compares medians against benchmarks/latency_matrix/baseline.json"
+    ),
     "fault-injection": "chaos suite (#397) -> benchmarks/out/fault_injection_report.{json,md}",
     "horizon": (
         "horizon-scale suite (#398) -> benchmarks/out/horizon_report.{json,md}; "
@@ -285,6 +308,28 @@ def main() -> None:
     print(f"md:   {md_path}")
     # Append continuum byte-count bench (issue #568) without breaking the suite
     _append_continuum_bench(out_dir)
+
+    # Recovery latency-regression matrix (#766): assess latency across a
+    # deterministic grid, compared against the committed baseline. Guarded like
+    # the suites below so an observational measurement can never break the run.
+    try:
+        from benchmarks.latency_matrix import emitter as latency_emitter
+        from benchmarks.latency_matrix import runner as latency_runner
+
+        latency_report = latency_runner.run_matrix()
+        latency_json, latency_md = latency_emitter.emit_report(
+            latency_report, os.path.join(out_dir, "latency_matrix_report")
+        )
+        latency_emitter.print_summary(latency_report)
+        print(f"latency json: {latency_json}")
+        print(f"latency md:   {latency_md}")
+        if latency_report.regressions:
+            print(
+                f"latency-matrix: {len(latency_report.regressions)} regression(s) "
+                "against the committed baseline"
+            )
+    except Exception as exc:  # noqa: BLE001 - don't let the matrix break the suite
+        print(f"latency-matrix benchmark failed: {exc}")
 
     # Fault-injection chaos suite (#397), shares the emitter schema with #398
     try:

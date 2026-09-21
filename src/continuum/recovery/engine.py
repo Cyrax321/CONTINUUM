@@ -488,7 +488,11 @@ class RecoveryEngine:
             # (issue #1066).
             consumed_authorities = None
         if consumed_authorities:
-            mode = RecoveryMode.REQUEST_HUMAN
+            # Escalate, never downgrade: REQUEST_HUMAN is the floor a consumed
+            # authority imposes, but a risk policy that already proposed
+            # ROLLBACK or ABORT is strictly more cautious and must survive
+            # (SEVERITY is ascending caution, so the max wins).
+            mode = max((mode, RecoveryMode.REQUEST_HUMAN), key=lambda m: SEVERITY[m])
             rationale = (
                 *rationale,
                 f"consumed authority blocks resume: {sorted(consumed_authorities)}",

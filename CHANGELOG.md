@@ -27,6 +27,24 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The `__all__` guard now walks the installed package instead of five
+  hand-listed modules (#1228).** `tests/test_module_all_exports.py` asserted
+  that names in `__all__` resolve by importing five modules by name, so a
+  rename that forgot `__all__` stayed green on the other 117 modules that
+  declare one. `test_all_symbols_exist_on_modules` now enumerates the package
+  with `pkgutil.walk_packages` and checks every module it finds (122 today,
+  against a floor of 90 so a walk that silently shrank to nothing fails
+  instead of passing vacuously), and `test_star_import_execution` covers the
+  same set, catching a module whose import has a side effect or a name that
+  shadows an earlier one. A second check, `__all__` equals the public names a
+  leaf module defines itself, is added per-module on a curated list: it
+  cannot hold package-wide, because aggregator modules (`continuum.actions`
+  re-exports all 15 of its entries from submodules) legitimately list names
+  they do not define and some modules hold a public name back on purpose
+  (`continuum.budgets` keeps `FALLBACK_MAX_ATTEMPTS` private to its own
+  defaulting). Both are per-module policy, so only modules that define their
+  whole surface are pinned.
+
 - **The TUI `tree` view fetches the run once instead of twice (#1157).**
   `family_lines` in `src/continuum/tui/model.py` called
   `storage.get_run(run_id)` twice and discarded the first result: the first
@@ -53,6 +71,28 @@ All notable changes to this project are documented here. The format follows
   no product caller and still has none, so this documents the existing
   contract rather than altering it.
 
+- **The retry-budget gate now answers the same question `claim` does (#1080).**
+  `continuum_intercept_action` guards the run-level retry budget (#240) before
+  it calls `claim`, and the guard decided whether a claim needed a slot from the
+  *derived* idempotency key alone. `claim` can answer from a different key: the
+  drift-tolerant identity lookup recognises an already-recorded action when the
+  argument hash misses, and an unscoped key can be held by another run. Whenever
+  the two disagreed, the budget was counted against a key `claim` never records
+  under, and an exhausted allowance refused with "raise the limit" in front of
+  an answer that needed no retry at all. The settled set also omitted STARTED,
+  so a claim interrupted mid-flight -- the case a recovery is most likely to
+  meet first -- was gated as an attempt once its one slot was spent, and the run
+  was told to raise a budget that was working as intended instead of being told
+  an outcome is owed and unknown.
+
+  The three lookups `claim` performs are extracted into
+  `ActionLedger.resolve_prior` (exact key, then another run's record for an
+  unscoped key, then the identity fallback, skipped when the caller asserted its
+  own key), and the gate resolves through it. A claim is only counted as an
+  attempt when it opens a slot, and the count uses the stored key `claim`
+  settles against. Callers passing an explicit `key` are unaffected: no drift is
+  possible and the derived key is the stored key.
+
 ### Removed
 
 - **Dead `DuplicateAction` and `LeaseError` exception classes (#1115).**
@@ -70,6 +110,64 @@ All notable changes to this project are documented here. The format follows
   from history (355ba76) if a future surface needs that exact rendering.
 
 ### Fixed
+
+- **CITATION.cff states the released version, and the bump sites are documented
+  (#1120).** The citation file pinned `0.1.0` while the package was `0.1.2`, so
+  anyone citing the project recorded a version two releases stale, and
+  `CONTRIBUTING.md` still said the version lived in two places guarded by
+  checking that "will be added" -- the guard has run in CI since #838 and reads
+  four sites. The file now says `0.1.2`, the paragraph names all five sites a
+  bump touches (pyproject, `__init__.py`, both README pins, CITATION.cff, the
+  release tag), and `tests/test_version_drift.py` checks the citation file
+  alongside the README pins so the drift cannot recur- **The Postgres backend now stores and returns a fork's `parent_run_id`
+  (#1079).** Both `create_run` and `create_run_started` inserted only the six
+  columns the schema had before lineage existed, and `_row_to_run` never read
+  the column back, so `runs.parent_run_id` was declared with a foreign key to
+  the parent and then left permanently null. Every fork silently lost its
+  lineage on the Postgres engine, and because `children_of`
+  (`recovery/family.py`) filters `list_runs` on that column, the family
+  resume block was vacuous there: a Postgres deployment would never refuse a
+  parent RESUME over an unsafe child, and would report the same empty family
+  the CLI tree and TUI render from. SQLite wrote and read the column in all
+  three places, so the two engines disagreed on a safety property with no
+  error anywhere. Both inserts now carry `run.parent_run_id` and the row maps
+  it into the `Run`, matching SQLite; the contract suite gained a case that
+  forks on the engine and asserts `children_of` resolves the child.
+- **`replay --upto` works on a compacted run instead of failing for every value
+  of `N` and blaming the operator for it (#1172).** `cmd_replay` read only the
+  live event tail, where `RUN_STARTED` no longer lives once a run is compacted,
+  so its guard rejected every `--upto` request and advised "increase `--upto`"
+  -- the one fix that cannot help, because the event had moved into the archive
+  rather than being excluded by the window. `--upto 999` failing on a run whose
+  head was 13 is what proved the message was wrong about the cause. The command
+  now windows the full history, archived prefix included, the way `cmd_events`
+  already does; `--upto` remains the bisection tool it is documented as, on the
+  long-lived runs compaction exists to serve. `_verify_against_stored` had the
+  same blind spot one function down: it re-derived the stored version's prefix
+  from `read_events(upto=source_sequence)`, which reads an empty log on a
+  compacted run because the prefix starts at sequence 1 and compaction moves
+  exactly that range. Left alone it would have reported every healthy
+  checkpoint as corrupt once the primary read was corrected, so both sites now
+  window `read_all_events`. `STATE_CHECKPOINTED` and `EVENT_LOG_ANCHORED` are
+  both non-projecting, so folding the archived prefix from genesis reaches the
+  same state the anchored path already produced. The guard is unchanged and
+  still fires when a window genuinely excludes `RUN_STARTED`.
+- **`resume --pinning` compares against the archived pinning, so a compacted
+  run stops reporting every key as newly pinned (#1126).** The drift display
+  folded the live event tail alone, and compaction moves the pinning-carrying
+  `ACTION_RECORDED` into `events_archive` while the anchor marker that replaces
+  it carries no pinning at all. The fold therefore read `{}` as the run's
+  recorded identity and `pinning_drift({}, current)` called every key newly
+  pinned -- including on a run whose recorded pinning was byte-identical to the
+  one passed at resume. The wrong directions were exactly the ones an operator
+  would act on: a genuinely *changed* hash
+  rendered as "newly pinned" instead of "changed", hiding the previous value,
+  and a key that had been unpinned never rendered at all, because the
+  `unpinned (was ...)` line needs the old value the empty record could not
+  supply. The display is informational and never gated recovery (issue #241),
+  but it was wrong in the direction of hiding drift, which is the opposite of
+  what a drift report is for. `latest_pinning` now folds `read_all_events`, the
+  same history the assess (#1050) and watch (#1072) folds already read.
 
 - **Webhook dedup now survives a compaction inside the re-notify window
   (#1186).** `_within_dedup_window` scanned only the live event tail for the
@@ -99,6 +197,16 @@ All notable changes to this project are documented here. The format follows
   all its prose is rephrased, so that one pattern reads all six READMEs.
   `references/testing.md`, `references/install.md`, and the translated READMEs
   now carry the same figures as `README.md`.
+
+- **A consumed authority no longer downgrades a stricter recovery verdict
+  (#1146).** `RecoveryEngine.assess` overwrote the mode with
+  `REQUEST_HUMAN` whenever a consumed authority blocked resume, discarding an
+  `ABORT` or `ROLLBACK` the risk policy had already proposed — both strictly
+  more cautious, per the module's own "the engine always returns the maximum
+  proposed mode" invariant. The rationale still named the abort the verdict
+  no longer delivered. The block now escalates to `max(mode, REQUEST_HUMAN)`
+  instead of replacing it, so the authority raises the floor without
+  weakening the ceiling.
 
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
@@ -956,7 +1064,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,426 collected, ~2,398 passed, ~28 skipped on a minimal env).
+  (~2,452 collected, ~2,423 passed, ~28 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
