@@ -50,9 +50,14 @@ changing anything. The decision's `mode` is one of the seven `RecoveryMode` valu
 
 ## LangGraphAgentAdapter
 
-`continuum.adapters.LangGraphAgentAdapter(storage, *, engine=None)`
+`continuum.adapters.LangGraphAgentAdapter(storage, *, graph=None, state_to_semantic=None, auto_file=None, auto_total=None)`
 
-Subclass of `GenericAgentAdapter` for LangGraph `StateGraph` workflows. Adds:
+Subclass of `GenericAgentAdapter` for LangGraph `StateGraph` workflows. `graph`
+is the `StateGraph` the adapter checkpoints against, and `state_to_semantic`
+overrides the default extractor that reads `continuum_run_id` and `goal` from a
+graph state dict; the two are the primary customization points on this adapter.
+Unlike `GenericAgentAdapter`, this constructor accepts no `engine`: it builds its
+own `RecoveryEngine` internally, so an engine cannot be injected. Adds:
 
 ### `revalidate_environment(run_id, *, current_environment=None, expected_model=None) -> RecoveryDecision`
 
@@ -63,11 +68,14 @@ environment changed (issue #25).
 
 ## OpenAIAgentAdapter
 
-`continuum.adapters.OpenAIAgentAdapter(storage, *, engine=None)`
+`continuum.adapters.OpenAIAgentAdapter(storage, *, state_to_semantic=None, auto_file=None, auto_total=None)`
 
 Subclass of `GenericAgentAdapter` for the OpenAI Agents SDK. Wraps
 `function_tool` so tool arguments are bound and idempotency is preserved, and
-exposes `ContinuumContext` to tools.
+exposes `ContinuumContext` to tools. `state_to_semantic` overrides the default
+extractor that delegates to `ContinuumContext.to_semantic_state()`. Like the
+other framework adapters, this constructor accepts no `engine`: it builds its own
+`RecoveryEngine` internally, so an engine cannot be injected.
 
 ### `ContinuumContext`
 
@@ -76,10 +84,14 @@ can capture state or intercept its own side effects.
 
 ## LangChainAgentAdapter
 
-`continuum.adapters.LangChainAgentAdapter(storage, *, engine=None)`
+`continuum.adapters.LangChainAgentAdapter(storage, *, state_to_semantic=None, auto_file=None, auto_total=None)`
 
 Subclass of `GenericAgentAdapter` wrapping LCEL runnable pipelines and the
-`langchain.agents.create_agent` tool-calling loop.
+`langchain.agents.create_agent` tool-calling loop. `state_to_semantic` overrides
+the default extractor that reads `continuum_run_id` and `goal` from the chain's
+state dict. Like the other framework adapters, this constructor accepts no
+`engine`: it builds its own `RecoveryEngine` internally, so an engine cannot be
+injected.
 
 ## BrowserAdapter
 
