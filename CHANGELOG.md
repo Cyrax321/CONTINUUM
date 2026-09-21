@@ -111,6 +111,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`PostgresStorage.rebuild_action_index` returns corrected row count (#1267).**
+  `rebuild_action_index` on Postgres ended in an unconditional `return 0`,
+  so `continuum verify --index --repair-index` always reported 0 rows corrected
+  even after rewriting drifted rows. It now queries the stored index before
+  rebuilding, compares against the canonical fold, and returns the count of
+  missing, stale, and spurious rows corrected, matching `SQLiteStorage` and the
+  base `Storage` contract.
 - **CITATION.cff states the released version, and the bump sites are documented
   (#1120).** The citation file pinned `0.1.0` while the package was `0.1.2`, so
   anyone citing the project recorded a version two releases stale, and
@@ -119,7 +126,8 @@ All notable changes to this project are documented here. The format follows
   four sites. The file now says `0.1.2`, the paragraph names all five sites a
   bump touches (pyproject, `__init__.py`, both README pins, CITATION.cff, the
   release tag), and `tests/test_version_drift.py` checks the citation file
-  alongside the README pins so the drift cannot recur- **The Postgres backend now stores and returns a fork's `parent_run_id`
+  alongside the README pins so the drift cannot recur.
+- **The Postgres backend now stores and returns a fork's `parent_run_id`
   (#1079).** Both `create_run` and `create_run_started` inserted only the six
   columns the schema had before lineage existed, and `_row_to_run` never read
   the column back, so `runs.parent_run_id` was declared with a foreign key to
