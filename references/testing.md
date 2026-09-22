@@ -9,8 +9,8 @@ need nothing but this repository; higher levels need the named tool.
 ```bash
 pip install -e ".[dev]"
 pytest --tb=short -q --cov=continuum --cov-report=xml --cov-report=term-missing
-ruff check src/ tests/ examples/        # lint
-ruff format --check src/ tests/ examples/
+ruff check src/ tests/ examples/ scripts/ demo-run/        # lint
+ruff format --check src/ tests/ examples/ scripts/ demo-run/
 mypy src/continuum                     # strict type check
 ```
 

@@ -9,8 +9,9 @@
 # file in CI, which is the failure this config exists to prevent: bump both
 # together.
 #
-# files scopes the hooks to the three directories CI lints. benchmarks/,
-# demo-run/ and _bugaudit/ are not ruff-clean and are not checked by CI, so
+# files scopes the hooks to the five directories CI lints. Issue #1118 added
+# scripts/ and demo-run/, the last Python directories outside every lint gate.
+# benchmarks/ and _bugaudit/ are not ruff-clean and are not checked by CI, so
 # leaving them in would fail `pre-commit run --all-files` on an untouched tree
 # and rewrite files no gate asks about.
 #
@@ -24,6 +25,6 @@ repos:
     hooks:
       - id: ruff-check
         args: [--fix]
-        files: ^(src|tests|examples)/
+        files: ^(src|tests|examples|scripts|demo-run)/
       - id: ruff-format
-        files: ^(src|tests|examples)/
+        files: ^(src|tests|examples|scripts|demo-run)/
