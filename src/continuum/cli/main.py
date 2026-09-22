@@ -3015,14 +3015,43 @@ def cmd_gate(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> 
     return 2
 
 
+def _load_dotted(spec: str) -> Any:
+    """Load a reconciler plugin from a dotted path 'module:Class'."""
+    if ":" not in spec:
+        raise ValueError(f"invalid reconciler specification '{spec}', expected 'module:ClassName'")
+    mod_name, class_name = spec.split(":", 1)
+    if not mod_name or not class_name:
+        raise ValueError(f"invalid reconciler specification '{spec}', expected 'module:ClassName'")
+    import importlib
+
+    try:
+        mod = importlib.import_module(mod_name)
+    except Exception as exc:
+        raise ValueError(f"failed to import module '{mod_name}': {exc}") from exc
+    try:
+        target = getattr(mod, class_name)
+    except AttributeError as exc:
+        raise ValueError(f"module '{mod_name}' has no attribute '{class_name}'") from exc
+    try:
+        return target() if isinstance(target, type) else target
+    except Exception as exc:
+        raise ValueError(f"failed to instantiate '{spec}': {exc}") from exc
+
+
 def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
-    """Settle uncertain actions with registered probes (issue #218).
+    """Settle uncertain actions with registered probes (issue #218) and plugins (#765).
 
     Mutating by design (it appends ACTION_RECONCILED events through the
     ledger), which is why it is its own command rather than something
     `validate`/`resume` do implicitly: those stay read-only so the exit-code
-    safety contract holds. With no registered probe for an action's type,
-    that action is left exactly as the ledger holds it.
+    safety contract holds. With no registered probe for an action's type and no
+    applicable plugin, that action is left exactly as the ledger holds it.
+
+    Plugins are the framework-neutral counterpart of the probe registry: any
+    ``ActionReconciler`` the operator names with ``--reconciler`` is dispatched
+    over the actions the probes left pending. Both paths settle through the same
+    ledger method, and neither can lower the other's caution: a plugin never
+    un-settles what a probe decided, only advises on what it left open.
     """
     from continuum.actions.ledger import ActionLedger
     from continuum.reconcilers import (
@@ -3041,6 +3070,17 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
     except ReconcilerConfigError as exc:
         print(f"error: {exc}", file=err)
         return ExitCode.ERROR
+
+    # Plugins resolve from dotted paths the operator named explicitly, never by
+    # discovery: a reconcile must not execute code nobody asked it to run.
+    specs: list[str] = list(getattr(args, "reconciler", None) or [])
+    plugins: list[Any] = []
+    for spec in specs:
+        try:
+            plugins.append(_load_dotted(spec))
+        except ValueError as exc:
+            print(f"error: {exc}", file=err)
+            return ExitCode.ERROR
 
     # Authority probe path (issue #289c)
     authority_id = getattr(args, "authority", None)
@@ -3070,7 +3110,7 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
 
     pending = ActionLedger(storage, args.run_id).pending()
     report = settle_run(storage, args.run_id, probes, dry_run=args.dry_run)
-    payload = {"run_id": args.run_id, "dry_run": args.dry_run, **report.as_dict()}
+    payload: dict[str, Any] = {"run_id": args.run_id, "dry_run": args.dry_run, **report.as_dict()}
     lines = [
         f"pending actions: {len(pending)}, "
         f"settled: {report.settled} "
@@ -3080,6 +3120,39 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
     ]
     for action_type, detail in report.unresolved:
         lines.append(f"  [!!] {action_type}: {detail}")
+
+    # Plugin pass (issue #765): only actions the probes left pending are seen
+    # here, so a probe's settlement is never revisited or contradicted.
+    unresolved_after_plugins = 0
+    if plugins:
+        from continuum.plugins.reconcile import (
+            ReconciliationOutcome,
+            settle_with_reconcilers,
+        )
+
+        # Counted before the pass: an action the plugins escalate to
+        # REQUIRES_REVIEW leaves `pending()` (which only lists STARTED and
+        # UNKNOWN), so re-reading the ledger afterwards would report an
+        # escalated conflict as resolved and exit OK on a run a human must see.
+        open_before = len(ActionLedger(storage, args.run_id).pending())
+        plugin_report = settle_with_reconcilers(storage, args.run_id, plugins, dry_run=args.dry_run)
+        payload["plugins"] = plugin_report.as_dict()
+        unresolved_after_plugins = open_before - plugin_report.settled
+        lines.append(
+            f"plugin reconcilers: {len(plugins)} registered, "
+            f"settled: {plugin_report.settled} "
+            f"(occurred {len(plugin_report.settled_true)}, "
+            f"not-occurred {len(plugin_report.settled_false)}), "
+            f"escalated: {len(plugin_report.escalated)}"
+        )
+        for assessment in plugin_report.assessments:
+            # Only the escalated ones carry the warning sigil: a confirmed
+            # outcome is good news and must not render red in the terminal.
+            rendered = assessment.render().splitlines()[0]
+            if assessment.outcome is ReconciliationOutcome.CONFIRMED_OCCURRED:
+                lines.append(f"  [ok] {rendered}")
+            else:
+                lines.append(f"  [!!] {rendered}")
     if args.dry_run:
         lines.append("dry run: nothing was written")
     _emit(
@@ -3089,7 +3162,7 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
         stream=out,
         palette=getattr(args, "_palette", None),
     )
-    remaining = len(pending) - report.settled
+    remaining = unresolved_after_plugins if plugins else len(pending) - report.settled
     return ExitCode.OK if remaining <= 0 else ExitCode.REQUIRES_HUMAN
 
 
@@ -4270,6 +4343,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--authority",
         default=None,
         help="probe a consumed authority id via reconcilers.json instead of actions",
+    )
+    reconcile_auto.add_argument(
+        "--reconciler",
+        action="append",
+        default=None,
+        metavar="module.path:ClassName",
+        help=(
+            "register an ActionReconciler plugin by dotted path (repeatable). "
+            "Dispatched over actions the probes left pending (issue #765)."
+        ),
     )
     with_run(add("actions", cmd_actions, "List external side effects."))
     with_env(with_run(add("show-contract", cmd_contract, "Print the recovery contract.")))

@@ -71,6 +71,16 @@ class Registry:
         """Every registered service that is an instance of ``type_``."""
         return [s for s in self._services.values() if isinstance(s, type_)]
 
+    def all_services(self) -> list[Any]:
+        """Every registered service, unfiltered.
+
+        ``all_of`` is the typed view; this is the seam-membership view, for a
+        caller that applies its own ``isinstance`` check against a
+        ``runtime_checkable`` Protocol the registry cannot express as a ``type``
+        (issue #765).
+        """
+        return list(self._services.values())
+
     def __contains__(self, name: str) -> bool:
         return name in self._services
 
