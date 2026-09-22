@@ -55,6 +55,11 @@ SCENARIOS: tuple[ControlledScenario, ...] = (
         scenario="tool_failure",
         checkpoint_version="v1",
         environment_version="v1",
+        # A returned error settles the action as FAILED (ledger.fail with
+        # certain=True), which is known not to have landed. The engine builds
+        # its uncertain set from UNKNOWN, STARTED and REQUIRES_REVIEW only, so a
+        # FAILED action never blocks the run. RESUME, not a "RETRY" mode the
+        # enum does not define.
         expected="RESUME",
         description="Tool returns error, retry is safe",
     ),
@@ -62,6 +67,13 @@ SCENARIOS: tuple[ControlledScenario, ...] = (
         scenario="api_timeout",
         checkpoint_version="v1",
         environment_version="v1",
+        # A timeout is not evidence of absence: the request may have landed, so
+        # the ledger records UNKNOWN with side_effect_uncertain set
+        # (ledger.fail with certain=False). The engine's uncertain arm then
+        # proposes REQUEST_HUMAN in strict mode and WAIT in lenient, so this is
+        # the strict-mode value. The same shape as external_side_effect below,
+        # which already declares REQUEST_HUMAN, and project.md forbids a blind
+        # retry when the side effect is unknown.
         expected="REQUEST_HUMAN",
         description="External API timed out, side effect uncertain",
     ),
