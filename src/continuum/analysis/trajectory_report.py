@@ -8,7 +8,7 @@ from datetime import datetime
 
 from continuum.events import Event, EventType
 from continuum.models import Origin, TrajectoryReport, utcnow
-from continuum.provenance_map import derived_provenance_for_events
+from continuum.recovery.derived import derived_label, stamp_derived
 from continuum.storage.base import Storage
 
 __all__ = [
@@ -189,7 +189,6 @@ def build_trajectory_report(
     top = _top_failure_types(events)
     stalls = _truncate_list(stalls, _MAX_STALL_SITES)
     top = _truncate_list(top, _MAX_TOP_TYPES)
-    derived_origin = derived_provenance_for_events(events)
     raw_id = stable_hash(
         {
             "run_id": run_id,
@@ -205,18 +204,25 @@ def build_trajectory_report(
     if not report_id:
         report_id = "report_1"
     created = now or utcnow()
-    candidate = TrajectoryReport(
-        report_id=report_id,
-        window_start=window_start,
-        window_end=window_end,
-        compaction_seq=window_end,
-        attempts=attempts,
-        scar_rate=scar,
-        stall_sites=stalls,
-        top_failure_action_types=top,
-        created_at=created,
-        derived_origin=derived_origin.value,
+    # The report is a pure projection of the window, so its authority is the
+    # weakest source in it: one self-reported event makes the report
+    # unverified rather than "system-derived" (#392). Stamped through the same
+    # helper as every other derived artifact.
+    stamped = stamp_derived(
+        {
+            "report_id": report_id,
+            "window_start": window_start,
+            "window_end": window_end,
+            "compaction_seq": window_end,
+            "attempts": attempts,
+            "scar_rate": scar,
+            "stall_sites": stalls,
+            "top_failure_action_types": top,
+            "created_at": created,
+        },
+        events,
     )
+    candidate = TrajectoryReport.model_validate(stamped)
     while (
         len(json.dumps(candidate.model_dump(mode="json"), sort_keys=True).encode())
         > TRAJECTORY_REPORT_CAP_BYTES
@@ -254,7 +260,6 @@ def record_trajectory_report(
             except Exception:
                 continue
     payload = report.model_dump(mode="json")
-    payload["derived_origin"] = str(report.derived_origin)
     storage.append_event(run_id, EventType.TRAJECTORY_REPORT, payload, source=Origin.DETERMINISTIC)
     return report
 
@@ -347,11 +352,10 @@ def health_maybe_generate_trajectory_report(
 
 def render_trajectory_report(report: TrajectoryReport) -> list[str]:
     """Format a trajectory report into human-readable lines for display."""
-    label = (
-        "unverified (derived)"
-        if report.derived_origin in ("external_agent", "llm")
-        else f"derived from {report.derived_origin}"
-    )
+    # The stored payload is what the invariant is checked against, so the label
+    # a reader sees comes from the same helper: an IMPORTED or missing origin
+    # reads unverified here too, not just external_agent and llm (#392).
+    label = derived_label(report.model_dump())
     lines: list[str] = []
     lines.append(
         f"trajectory report {report.report_id} window {report.window_start}->{report.window_end} [{label}]:"
