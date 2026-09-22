@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 
 from continuum.cli import ExitCode, main
@@ -43,7 +44,7 @@ def test_lesson_sourced_only_from_external_agent_is_unverified() -> None:
     stamped = stamp_derived(payload, events)
     assert stamped["derived_origin"] == Origin.EXTERNAL_AGENT.value
     assert is_derived_unverified(stamped)
-    assert "unverified" in derived_label(stamped)
+    assert derived_label(stamped) == "unverified (derived from external_agent)"
     finding = Finding(
         finding_id="lesson_1",
         claim="lesson",
@@ -114,7 +115,7 @@ def test_existing_artifact_without_new_field_degrades_to_unverified() -> None:
     old_block: dict[str, object] = {"attempts": 1, "avoid": []}
     assert is_derived_unverified(old_block)  # type: ignore[arg-type]
     label = derived_label(old_block)  # type: ignore[arg-type]
-    assert "unverified" in label
+    assert label == "unverified (derived from unverified sources)"
     assert min_canonical([]).value == "agent_asserted"
     assert derived_origin([]) is Origin.EXTERNAL_AGENT
     assert derived_provenance_for_events([]) is Origin.EXTERNAL_AGENT
@@ -177,7 +178,8 @@ def test_informed_retry_block_is_stamped_and_labelled() -> None:
     assert "derived_origin" in decision.informed_retry
     assert decision.informed_retry["derived_origin"] == Origin.EXTERNAL_AGENT.value
     rendered = render_informed_retry(decision.informed_retry)
-    assert any("provenance" in line and "unverified" in line for line in rendered)
+    # The full wording is pinned because it is the line a reading agent sees.
+    assert "provenance: unverified (derived from external_agent)" in rendered
     storage.close()
 
 
@@ -198,7 +200,7 @@ def test_trusted_only_sources_yield_verified_derived() -> None:
     assert origin is Origin.DETERMINISTIC
     payload = stamp_derived({}, events)
     assert not is_derived_unverified(payload)
-    assert "derived from deterministic" in derived_label(payload)
+    assert derived_label(payload) == "derived from deterministic"
 
 
 def test_trajectory_report_from_imported_sources_renders_unverified() -> None:
@@ -230,7 +232,7 @@ def test_trajectory_report_from_imported_sources_renders_unverified() -> None:
         report = build_trajectory_report(storage, "r", window_start, window_end)
         assert report.derived_origin == Origin.IMPORTED.value
         assert is_derived_unverified(report.model_dump())
-        assert "unverified" in derived_label(report.model_dump())
+        assert derived_label(report.model_dump()) == "unverified (derived from imported)"
         rendered = render_trajectory_report(report)
         assert any("unverified" in line for line in rendered)
     finally:
@@ -256,7 +258,7 @@ def test_unstamped_trajectory_report_renders_unverified() -> None:
     )
     assert report.derived_origin == ""
     assert is_derived_unverified(report.model_dump())
-    assert "unverified" in derived_label(report.model_dump())
+    assert derived_label(report.model_dump()) == "unverified (derived from unverified sources)"
     rendered = render_trajectory_report(report)
     assert any("unverified" in line for line in rendered)
 
@@ -286,17 +288,30 @@ def _record_trajectory_report(db: str, derived_origin: str) -> None:
         )
 
 
+def _trajectory_section(db: str) -> dict[str, object]:
+    """The curated briefing's trajectory-report section, via the --json payload."""
+    code, out, err = _run_cli("--db", db, "--json", "briefing")
+    assert code is ExitCode.OK, err
+    sections = json.loads(out)["curated_sections"]
+    matches = [s for s in sections if str(s["title"]).startswith("trajectory reports")]
+    assert len(matches) == 1, f"expected one trajectory section, got {matches}"
+    return matches[0]
+
+
 def test_briefing_marks_trajectory_section_from_unverified_sources(tmp_path: Path) -> None:
     """The section title carries the caveat, because the title is what renders (#1098).
 
     A report projected from self-reported sources is not system-derived in
-    authority, even though the projection itself is mechanical.
+    authority, even though the projection itself is mechanical. The title says
+    so, and the machine-readable ``provenance`` tier is demoted to ``agent``
+    so the hook payload does not advertise system authority either (#1262).
     """
     db = str(tmp_path / "brief.db")
     _record_trajectory_report(db, Origin.IMPORTED.value)
     code, out, err = _run_cli("--db", db, "briefing")
     assert code is ExitCode.OK, err
     assert "trajectory reports (sleep-time, derived from unverified sources)" in out
+    assert _trajectory_section(db)["provenance"] == "agent"
 
 
 def test_briefing_trajectory_section_stays_system_derived_when_verified(tmp_path: Path) -> None:
@@ -307,3 +322,4 @@ def test_briefing_trajectory_section_stays_system_derived_when_verified(tmp_path
     assert code is ExitCode.OK, err
     assert "trajectory reports (sleep-time, system-derived)" in out
     assert "derived from unverified sources" not in out
+    assert _trajectory_section(db)["provenance"] == "system"

@@ -471,7 +471,9 @@ def test_render_trajectory_report_labels_a_derived_origin() -> None:
         derived_origin="external_agent",
     )
     text = "\n".join(render_trajectory_report(report))
-    assert "unverified (derived)" in text
+    # The shared derived_label names the weak origin rather than the generic
+    # "unverified (derived)" the old hardcoded renderer printed (#1098).
+    assert "unverified (derived from external_agent)" in text
 
-    report_machine = report.model_copy(update={"derived_origin": "checkpoint"})
-    assert "derived from checkpoint" in "\n".join(render_trajectory_report(report_machine))
+    report_machine = report.model_copy(update={"derived_origin": "deterministic"})
+    assert "derived from deterministic" in "\n".join(render_trajectory_report(report_machine))

@@ -56,7 +56,10 @@ All notable changes to this project are documented here. The format follows
   `derived_label`. `is_derived_unverified` marks the trajectory-report section
   of the curated briefing: its title read "system-derived" even when every
   source the report was distilled from was self-reported, and the title, not
-  the section's `reason`, is what the briefing renders. The shared label also
+  the section's `reason`, is what the briefing renders. The section's
+  machine-readable `provenance` tier is demoted to `agent` in the same case,
+  so the hook payload does not advertise system authority for self-reported
+  content either. The shared label also
   closes a gap in the trajectory renderer, which hard-coded
   `external_agent`/`llm` as the unverified set and so rendered an `imported`
   origin, and a report with no recorded origin at all, as "derived from ...".

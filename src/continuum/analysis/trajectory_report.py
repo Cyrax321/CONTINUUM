@@ -8,6 +8,7 @@ from datetime import datetime
 
 from continuum.events import Event, EventType
 from continuum.models import Origin, TrajectoryReport, utcnow
+from continuum.recovery.derived import derived_label, stamp_derived
 from continuum.storage.base import Storage
 
 __all__ = [
@@ -179,7 +180,6 @@ def build_trajectory_report(
     now: datetime | None = None,
 ) -> TrajectoryReport:
     """Distill metrics and failure patterns across an event window into a report."""
-    from continuum.recovery.derived import stamp_derived
     from continuum.security.hashing import stable_hash
 
     events = _window_events(storage, run_id, window_start, window_end)
@@ -352,8 +352,6 @@ def health_maybe_generate_trajectory_report(
 
 def render_trajectory_report(report: TrajectoryReport) -> list[str]:
     """Format a trajectory report into human-readable lines for display."""
-    from continuum.recovery.derived import derived_label
-
     # The stored payload is what the invariant is checked against, so the label
     # a reader sees comes from the same helper: an IMPORTED or missing origin
     # reads unverified here too, not just external_agent and llm (#392).
