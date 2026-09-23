@@ -165,7 +165,7 @@ CONTINUUM 将 **LLM 上下文**（临时）与 **持久任务状态**（永久�
 
 ### 崩溃恢复，真实发生
 
-下面的图片不是模型图。它是 `python demo-run/generate_crash_visual.py` 的输出，该脚本让 `demo-run/worker.py` 运行至第 399 篇文档时执行 `os._exit(9)`，调用 `continuum resume --env dataset=v4` 并展示拒绝路径（`REQUEST_HUMAN`、`safe:false`、exit 20），用探针调和不确定的副作用，然后从同一数据库恢复并在无重复工作的情况下完成。转录也保存为 `docs/assets/crash-recovery.txt` 供审计。
+下面的图片不是模型图。它是 `python demo-run/generate_crash_visual.py` 的输出，该脚本让 `demo-run/worker.py` 运行至第 399 篇文档时执行 `os._exit(9)`，调用 `continuum resume --env dataset=v4` 并展示拒绝路径（`REQUEST_HUMAN`、`safe:false`、exit 21），用探针调和不确定的副作用，然后从同一数据库恢复并在无重复工作的情况下完成。转录也保存为 `docs/assets/crash-recovery.txt` 供审计。
 
 重新生成：
 

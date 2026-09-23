@@ -167,7 +167,7 @@ Cada linha acima é rastreável a um caminho que existe em `main` no commit etiq
 
 ### Recuperação de falha, de verdade
 
-A imagem abaixo não é uma maquete. É a saída de `python demo-run/generate_crash_visual.py`, que executa `demo-run/worker.py` até `os._exit(9)` no documento 399, chama `continuum resume --env dataset=v4` e mostra o caminho de recusa (`REQUEST_HUMAN`, `safe:false`, exit 20), reconcilia o efeito colateral incerto com uma sonda, depois retoma a partir do mesmo banco de dados e termina sem trabalho duplicado. A transcrição também é salva como `docs/assets/crash-recovery.txt` para auditoria.
+A imagem abaixo não é uma maquete. É a saída de `python demo-run/generate_crash_visual.py`, que executa `demo-run/worker.py` até `os._exit(9)` no documento 399, chama `continuum resume --env dataset=v4` e mostra o caminho de recusa (`REQUEST_HUMAN`, `safe:false`, exit 21), reconcilia o efeito colateral incerto com uma sonda, depois retoma a partir do mesmo banco de dados e termina sem trabalho duplicado. A transcrição também é salva como `docs/assets/crash-recovery.txt` para auditoria.
 
 Regenerar:
 

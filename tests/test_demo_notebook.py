@@ -68,7 +68,8 @@ def test_notebook_runs_end_to_end(tmp_path: Path) -> None:
     assert "exit code 9:" in flat, "the worker was not killed by os._exit(9)"
     assert "progress 400/1000 documents" in flat, "the checkpoint did not survive the kill"
     assert "mode request_human" in flat, "an unknown side effect must not resume"
-    assert "continuum resume would exit 20" in flat
+    # Each recovery mode owns a distinct code, so request_human is 21, not WAIT's 20.
+    assert "continuum resume would exit 21" in flat
     assert "unresolved before 1" in flat
     assert "unresolved after 0" in flat
     assert "resumed at 400 documents" in flat, "work was reprocessed from zero"

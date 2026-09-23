@@ -217,6 +217,29 @@ def test_only_resume_maps_to_a_zero_exit() -> None:
         assert (code == ExitCode.OK) == (mode is RecoveryMode.RESUME)
 
 
+def test_every_recovery_mode_maps_to_a_distinct_code() -> None:
+    """The safety contract README states: every mode gets its own code (#1170).
+
+    A coarse scheme collapsed WAIT onto REQUEST_HUMAN and ROLLBACK onto ABORT,
+    so a shell consumer could not do what the module docstring told it to --
+    tell "hold and retry" apart from "page a human", or "roll back" from
+    "abort". Distinct codes make both branches reachable.
+    """
+    codes = [exit_code_for(mode) for mode in RecoveryMode]
+    assert len(codes) == len(set(codes)), dict(zip(RecoveryMode, codes, strict=True))
+
+    # The pairs the old scheme merged now differ, and stay within their band.
+    assert exit_code_for(RecoveryMode.WAIT) != exit_code_for(RecoveryMode.REQUEST_HUMAN)
+    assert exit_code_for(RecoveryMode.ROLLBACK) != exit_code_for(RecoveryMode.ABORT)
+    assert exit_code_for(RecoveryMode.REPAIR_AND_RESUME) != exit_code_for(RecoveryMode.REPLAN)
+    # Every non-resume mode is non-zero, so a pipeline still short-circuits.
+    assert all(
+        code != ExitCode.OK
+        for mode, code in zip(RecoveryMode, codes, strict=True)
+        if mode is not RecoveryMode.RESUME
+    )
+
+
 def test_an_unclassified_mode_is_never_mistaken_for_permission() -> None:
     """A mode added later, before anyone assigns it a code, must fail closed.
 
