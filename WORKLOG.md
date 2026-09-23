@@ -576,3 +576,51 @@ on 104 files, mcp pinned to 2.1.0 first. All CI checks green on the branch.
 Options 2 (repair/amend) and 3 (fork-from-last-good-prefix) remain open by
 design; the reviewer floated moving the bookkeeping fields off
 `SemanticState` entirely as follow-up scope.
+
+## Session 19, 2026-09-22 (issue #765: dispatch registered ActionReconcilers)
+
+Made the `ActionReconciler` plugin seam load-bearing. It had been declared in
+Phase 7 with no consumer, which is why `docs/ARCHITECTURE_EVOLUTION.md` listed it
+under "plugin seams ... declared, not load-bearing". Open PR #1189 (issue #268,
+OTel-span evidence) is one such source; this is the contract every such source
+meets.
+
+- New `src/continuum/plugins/reconcile.py`: the dispatch/merge/settlement core.
+  Four documented outcomes (`confirmed_occurred` / `confirmed_not_occurred` /
+  `unavailable_evidence` / `conflicting_evidence`), deterministic name-ordered
+  selection, per-source provenance in JSON and text. Pure dispatch takes `Action`
+  objects only: the trust boundary is the signature, not a convention.
+- `settle_with_reconcilers` writes solely through `ActionLedger.reconcile` /
+  `flag_for_review`, mirroring `settle_run` (#218), and reuses the archive-aware
+  `fold_action_events` key lookup so compacted runs still settle (#647).
+- `Reconciliation.occurred` widened `bool` -> `bool | None`; `None` is "looked,
+  could not obtain evidence", never evidence of absence. The fourth outcome
+  (conflict) is emergent across sources, so it lives in the merge layer.
+- `continuum reconcile --reconciler module:Class` (repeatable) names plugins
+  explicitly: no discovery, matching the issue's requirement that a reconcile
+  not implicitly execute untrusted code. Plugin pass runs after the probe pass
+  over what it left pending, so probes and plugins compose and the default
+  (no `--reconciler`) path is unchanged.
+
+Two design decisions worth flagging for review, both deliberate:
+
+1. **An errored reconciler blocks confirmation.** The first implementation
+   ignored errors and settled on the surviving sources; that lets one broken
+   plugin quietly veto a real conflict. Changed to fail closed: a source that
+   crashed cannot say whether it agrees, so its silence is not neutrality.
+2. **Conflict is never adjudicated.** Disagreeing sources escalate to
+   `REQUIRES_HUMAN`; no majority vote, since the layer has no way to rank two
+   external systems it did not build.
+
+A real CLI exit-code bug surfaced from the tests: actions escalated to
+`REQUIRES_REVIEW` leave `pending()` (which lists only STARTED/UNKNOWN), so
+re-reading the ledger after the plugin pass reported an escalated conflict as
+resolved and exited `0`. Fixed by counting pending before the pass, as the probe
+path already did.
+
+Also: `Registry.all_services()` added as an unfiltered view, because
+`all_of(type_)` cannot take a `runtime_checkable` Protocol as a `type`.
+
+Verification: 34 new tests in `tests/test_reconcile_plugins.py` (four categories,
+every failure mode, ordering, provenance, no-op, registry resolution, real-ledger
+settlement, CLI); all 34 passed; ruff clean and formatted.

@@ -6,6 +6,43 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Registered `ActionReconciler` plugins are now dispatched during reconciliation (#765).**
+  The `ActionReconciler` seam in `continuum.plugins.seams` was declared in Phase 7
+  with no consumer: `docs/ARCHITECTURE_EVOLUTION.md` listed it among the plugin
+  seams declared but not load-bearing. `continuum.plugins.reconcile` is the
+  consumer. It dispatches registered reconcilers over a run's uncertain actions,
+  merges their evidence, and settles through the existing ledger path alongside the
+  subprocess probe registry (#218).
+
+  Every assessed action lands in one of four documented categories: confirmed
+  occurrence, confirmed non-occurrence, unavailable evidence, or conflicting
+  evidence. Confirmation settles the action; anything else escalates it to
+  `REQUIRES_REVIEW`. Two rules keep that safe: a reconciler that raises or returns
+  a malformed value blocks confirmation rather than being ignored (its silence is
+  not neutrality), and disagreeing sources are escalated rather than
+  majority-voted. The human queue only ever grows on anything less than unanimous
+  confirmation, so plugins can shrink what a person must inspect and never widen
+  what an agent may certify on its own.
+
+  Reconcilers run sorted by declared name, so registration or iteration order can
+  never change a verdict, and every report carries per-source provenance in that
+  same order for diffable JSON and text diagnostics. `Reconciliation.occurred`
+  widens from `bool` to `bool | None`, where `None` means looked and could not
+  obtain evidence rather than evidence of absence; existing reconcilers returning
+  `True`/`False` are unaffected.
+
+  A reconciler receives the `Action` record and nothing else (no storage, no
+  ledger), so plugin code cannot persist anything outside the controlled
+  settlement loop. Registration stays explicit and is never discovered: `continuum
+  reconcile run_1 --reconciler myapp:OutboxReconciler` (repeatable) names each
+  plugin by dotted path, and `settle_with_reconcilers` also accepts a `Registry` to
+  resolve from. Probes and plugins compose: the probe pass runs first and plugins
+  only see what it left pending. Default behaviour with no `--reconciler` is
+  unchanged. See `docs/guides/reconciler-plugins.md`, including how to implement a
+  #268-compatible OpenTelemetry reconciler on the seam.
+
 ### Fixed
 
 - **The edit-precondition gate now raises the exception subclass matching the
