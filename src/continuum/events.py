@@ -143,7 +143,11 @@ class EventType(StrEnum):
     # structured plan (issue #312): durable milestones for long-horizon recovery
     PLAN_UPSERT = "PLAN_UPSERT"
 
-    # memory governance (issue #304, #567): per-tenant tombstone for erasure
+    # subagent spanning: trace delegation chains when a main agent spawns subagents
+    # subagent spanning: trace delegation chains when a main agent spawns subagents
+    SUBAGENT_SPAWNED = "SUBAGENT_SPAWNED"
+    SUBAGENT_COMPLETED = "SUBAGENT_COMPLETED"
+    SUBAGENT_FAILED = "SUBAGENT_FAILED"
     MEMORY_TOMBSTONED = "MEMORY_TOMBSTONED"
 
     # outbound notifications (issue #305): the bell next to the HITL door.

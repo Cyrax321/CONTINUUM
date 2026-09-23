@@ -96,6 +96,7 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]
+"src/continuum/adapters/base.py" = ["B027"]
 
 [tool.mypy]
 python_version = "3.11"

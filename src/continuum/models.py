@@ -59,6 +59,7 @@ __all__ = [
     "ModelState",
     "Run",
     "SemanticState",
+    "SubagentSpan",
     "ConsumedInputs",
     "Action",
     "EnvResource",
@@ -741,6 +742,26 @@ class ModelState(BaseModel):
     provider: str | None = None
     fingerprint: str | None = None
     model_specific_state: list[ModelSpecificState] = Field(default_factory=list)
+
+
+class SubagentSpan(BaseModel):
+    """Tracks a subagent delegation within a parent run.
+
+    When a main agent spawns a subagent, CONTINUUM records a SUBAGENT_SPAWNED
+    event. The subagent runs in its own run_id but is linked back to the parent
+    via this span, enabling end-to-end tracing of delegation chains.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    span_id: str = Field(default_factory=lambda: make_id("span"))
+    parent_run_id: str
+    subagent_run_id: str
+    task_description: str
+    spawned_at: datetime = Field(default_factory=utcnow)
+    completed_at: datetime | None = None
+    status: str = "active"  # active, completed, failed
+    result_summary: str | None = None
 
 
 class SemanticState(BaseModel):

@@ -81,3 +81,33 @@ class AgentAdapter(ABC):
         replay: bool = True,
     ) -> RecoveryDecision:
         """Assess recovery safety and return a recovery decision for a run."""
+
+    def spawn_subagent(
+        self,
+        parent_run_id: str,
+        subagent_run_id: str,
+        task_description: str,
+    ) -> None:
+        """Record that a subagent was spawned from this adapter's run.
+
+        Default implementation is a no-op. Override in adapters that
+        manage subagent lifecycle to record the SUBAGENT_SPAWNED event.
+        """
+        pass  # noqa: B027 - intentional no-op default
+
+    def complete_subagent(
+        self,
+        parent_run_id: str,
+        subagent_run_id: str,
+        *,
+        success: bool = True,
+        result_summary: str | None = None,
+    ) -> None:
+        """Record that a subagent completed or failed.
+
+        Default implementation is a no-op. Override in adapters that
+        manage subagent lifecycle to record the SUBAGENT_COMPLETED or
+        SUBAGENT_FAILED event.
+        """
+        pass  # noqa: B027 - intentional no-op default
+
