@@ -80,12 +80,15 @@ That line must never launch an agent onto stale state, so **only a verified-safe
 |:--|:--|
 | `0` | verified safe to resume |
 | `1` | usage error or unexpected command failure |
-| `10` | recoverable, but repairs are required first |
-| `20` | a human must decide (typically an unreconciled side effect) |
-| `30` | not safe to resume |
+| `10` | recoverable once an automatic repair runs (`REPAIR_AND_RESUME`) |
+| `11` | recoverable, but the plan itself must change (`REPLAN`) |
+| `20` | hold and retry once a condition clears; no person needed yet (`WAIT`) |
+| `21` | a human must decide, typically an unreconciled side effect (`REQUEST_HUMAN`) |
+| `30` | unsafe as-is, but a rollback to a safe point is available (`ROLLBACK`) |
+| `31` | not safe to resume; abort (`ABORT`), and the fail-closed default |
 | `2` / `3` / `4` | not found / integrity failure / not implemented |
 
-A recovery mode nobody has classified falls through to *unsafe*, never to `0`.
+A recovery mode nobody has classified falls through to *unsafe* (`31`), never to `0`.
 
 ```text
 $ continuum resume run_4821 --env dataset=v4
@@ -101,7 +104,7 @@ Repairs required:
 
 Next permitted action: reconcile_action:action_cda6e307...
 $ echo $?
-20
+21
 ```
 
 ### State Diff

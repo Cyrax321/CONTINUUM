@@ -1190,10 +1190,12 @@ def cmd_watch(args: argparse.Namespace, storage: Storage, out: Any, err: Any) ->
         stream=out,
         palette=getattr(args, "_palette", None),
     )
-    # Exit code: breached maps to WAIT which is REQUIRES_HUMAN (20), otherwise OK
+    # Exit code: a breach proposes WAIT (never ROLLBACK, per #302), which is
+    # its own code (20) so a script can tell "hold and retry" apart from
+    # REQUEST_HUMAN; a clean read exits OK (issue #1170).
     if breached:
-        return 20
-    return 0
+        return ExitCode.WAIT
+    return ExitCode.OK
 
 
 def cmd_health(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
@@ -1390,7 +1392,7 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         }
         # Machine JSON on stdout (same as every other resume _emit); text stays human-readable.
         _emit(payload, msg, as_json=args.json, stream=out)
-        # UNSAFE (30): run exists but resuming is not safe (distinct from NOT_FOUND / 2).
+        # UNSAFE (31): run exists but resuming is not safe (distinct from NOT_FOUND / 2).
         return ExitCode.UNSAFE
     engine = RecoveryEngine(storage, strict_unknown=not args.tolerate_unknown)
     decision = engine.assess(

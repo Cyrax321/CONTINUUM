@@ -61,7 +61,7 @@ What previous attempts changed (informed retry):
   avoid repeating: github.create_issue (action_009a7fc): outcome unknown; reconcile before any retry
 
 Run with --repair to record the repair plan, or resolve the items above first.
-[exit code 20 - refusal path, safe:false]
+[exit code 21 - refusal path, safe:false]
 
 $ # reconcile the uncertain side effect (probe asks the real system)
 unresolved before: 1

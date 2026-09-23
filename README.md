@@ -170,7 +170,7 @@ Every row above is traceable to a path that exists on `main` at the tagged commi
 
 ### Crash recovery, for real
 
-The image below is not a mock. It is the output of `python demo-run/generate_crash_visual.py`, which runs `demo-run/worker.py` until `os._exit(9)` at document 399, calls `continuum resume --env dataset=v4` and shows the refusal path (`REQUEST_HUMAN`, `safe:false`, exit 20), reconciles the uncertain side effect with a probe, then resumes from the same database and finishes with no duplicate work. The transcript is also saved as `docs/assets/crash-recovery.txt` for audit.
+The image below is not a mock. It is the output of `python demo-run/generate_crash_visual.py`, which runs `demo-run/worker.py` until `os._exit(9)` at document 399, calls `continuum resume --env dataset=v4` and shows the refusal path (`REQUEST_HUMAN`, `safe:false`, exit 21), reconciles the uncertain side effect with a probe, then resumes from the same database and finishes with no duplicate work. The transcript is also saved as `docs/assets/crash-recovery.txt` for audit.
 
 Regenerate it:
 
