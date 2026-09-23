@@ -69,6 +69,10 @@ _COLLECTED_RES = (
     re.compile(r"^pytest\s+-q\s+#.*?([\d,]+)", re.MULTILINE),
 )
 
+# "36 event types", "44 event types in v0.2": any count attached to the
+# vocabulary is a claim about ``len(EventType)`` (#1171).
+_EVENT_TYPES_RES = re.compile(r"(\d[\d,]*)\s+event types")
+
 
 def documented_total(path: Path) -> int | None:
     """The collected total ``path`` states, or None if it states none.
@@ -129,6 +133,29 @@ def test_documented_narrative_count_forms(tmp_path: Path) -> None:
         path = tmp_path / f"doc-{index}.md"
         path.write_text(text, encoding="utf-8")
         assert documented_total(path) == expected
+
+
+def test_readme_event_type_count_matches_the_enum() -> None:
+    """README's stated event-type counts must equal ``len(EventType)`` (#1171).
+
+    The figure was documented twice in one file and both copies were wrong and
+    mutually inconsistent, one citing a count for a version that had not
+    shipped. Nothing checked it: this module pinned the collected-test totals
+    only. The count is a claim about an enum a reader can verify in one line, so
+    it is asserted against the enum rather than against a number.
+
+    Scoped to README because that is where this issue's figures live. The same
+    claim in ``references/`` and ``docs/index.html`` is still stale and belongs
+    to #1100; asserting there now would fail on figures that issue owns.
+    """
+    from continuum.events import EventType
+
+    text = COUNTED_FILES[0].read_text(encoding="utf-8")
+    stated = {int(match.replace(",", "")) for match in _EVENT_TYPES_RES.findall(text)}
+    assert stated, "README.md states no event-type count"
+    assert stated == {len(EventType)}, (
+        f"README.md states {sorted(stated)} event types, but EventType has {len(EventType)} members"
+    )
 
 
 @pytest.mark.slow
