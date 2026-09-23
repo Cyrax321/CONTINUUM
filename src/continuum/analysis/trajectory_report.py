@@ -99,17 +99,32 @@ def _scar_rate(events: list[Event]) -> float:
 def _stall_sites(events: list[Event]) -> list[str]:
     from continuum.models import Action
 
-    fails: list[str] = []
+    # Fold to the latest action per key before counting, exactly as _scar_rate
+    # does. Every operation writes at least two ACTION_RECORDED events -- a
+    # "started" claim and a terminal complete/fail -- so tallying raw events
+    # reported a fully successful operation as a stall (its "started" event
+    # still counted) and let a single genuine failure ("started" + "failed")
+    # clear the "repeated" (>= 2) threshold on its own (issue #1345).
+    latest: dict[str, Action] = {}
     for ev in events:
-        if ev.type not in (EventType.ACTION_RECORDED, EventType.ACTION_RECONCILED):
+        if ev.type not in (
+            EventType.ACTION_RECORDED,
+            EventType.ACTION_RECONCILED,
+            EventType.ACTION_COMPENSATED,
+        ):
+            continue
+        raw_key = ev.payload.get("key")
+        if not raw_key:
             continue
         try:
             action = Action.model_validate(ev.payload["action"])
         except Exception:
             continue
-        if action.status.value in ("failed", "unknown", "started"):
-            fails.append(action.action_type)
+        latest[str(raw_key)] = action
 
+    fails = [
+        a.action_type for a in latest.values() if a.status.value in ("failed", "unknown", "started")
+    ]
     if not fails:
         return []
     counts = Counter(fails)

@@ -456,6 +456,51 @@ def test_render_trajectory_report_is_honest_when_there_are_no_lessons() -> None:
         storage.close()
 
 
+def _add_completed_action(storage: SQLiteStorage, run_id: str, action_type: str, key: str) -> None:
+    from continuum.actions import ActionLedger
+
+    ledger = ActionLedger(storage, run_id)
+    outcome = ledger.claim(action_type, {"x": 1}, key=key)
+    ledger.complete(outcome.key, result={"ok": True})
+
+
+def test_stall_sites_ignore_fully_successful_operations() -> None:
+    """A successful operation still writes a 'started' ACTION_RECORDED event.
+
+    Counting raw events reported two successful ops of the same type as a
+    repeated stall site despite zero failures; folding to the latest action per
+    key (as _scar_rate does) fixes it (issue #1345)."""
+    storage = _make_storage()
+    try:
+        _add_completed_action(storage, "run_1", "send_email", "email:m1")
+        _add_completed_action(storage, "run_1", "send_email", "email:m2")
+        end = storage.last_sequence("run_1")
+        report = build_trajectory_report(storage, "run_1", window_start=1, window_end=end)
+        assert report.stall_sites == []
+    finally:
+        storage.close()
+
+
+def test_a_single_failure_does_not_reach_the_repeated_threshold() -> None:
+    """One failed op emits 'started' + 'failed'; the raw-event tally hit the
+    >= 2 'repeated' threshold on that alone. After the fold, a lone failure is
+    only the single top site, and a genuinely repeated failure elsewhere is what
+    the >= 2 threshold selects (issue #1345)."""
+    storage = _make_storage()
+    try:
+        _add_completed_action(storage, "run_1", "send_email", "email:ok")
+        _add_failed_action(storage, "run_1", "send_email", "email:once")
+        _add_failed_action(storage, "run_1", "charge_card", "card:1")
+        _add_failed_action(storage, "run_1", "charge_card", "card:2")
+        end = storage.last_sequence("run_1")
+        report = build_trajectory_report(storage, "run_1", window_start=1, window_end=end)
+        # charge_card failed twice (repeated); send_email failed once, so it is
+        # not a repeated stall site and the successful send is never counted.
+        assert report.stall_sites == ["charge_card"]
+    finally:
+        storage.close()
+
+
 def test_render_trajectory_report_labels_a_derived_origin() -> None:
     """The label distinguishes a report the machine distilled from one an agent
     asserted, so a reader knows how much to trust the figures."""
