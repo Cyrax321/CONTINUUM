@@ -138,6 +138,46 @@ def test_an_interval_policy_sees_an_existing_checkpoint_after_a_restart(
         assert restarted.maybe_checkpoint("run_1", now=future) is not None
 
 
+def test_the_default_policy_does_not_re_checkpoint_unchanged_state_after_a_restart(
+    tmp_path: Path,
+) -> None:
+    """The same restart invariant, for the default HybridPolicy.
+
+    IntervalPolicy is served by the _last_checkpoint_at back-fill, but
+    SemanticPolicy and EventPolicy read _last_state, which was never seeded the
+    same way. So a fresh manager saw previous_state=None even with a stored
+    checkpoint: SemanticPolicy fired "first state for this run" and EventPolicy
+    rescanned the whole history from cursor 0, writing a redundant checkpoint of
+    unchanged state on the first call after every restart (issue #1347).
+    """
+    db = tmp_path / "agent.db"
+    with SQLiteStorage(db) as store:
+        store.create_run(Run(run_id="run_1", goal="g"))
+        store.append_event("run_1", EventType.RUN_STARTED, {"goal": "g", "total": 10})
+        CheckpointManager(store).checkpoint("run_1")  # default policy
+        assert len(store.list_checkpoints("run_1")) == 1
+
+    with SQLiteStorage(db) as store:  # restart: fresh manager, empty memory
+        restarted = CheckpointManager(store)  # default policy
+        assert restarted.maybe_checkpoint("run_1") is None
+        assert len(store.list_checkpoints("run_1")) == 1
+
+        # A genuine change after the restart still checkpoints.
+        store.append_event(
+            "run_1",
+            EventType.ACTION_RECORDED,
+            {
+                "action": {
+                    "action_id": "a1",
+                    "action_type": "send_invoice",
+                    "status": "completed",
+                    "arguments": {},
+                }
+            },
+        )
+        assert restarted.maybe_checkpoint("run_1") is not None
+
+
 # --- restoring ------------------------------------------------------------- #
 
 

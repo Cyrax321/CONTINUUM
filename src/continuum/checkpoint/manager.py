@@ -115,6 +115,17 @@ class CheckpointManager:
             if existing is not None:
                 last_at = existing.created_at
                 self._last_checkpoint_at[run_id] = last_at
+                if previous is None:
+                    # A stored checkpoint means this run's state was already
+                    # captured. Seed the in-memory previous state too, exactly
+                    # as _last_checkpoint_at is seeded above — otherwise a fresh
+                    # manager after a restart treats the run as brand new:
+                    # SemanticPolicy fires "first state for this run" and
+                    # EventPolicy rescans the whole history from cursor 0,
+                    # writing a redundant checkpoint of unchanged state on the
+                    # first maybe_checkpoint (issue #1347).
+                    previous = existing.state
+                    self._last_state[run_id] = previous
 
         cursor = previous.source_sequence if previous else 0
         new_events = self.storage.read_events(run_id, after_sequence=cursor)
