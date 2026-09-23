@@ -17,6 +17,7 @@ import pytest
 from continuum.actions import ActionLedger
 from continuum.actions.idempotency import idempotency_key
 from continuum.cli import ExitCode, main
+from continuum.models import RunStatus
 from continuum.storage import SQLiteStorage
 
 
@@ -205,6 +206,34 @@ def test_a_family_blocked_parent_never_exits_zero(db: str) -> None:
     ActionLedger(SQLiteStorage(db), "kid").reconcile(str(key), occurred=True)
     code, _, _ = run("--db", db, "--json", "resume", "par")
     assert code == ExitCode.OK
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [RunStatus.CRASHED, RunStatus.ABORTED, RunStatus.FAILED],
+)
+def test_a_terminal_child_with_an_open_claim_does_not_block_the_parent(
+    db: str, terminal: RunStatus
+) -> None:
+    """A terminal child can never be made resumable, so it must not be assessed.
+
+    An open claim on a CRASHED/ABORTED/FAILED worker used to pin the parent's
+    family verdict to request_human forever, with no repair path — the
+    supervisor could never resume even though it is clean (issue #1344). Only
+    COMPLETED was skipped; the other terminal statuses are terminal too.
+    """
+    run("--db", db, "start", "par", "--goal", "supervise")
+    run("--db", db, "start", "kid", "--goal", "work", "--parent", "par")
+    ActionLedger(SQLiteStorage(db), "kid").claim("send_invoice", {}, key="invoice:I-9")
+
+    with SQLiteStorage(db) as store:
+        kid = store.get_run("kid")
+        store.update_run(kid.model_copy(update={"status": terminal}))
+
+    code, out, err = run("--db", db, "--json", "resume", "par")
+    payload = json.loads(out)
+    assert payload["safe"] is True, err
+    assert code == ExitCode.OK, err
 
 
 def test_clean_children_do_not_block_the_parent(db: str) -> None:

@@ -22,6 +22,20 @@ from continuum.storage.base import Storage
 
 __all__ = ["ChildStatus", "children_of", "roll_up_children"]
 
+# The authoritative terminal set, matching get_active_run in both storage
+# backends and the parent-run guard in cli/main.py. A terminal child can never
+# be made resumable, so assessing it would pin the parent's family verdict to
+# blocked forever (issue #1344); every one of these is skipped, not just
+# COMPLETED.
+_TERMINAL_STATUSES = frozenset(
+    {
+        RunStatus.COMPLETED,
+        RunStatus.CRASHED,
+        RunStatus.ABORTED,
+        RunStatus.FAILED,
+    }
+)
+
 
 @dataclass(frozen=True)
 class ChildStatus:
@@ -71,7 +85,7 @@ def roll_up_children(
     statuses: list[ChildStatus] = []
     blocked = False
     for child in children_of(storage, run_id):
-        if child.status is RunStatus.COMPLETED:
+        if child.status in _TERMINAL_STATUSES:
             continue
         try:
             decision = engine.assess(child.run_id)
