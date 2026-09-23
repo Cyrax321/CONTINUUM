@@ -702,3 +702,191 @@ def test_a_route_without_a_prefix_keeps_the_whole_host(tmp_path: Path) -> None:
         run_id="run_1",
     )
     assert decision.allow is True
+
+
+def test_the_most_specific_prefix_wins_regardless_of_registry_order(tmp_path: Path) -> None:
+    """A broad route must not shadow a narrower one that also admits the path.
+
+    ``match_route`` narrowed a host's routes by prefix and then took the first
+    survivor in registry order (issue #1341). A route with a broad prefix
+    therefore shadowed a route with a narrower one that also admitted the path,
+    so two configs identical but for the order of their ``upstreams`` array
+    rendered different keys and consulted, or spent, a different claim. The
+    winner is now the longest matching prefix, whichever order the list is in.
+    """
+    from continuum.actions.ledger import fold_action_events
+
+    broad = Route(
+        host="api.example.com",
+        methods=("POST",),
+        prefix="/v1/invoices",
+        action_type="mem_write",
+        key_template="mem:{store_id}:{tenant}:invoice",
+    )
+    specific = Route(
+        host="api.example.com",
+        methods=("POST",),
+        prefix="/v1/invoices/archive",
+        action_type="mem_write",
+        key_template="mem:{store_id}:{tenant}:archived",
+    )
+    body = {"store_id": "pg", "tenant": "acme"}
+
+    def decide(routes: list[Route]) -> Decision:
+        store = SQLiteStorage(":memory:")
+        store.create_run(Run(run_id="run_1", goal="g"))
+        store.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+        ledger = ActionLedger(store, "run_1")
+        ledger.claim("mem_write", {}, key="mem:pg:acme:archived", scoped_to_run=False)
+        actions = fold_action_events(store.read_events("run_1"))
+        return match_route(
+            routes,
+            host="api.example.com",
+            method="POST",
+            path="/v1/invoices/archive/2024",
+            body=body,
+            actions_by_key=actions,
+            run_id="run_1",
+            bound_tenant="acme",
+        )
+
+    # The caller claimed the key the archive endpoint renders; the request is
+    # allowed and lands on the specific route no matter how the list is ordered.
+    for routes in ([broad, specific], [specific, broad]):
+        decision = decide(routes)
+        assert decision.allow is True, decision.reason
+        assert decision.route is not None
+        assert decision.route.prefix == "/v1/invoices/archive"
+
+
+def test_a_claim_for_the_broad_route_no_longer_spends_on_the_specific_path(
+    tmp_path: Path,
+) -> None:
+    """The mirror of #1341: the broad key must not settle the specific request.
+
+    Before the fix a claim for the broad prefix was spendable on the narrower
+    endpoint whenever the broad route happened to be listed first, so the run's
+    evidence said the broad operation ran while the upstream served the
+    specific one. The specific route now wins, and a request that carries only
+    the broad claim is refused, naming the key the specific route renders.
+    """
+    from continuum.actions.ledger import fold_action_events
+
+    broad = Route(
+        host="api.example.com",
+        methods=("POST",),
+        prefix="/v1/invoices",
+        action_type="mem_write",
+        key_template="mem:{store_id}:{tenant}:invoice",
+    )
+    specific = Route(
+        host="api.example.com",
+        methods=("POST",),
+        prefix="/v1/invoices/archive",
+        action_type="mem_write",
+        key_template="mem:{store_id}:{tenant}:archived",
+    )
+    store = SQLiteStorage(":memory:")
+    store.create_run(Run(run_id="run_1", goal="g"))
+    store.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    ledger = ActionLedger(store, "run_1")
+    ledger.claim("mem_write", {}, key="mem:pg:acme:invoice", scoped_to_run=False)
+    actions = fold_action_events(store.read_events("run_1"))
+
+    decision = match_route(
+        [broad, specific],
+        host="api.example.com",
+        method="POST",
+        path="/v1/invoices/archive/2024",
+        body={"store_id": "pg", "tenant": "acme"},
+        actions_by_key=actions,
+        run_id="run_1",
+        bound_tenant="acme",
+    )
+    assert decision.allow is False
+    assert "mem:pg:acme:archived" in decision.reason
+
+
+@pytest.mark.parametrize(
+    ("route_host", "request_host"),
+    [
+        ("api.example.com", "API.EXAMPLE.COM"),  # client upper-cased the header
+        ("API.EXAMPLE.COM", "api.example.com"),  # config upper-cased the host
+        ("Api.Example.Com", "api.example.COM"),  # mixed on both sides
+    ],
+)
+def test_host_matching_is_case_insensitive(
+    route_host: str, request_host: str, tmp_path: Path
+) -> None:
+    """HTTP host names are case-insensitive (RFC 7230 §5.4), issue #1342.
+
+    A client sending ``Host: API.EXAMPLE.COM`` against a route registered as
+    ``api.example.com`` was refused with "no upstream registered for host",
+    for a spelling the protocol says is not a difference.
+    """
+    from continuum.actions.ledger import fold_action_events
+
+    route = Route(
+        host=route_host,
+        methods=("POST",),
+        prefix="/v1/invoices",
+        action_type="send_invoice",
+        key_template="invoice:{id}",
+    )
+    store = SQLiteStorage(":memory:")
+    store.create_run(Run(run_id="run_1", goal="g"))
+    store.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    ActionLedger(store, "run_1").claim("send_invoice", {"id": "I-9"}, key="invoice:I-9")
+    actions = fold_action_events(store.read_events("run_1"))
+
+    decision = match_route(
+        [route],
+        host=request_host,
+        method="POST",
+        path="/v1/invoices/49",
+        body={"id": "I-9"},
+        actions_by_key=actions,
+        run_id="run_1",
+    )
+    assert decision.allow is True, decision.reason
+
+
+def test_a_port_bound_route_is_reachable_after_the_server_strips_the_port(
+    tmp_path: Path,
+) -> None:
+    """A route registered with a port must still match (issue #1342).
+
+    The server hands ``host.split(":")[0]`` to ``match_route``, so a route
+    registered as ``api.example.com:8443`` never matched anything and was
+    silently dead. The port is dropped for the match only; the route keeps it
+    verbatim for the upstream connection, so it stays significant where it is
+    used.
+    """
+    from continuum.actions.ledger import fold_action_events
+
+    route = Route(
+        host="api.example.com:8443",
+        methods=("POST",),
+        prefix="/v1/invoices",
+        action_type="send_invoice",
+        key_template="invoice:{id}",
+    )
+    store = SQLiteStorage(":memory:")
+    store.create_run(Run(run_id="run_1", goal="g"))
+    store.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    ActionLedger(store, "run_1").claim("send_invoice", {"id": "I-9"}, key="invoice:I-9")
+    actions = fold_action_events(store.read_events("run_1"))
+
+    decision = match_route(
+        [route],
+        host="api.example.com",  # server already stripped the port
+        method="POST",
+        path="/v1/invoices/49",
+        body={"id": "I-9"},
+        actions_by_key=actions,
+        run_id="run_1",
+    )
+    assert decision.allow is True, decision.reason
+    # The route keeps its port for the upstream connection.
+    assert decision.route is not None
+    assert decision.route.host == "api.example.com:8443"

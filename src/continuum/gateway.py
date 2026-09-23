@@ -198,6 +198,23 @@ def _normalize_path(raw: str) -> str:
     return collapsed or "/"
 
 
+def _normalize_host(host: str) -> str:
+    """Canonical host for route matching: lowercased, port removed.
+
+    HTTP host names are case-insensitive (RFC 7230 §5.4, and DNS before it),
+    so the comparison has to fold case on both sides or a client that sends
+    ``Host: API.EXAMPLE.COM`` against a route registered as ``api.example.com``
+    is refused for a spelling the protocol says is not one (issue #1342). The
+    port is dropped for the *match* only: the server already strips it from the
+    request host, so a route registered as ``api.example.com:8443`` never
+    matched anything and was silently dead. The route keeps its ``host``
+    verbatim for the upstream connection, so the port stays significant exactly
+    where it is used. IPv6 literals are out of scope here, matching the port
+    stripping the request side already does.
+    """
+    return host.split(":")[0].casefold()
+
+
 def _path_under_prefix(path: str, prefix: str) -> bool:
     """Whether ``path`` is within the route's ``prefix``.
 
@@ -250,7 +267,8 @@ def match_route(
                 route=None,
             )
 
-    candidates = [r for r in routes if r.host == host]
+    request_host = _normalize_host(host)
+    candidates = [r for r in routes if _normalize_host(r.host) == request_host]
     if not candidates:
         return Decision(False, f"no upstream registered for host {host!r}")
 
@@ -271,6 +289,16 @@ def match_route(
             f"host {host!r} is registered but {requested!r} is not under any of "
             f"its prefixes {sorted(r.prefix for r in candidates)}",
         )
+
+    # Most specific prefix wins, regardless of the order the registry lists
+    # routes in (issue #1341). A broad route must not shadow a narrower one
+    # that also admits the path: without this sort, two configs identical but
+    # for the order of their ``upstreams`` array render different keys for the
+    # same request and so consult, or spend, a different claim. The empty-prefix
+    # whole-host default normalises to ``/`` and sorts last, which is what it
+    # means. The method-fallback message below then reads the most specific
+    # route rather than whichever happened to come first.
+    scoped.sort(key=lambda r: len(_normalize_path(r.prefix)), reverse=True)
 
     route = next((r for r in scoped if method.upper() in r.methods), None)
     if route is None:
