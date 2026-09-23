@@ -91,7 +91,7 @@ def evaluate(
     from continuum.actions.idempotency import idempotency_key
     from continuum.models import ActionStatus
 
-    from continuum.replay_similarity import SimilarityConfig, SimilarityKind, similarity
+    from continuum.replay_similarity import SimilarityConfig, SimilarityKind, best_match
 
     if similarity_config is None:
         similarity_config = SimilarityConfig(kind=SimilarityKind.EXACT)
@@ -101,20 +101,9 @@ def evaluate(
 
     if action is None or action.action_type != action_type:
         if similarity_config.kind != SimilarityKind.EXACT and tool_input is not None:
-            best_score = 0.0
-            best_action = None
-            best_key = None
-            for prior_key, prior_action in actions_by_key.items():
-                if prior_action.action_type != action_type:
-                    continue
-                prior_args_raw = getattr(prior_action, "arguments", None) or {}
-                if not isinstance(prior_args_raw, dict):
-                    continue
-                score = similarity(tool_input, prior_args_raw, similarity_config)
-                if score > best_score:
-                    best_score = score
-                    best_action = prior_action
-                    best_key = prior_key
+            best_score, best_key, best_action = best_match(
+                tool_input, action_type, actions_by_key, similarity_config
+            )
 
             if best_action is not None and best_score >= similarity_config.replay_threshold:
                 if best_action.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
@@ -136,9 +125,12 @@ def evaluate(
     if status is ActionStatus.STARTED:
         return GuardDecision(GuardKind.ALLOW, "live claim", key=key)
     if status is ActionStatus.COMPLETED:
+        reason = f"{action_type!r} {rendered_key!r} already completed"
+        if key and key != str(idempotency_key(action_type, None, scope=run_id, key=rendered_key)):
+            reason = f"{action_type!r} matched prior key {key!r} (already completed)"
         return GuardDecision(
             GuardKind.SKIP_DUPLICATE,
-            f"{action_type!r} {rendered_key!r} already completed",
+            reason,
             key=key,
         )
     if status is ActionStatus.UNKNOWN:

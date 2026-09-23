@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -31,6 +31,8 @@ __all__ = [
     "SimilarityConfig",
     "token_set",
     "jaccard",
+    "similarity",
+    "best_match",
     "similarity_backend",
     "classify_call",
 ]
@@ -123,6 +125,37 @@ def similarity(
     return 0.0
 
 
+def best_match(
+    new_args: dict[str, Any],
+    action_type: str,
+    prior_actions: Mapping[str, Any],
+    config: SimilarityConfig,
+) -> tuple[float, str | None, Any | None]:
+    """Scan prior actions for the best similarity match.
+
+    Returns ``(best_score, best_key, best_action)``.
+    """
+    best_score = 0.0
+    best_key: str | None = None
+    best_action: Any | None = None
+
+    for key, action in prior_actions.items():
+        prior_type = action.get("action_type") if isinstance(action, dict) else getattr(action, "action_type", None)
+        if prior_type != action_type:
+            continue
+        prior_args_raw = action.get("arguments") if isinstance(action, dict) else getattr(action, "arguments", None)
+        prior_args_raw = prior_args_raw or {}
+        if not isinstance(prior_args_raw, dict):
+            continue
+        score = similarity(new_args, prior_args_raw, config)
+        if score > best_score:
+            best_score = score
+            best_key = key
+            best_action = action
+
+    return best_score, best_key, best_action
+
+
 def classify_call(
     new_key: str,
     new_args: dict[str, Any],
@@ -148,18 +181,8 @@ def classify_call(
             return "replay", prior
         return "fresh", None
 
-    best_score = 0.0
-    best_action: dict[str, Any] | None = None
-    for key, action in prior_actions.items():
-        if action.get("action_type") != action_type:
-            continue
-        prior_args_raw = action.get("arguments") or {}
-        if not isinstance(prior_args_raw, dict):
-            continue
-        score = similarity(new_args, prior_args_raw, config)
-        if score > best_score:
-            best_score = score
-            best_action = {**action, "__ledger_key__": key}
+    best_score, best_key, best_action_raw = best_match(new_args, action_type, prior_actions, config)
+    best_action = {**best_action_raw, "__ledger_key__": best_key} if best_action_raw else None
 
     if best_score >= config.replay_threshold:
         return "replay", best_action
@@ -188,14 +211,17 @@ def similarity_backend(name_or_config: str | dict[str, Any] | SimilarityConfig) 
             raise ValueError(f"unknown similarity backend {kind_str!r}")
 
         kwargs = {"kind": kind}
-        if "replay_threshold" in name_or_config:
-            kwargs["replay_threshold"] = float(name_or_config["replay_threshold"])
-        if "fork_threshold" in name_or_config:
-            kwargs["fork_threshold"] = float(name_or_config["fork_threshold"])
+        try:
+            if "replay_threshold" in name_or_config:
+                kwargs["replay_threshold"] = float(name_or_config["replay_threshold"])
+            if "fork_threshold" in name_or_config:
+                kwargs["fork_threshold"] = float(name_or_config["fork_threshold"])
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"invalid threshold value: {exc}")
 
         if kind == SimilarityKind.EMBEDDING:
             if "embedder" not in name_or_config or name_or_config["embedder"] is None:
-                raise ValueError("embedding backend requires an embedder function instance")
+                raise ValueError("embedding backend requires an embedder function instance (note: gate.json supports only 'exact' and 'fuzzy'; 'embedding' requires Python API configuration)")
             kwargs["embedder"] = name_or_config["embedder"]
 
         return SimilarityConfig(**kwargs)

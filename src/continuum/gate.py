@@ -311,7 +311,7 @@ def decide(
         from continuum.replay_similarity import similarity_backend
         try:
             similarity_config = similarity_backend(similarity_spec)
-        except ValueError as exc:
+        except (ValueError, TypeError) as exc:
             return Decision(False, f"gate configuration error: {exc}")
 
     try:

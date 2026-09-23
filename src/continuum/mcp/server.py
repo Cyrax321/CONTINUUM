@@ -1272,15 +1272,11 @@ def build_server(
         # a duplicate side effect (issue #309).
         from continuum.gate import DEFAULT_GATE_CONFIG_PATH, GateConfigError, load_gate_config
 
-        if not hasattr(ctx, "_gate_cache"):
-            ctx._gate_cache = {}
-        if run_id not in ctx._gate_cache:
-            try:
-                ctx._gate_cache[run_id] = load_gate_config(_Path(DEFAULT_GATE_CONFIG_PATH))
-            except GateConfigError as exc:
-                from mcp.server.mcpserver.exceptions import ToolError
-                raise ToolError(f"invalid gate configuration: {exc}") from exc
-        gate_config = ctx._gate_cache[run_id]
+        try:
+            gate_config = load_gate_config(_Path(DEFAULT_GATE_CONFIG_PATH))
+        except GateConfigError as exc:
+            from mcp.server.mcpserver.exceptions import ToolError
+            raise ToolError(f"invalid gate configuration: {exc}") from exc
         similarity_config = None
         if gate_config:
             spec = None
@@ -1304,28 +1300,17 @@ def build_server(
         )
         existing = ledger.get(claim_key)
 
-        from continuum.replay_similarity import SimilarityKind
+        from continuum.replay_similarity import SimilarityKind, best_match
         if (
             existing is None
+            and scoped_to_run
             and similarity_config is not None
             and similarity_config.kind != SimilarityKind.EXACT
             and arguments is not None
         ):
-            from continuum.replay_similarity import similarity
-            best_score = 0.0
-            best_action = None
-            best_key = None
-            for prior_key, prior_action in ledger.folded().items():
-                if prior_action.action_type != action_type:
-                    continue
-                prior_args = getattr(prior_action, "arguments", None) or {}
-                if not isinstance(prior_args, dict):
-                    continue
-                score = similarity(arguments, prior_args, similarity_config)
-                if score > best_score:
-                    best_score = score
-                    best_action = prior_action
-                    best_key = prior_key
+            best_score, best_key, best_action = best_match(
+                arguments, action_type, ledger.folded(), similarity_config
+            )
 
             if best_action is not None and best_score >= similarity_config.replay_threshold:
                 if best_action.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
