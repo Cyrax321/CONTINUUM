@@ -289,6 +289,9 @@ def test_v2_database_backfills_on_open(tmp_path: Path) -> None:
         found = store.foreign_action(key, exclude_run="other")
         assert found is not None
         assert found.status is ActionStatus.COMPLETED
+        # The seeded rows must already be on the fold's own scale, otherwise a
+        # freshly upgraded store reads dirty until its first rebuild (#1322).
+        assert store.action_index_drift() == 0
 
 
 def test_a_key_rewritten_by_another_run_is_global_last_write_wins(
@@ -319,6 +322,138 @@ def test_a_key_rewritten_by_another_run_is_global_last_write_wins(
     assert found is not None
     assert found.run_id == "run_2"
     assert found.status is ActionStatus.STARTED
+
+
+def test_compacting_the_later_writer_does_not_invert_ownership(tmp_path: Path) -> None:
+    """Cross-run compaction must not change which run owns a key (#1322).
+
+    ``events_archive`` and ``events`` are one stream to the fold, not two
+    segments: the archive holds a *run's* prefix, while other runs keep
+    appending live, so 'everything archived is older than everything live'
+    holds only within a single run. Treating them as segments ranked a run
+    compacted *after* another run's live write below it, so the fold stopped
+    reproducing the number the incremental writer stored and a clean store
+    read dirty until it was rebuilt.
+
+    Here run B rewrites the key run A held, then compacts. B is the later
+    write, so B owns the row before and after its own compaction.
+    """
+    from continuum.actions.idempotency import idempotency_key
+
+    db = str(tmp_path / "xrun.db")
+    with SQLiteStorage(db) as store:
+        make_run(store, "run_a")
+        make_run(store, "run_b")
+        key = str(idempotency_key("send_invoice", None, scope=None, key="shared:2"))
+        for run_id, status in (("run_a", ActionStatus.COMPLETED), ("run_b", ActionStatus.FAILED)):
+            store.append_event(
+                run_id,
+                EventType.ACTION_RECORDED,
+                {
+                    "key": key,
+                    "action": Action(
+                        run_id=run_id, action_type="send_invoice", status=status
+                    ).model_dump(mode="json"),
+                },
+            )
+        assert store.action_index_drift() == 0
+        owner = store.foreign_action(key, exclude_run="nobody")
+        assert owner is not None and owner.run_id == "run_b" and owner.status is ActionStatus.FAILED
+
+        # B compacts its own log. The key's row now lives entirely in the
+        # archive while A's is live -- the ordering the segment-merge got wrong.
+        store.compact_run("run_b")
+        assert store.action_index_drift() == 0
+        after = store.foreign_action(key, exclude_run="nobody")
+        assert after is not None and after.run_id == "run_b" and after.status is ActionStatus.FAILED
+        assert store.rebuild_action_index() == 0
+
+
+def test_compacting_the_earlier_writer_keeps_the_later_one_winning(tmp_path: Path) -> None:
+    """The mirror of the test above: A compacts first, B still owns the key.
+
+    This is the direction the segment-merge got *right*, so it pins the
+    invariant from the other side and guards against a fix that merely
+    inverts the bug.
+    """
+    from continuum.actions.idempotency import idempotency_key
+
+    db = str(tmp_path / "xrun2.db")
+    with SQLiteStorage(db) as store:
+        make_run(store, "run_a")
+        make_run(store, "run_b")
+        key = str(idempotency_key("send_invoice", None, scope=None, key="shared:3"))
+        for run_id, status in (("run_a", ActionStatus.COMPLETED), ("run_b", ActionStatus.FAILED)):
+            store.append_event(
+                run_id,
+                EventType.ACTION_RECORDED,
+                {
+                    "key": key,
+                    "action": Action(
+                        run_id=run_id, action_type="send_invoice", status=status
+                    ).model_dump(mode="json"),
+                },
+            )
+        store.compact_run("run_a")
+        assert store.action_index_drift() == 0
+        owner = store.foreign_action(key, exclude_run="nobody")
+        assert owner is not None and owner.run_id == "run_b" and owner.status is ActionStatus.FAILED
+
+
+def test_repair_keeps_a_later_archived_completion_above_an_earlier_live_failure(
+    store: SQLiteStorage,
+) -> None:
+    """The severe half of the same root cause (#1054).
+
+    Compaction is per-run, so the *later* write can be archived while an
+    *earlier* write of the same unscoped key stays live in another run: run B
+    completes the key and compacts straight away, while run A's earlier failure
+    was never compacted and is still live. True order puts B's completion last,
+    and that is what the incremental writer stored.
+
+    The segment-merge fold ranked the whole archive below the whole live log,
+    so ``rebuild_action_index`` -- the *repair* path -- "corrected" the row to
+    A's failure, and the next claim saw ``fresh: True`` against a side effect
+    that had already happened and re-fired it. Folding one wall-clock timeline
+    instead makes the repair agree with the incremental writer, so the
+    completion stands and the claim still hits the cache.
+    """
+    from continuum.actions.idempotency import idempotency_key
+
+    make_run(store, "run_a")
+    late = make_run(store, "run_b")
+    key = str(idempotency_key("send_invoice", None, scope=None, key="invoice:1054"))
+
+    # The earlier failure, which stays live: run A never compacts.
+    store.append_event(
+        "run_a",
+        EventType.ACTION_RECORDED,
+        {
+            "key": key,
+            "action": Action(
+                run_id="run_a", action_type="send_invoice", status=ActionStatus.FAILED
+            ).model_dump(mode="json"),
+        },
+    )
+    # The later completion, then its own compaction. A failure recorded
+    # elsewhere leaves no live effect in the way, so run B opens its own slot.
+    outcome = late.claim("send_invoice", {}, key="invoice:1054", scoped_to_run=False)
+    assert outcome.fresh is True
+    assert late.complete(outcome.key, external_id="INV-1054") is not None
+    store.compact_run("run_b")
+
+    # The incremental row is correct and the canonical fold agrees with it.
+    assert store.action_index_drift() == 0
+    assert store.rebuild_action_index() == 0, "repair must not demote the later completion"
+    assert store.action_index_drift() == 0
+
+    # The claim path still sees the completion and does not re-fire it.
+    replay = make_run(store, "run_c").claim(
+        "send_invoice", {}, key="invoice:1054", scoped_to_run=False
+    )
+    assert replay.fresh is False
+    assert replay.action.status is ActionStatus.COMPLETED
+    assert replay.action.external_id == "INV-1054"
 
 
 def test_repair_refuses_when_the_chain_fails(tmp_path: Path) -> None:

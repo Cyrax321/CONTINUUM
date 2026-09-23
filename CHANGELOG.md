@@ -8,18 +8,43 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
-- **The edit-precondition gate now raises the exception subclass matching the
-  edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
-  forks but the plain `EditPreconditionError` for every other edit type, so
-  `MergePreconditionError` and `RestorePreconditionError` -- both exported
-  through `recovery/__init__.py` -- were never raised anywhere and a caller
-  could not distinguish a merge refusal from a restore refusal by exception
-  type. `check_preconditions` now maps `edit_type` to its subclass, and the
-  two-sided `check_merge_preconditions` path raises `MergePreconditionError`
-  as well. The three subclasses are defined once in `gate.py` and re-exported
-  by `fork.py`, `merge.py` and `restore.py` as before, so existing imports and
-  `except EditPreconditionError` handlers are unaffected; only `type(exc)`
-  becomes observable.
+- **Compacting one run no longer makes the action index read another run's
+  writes as dirty (#1322).** `action_index_drift` compares the stored
+  projection against a canonical fold of the log, and the fold treated
+  `events_archive` and `events` as two segments -- everything archived ranked
+  below everything live. That holds inside a single run, where the archive is
+  its own prefix, but not across runs: while one run compacts, others keep
+  appending, so a write made *later* in wall-clock time could sit in the
+  archive below an *earlier* live write. The projection then stopped
+  reproducing the number the incremental writer had stored and `verify`
+  reported a dirty index on a store nothing had tampered with, until
+  `rebuild_action_index` was run. The fold now merges the two tables into one
+  stream ordered by `(timestamp, run_id, sequence)`, and the number stored in
+  `updated_seq` is epoch microseconds of the event's own timestamp rather than
+  a row position or a sequence value -- both of which compaction reassigns,
+  since it moves rows between tables and deletes the originals. No schema
+  change is required: `timestamp` was already the one global write-order
+  column that survives the archive move unchanged.
+
+  A store whose `action_index` rows were written by an earlier build keep the
+  old numbers until they are rewritten; on such a store `drift` still reads
+  non-zero, and `continuum verify --index --repair-index` (or any
+  `rebuild_action_index` call) brings them onto the new scale in one pass. The
+  incremental writer, both backfills, and both folds share one helper,
+  `continuum.storage.actionindex.index_order_for`, so the three cannot drift
+  apart in what number they assign.
+
+  The same segment merge also repairs the severe half of the same root cause:
+  `rebuild_action_index` itself could demote a completion and re-fire a
+  completed side effect (#1054). An unscoped key lives in one store-wide
+  namespace, so the *later* write can be archived (its own run compacted)
+  while an *earlier* write of the same key stays live in another run. Ranking
+  the whole archive below the whole live log then made the repair path rewrite
+  the row onto the earlier failure, and the next claim saw `fresh: True`
+  against a side effect that had already happened. Folding one wall-clock
+  timeline makes the repair agree with the incremental writer, so the
+  completion stands and the claim still hits the cache. This subsumes the
+  separate fold-only change that was open for #1054.
 
 - **A padded argument token can no longer reset the authorization-bound retry
   budget (#1052).** The bucket was derived from every argument token, and the
@@ -108,17 +133,6 @@ All notable changes to this project are documented here. The format follows
 
 ### Removed
 
-- **Dead `backoff_delay` export (#1095).** The exponential-with-cap pacing
-  helper in `src/continuum/budgets.py` was the only member of
-  `budgets.__all__` with no consumer anywhere in the repo. Every refusal site
-  (`cli/main.py`, `mcp/server.py`, `actions/ledger.py`) refuses and returns;
-  none computes or applies a delay, and the module's own docstring states
-  CONTINUUM never retries anything itself; it counts and gates. The helper
-  shipped speculatively with #240 ("ships as a pure exponential+cap helper;
-  CONTINUUM never retries itself") and no caller arrived in the year since.
-  Removed with its tests. Recoverable from history (6217a65) if a real
-  retry-pacing surface ever needs it.
-
 - **Dead `DuplicateAction` and `LeaseError` exception classes (#1115).**
   `DuplicateAction` (`continuum.actions.ledger`) and `LeaseError`
   (`continuum.concurrency.lease`) were exported exceptions that no code path
@@ -176,38 +190,6 @@ All notable changes to this project are documented here. The format follows
   both non-projecting, so folding the archived prefix from genesis reaches the
   same state the anchored path already produced. The guard is unchanged and
   still fires when a window genuinely excludes `RUN_STARTED`.
-- **The gateway now enforces a route's `prefix` instead of only parsing it
-  (#1051).** `match_route` narrowed candidates by host and method and never
-  compared the request path against the route, so every path on a registered
-  host was the route's scope: a live claim for `/v1/invoices` spent itself on
-  `/v1/refunds` or `/internal/admin/purge`, the gateway forwarded the request,
-  settled the claim as completed, and wrote `TOOL_COMPLETED` evidence whose
-  `path` recorded the off-prefix URL: the run's log said the invoice was sent
-  while the upstream saw something else entirely. The prefix is the only
-  per-path scope a route has and nothing else narrowed what a claim could
-  reach, so there was no workaround. `match_route` now takes the request path
-  and requires it to fall within the prefix on a whole-segment boundary
-  (`/v1/invoices` admits `/v1/invoices/49`, not `/v1/invoices-archived` or
-  `/v1/refunds`); the path is normalised first (query stripped, percent-decoded,
-  `..` collapsed) because the upstream rewrites `/v1/invoices/../refunds` and
-  decodes `/v1/invoices/%2e%2e/refunds` to the same thing before it dispatches,
-  and the refusal has to be about the path actually served. A
-  request on a registered host but under none of its prefixes is refused with
-  `403` naming the prefixes, before the key is rendered and before anything is
-  forwarded or settled. A route written without a `prefix` keeps the whole
-  host, which is what the default `/` has always meant. `match_route`'s new
-  `path` argument is required rather than defaulted: a caller cannot ask for a
-  routing verdict without saying what it is routing, and a silent default
-  would reintroduce the hole as an omission rather than a design. The path is
-  normalised exactly once, because `urllib.parse.unquote` is not idempotent:
-  `/v1%252finvoices/49` decodes to `/v1%2finvoices/49` on the first pass and to
-  `/v1/invoices/49` on the second, and the gateway was normalising in
-  `match_route` and again in `_path_under_prefix`, so a doubly-encoded
-  separator made the boundary see the invoice path, spend the claim, and write
-  evidence that the invoice was sent while the upstream, which decodes once,
-  served one literal segment that never reached the invoice endpoint. The
-  verdict is now taken on the raw request line, which is what the upstream
-  decodes.
 - **`resume --pinning` compares against the archived pinning, so a compacted
   run stops reporting every key as newly pinned (#1126).** The drift display
   folded the live event tail alone, and compaction moves the pinning-carrying
@@ -1135,7 +1117,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,501 collected, ~2,423 passed, ~28 skipped on a minimal env).
+  (~2,516 collected, ~2,423 passed, ~28 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

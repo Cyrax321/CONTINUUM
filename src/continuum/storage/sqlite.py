@@ -35,7 +35,7 @@ from continuum.events import CAUSED_BY_TYPES, Event, EventType, IntegrityReport,
 from continuum.models import Action, Origin, Run, RunStatus, SemanticState, StateCheckpoint, utcnow
 from continuum.security.hashing import make_id
 from continuum.state.versioning import canonical_state_json, state_fingerprint
-from continuum.storage.actionindex import index_entry_from_payload
+from continuum.storage.actionindex import index_entry_from_payload, index_order_for
 from continuum.storage.base import (
     CheckpointNotFound,
     ConcurrentWriteError,
@@ -460,7 +460,7 @@ class SQLiteStorage(Storage):
     @staticmethod
     def _insert_event(conn: sqlite3.Connection, event: Event) -> None:
         try:
-            cursor = conn.execute(
+            conn.execute(
                 "INSERT INTO events(run_id, sequence, event_id, type, timestamp, payload, "
                 "causer_event_id, source, prev_hash, hash) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -481,7 +481,7 @@ class SQLiteStorage(Storage):
             raise ConcurrentWriteError(
                 f"run {event.run_id!r} sequence {event.sequence} was taken by another writer"
             ) from exc
-        _maintain_action_index(conn, event, int(cursor.lastrowid or 0))
+        _maintain_action_index(conn, event, index_order_for(event.timestamp))
 
     def compact_run(self, run_id: str, *, through_sequence: int | None = None) -> dict[str, int]:
         """Archive the pre-anchor prefix of a run's log (issue #239).
@@ -645,34 +645,36 @@ class SQLiteStorage(Storage):
     def _canonical_index_rows(self) -> dict[str, tuple[tuple[str, str, str, str, str], int]]:
         """Fold the log into ``{key: ((entry...), order_seq)}``, last write wins.
 
-        Compacted history (#239) folds too, archive first and live second:
-        everything in ``events_archive`` predates every live row of its run,
-        so folding the two tables in one shared stream would let an archived
-        action claimed long ago outrank a newer live write of the same key
-        (they number their rows independently). Live rows keep their
-        insertion rowid, matching incremental index maintenance exactly;
-        archived rows receive negative order positions below every possible
-        rowid, oldest first, so last-write-per-key stays true after
-        compaction while uncompacted stores fold identically to before.
+        The archive and the live log are one stream, not two segments.
+        Compaction (#239) moves a run's prefix into ``events_archive`` while
+        other runs keep appending, so "everything archived is older than
+        everything live" holds only within a single run. Across runs it
+        inverted write order and the fold stopped reproducing the number the
+        incremental writer stored (#1322). The stream is now merged on
+        ``(timestamp, run_id, sequence)``: ``timestamp`` is assigned at append
+        time and copied into the archive verbatim, so it is global write order
+        in every state of the store. The order value is
+        :func:`index_order_for` of the winning row's own timestamp -- the same
+        number the writer stored, not a position that rowid reuse or a fresh
+        ``nextval`` can invalidate.
         """
         with self._read() as conn:
-            archived = conn.execute(
-                "SELECT type, payload FROM events_archive ORDER BY rowid"
-            ).fetchall()
             rows = conn.execute(
-                "SELECT rowid AS rid, type, payload FROM events ORDER BY rowid"
+                "SELECT timestamp, run_id, sequence, type, payload FROM ("
+                "SELECT timestamp, run_id, sequence, type, payload FROM events_archive "
+                "UNION ALL "
+                "SELECT timestamp, run_id, sequence, type, payload FROM events) "
+                "ORDER BY timestamp, run_id, sequence"
             ).fetchall()
         canonical: dict[str, tuple[tuple[str, str, str, str, str], int]] = {}
-        offset = len(archived)
-        for position, row in enumerate([*archived, *rows]):
+        for row in rows:
             try:
                 payload = json.loads(row["payload"])
             except json.JSONDecodeError:
                 continue
             entry = index_entry_from_payload(EventType(row["type"]), payload)
             if entry is not None:
-                order = int(row["rid"]) if position >= offset else position - offset
-                canonical[entry[0]] = (entry, order)
+                canonical[entry[0]] = (entry, index_order_for(row["timestamp"]))
         return canonical
 
     @staticmethod

@@ -17,7 +17,7 @@ import pytest
 from continuum.actions import ActionLedger
 from continuum.checkpoint import CheckpointManager
 from continuum.events import EventType
-from continuum.models import ActionStatus, Origin, Run, RunStatus
+from continuum.models import Action, ActionStatus, Origin, Run, RunStatus
 from continuum.storage.base import ConcurrentWriteError, RunNotFound
 from continuum.storage.postgres import PostgresStorage
 
@@ -337,13 +337,14 @@ def test_pg_action_index_covers_the_archive_after_rebuild(
     ledger.complete(outcome.key, external_id="doc:1")
     storage.compact_run("pg_ki")
 
-    # Compaction moves the rows the index describes into events_archive, and
-    # the fold merges that table ahead of every live row, so the projection
-    # is reported dirty until it is rebuilt. That desync is the archive/live
-    # ordering gap, #1322, which is separate from #1321 (a healthy store
-    # reported dirty with no compaction at all).
-    assert storage.action_index_drift() > 0
-    storage.rebuild_action_index()
+    # Compaction moves the rows the index describes into events_archive, but
+    # the fold treats the archive and the live log as one stream ordered by
+    # timestamp, so the projection stays clean and the archived completion
+    # stays visible to cross-run lookups. This is the #1322 fix: the fold used
+    # to merge the archive ahead of every live row, which inverted write order
+    # across runs and reported a clean store as dirty until it was rebuilt.
+    assert storage.action_index_drift() == 0
+    assert storage.rebuild_action_index() == 0
     assert storage.action_index_drift() == 0
     key = str(idempotency_key("process_doc", None, scope="pg_ki", key="doc:1"))
     foreign = storage.foreign_action(key, exclude_run="some_other_run")
@@ -355,13 +356,11 @@ def test_pg_action_index_covers_the_archive_after_rebuild(
 def isolated_storage() -> Iterator[PostgresStorage]:
     """A database the test owns exclusively.
 
-    ``action_index_drift`` compares a store-wide count of action events
-    against a store-wide sequence value, so the comparison is only meaningful
-    in a database whose entire history the test controls. The shared suite
-    database accumulates every test's runs, and once one run is compacted the
-    fold's merged order stops tracking the sequence (the archive/live ordering
-    gap, #1322, tracked separately from #1321), which would make a clean store
-    read as dirty for reasons this test does not exercise.
+    ``action_index_drift`` compares a store-wide projection against a
+    store-wide fold, so the comparison is only meaningful in a database whose
+    entire history the test controls. The shared suite database accumulates
+    every test's runs, so a key this test rewrites could have been touched by
+    another test's run.
     """
     import psycopg
     from psycopg.conninfo import conninfo_to_dict, make_conninfo
@@ -387,16 +386,16 @@ def isolated_storage() -> Iterator[PostgresStorage]:
 def test_pg_action_index_drift_stays_zero_with_non_action_events_between_actions(
     isolated_storage: PostgresStorage,
 ) -> None:
-    """A healthy store must not report drift because of how it counts rows (#1321).
+    """A healthy store must not report drift because of how it numbers rows (#1321).
 
-    ``_maintain_action_index`` numbers a row with ``nextval``, which advances
-    once per action event, while the canonical fold numbered it by its
-    position in the merged row stream, which counts RUN_STARTED, TOOL_CALLED,
-    EVIDENCE_ADDED and every other non-action row too. An ordinary run has
-    those between its actions, so the two figures disagreed by one per
-    intervening row and ``verify`` reported a permanently dirty index on a
-    store nothing had tampered with. The fold now counts action events only,
-    1-based, which is the number the sequence actually assigned.
+    ``_maintain_action_index`` and the canonical fold must derive the same
+    number for the same event. They used not to: the writer took ``nextval``
+    while the fold numbered by position in the merged row stream, which counts
+    RUN_STARTED, TOOL_CALLED, EVIDENCE_ADDED and every other non-action row
+    too. An ordinary run has those between its actions, so the two figures
+    disagreed by one per intervening row and ``verify`` reported a permanently
+    dirty index on a store nothing had tampered with. Both sides now take the
+    number from the event's own timestamp.
     """
     storage = isolated_storage
     make_run(storage, "pg_1321", "healthy run")
@@ -428,7 +427,8 @@ def test_pg_action_index_stays_clean_after_a_rebuild_and_further_appends(
     appended action took the next ``nextval`` on the other; the two diverged
     again immediately. ``foreign_action`` ranks with
     ``ORDER BY updated_seq DESC``, so a fresh event that landed below the
-    rewritten rows would rank as the older write.
+    rewritten rows would rank as the older write. Both sides now take the
+    number from the event's own timestamp, which a rebuild cannot perturb.
     """
     storage = isolated_storage
     make_run(storage, "pg_rb", "rebuild then append")
@@ -448,6 +448,142 @@ def test_pg_action_index_stays_clean_after_a_rebuild_and_further_appends(
     newest = storage.foreign_action(later.key, exclude_run="no_such_run")
     assert newest is not None
     assert newest.run_id == "pg_rb"
+
+
+def test_pg_compacting_the_later_writer_does_not_invert_ownership(
+    isolated_storage: PostgresStorage,
+) -> None:
+    """Cross-run compaction must not change which run owns a key (#1322).
+
+    The Postgres twin of ``test_compacting_the_later_writer_does_not_invert_ownership``
+    in ``tests/test_action_index.py``: this is the engine whose fold numbered
+    archived rows ahead of live ones by ``ctid``, so a run compacted *after*
+    another run's live write ranked below it and a clean store read dirty.
+    """
+    from continuum.actions.idempotency import idempotency_key
+
+    storage = isolated_storage
+    make_run(storage, "pg_late_a")
+    make_run(storage, "pg_late_b")
+    key = str(idempotency_key("send_invoice", None, scope=None, key="pg:shared:2"))
+    for run_id, status in (
+        ("pg_late_a", ActionStatus.COMPLETED),
+        ("pg_late_b", ActionStatus.FAILED),
+    ):
+        storage.append_event(
+            run_id,
+            EventType.ACTION_RECORDED,
+            {
+                "key": key,
+                "action": Action(
+                    run_id=run_id, action_type="send_invoice", status=status
+                ).model_dump(mode="json"),
+            },
+        )
+    assert storage.action_index_drift() == 0
+    owner = storage.foreign_action(key, exclude_run="nobody")
+    assert owner is not None and owner.run_id == "pg_late_b"
+
+    # B is the later writer and compacts its own log, so its row for the key
+    # moves entirely into events_archive while A's stays live.
+    storage.compact_run("pg_late_b")
+    assert storage.action_index_drift() == 0
+    after = storage.foreign_action(key, exclude_run="nobody")
+    assert after is not None and after.run_id == "pg_late_b"
+    assert storage.rebuild_action_index() == 0
+
+
+def test_pg_repair_keeps_a_later_archived_completion_above_an_earlier_live_failure(
+    isolated_storage: PostgresStorage,
+) -> None:
+    """The Postgres twin of the #1054 regression in ``tests/test_action_index.py``.
+
+    This is the engine whose fold ranked the whole ``events_archive`` below the
+    whole live ``ctid`` stream, so the repair path itself demoted a completion
+    that had already been archived and the next claim re-fired the side effect.
+    """
+    from continuum.actions.idempotency import idempotency_key
+
+    storage = isolated_storage
+    make_run(storage, "pg_early")
+    make_run(storage, "pg_late")
+    key = str(idempotency_key("send_invoice", None, scope=None, key="pg:1054"))
+
+    # The earlier failure, which stays live: this run never compacts.
+    storage.append_event(
+        "pg_early",
+        EventType.ACTION_RECORDED,
+        {
+            "key": key,
+            "action": Action(
+                run_id="pg_early", action_type="send_invoice", status=ActionStatus.FAILED
+            ).model_dump(mode="json"),
+        },
+    )
+    # The later completion, then its own compaction. A failure recorded
+    # elsewhere leaves no live effect in the way, so this run opens its own slot.
+    ledger = ActionLedger(storage, "pg_late")
+    outcome = ledger.claim("send_invoice", {}, key="pg:1054", scoped_to_run=False)
+    assert outcome.fresh is True
+    assert ledger.complete(outcome.key, external_id="INV-PG-1054") is not None
+    storage.compact_run("pg_late")
+
+    # The incremental row is correct and the canonical fold agrees with it.
+    assert storage.action_index_drift() == 0
+    assert storage.rebuild_action_index() == 0, "repair must not demote the later completion"
+    assert storage.action_index_drift() == 0
+
+    # The claim path still sees the completion and does not re-fire it.
+    make_run(storage, "pg_third")
+    replay = ActionLedger(storage, "pg_third").claim(
+        "send_invoice", {}, key="pg:1054", scoped_to_run=False
+    )
+    assert replay.fresh is False
+    assert replay.action.status is ActionStatus.COMPLETED
+    assert replay.action.external_id == "INV-PG-1054"
+
+
+def test_pg_backfill_seeds_an_emptied_index_on_the_folds_own_scale(
+    isolated_storage: PostgresStorage,
+) -> None:
+    """Reopening a store with action events but no projection rebuilds it (#1322).
+
+    ``_backfill_action_index`` runs from ``_create_schema`` whenever action
+    events exist and ``action_index`` does not. Its rows must already carry the
+    fold's own numbers, or a store rebuilt this way reads dirty until its first
+    explicit rebuild. The SQLite twin is
+    ``test_v2_database_backfills_on_open``.
+    """
+    from continuum.actions.idempotency import idempotency_key
+
+    storage = isolated_storage
+    make_run(storage, "pg_backfill")
+    key = str(idempotency_key("send_invoice", None, scope=None, key="pg:backfill"))
+    ledger = ActionLedger(storage, "pg_backfill")
+    outcome = ledger.claim("send_invoice", {}, key="pg:backfill", scoped_to_run=False)
+    assert outcome.fresh is True
+    assert ledger.complete(outcome.key, external_id="INV-BACKFILL") is not None
+
+    # Wipe the projection but keep the log, then reopen: _create_schema seeds it.
+    # ``storage.dsn`` rather than ``connection.info.dsn``: psycopg redacts the
+    # password from the latter, so a store reopened on it cannot authenticate
+    # against a server that requires one (CI's service container; a Homebrew
+    # ``trust`` server masks the bug locally).
+    dsn = storage.dsn
+    storage._connection.execute("DELETE FROM action_index")
+    assert storage.foreign_action(key, exclude_run="nobody") is None
+    storage.close()
+
+    reopened = PostgresStorage(dsn)
+    try:
+        found = reopened.foreign_action(key, exclude_run="nobody")
+        assert found is not None
+        assert found.status is ActionStatus.COMPLETED
+        assert found.external_id == "INV-BACKFILL"
+        # The seeded rows already sit on the fold's scale, so nothing is owed.
+        assert reopened.action_index_drift() == 0
+    finally:
+        reopened.close()
 
 
 def test_pg_run_without_a_parent_round_trips_null(storage: PostgresStorage) -> None:
