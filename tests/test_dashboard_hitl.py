@@ -189,6 +189,29 @@ def test_archived_uncertain_action_remains_visible_after_compaction(db: str) -> 
     ]
 
 
+def test_requires_review_action_is_offered_for_settlement(db: str) -> None:
+    """An escalated action must reach the settle button (issue #1183).
+
+    ``flag_for_review`` sets REQUIRES_REVIEW precisely because a human has to
+    judge the action; the dashboard is the one surface where that judgement
+    happens, so ``pending_actions_with_keys`` must offer it - matching the set
+    ``continuum actions`` flags and the TUI's ``UNCERTAIN_STATUSES``.
+    """
+    from continuum.actions.ledger import fold_action_events
+    from continuum.dashboard.hitl import pending_actions_with_keys
+    from continuum.models import ActionStatus
+
+    key = seed_uncertain(db, key="invoice:R-1")
+    with SQLiteStorage(db) as store:
+        ledger_key = next(iter(fold_action_events(store.read_events("run_1"))))
+        ActionLedger(store, "run_1").flag_for_review(ledger_key, "needs a human")
+
+        pending = pending_actions_with_keys(store, "run_1")
+
+    assert [(k, action.status.value) for k, action in pending] == [(key, "requires_review")]
+    assert any(action.status is ActionStatus.REQUIRES_REVIEW for _, action in pending)
+
+
 def test_reconcile_false_frees_the_action_for_retry(db: str, addr: str) -> None:
     seed_uncertain(db, key="invoice:H-2")
     status, _ = post(

@@ -127,6 +127,18 @@ def reconcile_action(
     )
 
 
+#: Statuses an operator may still settle from the dashboard, kept in step with
+#: the set ``continuum actions`` flags (cli/main.py) and the TUI's
+#: ``UNCERTAIN_STATUSES``. REQUIRES_REVIEW belongs here: an action escalated by
+#: ``flag_for_review`` is precisely the one a human must judge, so the settle
+#: button has to reach it (issue #1183).
+_SETTLEABLE_STATUSES = (
+    ActionStatus.STARTED,
+    ActionStatus.UNKNOWN,
+    ActionStatus.REQUIRES_REVIEW,
+)
+
+
 def pending_actions_with_keys(storage: Storage, run_id: str) -> list[tuple[str, Any]]:
     """Uncertain actions paired with their full ledger key (for buttons)."""
     from continuum.actions.ledger import fold_action_events
@@ -134,6 +146,6 @@ def pending_actions_with_keys(storage: Storage, run_id: str) -> list[tuple[str, 
     folded = fold_action_events(storage.read_all_events(run_id))
     out: list[tuple[str, Any]] = []
     for key, action in folded.items():
-        if action.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
+        if action.status in _SETTLEABLE_STATUSES:
             out.append((key, action))
     return out
