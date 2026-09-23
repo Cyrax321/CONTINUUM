@@ -618,6 +618,10 @@ def _resolve_via_ledger(
     except Exception:
         return None
 
+    # Materialise volatile once: it is applied to the incoming tokens and again
+    # to every stored action below, and a one-shot iterator would be exhausted
+    # after the first use, silently dropping the stored-side strip (issue #1346).
+    volatile = tuple(volatile)
     incoming_all = identity_tokens(arguments, volatile=volatile)
     incoming = leaf_tokens(incoming_all)
     run_id = getattr(ledger, "run_id", None)
@@ -660,7 +664,10 @@ def _resolve_via_ledger(
         if args is None and isinstance(action, Mapping):
             args = action.get("arguments", {})
         args = args or {}
-        known_all = identity_tokens(args)
+        # ``volatile`` must strip the stored side too: a declared-volatile
+        # strong token left on ``known`` alone makes it a spurious superset and
+        # re-fires the side effect (issue #1346).
+        known_all = identity_tokens(args, volatile=volatile)
         known = leaf_tokens(known_all)
         if run_id:
             try:
@@ -716,7 +723,10 @@ def _resolve_via_ledger(
     if args is None and isinstance(target, Mapping):
         args = target.get("arguments", {})
     args = args or {}
-    anchored_all = identity_tokens(args)
+    # Strip volatile here too: the anchored id must not embed a volatile strong
+    # token (a rotating trace/request id) from the stored action, or the budget
+    # bucket would move every time that field rotates (issue #1346).
+    anchored_all = identity_tokens(args, volatile=volatile)
     anchored_leaves = leaf_tokens(anchored_all)
     if run_id:
         try:

@@ -776,6 +776,55 @@ def test_identity_match_does_not_collapse_distinct_invoices(ledger: ActionLedger
     assert other.action.arguments["invoice"] == "INV-004"
 
 
+def test_identity_match_strips_volatile_from_the_stored_side_too(
+    ledger: ActionLedger,
+) -> None:
+    """A declared-volatile strong token must not defeat drift-tolerant dedup.
+
+    The stored action carries a strong-but-volatile value (a rotating trace
+    id). It used to survive as a token on the stored ("known") side only,
+    making it a spurious superset of the sparser re-claim, so the identity
+    match failed, a fresh slot opened, and the side effect fired again — the
+    exact duplicate the ledger exists to prevent (issue #1346).
+    """
+    first = ledger.claim(
+        "send_email",
+        {"to": "/outbox/alice.txt", "trace_id": "REQ-99999"},
+        volatile=["trace_id"],
+    )
+    ledger.complete(first.key, result={"ok": True})
+
+    # Recovery: the field was renamed (drift, so the exact key misses) and the
+    # volatile trace id rotated. Same volatile declaration.
+    again = ledger.claim(
+        "send_email",
+        {"target": "/outbox/alice.txt", "trace_id": "REQ-88888"},
+        volatile=["trace_id"],
+    )
+    assert not again.fresh
+    assert again.already_completed
+
+
+def test_identity_match_still_separates_work_when_only_volatile_differs(
+    ledger: ActionLedger,
+) -> None:
+    """Stripping volatile on both sides must not over-collapse: a genuinely
+    different recipient is still fresh even though it shares the volatile decl."""
+    first = ledger.claim(
+        "send_email",
+        {"to": "/outbox/alice.txt", "trace_id": "REQ-1"},
+        volatile=["trace_id"],
+    )
+    ledger.complete(first.key, result={"ok": True})
+
+    other = ledger.claim(
+        "send_email",
+        {"target": "/outbox/bob.txt", "trace_id": "REQ-2"},
+        volatile=["trace_id"],
+    )
+    assert other.fresh
+
+
 def test_identity_match_does_not_cross_action_types(ledger: ActionLedger) -> None:
     """send_invoice and send-invoice-email are different operations."""
     first = ledger.claim(

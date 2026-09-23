@@ -762,7 +762,12 @@ class ActionLedger:
             # is never present on the incoming claim, so folding it into ``known``
             # would make the stored set a systematic superset of every sparser
             # re-claim. It is therefore excluded from the comparison (issue #64).
-            known_all = identity_tokens(action.arguments)
+            # ``volatile`` is applied here too: a field the caller declares
+            # volatile must be stripped from *both* sides, or a volatile strong
+            # token surviving only on the stored side makes ``known`` a spurious
+            # superset, ``_identity_match`` returns None, and the side effect
+            # fires a second time (issue #1346).
+            known_all = identity_tokens(action.arguments, volatile=volatile)
             known = leaf_tokens(known_all) - plumbing
             # An empty ``known`` is contained in everything; treat a stored
             # action with no identity of its own as unrecognisable, not as a
