@@ -76,7 +76,7 @@ Liveness: ok, silence 22.8s within threshold 3600s (phase otherwise).
 ```
 
 That sample is a healthy run, which is why it reads `ok` and still exits 0.
-Breached runs report the breach in the same block and exit 20 instead, so a
+Breached runs report the breach in the same block and exit 25 instead, so a
 chained `continuum resume "$RUN" && ./start-agent.sh` will not launch an
 agent onto a run that went quiet past its contract.
 

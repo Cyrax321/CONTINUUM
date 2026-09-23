@@ -11,6 +11,7 @@ import unittest.mock
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from continuum.cli.exitcodes import ExitCode
 from continuum.cli.main import main
 from continuum.events import EventType
 from continuum.models import Run
@@ -86,11 +87,11 @@ def test_engine_maps_breach_to_wait(tmp_path: Path) -> None:
         assert decision.contract.liveness["breached"] is True
         assert decision.contract.liveness["breaches"] >= 0
         # A breach is advisory in the sense of #302 (never a rollback), but it
-        # is not inert: WAIT reaches `continuum resume` as exit 20, which is the
+        # is not inert: WAIT reaches `continuum resume` as exit 25, which is the
         # link the health.py docstring and the liveness-watch guide describe.
-        from continuum.cli.exitcodes import exit_code_for
+        from continuum.cli.exitcodes import ExitCode, exit_code_for
 
-        assert exit_code_for(decision.mode) == 20
+        assert exit_code_for(decision.mode) == ExitCode.WAIT
 
 
 def test_breach_rationale_states_the_reason_once(tmp_path: Path) -> None:
@@ -150,7 +151,7 @@ def test_watch_appends_detected_and_recovered(tmp_path: Path) -> None:
         out=out,
         err=err,
     )
-    assert code == 20
+    assert code == ExitCode.WAIT
     with SQLiteStorage(db) as store:
         events = store.read_events(run_id)
         types = [e.type for e in events]
@@ -249,7 +250,7 @@ def test_watch_webhook_delivers_on_breach(tmp_path: Path) -> None:
             out=out,
             err=err,
         )
-        assert code == 20
+        assert code == ExitCode.WAIT
         import time
 
         time.sleep(0.2)
@@ -301,7 +302,7 @@ def test_max_silence_override_wins_without_open_claim(tmp_path: Path) -> None:
         out=out,
         err=err,
     )
-    assert code == 20, out.getvalue()
+    assert code == ExitCode.WAIT, out.getvalue()
     with SQLiteStorage(db) as store:
         types = [e.type for e in store.read_events(run_id)]
         assert EventType.LIVENESS_SILENCE_DETECTED in types
@@ -366,7 +367,7 @@ def test_watch_does_not_duplicate_detected_after_compaction(tmp_path: Path) -> N
         out=out,
         err=err,
     )
-    assert code == 20, out.getvalue()
+    assert code == ExitCode.WAIT, out.getvalue()
     with SQLiteStorage(db) as store:
         detected = [
             e

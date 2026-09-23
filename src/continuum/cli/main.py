@@ -1190,10 +1190,12 @@ def cmd_watch(args: argparse.Namespace, storage: Storage, out: Any, err: Any) ->
         stream=out,
         palette=getattr(args, "_palette", None),
     )
-    # Exit code: breached maps to WAIT which is REQUIRES_HUMAN (20), otherwise OK
+    # Exit code: a breach proposes WAIT, so route it through exit_code_for
+    # rather than hard-coding the value (#1170: WAIT is now distinct from
+    # REQUEST_HUMAN and the two must not drift apart here).
     if breached:
-        return 20
-    return 0
+        return exit_code_for(RecoveryMode.WAIT)
+    return ExitCode.OK
 
 
 def cmd_health(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
