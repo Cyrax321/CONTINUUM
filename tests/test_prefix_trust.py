@@ -266,6 +266,62 @@ def test_an_agent_declared_dependency_cannot_buy_trust_with_a_version() -> None:
     assert trusted_unversioned["breakdown"]["evidence"] > agent_with_dep["breakdown"]["evidence"]
 
 
+def test_agent_authored_plan_and_pending_work_lower_the_role_score() -> None:
+    """Plan steps and pending work are scored by who authored them (#1065 sibling).
+
+    ``_collect_origins`` seeded the role dimension from goal, progress, evidence,
+    findings, decisions, external_dependencies, approvals and pins -- but omitted
+    ``state.plan`` and ``state.pending_work``. Both carry provenance and an agent
+    authors them by projecting PLAN_UPSERT / WORK_ADDED, so the omission let an
+    agent add self-reported plan steps and queued work without denting its own
+    role score: the same self-certification #1065 closed for a versioned
+    dependency. A trusted author must still leave the score at 1.0, so the fix
+    counts the origin, it does not blanket-penalise the field.
+    """
+    from continuum.state.semantic import project
+
+    def _role(source: Origin, *, add_plan: bool = False, add_work: bool = False) -> float:
+        storage = SQLiteStorage(":memory:")
+        storage.create_run(Run(run_id="r1", goal="ship"))
+        storage.append_event(
+            "r1", EventType.RUN_STARTED, {"goal": "ship"}, source=Origin.DETERMINISTIC
+        )
+        storage.append_event(
+            "r1", EventType.WORK_COMPLETED, {"doc": 0}, source=Origin.DETERMINISTIC
+        )
+        if add_plan:
+            storage.append_event(
+                "r1",
+                EventType.PLAN_UPSERT,
+                {"plan_id": "p1", "units": [{"id": "u1", "title": "do it", "status": "pending"}]},
+                source=source,
+            )
+        if add_work:
+            storage.append_event(
+                "r1",
+                EventType.WORK_ADDED,
+                {"task_id": "t1", "description": "later"},
+                source=source,
+            )
+        state = project("r1", storage.read_events("r1"))
+        score = trust_over_prefix(state)
+        storage.close()
+        return score["breakdown"]["role"]
+
+    # Goal and progress alone, both deterministic: the role dimension is clean.
+    baseline = _role(Origin.DETERMINISTIC)
+    assert baseline == 1.0
+
+    # An agent authoring a plan step or queuing pending work must dent the score;
+    # before the fix neither field was collected, so both stayed at the baseline.
+    assert _role(Origin.EXTERNAL_AGENT, add_plan=True) < baseline
+    assert _role(Origin.EXTERNAL_AGENT, add_work=True) < baseline
+
+    # Counting the origin, not the field: a trusted author of the same rows keeps
+    # the role dimension at 1.0.
+    assert _role(Origin.DETERMINISTIC, add_plan=True, add_work=True) == 1.0
+
+
 def test_health_command_is_advisory_and_never_gates(tmp_path: Path) -> None:
     """Health command is advisory, never gates, never changes exit code."""
     db = tmp_path / "h.db"

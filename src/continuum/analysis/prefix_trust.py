@@ -55,11 +55,22 @@ def _origin_is_trusted(origin: Origin) -> bool:
 
 def _collect_origins(state: SemanticState) -> list[Origin]:
     origins: list[Origin] = []
-    # Named fields cited: goal, progress, evidence, findings, decisions,
-    # external_dependencies, approvals, pins
+    # Named fields cited: goal, progress, plan, pending_work, evidence, findings,
+    # decisions, external_dependencies, approvals, pins
     if state.goal is not None:
         origins.append(state.goal.provenance.origin)
     origins.append(state.progress.provenance.origin)
+    for step in state.plan:
+        # A plan step carries provenance (PlanStep.provenance, stamped by the
+        # PLAN_UPSERT event's origin in state/semantic.py). Score it by that
+        # origin like every other fact: an agent authoring its own plan must not
+        # escape the role dimension it would otherwise dent, the same
+        # self-certification the dependency case closed (issue #1065).
+        origins.append(step.provenance.origin)
+    for work in state.pending_work:
+        # Pending work is likewise agent-authorable (WORK_ADDED); PendingWork
+        # carries provenance, so score it by who queued it (issue #1065).
+        origins.append(work.provenance.origin)
     for ev in state.evidence:
         origins.append(ev.provenance.origin)
     for f in state.findings:
