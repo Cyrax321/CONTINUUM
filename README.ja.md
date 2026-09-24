@@ -465,7 +465,7 @@ continuum tree <parent_run_id>                   # マルチエージェント�
 
 オプションのレジストリはコードの傍らに存在し、データでありコードではない。`.continuum/gate.json`（副作用ツール + 安定キーテンプレート）、`.continuum/reconcilers.json`（外部システムをチェックするプローブ）、`.continuum/gateway.json`（上流ルート）。
 
-各コマンドは `--json` を受け付け、読み取り専用コマンドは決して書き込まない。したがってエージェントが実行中でもライブデータベースに対して安全である。終了コードは安全性契約である（検証済みで安全な実行のみが 0 で終了する）。完全なコマンドリスト、終了コード表、状態差分出力は [references/cli.md](references/cli.md) にある。
+ほとんどのコマンドはサブコマンドの **前** に置くグローバル修飾子 `--json` を受け付ける（例: `continuum --json resume RUN`）。サブコマンドの後に置くと拒否される。読み取り専用コマンドは実行状態を変更しない。`--repair` のない `resume` は、`.continuum/webhooks.json` が設定されていると `NOTIFICATION_SENT` / `NOTIFICATION_FAILED` イベントを追記することがある。終了コードは安全性契約である（検証済みで安全な実行のみが 0 で終了する）。完全なコマンドリスト、終了コード表、状態差分出力は [references/cli.md](references/cli.md) にある。
 
 ## ロードマップ
 

@@ -157,6 +157,8 @@ All notable changes to this project are documented here. The format follows
   error anywhere. Both inserts now carry `run.parent_run_id` and the row maps
   it into the `Run`, matching SQLite; the contract suite gained a case that
   forks on the engine and asserts `children_of` resolves the child.
+- **The translated docs no longer tell users to pass `--json` after the subcommand, where argparse rejects it (#1144).**
+  `--json` is a global flag on the top-level parser, so `continuum resume RUN --json` exits 2 with "unrecognized arguments": the trailing position is not a valid invocation anywhere. Five translated READMEs still claimed every command accepts it there, and `docs/guides/memory_governance.md` built two shell pipelines on the failing form, so the whole tenant-enumeration section it belongs to produced nothing: the command never ran and `python -m json.tool` read an empty pipe. The guides now state the placement and the failure, matching `docs/api/cli.md`, which already documented the rule correctly. The translated READMEs also picked up the webhook caveat the English README gained when read-only-ness was qualified, so they describe the same CLI the canonical docs do rather than a stale version of it.
 - **`replay --upto` works on a compacted run instead of failing for every value
   of `N` and blaming the operator for it (#1172).** `cmd_replay` read only the
   live event tail, where `RUN_STARTED` no longer lives once a run is compacted,
