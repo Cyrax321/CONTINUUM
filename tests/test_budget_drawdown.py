@@ -140,6 +140,102 @@ def test_settlements_draw_down_same_counter(
     assert get_remaining(raw_after_reconcile, "deploy", auth) < 3
 
 
+def test_reconcile_does_not_re_draw_after_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """complete->reconcile of one effect draws the settlement bucket once, not
+    twice. reconcile() used to draw on every call regardless of status, so the
+    documented complete->reconcile correction double-charged the cap (#1370)."""
+    budgets_path = _budgets_path()
+    budgets_path.parent.mkdir(parents=True, exist_ok=True)
+    budgets_path.write_text(
+        json.dumps({"default_max_attempts": 5, "action_types": {"deploy": {"max_attempts": 5}}})
+    )
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="g"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    ledger = ActionLedger(storage, "run_1")
+
+    auth = resolve_authorization_id("deploy", None, {"target": "prod-1"})
+    assert auth is not None
+
+    outcome = ledger.claim("deploy", {"target": "prod-1"}, key="deploy-k1")
+    ledger.complete(outcome.key, external_id="ext-1")  # claim + settlement = 2 drawn
+    assert get_remaining(load_budgets(budgets_path), "deploy", auth) == 3
+
+    # Reconciling the already-COMPLETED record is permitted, but it settles no
+    # new effect, so the counter must hold.
+    ledger.reconcile(outcome.key, occurred=True, external_id="ext-1", note="probe")
+    assert get_remaining(load_budgets(budgets_path), "deploy", auth) == 3
+
+
+def test_idempotent_reconcile_retry_draws_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reconcile retried after a dropped MCP response settles the same STARTED
+    claim; the second call sees a terminal record and must not draw again."""
+    budgets_path = _budgets_path()
+    budgets_path.parent.mkdir(parents=True, exist_ok=True)
+    budgets_path.write_text(
+        json.dumps({"default_max_attempts": 5, "action_types": {"deploy": {"max_attempts": 5}}})
+    )
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="g"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    ledger = ActionLedger(storage, "run_1")
+
+    auth = resolve_authorization_id("deploy", None, {"target": "prod-1"})
+    assert auth is not None
+
+    outcome = ledger.claim("deploy", {"target": "prod-1"}, key="deploy-k1")  # 1 drawn
+    ledger.reconcile(
+        outcome.key, occurred=True, external_id="ext-1"
+    )  # settle from STARTED: 2 drawn
+    assert get_remaining(load_budgets(budgets_path), "deploy", auth) == 3
+    ledger.reconcile(outcome.key, occurred=True, external_id="ext-1")  # retry: no draw
+    assert get_remaining(load_budgets(budgets_path), "deploy", auth) == 3
+
+
+def test_reconcile_absent_effect_draws_no_settlement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """reconcile(occurred=False) confirms the effect never landed and resolves
+    the record to FAILED -- the same terminal state fail() produces, and fail()
+    draws no settlement. Charging the bucket for an effect a check proved absent
+    mis-bills the cap for a landing that never happened, so the counter must hold
+    across the reconcile. The #1370 status guard alone does not cover this: the
+    record is still STARTED (or the uncertain UNKNOWN) when reconcile is called,
+    so only also guarding on occurred keeps the drawdown honest.
+    """
+    budgets_path = _budgets_path()
+    budgets_path.parent.mkdir(parents=True, exist_ok=True)
+    budgets_path.write_text(
+        json.dumps({"default_max_attempts": 5, "action_types": {"deploy": {"max_attempts": 5}}})
+    )
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="g"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    ledger = ActionLedger(storage, "run_1")
+
+    auth = resolve_authorization_id("deploy", None, {"target": "prod-1"})
+    assert auth is not None
+
+    # STARTED -> reconcile(occurred=False): only the claim draws; an absent
+    # effect settles nothing.
+    outcome = ledger.claim("deploy", {"target": "prod-1"}, key="deploy-k1")  # 1 drawn
+    assert get_remaining(load_budgets(budgets_path), "deploy", auth) == 4
+    ledger.reconcile(outcome.key, occurred=False, note="probe found nothing")
+    assert get_remaining(load_budgets(budgets_path), "deploy", auth) == 4
+
+    # UNKNOWN -> reconcile(occurred=False): the uncertain outcome only reconcile
+    # can settle, resolved to absent, still draws nothing.
+    outcome2 = ledger.claim("deploy", {"target": "prod-1"}, key="deploy-k2")  # 1 drawn
+    assert get_remaining(load_budgets(budgets_path), "deploy", auth) == 3
+    ledger.fail(outcome2.key, "timeout", certain=False)  # -> UNKNOWN, no draw
+    ledger.reconcile(outcome2.key, occurred=False, note="probe found nothing")
+    assert get_remaining(load_budgets(budgets_path), "deploy", auth) == 3
+
+
 def test_weak_tokens_leave_no_budget_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     budgets_path = _budgets_path()
     budgets_path.parent.mkdir(parents=True, exist_ok=True)

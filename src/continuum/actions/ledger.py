@@ -1369,10 +1369,25 @@ class ActionLedger:
             )
         recorded = self._record(key, action, EventType.ACTION_RECONCILED)
         # Settlement drawdown (issue #413): the claim pinned the bucket onto
-        # this record, so settle against the same one (issue #1052).
-        auth_settle = self._settlement_authorization_id(existing)
-        if auth_settle is not None:
-            self._budget_consume_settlement(existing.action_type, auth_settle)
+        # this record, so settle against the same one (issue #1052). Two guards
+        # narrow it to the one case that actually settles a landed effect:
+        #  - Draw only when the effect is confirmed present. occurred=False
+        #    resolves the record to FAILED -- the same terminal state fail()
+        #    produces, and fail() draws no settlement -- so charging the bucket
+        #    for an effect a check proved absent mis-bills the cap for a landing
+        #    that never happened, starving later claims for no reason.
+        #  - Guard on the *pre-call* status exactly as complete() does
+        #    (issue #1370): the drawdown fires once, on the transition out of an
+        #    in-flight state (STARTED or the uncertain UNKNOWN that only reconcile
+        #    can settle). Reconciling an already-terminal record -- the
+        #    deliberately-permitted complete->reconcile correction, or an
+        #    idempotent reconcile retry after a dropped MCP response -- must not
+        #    re-consume the bucket, or one logical effect would draw the cap
+        #    twice.
+        if occurred and existing.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
+            auth_settle = self._settlement_authorization_id(existing)
+            if auth_settle is not None:
+                self._budget_consume_settlement(existing.action_type, auth_settle)
         return recorded
 
     @_single_writer
