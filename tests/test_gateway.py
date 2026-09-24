@@ -11,6 +11,7 @@ import http.client
 import json
 import socket
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -448,6 +449,137 @@ def test_malformed_length_smuggled_body_is_never_dispatched(
     assert b"400 Bad Request" in response
     assert b"Connection: close" in response
     assert b"malformed Content-Length" in response
+
+
+# --- oversized upstream replies (issue #1055) ----------------------------------- #
+#
+# The request side refuses a body over the cap before reading it, but the
+# reply half used to buffer the whole upstream response with no limit at all:
+# a hostile or merely broken upstream could then hold the agent's own proxy
+# and memory hostage by sending a large body, which is the DoS
+# docs/threat_model.md describes as fended off.
+
+
+class _FakeResponse:
+    """Stands in for ``http.client.HTTPResponse``.
+
+    The gateway reads a reply through ``.length``, ``.getheader`` and
+    ``.read``; faking those drives the whole response path without a
+    reachable upstream, the same way the suite avoids real network egress.
+    """
+
+    def __init__(self, status: int, chunks: bytes, declared: int | None) -> None:
+        self.status = status
+        self.length = declared
+        self._remaining = chunks
+
+    def getheader(self, name: str, default: str | None = None) -> str | None:
+        if name.lower() == "content-length":
+            return None if self.length is None else str(self.length)
+        return default
+
+    def read(self, n: int = -1) -> bytes:
+        if n is None or n < 0:
+            out, self._remaining = self._remaining, b""
+            return out
+        out, self._remaining = self._remaining[:n], self._remaining[n:]
+        return out
+
+
+class _FakeConnection:
+    """Answers one request with a canned response, then closes."""
+
+    def __init__(self, response: _FakeResponse) -> None:
+        self._response = response
+
+    def request(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    def getresponse(self) -> _FakeResponse:
+        return self._response
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture
+def fake_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[_FakeResponse], _FakeConnection]:
+    """Point the gateway's HTTPS client at a canned reply instead of the network.
+
+    The cap is shrunk to 1 KiB so the refusal is exercised without allocating
+    megabytes per attempt: the bound is what the test pins, not its size.
+    """
+    monkeypatch.setattr("continuum.gateway.MAX_RESPONSE_BYTES", 1024)
+
+    def install(response: _FakeResponse) -> _FakeConnection:
+        conn = _FakeConnection(response)
+        monkeypatch.setattr(http.client, "HTTPSConnection", lambda *a, **k: conn)
+        return conn
+
+    return install
+
+
+def test_an_oversized_declared_reply_is_refused_with_502(
+    db: str, gateway: str, fake_upstream: Callable[[_FakeResponse], _FakeConnection]
+) -> None:
+    """A declared Content-Length over the cap is refused before it is read."""
+    key = claim(db, "invoice:I-50")
+    fake_upstream(_FakeResponse(200, b"{}", declared=10 * 1024 * 1024))
+    status, body = post(gateway, "/v1/invoices", {"id": "I-50"})
+    assert status == 502
+    assert "upstream response too large" in body["error"]
+
+    with SQLiteStorage(db) as store:
+        from continuum.actions.ledger import fold_action_events
+
+        action = fold_action_events(store.read_events("run_1"))[key]
+    # The upstream may well have applied the side effect, so the claim lands
+    # uncertain rather than completed -- the honest answer for a reply we
+    # could not read.
+    assert action.side_effect_uncertain is True
+
+
+def test_an_oversized_undeclared_reply_is_refused_mid_stream(
+    db: str, gateway: str, fake_upstream: Callable[[_FakeResponse], _FakeConnection]
+) -> None:
+    """A reply that declares no length is bounded by what is actually read.
+
+    ``.length`` is None for a chunked reply, so the declared check cannot
+    fire; the running total has to catch it instead, or this path buffers
+    the whole upstream with no bound at all.
+    """
+    claim(db, "invoice:I-51")
+    fake_upstream(_FakeResponse(200, b"x" * 8192, declared=None))
+    status, body = post(gateway, "/v1/invoices", {"id": "I-51"})
+    assert status == 502
+    assert "upstream response too large" in body["error"]
+
+
+def test_a_reply_within_the_cap_is_forwarded_verbatim(
+    db: str, gateway: str, fake_upstream: Callable[[_FakeResponse], _FakeConnection]
+) -> None:
+    key = claim(db, "invoice:I-52")
+    payload = json.dumps({"ok": True, "id": "I-52"}).encode()
+    fake_upstream(_FakeResponse(200, payload, declared=len(payload)))
+    conn = http.client.HTTPConnection(gateway, timeout=10)
+    conn.request(
+        "POST",
+        "/v1/invoices",
+        body=json.dumps({"id": "I-52"}),
+        headers={"Host": "api.example.com", "Content-Type": "application/json"},
+    )
+    resp = conn.getresponse()
+    echoed = resp.read()
+    conn.close()
+    assert resp.status == 200
+    assert echoed == payload
+    with SQLiteStorage(db) as store:
+        from continuum.actions.ledger import fold_action_events
+
+        action = fold_action_events(store.read_events("run_1"))[key]
+    assert action.status is ActionStatus.COMPLETED
 
 
 @pytest.mark.parametrize(

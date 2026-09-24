@@ -8,6 +8,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The gateway again caps the upstream reply, not just the request body
+  (#1055).** This fix shipped in `54002e2` and was then deleted by the merge
+  `a37442f` ("Merge main into PR #1263"), which resolved a conflict in
+  `gateway.py` against the other branch's side and removed `MAX_RESPONSE_BYTES`,
+  `_read_bounded_response`, the capped read, and the tests that guarded them,
+  without a matching revert in the changelog, so the regression reached `main`
+  silently. Restored here. A proxy that only bounds what a client can make it
+  hold is still hostage to what an upstream sends it, so the reply half carries
+  the request cap's sibling: a reply whose declared `Content-Length` passes
+  `MAX_RESPONSE_BYTES` (10 MB) is refused with `502` before it is buffered, and
+  a reply that declares no length at all is bounded by the running total rather
+  than read whole, which is the only way a chunked reply can be bounded. The
+  claim settles uncertain rather than completed, since an upstream that cannot
+  answer inside the cap may still have applied the side effect, and reporting it
+  as done would promise a delivery the proxy could not verify.
 - **The edit-precondition gate now raises the exception subclass matching the
   edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
   forks but the plain `EditPreconditionError` for every other edit type, so

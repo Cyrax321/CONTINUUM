@@ -79,9 +79,40 @@ MAX_BODY_BYTES = 10 * 1024 * 1024
 #: Upper bound on how much we will drain-and-discard before giving up.
 DRAIN_LIMIT_BYTES = 256 * 1024 * 1024
 
+#: Replies larger than this are refused with 502 rather than buffered whole.
+#: The request cap bounds what a client can make the proxy hold; this bounds
+#: what an upstream can. Without it a hostile or merely broken upstream sends
+#: a large body and holds the agent's own proxy and memory hostage, which is
+#: the DoS docs/threat_model.md describes as fended off (#1055).
+MAX_RESPONSE_BYTES = MAX_BODY_BYTES
+
 
 class GatewayConfigError(ValueError):
     """The gateway registry exists but cannot be honoured."""
+
+
+def _read_bounded_response(resp: Any, cap: int) -> bytes | None:
+    """Read an upstream reply, or refuse it once it passes ``cap``.
+
+    Returns the reply bytes when they fit and ``None`` when they do not, so
+    the caller answers with a 502 instead of echoing an oversized body.
+    ``None`` is also the answer to a reply that declares no length at all and
+    streams past the cap, which is why the bound is checked against the
+    running total and not only against a declared one: a chunked reply has
+    no length to check up front, and reading it whole is precisely the
+    unbounded allocation the cap exists to prevent.
+    """
+    declared = getattr(resp, "length", None)
+    if declared is not None and declared > cap:
+        return None
+    buffer = bytearray()
+    while True:
+        chunk = resp.read(64 * 1024)
+        if not chunk:
+            return bytes(buffer)
+        buffer += chunk
+        if len(buffer) > cap:
+            return None
 
 
 @dataclass(frozen=True)
@@ -564,7 +595,19 @@ class GatewayServer:
                     try:
                         conn.request(method, self.path, body=payload, headers=headers)
                         resp = conn.getresponse()
-                        resp_body = resp.read()
+                        resp_body = _read_bounded_response(resp, MAX_RESPONSE_BYTES)
+                        if resp_body is None:
+                            # An upstream that cannot answer inside the cap is
+                            # the same class of failure as one that cannot
+                            # answer at all: the side effect's state is
+                            # unknown, not completed.
+                            ActionLedger(storage, run_id).fail(
+                                decision.key,
+                                f"upstream response exceeds {MAX_RESPONSE_BYTES} bytes",
+                                certain=False,
+                            )
+                            self._respond(502, {"error": "upstream response too large"})
+                            return
                         status = resp.status
                     except OSError as exc:
                         ledger = ActionLedger(storage, run_id)
