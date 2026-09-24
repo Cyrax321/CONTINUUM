@@ -8,6 +8,27 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The AutoGen wrapper now awaits the real async `run_json` instead of
+  settling the ledger before the tool ran (#1392).** `wrap_autogen_tool`
+  replaced `run_json` with a synchronous function, but AutoGen core declares
+  `run_json` as a coroutine function on both the `Tool` protocol and
+  `BaseTool`. Calling the original returned a coroutine nothing in the wrapper
+  awaited, so `guard.complete` fired immediately with the unrun coroutine as
+  its result: the claim was recorded COMPLETED before the side effect
+  executed, and the `except` clause could never see the tool body raise,
+  because that body only runs when the framework awaits the returned
+  coroutine, outside the wrapper. A failed side effect was then durably
+  recorded COMPLETED, which inverts what the ledger exists for. On recovery a
+  failed effect looks done and is never retried or reconciled, and a crash
+  between the premature completion and the real execution loses the effect
+  with the ledger claiming success. The replacement is now `async def` and
+  awaits the original, so claim and settle bracket the real execution and a
+  tool error reaches `guard.fail` and is re-raised exactly as before. The
+  test fake's `run_json` was synchronous, which is why CI never saw the
+  mismatch; it is now `async def` and two new tests pin that nothing settles
+  before the coroutine is awaited and that an async failure is recorded
+  FAILED.
+
 - **The edit-precondition gate now raises the exception subclass matching the
   edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
   forks but the plain `EditPreconditionError` for every other edit type, so
