@@ -8,6 +8,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`GenericAgentAdapter` declares its pinned environment with its own
+  provenance instead of an agent self-report (#1391).** The trusted in-process
+  facade writes `Origin.DETERMINISTIC` for its checkpoint annotation and its
+  ledger events, but the `DEPENDENCY_DECLARED` events `_declare_dependencies`
+  appends were hardcoded `Origin.EXTERNAL_AGENT`, copied from the MCP/serve
+  mirrors where every write really is external-agent. A fully trusted local run
+  that pinned an environment therefore carried one untrusted, self-reported
+  fact, and the advisory trust score read 0.622 against 0.967 for the identical
+  run whose dependency was declared deterministically. The declaration now
+  defaults to `Origin.DETERMINISTIC`, the docstring no longer claims parity with
+  the external-agent mirrors, and the mirrors themselves are unchanged
+  (`AGENT_SOURCE`). The mislabel was latent for the recovery verdict only
+  because `_weakest_from_state` excludes external dependencies from the trust
+  floor (#1373).
+
 - **The edit-precondition gate now raises the exception subclass matching the
   edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
   forks but the plain `EditPreconditionError` for every other edit type, so
