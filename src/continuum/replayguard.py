@@ -52,7 +52,6 @@ class GuardKind(StrEnum):
     ``ALLOW`` (live claim, proceed with execution),
     ``SKIP_DUPLICATE`` (already completed, return memoized result),
     ``DENY_UNCLAIMED`` (no claim registered yet),
-    ``DENY_DUPLICATE`` (explicit duplicate refusal),
     ``BLOCK_UNCERTAIN`` (outcome in doubt, requires reconciliation), or
     ``DENY_RECLAIM`` (previous attempt closed, requires new claim).
     """
@@ -60,7 +59,6 @@ class GuardKind(StrEnum):
     ALLOW = "allow"
     SKIP_DUPLICATE = "skip_duplicate"
     DENY_UNCLAIMED = "deny_unclaimed"
-    DENY_DUPLICATE = "deny_duplicate"
     BLOCK_UNCERTAIN = "block_uncertain"
     DENY_RECLAIM = "deny_reclaim"
 

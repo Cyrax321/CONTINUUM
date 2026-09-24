@@ -491,7 +491,7 @@ def decide(
                 f"continuum fork {run_id} --reason '<why>' --child <new-run-id>"
             )
         return Decision(False, message, fork_candidates=candidates)
-    if decision.kind is GuardKind.SKIP_DUPLICATE or (decision.kind is GuardKind.DENY_DUPLICATE):
+    if decision.kind is GuardKind.SKIP_DUPLICATE:
         return Decision(
             False,
             f"{action_type!r} with key {rendered!r} was already completed"
