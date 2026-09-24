@@ -240,3 +240,68 @@ def test_adapter_resume(store: SQLiteStorage) -> None:
     decision = adapter.resume("run_104", current_environment=env)
     assert decision.mode is RecoveryMode.RESUME
     assert decision.safe
+
+
+def test_a_non_canonical_result_does_not_wedge_the_action(store: SQLiteStorage) -> None:
+    """Issue #1394: a result the ledger cannot hash must not strand the effect.
+
+    The side effect has already run when completion is attempted. Completing it
+    used to raise, leaving the action STARTED and its caller holding a raw
+    TypeError; a retry on the same key was then refused as an unknown side
+    effect, so a once-only effect could neither be recorded nor redone.
+    """
+    from decimal import Decimal
+
+    from continuum.actions import ActionLedger
+
+    adapter = GenericAgentAdapter(store)
+    adapter.start_run(goal="Charge card", run_id="run_107")
+
+    calls = 0
+
+    def charge() -> dict[str, Decimal]:
+        nonlocal calls
+        calls += 1
+        return {"amount": Decimal("19.99")}
+
+    # Before the fix this raised TypeError out of the ledger, after the effect.
+    returned = adapter.intercept_action(
+        "run_107", "stripe.charge", charge, arguments={"c": 1}, key="charge:1"
+    )
+    assert calls == 1
+    # The caller gets its own return value back, untouched.
+    assert returned == {"amount": Decimal("19.99")}
+
+    ledger = ActionLedger(store, "run_107")
+    assert ledger.all()[0].status.value == "completed"
+    assert ledger.pending() == []
+
+    # A retry on the same key reads the recorded result back and does not re-fire.
+    again = adapter.intercept_action(
+        "run_107", "stripe.charge", charge, arguments={"c": 1}, key="charge:1"
+    )
+    assert calls == 1
+    assert again is not None
+    assert ledger.pending() == []
+
+
+def test_a_non_canonical_result_does_not_break_recovery(store: SQLiteStorage) -> None:
+    from decimal import Decimal
+
+    from continuum.events import EventType
+
+    adapter = GenericAgentAdapter(store)
+    adapter.start_run(goal="Charge card", run_id="run_108")
+    store.append_event("run_108", EventType.RUN_STARTED, {"goal": "Charge card", "total": 1})
+
+    adapter.intercept_action(
+        "run_108",
+        "stripe.charge",
+        lambda: {"amount": Decimal("19.99")},
+        arguments={"c": 1},
+        key="charge:1",
+    )
+
+    # Recovery reads the recorded result; a sanitized one must not crash it.
+    decision = adapter.resume("run_108")
+    assert decision.mode is not None

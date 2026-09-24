@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -13,6 +14,7 @@ from continuum.actions import (
 )
 from continuum.events import EventType
 from continuum.models import Action, ActionStatus, Run, UnknownSideEffect
+from continuum.security.hashing import canonical_sanitize, stable_hash
 from continuum.storage import SQLiteStorage
 
 
@@ -99,6 +101,62 @@ def test_completing_stores_the_external_id_and_result(ledger: ActionLedger) -> N
     assert action.external_id == "481"
     assert action.result_hash is not None
     assert action.completed_at is not None
+
+
+def test_completing_with_a_non_canonical_result_still_completes(ledger: ActionLedger) -> None:
+    """A result the ledger cannot canonicalize must not wedge the action (issue #1394).
+
+    The effect has already happened by the time ``complete`` is called, so
+    raising here would leave it recorded as STARTED forever, and a retry on the
+    same key would be refused as an unknown side effect.
+    """
+    outcome = ledger.claim("stripe.charge", {"amount": 1999})
+    action = ledger.complete(outcome.key, external_id="ch_1", result={"amount": Decimal("19.99")})
+
+    assert action.status is ActionStatus.COMPLETED
+    assert action.result_hash is not None
+    assert action.result == {"amount": repr(Decimal("19.99"))}
+
+
+def test_completing_with_a_non_canonical_result_settles_the_hash(ledger: ActionLedger) -> None:
+    # The stored hash must match the stored result, not the value the caller
+    # handed over, otherwise the durable record is self-inconsistent.
+    result = {"amount": Decimal("19.99"), "currency": "usd"}
+    outcome = ledger.claim("stripe.charge", {"amount": 1999})
+    action = ledger.complete(outcome.key, external_id="ch_1", result=result)
+
+    assert action.result == canonical_sanitize(result)
+    assert action.result_hash == stable_hash(action.result)
+
+
+def test_completing_with_a_non_canonical_result_is_replayable(ledger: ActionLedger) -> None:
+    # The point of completing at all is that a later claim reads the result back
+    # instead of redoing the effect.
+    outcome = ledger.claim("stripe.charge", {"amount": 1999})
+    ledger.complete(outcome.key, external_id="ch_1", result={"amount": Decimal("19.99")})
+
+    replay = ledger.claim("stripe.charge", {"amount": 1999})
+    assert not replay.fresh
+    assert replay.already_completed
+    assert replay.result == {"amount": repr(Decimal("19.99"))}
+    assert ledger.pending() == []
+
+
+def test_reconcile_with_a_non_canonical_result_still_confirms(ledger: ActionLedger) -> None:
+    """Reconciliation confirming an uncertain effect takes the same path (issue #1394).
+
+    Evidence gathered by a probe is even more likely to be an arbitrary object
+    than a tool result is, and failing to record the confirmation would leave
+    the action pending forever.
+    """
+    outcome = ledger.claim("stripe.charge", {"amount": 1999})
+    confirmed = ledger.reconcile(
+        outcome.key, occurred=True, external_id="ch_1", result={"amount": Decimal("19.99")}
+    )
+
+    assert confirmed.status is ActionStatus.COMPLETED
+    assert confirmed.result_hash is not None
+    assert ledger.pending() == []
 
 
 def test_a_repeat_claim_returns_the_previous_result_instead_of_redoing_it(
