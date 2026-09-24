@@ -42,6 +42,8 @@ continuum --json <command>                    # machine-readable output
 | `briefing [--run-id <id>] [--raw-summary]` | Session-start context, curated by provenance: verified contract facts and system-derived lessons before agent-authored summaries, stale items quarantined with reasons. Read-only; `--raw-summary` is the diagnostic path to the verbatim agent summary (#742). |
 | `gate` | Decide whether a tool call may proceed (pre-tool-use hook). Read-only. |
 | `hooks` | Manage host-side observation hooks. |
+| `mcp install` | Register the MCP server with a host, baking resolved absolute paths (issue #834). Mutates host config. |
+| `mcp remove` | Remove the registration `mcp install` wrote. Mutates host config. |
 | `verify <run_id>` | Re-audit the event chain for tampering. |
 | `reconcile <run_id>` | Settle uncertain actions with registered probes. Mutates storage. |
 | `actions <run_id>` | List recorded side effects and flag uncertain outcomes. |
@@ -206,4 +208,46 @@ To remove all installed CONTINUUM hooks from a client settings file:
 ```bash
 continuum hooks remove claude-code
 ```
+
+## mcp
+
+`continuum mcp install` registers the MCP server with a host (Claude Code today,
+`HOST_PROFILES` in `src/continuum/mcp/install.py` holds the per-host data) so it
+connects no matter how the host was launched. The registration bakes values
+resolved at install time, because a committed file cannot express
+"`.venv/bin/continuum-mcp` on POSIX, `.venv\Scripts\continuum-mcp.exe` on
+Windows", and a bare command name is resolved by the host's own `CreateProcess`
+against *its* PATH, which is how a healthy install surfaces as
+`CONNECTION_CLOSED` (issue #834, see [the MCP docs](mcp.md)).
+
+What gets baked:
+
+- **Command**: the console script installed beside this interpreter (absolute
+  path), else the first `continuum-mcp` on PATH, else
+  `/path/to/python -u -m continuum.mcp`. The fallback is what makes venv and
+  editable installs work on Windows with zero PATH assumptions.
+- **`--db`**: an absolute database path (default: `./continuum.db` under the
+  project root, resolved), because the host's spawn cwd is neither documented
+  nor guaranteed to be the project root.
+- **`env`**: names the host's client in the mutating-tools allowlist, so the
+  registration exposes all twelve tools rather than the three read-only ones.
+
+Before writing anything, the `mcp` SDK extra is verified by spawning a probe
+subprocess; when it is missing, install prints
+`pip install "continuum-agent[mcp]"` and exits non-zero without touching the
+config file.
+
+```bash
+continuum mcp install                        # local scope: ~/.claude.json, this project
+continuum mcp install --scope project        # the shared .mcp.json in the project root
+continuum mcp install --db /abs/path.db      # bake a specific database, stored absolute
+continuum mcp remove                         # take the registration back out
+```
+
+Install is idempotent: re-running it updates the entry in place (a moved
+virtualenv is repointed) and never duplicates. Remove deletes only entries
+this command wrote: the committed `.mcp.json` registration and anything
+hand-registered survive untouched. Both take `--settings <path>` to act on a
+file other than the default for the scope.
+
 

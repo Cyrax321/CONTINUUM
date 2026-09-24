@@ -36,6 +36,8 @@ continuum gate                                   # pre-tool-use verdict: allow o
 continuum briefing                               # session-start context injection
 continuum gateway --port 8765                    # enforcing proxy for registered upstreams. mutates
 continuum hooks install <client> [--with-gate]   # wire a coding CLI (claude-code, gemini, codex)
+continuum mcp install [--scope project]          # register the MCP server, resolved absolute. mutates
+continuum mcp remove                             # remove the registration install wrote. mutates
 continuum health <run_id>                        # advisory prefix-trust health check
 continuum impact <run_id> --evidence <id>        # downstream impact of an evidence item
 continuum provenance <run_id>                    # show provenance DAG

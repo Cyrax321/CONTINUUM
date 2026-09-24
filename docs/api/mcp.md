@@ -46,8 +46,53 @@ here and exercised by the missing-SDK tests in `tests/test_mcp_server.py`.
 
 ## Registration
 
-Claude Code discovers the server from the project's `.mcp.json`, which declares
-it by bare command name:
+### `continuum mcp install` (cross-platform)
+
+The committed `.mcp.json` cannot express "`.venv/bin/continuum-mcp` on POSIX,
+`.venv\Scripts\continuum-mcp.exe` on Windows", and a bare command name is
+resolved by the host's `CreateProcess` against *its* PATH, not the child's
+environment. So resolution has to happen on the machine that will spawn the
+server, which is what this command does (issue #834):
+
+```bash
+continuum mcp install                        # local scope, this project
+continuum mcp install --scope project        # the shared .mcp.json instead
+```
+
+It verifies the `mcp` SDK by spawning a probe subprocess first (a missing extra
+is refused with `pip install "continuum-agent[mcp]"` and nothing is written),
+then bakes absolute values into the registration: the resolved console script
+(or `python -u -m continuum.mcp` when no executable is on PATH, the form that
+works on Windows with zero PATH assumptions) and an absolute `--db` (the host's
+spawn cwd is not the project root). The result connects regardless of the
+host's PATH and spawn cwd. Install is idempotent and repoints a moved
+virtualenv; `continuum mcp remove` deletes only the entries install wrote.
+See [the CLI reference](cli.md#mcp) for the flags.
+
+#### The registration lifecycle
+
+Registration is written once and then has to survive everything that happens
+to an install afterwards. That lifecycle is defined rather than left
+ambiguous (issue #841), because every row is a real failure mode a user would
+otherwise diagnose by hand:
+
+| You did                                 | What happens to the registration                                                                                                                                                               |
+| --------------------------------------- | ------------------------------------------------                                                                                                                                               |
+| `pip install -U "continuum-agent[mcp]"` | The venv path or interpreter may change; re-run `continuum mcp install` to repoint it in place. No duplicate entry is created: install recognises the entry it wrote and replaces the command. |
+| Moved the project, renamed the venv     | Same as an upgrade: the baked path is stale, re-run `continuum mcp install`. `continuum mcp doctor` reports the stale resolution as a failure.                                                 |
+| `continuum mcp install` again           | Idempotent. An unchanged install rewrites the same values; a moved one repoints. Nothing is duplicated.                                                                                        |
+| `continuum mcp remove`                  | Deletes the entries install wrote and recognises; a foreign or hand-edited entry under the same name is left alone.                                                                            |
+| `pip uninstall continuum-agent`         | Removes the code; the registration survives and now points at nothing. Run `continuum mcp remove` to clear it, so a host does not keep trying to spawn a server that no longer exists.         |
+
+Re-running `install` after any of the first three rows is the documented
+remediation and is always safe, which is what makes the command usable from a
+setup script: it never has to be guarded with "only if not already
+installed".
+
+### The committed `.mcp.json`
+
+Claude Code also discovers the server from the project's `.mcp.json`, which
+declares it by bare command name:
 
 ```json
 {
@@ -206,6 +251,11 @@ claude                           # then start the client from that shell
 Nothing is written to the repository and `.mcp.json` resolves as intended.
 
 #### Remedy 2, pin the absolute path in the local scope
+
+`continuum mcp install` (above) is this remedy automated: it resolves the
+command on this machine, bakes it absolute with an absolute `--db`, and writes
+the local-scope entry itself. The manual form, for when you want to see every
+byte:
 
 When the client is not launched from a shell, a desktop app, or an IDE, register
 the resolved path instead:
