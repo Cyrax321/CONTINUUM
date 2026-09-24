@@ -175,6 +175,8 @@ def _weakest_from_state(state: SemanticState | None) -> Any | None:
         candidates.append(e.provenance.origin)
     for w in state.pending_work:
         candidates.append(w.provenance.origin)
+    for dep in state.external_dependencies:
+        candidates.append(dep.provenance.origin)
     for pin in state.pins.values():
         candidates.append(pin.provenance.origin)
     if not candidates:
