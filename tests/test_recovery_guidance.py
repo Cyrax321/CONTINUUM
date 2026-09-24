@@ -56,6 +56,62 @@ def assess(db: str):
 # --- pure derivation ---------------------------------------------------------- #
 
 
+def test_review_decision_step_names_the_decision_and_asks_for_revalidation() -> None:
+    """A REVIEW_DECISION repair step must render a human-facing line (#1381).
+
+    The planner emits REVIEW_DECISION for any non-VALID decision, but
+    human_steps_for had no branch for it, so the step was dropped: alone it
+    degraded to the generic "nothing further is automatable" fallback; in a
+    mixed plan it vanished with no trace, leaving an operator never told the
+    flagged decision needs review.
+    """
+    from types import SimpleNamespace
+
+    from continuum.models import RecoveryMode
+    from continuum.recovery.planner import RepairKind, RepairPlan, RepairStep
+
+    plan = RepairPlan(
+        steps=[RepairStep(kind=RepairKind.REVIEW_DECISION, target="d1", reason="d1 is stale")]
+    )
+    decision = SimpleNamespace(mode=RecoveryMode.REPAIR_AND_RESUME, plan=plan, uncertain_actions=())
+    steps = human_steps_for(decision, run_id="run_1")
+    assert any("d1" in s for s in steps), steps
+    assert not any("nothing further is automatable" in s for s in steps), steps
+
+    # In a mixed plan the decision line survives alongside the finding line.
+    mixed = RepairPlan(
+        steps=[
+            RepairStep(kind=RepairKind.REDERIVE_FINDING, target="f1", reason="f1 stale"),
+            RepairStep(kind=RepairKind.REVIEW_DECISION, target="d1", reason="d1 conflicted"),
+        ]
+    )
+    decision = SimpleNamespace(
+        mode=RecoveryMode.REPAIR_AND_RESUME, plan=mixed, uncertain_actions=()
+    )
+    out = human_steps_for(decision, run_id="run_1")
+    assert any("f1" in s for s in out) and any("d1" in s for s in out), out
+
+
+def test_every_planner_repair_kind_renders_a_human_step() -> None:
+    """Producer/consumer lockstep: every RepairKind the planner can emit must
+    render a specific human step, never the generic fallback (#1381)."""
+    from types import SimpleNamespace
+
+    from continuum.models import RecoveryMode
+    from continuum.recovery.planner import RepairKind, RepairPlan, RepairStep
+
+    for kind in RepairKind:
+        plan = RepairPlan(steps=[RepairStep(kind=kind, target="t1", reason="r")])
+        decision = SimpleNamespace(
+            mode=RecoveryMode.REPAIR_AND_RESUME, plan=plan, uncertain_actions=()
+        )
+        steps = human_steps_for(decision, run_id="run_1")
+        assert steps, f"{kind} rendered no step"
+        assert not any("nothing further is automatable" in s for s in steps), (
+            f"{kind} degraded to the generic fallback"
+        )
+
+
 def test_safe_resume_yields_no_steps(db: str) -> None:
     decision = assess(db)  # nothing pending; but MCP provenance forces review
     steps = human_steps_for(decision, run_id="run_1")
