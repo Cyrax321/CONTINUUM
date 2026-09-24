@@ -436,6 +436,33 @@ def test_an_empty_database_says_so(tmp_path: Path) -> None:
     assert "No runs recorded" in out
 
 
+def test_runs_refuses_a_zero_limit_instead_of_looking_empty(db: str) -> None:
+    """Issue #1354: --limit 0 must not misreport a populated store as empty.
+
+    SQLite reads LIMIT 0 as an empty listing, so passing it straight through
+    printed "No runs recorded." (exit 0) for a store that has runs. Mirror the
+    tree/provenance/impact contract and refuse limit < 1.
+    """
+    code, out, err = run("--db", db, "runs", "--limit", "0")
+    assert code == ExitCode.ERROR
+    assert "--limit must be 1 or more (got 0)" in err
+    assert "No runs recorded" not in out
+
+
+def test_runs_refuses_a_negative_limit_instead_of_ignoring_it(db: str) -> None:
+    """SQLite treats LIMIT -1 as unlimited, so a negative --limit was silently
+    ignored and listed everything; it must be rejected (issue #1354)."""
+    code, _, err = run("--db", db, "runs", "--limit", "-1")
+    assert code == ExitCode.ERROR
+    assert "--limit must be 1 or more (got -1)" in err
+
+
+def test_runs_still_honours_a_valid_limit(db: str) -> None:
+    code, out, _ = run("--db", db, "runs", "--limit", "5")
+    assert code == ExitCode.OK
+    assert "run_1" in out
+
+
 def test_init_reports_where_storage_lives(tmp_path: Path) -> None:
     path = str(tmp_path / "new.db")
     code, out, _ = run("--db", path, "init")

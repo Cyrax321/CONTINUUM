@@ -313,6 +313,14 @@ def cmd_runs(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> 
     The text table truncates long goals to keep one run per line; the JSON
     payload carries each goal in full, so scripts never read a clipped goal.
     """
+    # Refuse a sub-1 --limit rather than pass it through: SQLite reads LIMIT 0
+    # as an empty listing (a populated store misreports as empty) and LIMIT -1
+    # as unlimited (the flag is silently ignored). The paging siblings (tree /
+    # provenance / impact) all refuse limit < 1 via _page_bounds; mirror that
+    # contract here (issue #1354).
+    if args.limit is not None and args.limit < 1:
+        print(f"--limit must be 1 or more (got {args.limit})", file=err)
+        return ExitCode.ERROR
     runs = storage.list_runs(limit=args.limit)
     if not runs:
         _emit(
