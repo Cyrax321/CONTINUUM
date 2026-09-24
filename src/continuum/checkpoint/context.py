@@ -101,19 +101,28 @@ class RecoveryContext:
     dropped_sections: tuple[str, ...] = ()
     truncated: bool = False
     notes: tuple[str, ...] = field(default=())
+    # When truncated, whether the notice lists the dropped titles. It is set
+    # False only when that list would not fit the budget (issue #1350); the
+    # dropped_sections field always carries the full list for programmatic
+    # callers regardless.
+    detail_notice: bool = True
 
     def render(self) -> str:
         """Render the complete briefing text across all populated sections.
 
         Joins non-empty rendered sections with double newlines. If sections were
-        omitted to satisfy a token budget, appends a truncation notice naming
-        the dropped section titles.
+        omitted to satisfy a token budget, appends a truncation notice; the
+        notice names the dropped section titles unless that list would not fit
+        the budget, in which case a compact notice is used instead.
         """
         blocks = [section.render() for section in self.sections if section.lines]
         text = "\n\n".join(blocks)
         if self.truncated:
-            dropped = ", ".join(self.dropped_sections)
-            text += f"\n\n[context truncated to fit budget; omitted: {dropped}]"
+            if self.detail_notice and self.dropped_sections:
+                dropped = ", ".join(self.dropped_sections)
+                text += f"\n\n[context truncated to fit budget; omitted: {dropped}]"
+            else:
+                text += "\n\n[context truncated to fit budget]"
         return text
 
     @property
@@ -413,18 +422,58 @@ def build_recovery_context(
     # cannot push STALE STATE out of the protected set.
     never_dropped = _NEVER_DROPPED
 
+    def _tokens(
+        kept_sections: list[ContextSection], dropped_titles: list[str], *, detail: bool
+    ) -> int:
+        # Measure as the context will actually render, notice included. The
+        # pre-#1350 loop built each candidate with the default truncated=False,
+        # so the truncation notice -- part of the output, and growing with every
+        # dropped title -- never entered the fit decision, and the returned
+        # context overflowed the budget by exactly that notice.
+        return RecoveryContext(
+            run_id=state.run_id,
+            sections=tuple(kept_sections),
+            dropped_sections=tuple(dropped_titles),
+            truncated=bool(dropped_titles),
+            detail_notice=detail,
+        ).estimated_tokens
+
+    # Reserve only the compact-notice cost while deciding what to keep: the
+    # compact form is the minimum we can always fall back to, so charging just
+    # that keeps the most content. The detailed (title-listing) notice is
+    # restored afterward only if it still fits.
     for section in populated:
-        candidate = RecoveryContext(run_id=state.run_id, sections=(*kept, section))
-        if candidate.estimated_tokens <= token_budget or section.title in never_dropped:
+        if section.title in never_dropped:
+            kept.append(section)
+            continue
+        if _tokens([*kept, section], dropped, detail=False) <= token_budget:
             kept.append(section)
         else:
             dropped.append(section.title)
+
+    # Dropping the section that overflowed enlarges the notice, which can push
+    # an already-kept section back over the budget. Converge: while the
+    # assembled context still exceeds the budget, drop the lowest-priority
+    # droppable section and re-measure. never_dropped sections are exempt, so
+    # this terminates once only protected sections remain -- the contract
+    # promises a fit only when they fit (#1350).
+    while dropped and _tokens(kept, dropped, detail=False) > token_budget:
+        droppable = [s for s in kept if s.title not in never_dropped]
+        if not droppable:
+            break
+        victim = droppable[-1]
+        kept = [s for s in kept if s is not victim]
+        dropped.append(victim.title)
+
+    # Keep the detailed notice when it fits; otherwise drop to the compact form.
+    detail_notice = (not dropped) or _tokens(kept, dropped, detail=True) <= token_budget
 
     ctx = RecoveryContext(
         run_id=state.run_id,
         sections=tuple(kept),
         dropped_sections=tuple(dropped),
         truncated=bool(dropped),
+        detail_notice=detail_notice,
     )
     # Accounting for budgeted context
     if state.pins:
@@ -440,5 +489,6 @@ def build_recovery_context(
                 dropped_sections=ctx.dropped_sections,
                 truncated=ctx.truncated,
                 notes=tuple(list(ctx.notes) + flags),
+                detail_notice=ctx.detail_notice,
             )
     return ctx

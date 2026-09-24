@@ -177,6 +177,54 @@ def test_low_priority_sections_are_dropped_under_a_budget() -> None:
     assert "[context truncated to fit budget" in context.render()
 
 
+def test_the_truncation_notice_is_counted_against_the_budget() -> None:
+    """Issue #1350: the notice is part of the output, so it must fit the budget.
+
+    The notice lists every dropped title, so the more sections truncation drops,
+    the larger the notice it then appends -- and the pre-fix loop measured each
+    candidate with the notice absent, letting the returned context overflow by
+    exactly that notice. When the title list will not fit, the notice degrades to
+    a compact form, but dropped_sections still reports the full set.
+    """
+    rich = state(
+        findings=[
+            Finding(finding_id=f"f{i}", claim=f"finding number {i} about the data")
+            for i in range(6)
+        ],
+    )
+    budget = 62
+    context = build_recovery_context(
+        rich,
+        token_budget=budget,
+        environment_changes=["the input file changed on disk since the last checkpoint"],
+        next_action="reconcile_action:x",
+    )
+
+    assert context.truncated
+    assert not context.detail_notice  # the title list did not fit, so it was dropped
+    assert context.estimated_tokens <= budget  # overflowed the budget before the fix
+    # The full drop list is still reported even when the notice is compacted.
+    assert "RELEVANT FINDINGS" in context.dropped_sections
+    assert "[context truncated to fit budget" in context.render()
+
+
+def test_a_notice_that_fits_still_lists_the_dropped_titles() -> None:
+    """The detailed (title-listing) notice is kept whenever it fits the budget."""
+    rich = state(
+        findings=[
+            Finding(finding_id=f"f{i}", claim=f"finding number {i} about the data")
+            for i in range(6)
+        ],
+    )
+    context = build_recovery_context(
+        rich, token_budget=120, environment_changes=["x changed"], next_action="do:y"
+    )
+    assert context.truncated
+    assert context.estimated_tokens <= 120
+    assert context.detail_notice
+    assert "omitted:" in context.render()
+
+
 def test_the_goal_and_stale_state_survive_even_a_tiny_budget() -> None:
     """Truncation must never remove the reason recovery is unsafe."""
     rich = state(
