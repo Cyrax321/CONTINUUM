@@ -414,8 +414,14 @@ class PostgresStorage(Storage):
         expected_sequence: int | None = None,
         source: Origin = Origin.DETERMINISTIC,
     ) -> Event:
-        """Append one chained event in a write transaction and return it."""
-        with self._write():
+        """Append one chained event in a write transaction and return it.
+
+        The connection runs autocommit, so an explicit ``transaction()`` block
+        is what makes the ``events`` INSERT and its ``action_index`` upsert
+        (via ``_insert_event`` -> ``_maintain_action_index``) commit atomically,
+        matching SQLite's single ``BEGIN IMMEDIATE`` (issue #1371).
+        """
+        with self._write(), self._connection.transaction():
             event = self._append_chained(
                 run_id,
                 type,
@@ -486,7 +492,12 @@ class PostgresStorage(Storage):
         return event
 
     def append_sealed(self, event: Event) -> Event:
-        """Store a pre-sealed event as-is, preserving its chain."""
+        """Store a pre-sealed event as-is, preserving its chain.
+
+        Wrapped in an explicit ``transaction()`` for the same reason as
+        :meth:`append_event`: the ``events`` INSERT and the ``action_index``
+        upsert must commit together on the autocommit connection (issue #1371).
+        """
         if event.type in CAUSED_BY_TYPES:
             caused_by = event.payload.get("caused_by") if isinstance(event.payload, dict) else None
             if caused_by is not None:
@@ -497,7 +508,7 @@ class PostgresStorage(Storage):
                 for cid in caused_by:
                     if not isinstance(cid, str) or not 1 <= len(cid) <= 128:
                         raise ValueError("caused_by entries must be 1-128 chars")
-        with self._write():
+        with self._write(), self._connection.transaction():
             if event.type in CAUSED_BY_TYPES:
                 caused_by = (
                     event.payload.get("caused_by") if isinstance(event.payload, dict) else None

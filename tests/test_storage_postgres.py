@@ -18,7 +18,7 @@ from continuum.actions import ActionLedger
 from continuum.checkpoint import CheckpointManager
 from continuum.events import EventType
 from continuum.models import ActionStatus, Origin, Run, RunStatus
-from continuum.storage.base import ConcurrentWriteError, RunNotFound
+from continuum.storage.base import ConcurrentWriteError, CorruptedRecord, RunNotFound
 from continuum.storage.postgres import PostgresStorage
 
 DSN = os.environ.get("CONTINUUM_TEST_POSTGRES_DSN")
@@ -477,3 +477,40 @@ def test_pg_child_run_keeps_its_parent_after_the_round_trip(
 
     assert [run.run_id for run in children_of(storage, "pg_par")] == ["pg_kid"]
     assert children_of(storage, "pg_kid") == []
+
+
+def test_pg_append_rolls_back_the_event_when_the_index_upsert_fails(
+    isolated_storage: PostgresStorage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The event and its action_index row must commit atomically (#1371).
+
+    The connection is autocommit, so the ``events`` INSERT and the
+    ``action_index`` upsert used to land in two separate durable commits: a
+    crash (or the ``CorruptedRecord`` the upsert can raise) between them left
+    the ACTION event durably in the log with no matching index row, and
+    ``foreign_action`` then reports a committed claim as un-recorded, so the
+    idempotency gate re-fires the effect. Wrapping the append in an explicit
+    ``transaction()`` makes the two writes atomic, matching SQLite. When the
+    index upsert fails, the event must not be durably present either.
+    """
+    storage = isolated_storage
+    make_run(storage, "pg_atomic", "atomicity")
+    ledger = ActionLedger(storage, "pg_atomic")
+
+    def boom(_event: object) -> None:
+        raise CorruptedRecord("injected action-index failure")
+
+    monkeypatch.setattr(storage, "_maintain_action_index", boom)
+    before = storage.last_sequence("pg_atomic")
+    with pytest.raises(CorruptedRecord):
+        ledger.claim("process_doc", {}, key="doc:atomic")
+
+    # The failed append rolled back: no orphan event past the last good one.
+    monkeypatch.undo()
+    assert storage.last_sequence("pg_atomic") == before
+    action_rows = storage._connection.execute(
+        "SELECT count(*) AS c FROM events WHERE run_id = %s AND type LIKE 'action_%%'",
+        ("pg_atomic",),
+    ).fetchone()
+    assert action_rows["c"] == 0
