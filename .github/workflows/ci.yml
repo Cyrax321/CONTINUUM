@@ -121,10 +121,24 @@ jobs:
       - name: Install with Postgres extra
         run: pip install -e ".[dev,postgres]"
 
+      # Run under coverage and upload it. The Linux/3.12 leg above uploads the
+      # only other report, and it runs the suite without
+      # CONTINUUM_TEST_POSTGRES_DSN, so test_storage_postgres.py skips wholesale
+      # there. Without this upload every postgres.py line reads as uncovered and
+      # codecov/patch fails on any change to the backend (#1329). Scoped to the
+      # module this job exercises: Codecov merges the two reports per commit
+      # rather than overriding, so this only adds line data the other leg lacks.
       - name: Run Postgres contract tests
         env:
           CONTINUUM_TEST_POSTGRES_DSN: postgresql://continuum:continuum@localhost:5432/continuum_test
-        run: pytest tests/test_storage_postgres.py tests/test_action_index.py --tb=short -q
+        run: pytest tests/test_storage_postgres.py tests/test_action_index.py
+          --tb=short -q --cov=continuum.storage.postgres --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v7.0.0
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
 
   lint:
     name: Lint & Type-check

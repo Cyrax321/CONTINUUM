@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`codecov/patch` no longer fails on every change to the Postgres backend
+  (#1329).** Coverage was uploaded from a single matrix leg, the Linux
+  Python 3.12 one, and that leg runs the suite without
+  `CONTINUUM_TEST_POSTGRES_DSN`, so `tests/test_storage_postgres.py` skips
+  wholesale there. The `Test (Postgres backend)` job is the only place the
+  suite actually executes, and it uploaded nothing. Every `postgres.py` line
+  therefore read as uncovered, the patch check reported `0.00% of diff hit` on
+  an otherwise-green PR, and it had been doing so since the backend landed --
+  the last `postgres.py` change before the fix carries the identical failure.
+  The Postgres job now runs under `--cov` and uploads its own report; Codecov
+  merges the two per commit rather than overriding, so the backend's line data
+  folds into the same patch and total figures.
 - **The edit-precondition gate now raises the exception subclass matching the
   edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
   forks but the plain `EditPreconditionError` for every other edit type, so
