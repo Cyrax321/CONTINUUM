@@ -371,3 +371,58 @@ def test_unreadable_authority_ledger_degrades_to_request_human(
     assert decision.contract.recovery_status.value == "requires_human"
     assert decision.permits("anything") is False
     assert any("unreadable" in line for line in decision.rationale)
+
+
+def test_unreadable_ledger_raises_a_floor_it_does_not_overwrite_a_higher_verdict(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #1356: the unreadable branch imposes REQUEST_HUMAN as a floor.
+
+    #1146 made the *readable* consumed-authority branch escalate rather than
+    overwrite, so a risk-driven ABORT/ROLLBACK survives. The unreadable branch
+    (added by #1066) kept a bare ``mode = REQUEST_HUMAN``, so a degraded log
+    *downgraded* a risk-driven ABORT (severity 6) to REQUEST_HUMAN (4) --
+    softening the decision in exactly the scenario the branch exists to harden.
+    """
+    import continuum.recovery.engine as engine_mod
+    from continuum.checkpoint import CheckpointManager
+    from continuum.environment import StaticProvider, capture
+    from continuum.models import Origin
+    from continuum.storage.base import CorruptedRecord
+
+    def env(v: str) -> Any:
+        return capture("run_1", StaticProvider(dataset=v))
+
+    db = str(tmp_path / "auth_unreadable_risk.db")
+    with SQLiteStorage(db) as storage:
+        storage.create_run(Run(run_id="run_1", goal="g"))
+        storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "g", "total": 100})
+        storage.append_event(
+            "run_1", EventType.DEPENDENCY_DECLARED, {"resource": "dataset", "version": "v3"}
+        )
+        for i in range(20):
+            storage.append_event("run_1", EventType.WORK_COMPLETED, {"doc": i})
+        CheckpointManager(storage).checkpoint("run_1", environment=env("v3"))
+        # A monitor observes a risk that drives the verdict to ABORT.
+        storage.append_event(
+            "run_1",
+            EventType.RISK_OBSERVED,
+            {"trigger": "side_effect_duplicate", "score": 1.0},
+            source=Origin.EXTERNAL_MONITOR,
+        )
+
+    # Readable ledger: the risk policy's ABORT stands.
+    with SQLiteStorage(db) as storage:
+        readable = RecoveryEngine(storage).assess("run_1", current_environment=env("v4"))
+    assert readable.mode is RecoveryMode.ABORT
+
+    def unreadable(events: object) -> dict[str, Any]:
+        raise CorruptedRecord("events table: unreadable page (transient)")
+
+    monkeypatch.setattr(engine_mod, "collect_consumed_authorities", unreadable)
+    with SQLiteStorage(db) as storage:
+        degraded = RecoveryEngine(storage).assess("run_1", current_environment=env("v4"))
+
+    # The unreadable ledger raises the floor but must not lower the verdict.
+    assert degraded.mode is RecoveryMode.ABORT
+    assert any("unreadable" in line for line in degraded.rationale)
