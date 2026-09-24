@@ -1796,7 +1796,7 @@ def cmd_compact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
             file=err,
         )
         return ExitCode.ERROR
-    report = storage.compact_run(args.run_id)
+    report = storage.compact_run(args.run_id, environment=_environment(args, args.run_id))
     payload = {"run_id": args.run_id, **report}
     _emit(
         payload,
@@ -4043,8 +4043,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="identifier to carry forward (repeatable: approval_id, key, action_id or sequence).",
     )
 
-    compact = with_run(
-        add("compact", cmd_compact, "Archive the pre-anchor log prefix. Mutates storage.")
+    compact = with_env(
+        with_run(add("compact", cmd_compact, "Archive the pre-anchor log prefix. Mutates storage."))
     )
     compact.add_argument("--force", action="store_true", help="apply without confirmation.")
 
