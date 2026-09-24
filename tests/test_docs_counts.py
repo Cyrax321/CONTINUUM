@@ -29,10 +29,13 @@ REQUIRED_FILES = (
 
 # Docs that may state it. references/ and the translated READMEs are
 # user-facing and used to drift unnoticed (#1109, #1071): a doc that states no
-# total is skipped, a doc that states a wrong one fails.
+# total is skipped, a doc that states a wrong one fails. docs/index.html is not
+# markdown but states the figure three times, and drifted 234 tests behind the
+# suite without any markdown guard noticing (#1283).
 OPTIONAL_FILES = (
     *sorted(ROOT.glob("README.*.md")),  # translated READMEs
     *sorted(ROOT.joinpath("references").glob("*.md")),
+    ROOT / "docs" / "index.html",
 )
 
 COUNTED_FILES = (*REQUIRED_FILES, *OPTIONAL_FILES)
@@ -67,6 +70,15 @@ _COLLECTED_RES = (
         re.IGNORECASE,
     ),
     re.compile(r"^pytest\s+-q\s+#.*?([\d,]+)", re.MULTILINE),
+    # docs/index.html is not markdown, so none of the prose forms above reach
+    # it. It states the figure three times -- the meta description, the hero
+    # banner, and the metrics card (#1283). Uppercase is deliberate: the master
+    # plan says "909 tests passing" about a long-ago snapshot and is not a
+    # counted file, but a case-insensitive flag would let it veto the real
+    # total.
+    re.compile(r"CLI commands,\s*([\d,]+)\s+tests"),
+    re.compile(r"([\d,]+)\s+TESTS\s+PASSING"),
+    re.compile(r'class="metric-value">([\d,]+)<span class="accent">\+'),
 )
 
 
@@ -115,7 +127,7 @@ def test_documented_counts_agree() -> None:
 
 
 def test_documented_narrative_count_forms(tmp_path: Path) -> None:
-    """Narrative English and Spanish count claims must remain detectable."""
+    """Narrative English, Spanish, and HTML count claims must stay detectable."""
     cases = (
         ("Built with ~2,241 tests.", 2241),
         ("Built with 2241 tests.", 2241),
@@ -124,6 +136,10 @@ def test_documented_narrative_count_forms(tmp_path: Path) -> None:
         ("Validado con muertes reales y 1380 tests.", 1380),
         ("Validado con muertes reales y ~2,241 tests.", 2241),
         ("cerca de 2,311 tests", 2311),
+        # docs/index.html: meta description, hero banner, metrics card (#1283).
+        ("12 MCP tools, 46 CLI commands, 2,397 tests.", 2397),
+        ("<div>2,397 TESTS PASSING</div>", 2397),
+        ('<span class="metric-value">2,397<span class="accent">+</span>', 2397),
     )
     for index, (text, expected) in enumerate(cases):
         path = tmp_path / f"doc-{index}.md"

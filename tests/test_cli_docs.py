@@ -16,6 +16,7 @@ from continuum.cli.main import build_parser
 
 TABLE = Path(__file__).resolve().parents[1] / "docs" / "api" / "cli.md"
 REF_CLI = Path(__file__).resolve().parents[1] / "references" / "cli.md"
+LANDING = Path(__file__).resolve().parents[1] / "docs" / "index.html"
 
 
 def _row_pattern(name: str) -> re.Pattern[str]:
@@ -84,6 +85,35 @@ def test_readme_module_map_command_count_matches_parser() -> None:
     live = len(build_parser()._subparsers._group_actions[0].choices)
     assert documented == live, (
         f"README module map says {documented} argparse commands but the parser builds {live}"
+    )
+
+
+def test_landing_page_command_count_matches_parser() -> None:
+    """The landing page's CLI-command figure must match the parser (#1283).
+
+    ``docs/index.html`` is the first thing a visitor sees and it stated 45
+    while the parser built 46. The page states the count twice -- the meta
+    description search engines read and the metrics card -- and a figure that
+    disagrees with either the parser or itself is wrong, so both are compared
+    against the parser rather than pinned.
+    """
+    html = LANDING.read_text(encoding="utf-8")
+    live = len(build_parser()._subparsers._group_actions[0].choices)
+    documented = set()
+    for pattern in (
+        re.compile(r"([\d,]+)\s+CLI commands"),
+        re.compile(
+            r'class="metric-value">([\d,]+)</span>\s*<span class="metric-label">CLI COMMANDS'
+        ),
+    ):
+        match = pattern.search(html)
+        assert match, f"docs/index.html no longer states a CLI-command count ({pattern.pattern})"
+        documented.add(int(match.group(1).replace(",", "")))
+    assert len(documented) == 1, (
+        f"docs/index.html states inconsistent CLI-command counts: {sorted(documented)}"
+    )
+    assert documented == {live}, (
+        f"docs/index.html says {documented.pop()} CLI commands but the parser builds {live}"
     )
 
 

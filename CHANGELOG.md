@@ -176,6 +176,18 @@ All notable changes to this project are documented here. The format follows
   both non-projecting, so folding the archived prefix from genesis reaches the
   same state the anchored path already produced. The guard is unchanged and
   still fires when a window genuinely excludes `RUN_STARTED`.
+- **The landing page's headline metrics no longer drift behind the code (#1283).**
+  `docs/index.html` stated 2,163 tests and 45 CLI commands while the suite
+  collected 2,401 and the parser built 46 -- the figures a first-time visitor
+  sees were the oldest in the repo, and nothing noticed, because every existing
+  guard reads markdown. The page now states 2,452 tests (the README canonical
+  figure the rest of the docs agree on) and 46 commands, and two guards now
+  read the page: `tests/test_docs_counts.py` treats it as a counted file, so
+  its test figure must agree with every markdown figure exactly, and
+  `tests/test_cli_docs.py` compares its two CLI-command sites against
+  `build_parser()` and against each other. The page's own refresh note names
+  the three sources, so a future resync is one edit plus a test run rather
+  than a hunt.
 - **The gateway now enforces a route's `prefix` instead of only parsing it
   (#1051).** `match_route` narrowed candidates by host and method and never
   compared the request path against the route, so every path on a registered
