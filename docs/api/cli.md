@@ -42,7 +42,7 @@ continuum --json <command>                    # machine-readable output
 | `briefing [--run-id <id>] [--raw-summary]` | Session-start context, curated by provenance: verified contract facts and system-derived lessons before agent-authored summaries, stale items quarantined with reasons. Read-only; `--raw-summary` is the diagnostic path to the verbatim agent summary (#742). |
 | `gate` | Decide whether a tool call may proceed (pre-tool-use hook). Read-only. |
 | `hooks` | Manage host-side observation hooks. |
-| `verify <run_id>` | Re-audit the event chain for tampering. |
+| `verify <run_id> [--deep]` | Re-audit the event chain for tampering. `--deep` additionally checks every payload stored out of band by `CONTINUUM_PAYLOAD_OFFLOAD_BYTES`, reporting `BLOB_MISSING` or `BLOB_DIGEST_MISMATCH` by digest (#254); a no-op on stores that keep payloads inline, so it is always safe to pass. |
 | `reconcile <run_id>` | Settle uncertain actions with registered probes. Mutates storage. |
 | `actions <run_id>` | List recorded side effects and flag uncertain outcomes. |
 | `show-contract <run_id>` | Print the recovery contract for the run. |

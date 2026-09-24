@@ -328,8 +328,14 @@ class Storage(ABC):
         ...
 
     @abstractmethod
-    def verify_events(self, run_id: str) -> IntegrityReport:
-        """Recompute the hash chain and report whether it is intact."""
+    def verify_events(self, run_id: str, *, deep: bool = False) -> IntegrityReport:
+        """Recompute the hash chain and report whether it is intact.
+
+        ``deep`` additionally audits payloads the engine stored out of band
+        (#254): each referenced blob must exist and hash to its digest. An
+        engine that keeps every payload inline has nothing to check and
+        reports no violations for it, so the flag is always safe to pass.
+        """
         ...
 
     # -- state versions --------------------------------------------------- #

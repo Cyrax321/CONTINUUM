@@ -6,6 +6,50 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Oversized event payloads can be stored out of band (#254).** Set
+  `CONTINUUM_PAYLOAD_OFFLOAD_BYTES` to a byte threshold and the SQLite engine
+  writes any payload above it to a content-addressed blob beside the database
+  (`<db>.blobs/<sha256>`), replacing the row's payload with a small marker
+  carrying the digest:
+
+  ```json
+  {"__offloaded": "<sha256>", "keys": ["gateway", "evidence"], "bytes": 18342}
+  ```
+
+  The live log and the archive no longer bloat with gateway evidence bodies,
+  reasoning summaries or OTel attribute bundles, so replay latency stays
+  bounded no matter how large one payload grows. The feature is off by
+  default, and off means the serialized form a row stores is byte-identical to
+  what it stored before the codec existed -- the hash chain and every existing
+  reader are untouched. Reads rehydrate transparently at the single seam
+  (`_row_to_event`), so no caller of `read_events`, `read_archived_events` or
+  `read_all_events` knows the codec exists, and `verify_events` still passes
+  because the event was sealed over the original payload.
+
+  The pattern is the payload codec durable-execution platforms use (Temporal's
+  large-payload codec is the reference): keep a digest inline, store the bytes
+  out of band. The digest is the file's name, which makes the codec its own
+  deduplicator -- two events with the same payload share one blob -- and means
+  `compact` moves the marker without moving any bytes, because the archived row
+  points at the same digest the live row did. The blob is written before the
+  marker, so a crash between the two leaves an orphaned file (collectable disk
+  waste) rather than a row pointing at a blob that was never written.
+
+  Nothing deletes blobs. Reclaiming space is operator-owned, same as the
+  archive itself: a blob is the only copy of a payload, so automatic
+  collection would need a reachability scan that is wrong the moment a new
+  event with the same content arrives. An operator who deletes a blob the log
+  still references gets a `CorruptedRecord` naming the digest on read, never a
+  silent empty payload -- a resume that had lost the event describing what it
+  did would be worse than a loud failure. `continuum verify <run_id> --deep`
+  audits every referenced blob and reports `BLOB_MISSING` or
+  `BLOB_DIGEST_MISMATCH`, naming the digest, so the damage is attributable
+  before any repair. The Postgres engine keeps payloads inline: TOAST already
+  moves oversized values out of the main heap, so it has nothing to audit and
+  `--deep` is a no-op there.
+
 ### Fixed
 
 - **The edit-precondition gate now raises the exception subclass matching the
@@ -1135,7 +1179,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,501 collected, ~2,423 passed, ~28 skipped on a minimal env).
+  (~2,534 collected, ~2,461 passed, ~28 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

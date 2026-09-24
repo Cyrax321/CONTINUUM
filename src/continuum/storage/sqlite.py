@@ -44,6 +44,12 @@ from continuum.storage.base import (
     Storage,
 )
 from continuum.storage.migrations import SCHEMA_VERSION, migrate_schema
+from continuum.storage.payload import (
+    BLOB_MISSING,
+    OFFLOAD_MARKER,
+    BlobStore,
+    is_marker,
+)
 
 __all__ = ["SQLiteStorage", "SCHEMA_VERSION"]
 
@@ -112,6 +118,13 @@ class SQLiteStorage(Storage):
             check_same_thread=False,
         )
         self._connection.row_factory = sqlite3.Row
+        # Oversized payloads go to <db>.blobs/ beside the database (#254). An
+        # in-memory database has no file to sit beside, so the codec stays a
+        # no-op there -- it is not durable to begin with, so out-of-band
+        # storage would add a second separately-undurable copy of nothing.
+        self._blobs = BlobStore(
+            None if self.path == ":memory:" else Path(str(self.path) + ".blobs")
+        )
         self._configure()
         self._migrate()
 
@@ -457,8 +470,7 @@ class SQLiteStorage(Storage):
             self._insert_event(conn, event)
         return event
 
-    @staticmethod
-    def _insert_event(conn: sqlite3.Connection, event: Event) -> None:
+    def _insert_event(self, conn: sqlite3.Connection, event: Event) -> None:
         try:
             cursor = conn.execute(
                 "INSERT INTO events(run_id, sequence, event_id, type, timestamp, payload, "
@@ -470,7 +482,12 @@ class SQLiteStorage(Storage):
                     event.event_id,
                     event.type.value,
                     event.timestamp.isoformat(),
-                    json.dumps(dict(event.payload), sort_keys=True),
+                    # The codec returns the same JSON a row stored before #254
+                    # while the feature is off, so the hash chain is
+                    # unchanged. Over the threshold it writes the blob first
+                    # and the marker second, so a crash can orphan a blob but
+                    # never leave a row pointing at one that was never written.
+                    self._blobs.encode(event.payload),
                     event.causer_event_id,
                     event.source.value,
                     event.prev_hash,
@@ -569,7 +586,7 @@ class SQLiteStorage(Storage):
             rows = conn.execute(
                 "SELECT * FROM events_archive WHERE run_id = ? ORDER BY sequence ASC", (run_id,)
             ).fetchall()
-        return [self._row_to_event(row) for row in rows]
+        return [self._row_to_event(row, self._blobs) for row in rows]
 
     def foreign_action(self, key: str, *, exclude_run: str) -> Action | None:
         """Indexed cross-run ledger lookup (issue #216).
@@ -666,7 +683,11 @@ class SQLiteStorage(Storage):
         offset = len(archived)
         for position, row in enumerate([*archived, *rows]):
             try:
-                payload = json.loads(row["payload"])
+                # Rehydrated, not read raw: an offloaded ACTION_* payload is
+                # otherwise the marker dict, which carries no action_type and
+                # would drop the event from the index while the ledger still
+                # folds it (#254).
+                payload = self._blobs.decode(json.loads(row["payload"]))
             except json.JSONDecodeError:
                 continue
             entry = index_entry_from_payload(EventType(row["type"]), payload)
@@ -697,7 +718,7 @@ class SQLiteStorage(Storage):
         query += " ORDER BY sequence ASC"
         with self._read() as conn:
             rows = conn.execute(query, params).fetchall()
-        return [self._row_to_event(row) for row in rows]
+        return [self._row_to_event(row, self._blobs) for row in rows]
 
     def last_sequence(self, run_id: str) -> int:
         """Highest live sequence number; 0 when the run has no events yet."""
@@ -708,15 +729,27 @@ class SQLiteStorage(Storage):
         return int(row["seq"]) if row and row["seq"] is not None else 0
 
     @staticmethod
-    def _row_to_event(row: sqlite3.Row) -> Event:
+    def _row_to_event(row: sqlite3.Row, blobs: BlobStore | None = None) -> Event:
+        """Rebuild an ``Event`` from a row, rehydrating an offloaded payload.
+
+        ``blobs`` is the codec the engine built in ``__init__``; None means the
+        caller is outside an engine and gets the row's payload as stored.
+        """
         try:
+            payload = json.loads(row["payload"])
+            if blobs is not None:
+                # Transparent on read, so no caller of read_events,
+                # read_archived_events or read_all_events needs to know the
+                # codec exists. A missing blob is refused, never substituted
+                # with an empty payload (#254).
+                payload = blobs.decode(payload)
             return Event(
                 event_id=row["event_id"],
                 run_id=row["run_id"],
                 sequence=row["sequence"],
                 type=row["type"],
                 timestamp=row["timestamp"],
-                payload=json.loads(row["payload"]),
+                payload=payload,
                 causer_event_id=row["causer_event_id"],
                 source=row["source"],
                 prev_hash=row["prev_hash"],
@@ -728,7 +761,7 @@ class SQLiteStorage(Storage):
                 f"failed to load: {exc}"
             ) from exc
 
-    def verify_events(self, run_id: str) -> IntegrityReport:
+    def verify_events(self, run_id: str, *, deep: bool = False) -> IntegrityReport:
         """Re-audit a persisted chain without loading it into an EventLog.
 
         For a compacted run (#239) the walk resumes at the archive boundary:
@@ -738,6 +771,13 @@ class SQLiteStorage(Storage):
         only while its archived prefix is intact; removing the boundary
         events or editing history in the archive fails here instead of
         minting a fresh genesis out of whatever live rows survive.
+
+        ``deep`` additionally checks every payload the codec moved out of band
+        (#254): the blob file exists and its content hashes to the digest the
+        row references. The chain audit already reports a missing blob as an
+        unreadable record, because rehydration is part of loading a row; the
+        deep pass names the blob itself, so an operator sees which file to
+        restore rather than which event cannot be read.
         """
         violations: list[IntegrityViolation] = []
         checked = 0
@@ -765,6 +805,15 @@ class SQLiteStorage(Storage):
                 violations.extend(archive_violations)
                 if archive_violations:
                     intact = False
+            if deep:
+                # Audited from the raw payload column, not through
+                # _row_to_event, so a blob gone missing is reported as a blob
+                # violation instead of surfacing as the chain's generic
+                # unreadable-record finding.
+                blob_violations = self._audit_blobs(conn, run_id)
+                violations.extend(blob_violations)
+                if blob_violations:
+                    intact = False
 
         if archive_edge is not None:
             # The live chain must pick up exactly where the archive ends.
@@ -775,7 +824,7 @@ class SQLiteStorage(Storage):
             checked += 1
             healthy = True
             try:
-                event = self._row_to_event(row)
+                event = self._row_to_event(row, self._blobs)
             except CorruptedRecord as exc:
                 violations.append(
                     IntegrityViolation(
@@ -843,9 +892,62 @@ class SQLiteStorage(Storage):
             trusted_through={run_id: last_good},
         )
 
-    @classmethod
+    def _audit_blobs(self, conn: sqlite3.Connection, run_id: str) -> list[IntegrityViolation]:
+        """Check every blob a run's payloads reference (issue #254).
+
+        Reads the payload column of both tables and audits each marker's
+        digest. A run with no offloaded payloads reports nothing, so the deep
+        pass is a no-op on stores the feature never touched. Compaction needs
+        no separate handling: an archived row keeps the marker verbatim, and
+        the blob is content-addressed, so the archive references the same file
+        the live row did.
+        """
+        if not self._blobs.enabled:
+            return []
+        violations: list[IntegrityViolation] = []
+        rows = conn.execute(
+            "SELECT sequence, event_id, payload FROM events WHERE run_id = ? "
+            "UNION ALL SELECT sequence, event_id, payload FROM events_archive "
+            "WHERE run_id = ? ORDER BY sequence ASC",
+            (run_id, run_id),
+        ).fetchall()
+        seen: set[str] = set()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except json.JSONDecodeError:
+                continue
+            if not is_marker(payload):
+                continue
+            digest = payload[OFFLOAD_MARKER]
+            if not isinstance(digest, str) or digest in seen:
+                # Two events with the same payload share one blob by
+                # construction, so the digest is audited once.
+                continue
+            seen.add(digest)
+            kind = self._blobs.audit(digest)
+            if kind is not None:
+                violations.append(
+                    IntegrityViolation(
+                        kind=kind,
+                        run_id=run_id,
+                        sequence=row["sequence"],
+                        event_id=row["event_id"],
+                        detail=(
+                            f"payload blob {digest} is missing from "
+                            f"{self._blobs.directory}; the event's contents were "
+                            "stored out of band and cannot be read"
+                            if kind is BLOB_MISSING
+                            else f"payload blob {digest} no longer hashes to the "
+                            "digest the event references; it was rewritten "
+                            "after it was stored"
+                        ),
+                    )
+                )
+        return violations
+
     def _audit_archive(
-        cls, conn: sqlite3.Connection, run_id: str
+        self, conn: sqlite3.Connection, run_id: str
     ) -> tuple[list[IntegrityViolation], tuple[int, str] | None]:
         """Deep-audit one run's archived prefix (issue #239).
 
@@ -866,7 +968,7 @@ class SQLiteStorage(Storage):
         ).fetchall()
         for row in rows:
             try:
-                event = cls._row_to_event(row)
+                event = self._row_to_event(row, self._blobs)
             except CorruptedRecord as exc:
                 violations.append(
                     IntegrityViolation(

@@ -15,7 +15,7 @@ continuum diff <run_id> <from> <to>              # semantic diff between version
 continuum validate <run_id> --env dataset=v4     # validate. read-only
 continuum resume <run_id> --env dataset=v4       # recovery decision + contract
 continuum checkpoint <run_id>                    # force a checkpoint. mutates
-continuum verify <run_id>                        # re-audit the event hash chain
+continuum verify <run_id> [--deep]               # re-audit the chain; --deep also checks offloaded payload blobs
 continuum actions <run_id>                       # external side effects
 continuum show-contract <run_id>                 # the machine-readable contract
 continuum replay <run_id> [--upto N]             # re-derive state from events

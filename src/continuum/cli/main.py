@@ -3103,10 +3103,15 @@ def cmd_verify(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         return ExitCode.ERROR
 
     storage.get_run(args.run_id)
-    report = storage.verify_events(args.run_id)
+    report = storage.verify_events(args.run_id, deep=bool(getattr(args, "deep", False)))
     payload = report.model_dump(mode="json")
     if report.ok:
         text = f"Event chain verified: {report.checked} events, no violations."
+        # A deep pass over a store with the codec off reports nothing, so the
+        # line tells an operator the extra check actually ran rather than
+        # letting an unset threshold read as "all blobs present".
+        if getattr(args, "deep", False):
+            text += " Offloaded payloads checked: all present."
     else:
         lines = [f"INTEGRITY FAILURE: {len(report.violations)} violation(s)"]
         lines += [f"  seq {v.sequence}: {v.kind}: {v.detail}" for v in report.violations[:20]]
@@ -4235,6 +4240,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--repair-index",
         action="store_true",
         help="rebuild drifted index rows from the log (requires --index).",
+    )
+    verify.add_argument(
+        "--deep",
+        action="store_true",
+        help=(
+            "also check that every payload stored out of band "
+            "(CONTINUUM_PAYLOAD_OFFLOAD_BYTES, issue #254) still exists and "
+            "hashes to the digest the log references."
+        ),
     )
 
     forget = add(

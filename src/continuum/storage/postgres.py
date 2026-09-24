@@ -831,8 +831,16 @@ class PostgresStorage(Storage):
                 f"failed to load: {exc}"
             ) from exc
 
-    def verify_events(self, run_id: str) -> IntegrityReport:
+    def verify_events(self, run_id: str, *, deep: bool = False) -> IntegrityReport:
         """Re-audit a persisted chain without loading it into an EventLog.
+
+        ``deep`` is accepted for interface parity with the SQLite codec
+        (#254) but is a no-op here. This engine stores every payload
+        inline in a JSON column, and PostgreSQL's TOAST moves oversized
+        values out of the main heap automatically and transparently, so
+        there is no out-of-band file for an audit to check and no digest
+        for a row to lose. A violation can only mean the row itself is
+        corrupt, which the chain walk already reports.
 
         For a compacted run (#239) the walk resumes at the archive boundary:
         the newest ``events_archive`` row supplies the expected ``prev_hash``
