@@ -144,6 +144,46 @@ def test_the_cap_truncates_with_an_explicit_marker(
     assert entries[-1]["omitted"] == 3
 
 
+def test_exactly_the_cap_emits_no_truncation_marker(
+    db: str, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At exactly MAX_CONTRACT_OBSERVATIONS nothing was dropped, so the result
+    is the cap-many real rows and no marker -- not cap+1 rows with a spurious
+    ``omitted: 0`` (issue #1363)."""
+    from continuum.recovery import observations as obs_module
+
+    make_run(db)
+    monkeypatch.setattr(obs_module, "MAX_CONTRACT_OBSERVATIONS", 3)
+    for i in range(3):
+        f = workspace / f"c{i}.txt"
+        observe(db, f, content=f"x{i}")
+        f.write_text(f"x{i}")
+
+    monkeypatch.chdir(workspace)
+    entries = collect_observations(SQLiteStorage(db), "run_1", after_sequence=0)
+    assert len(entries) == 3
+    assert all("truncated" not in e for e in entries)
+
+
+def test_one_past_the_cap_omits_exactly_one(
+    db: str, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first observation over the cap makes the marker report ``omitted: 1``."""
+    from continuum.recovery import observations as obs_module
+
+    make_run(db)
+    monkeypatch.setattr(obs_module, "MAX_CONTRACT_OBSERVATIONS", 3)
+    for i in range(4):
+        f = workspace / f"o{i}.txt"
+        observe(db, f, content=f"x{i}")
+        f.write_text(f"x{i}")
+
+    monkeypatch.chdir(workspace)
+    entries = collect_observations(SQLiteStorage(db), "run_1", after_sequence=0)
+    assert len(entries) == 4
+    assert entries[-1] == {"truncated": True, "omitted": 1}
+
+
 # --- contract integration ------------------------------------------------------- #
 
 
