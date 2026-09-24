@@ -696,9 +696,26 @@ class PostgresStorage(Storage):
             ) from exc
 
     def rebuild_action_index(self) -> int:
-        """Recompute the whole index from the log (global key space)."""
+        """Recompute the whole index from the log; returns corrected rows.
+
+        Always global by design: keys live in one store-wide namespace, so a
+        per-run rewrite could collide with another run's legitimate row of the
+        same key. Mirrors the SQLite engine's count so ``verify --repair-index``
+        reports the same number from either backend (#1267). A correction is any
+        key whose stored row was missing, stale, or spurious: changed-or-added
+        rows plus rows the rebuild removed.
+        """
         canonical = self._canonical_index_rows()
         with self._write():
+            # Snapshot the stored rows under the write lock and ahead of the
+            # DELETE, so the count measures the index the rebuild replaced
+            # rather than one a concurrent writer shifted underneath it.
+            before = {
+                r["key"]: (int(r["updated_seq"]), r["status"])
+                for r in self._connection.execute(
+                    "SELECT key, updated_seq, status FROM action_index"
+                ).fetchall()
+            }
             self._connection.execute("DELETE FROM action_index")
             # psycopg's Connection has no executemany; the cursor does.
             with self._connection.cursor() as cur:
@@ -710,7 +727,13 @@ class PostgresStorage(Storage):
                         for key, (entry, seq) in canonical.items()
                     ],
                 )
-        return 0
+        corrections = sum(
+            1
+            for k, val in ((k, (seq, entry[3])) for k, (entry, seq) in canonical.items())
+            if before.get(k) != val
+        )
+        corrections += len(set(before) - set(canonical))
+        return corrections
 
     def action_index_drift(self) -> int:
         """Count index rows that disagree with the log. Read-only.

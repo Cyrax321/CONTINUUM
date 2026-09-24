@@ -351,6 +351,98 @@ def test_pg_action_index_covers_the_archive_after_rebuild(
     assert foreign.status is ActionStatus.COMPLETED
 
 
+def test_pg_rebuild_action_index_reports_the_rows_it_corrected(storage: PostgresStorage) -> None:
+    """Issue #1267: ``rebuild_action_index`` ended in an unconditional
+    ``return 0``, so ``verify --repair-index`` reported "0 corrected rows" on
+    Postgres after repairing real drift. The count must match the SQLite
+    engine's, and a correction is any key whose stored row was missing, stale,
+    or spurious.
+
+    Both ``action_index_drift`` and the rebuild's return value are store-wide, so
+    the assertion that ties them together is phrased against this test's own
+    corruption rather than as an absolute count: the suite shares one database,
+    an earlier test can legitimately leave drift behind, and a rebuild repairs
+    that too. What has to hold is that the repair reports the drift that called
+    for it -- whatever that number was -- instead of the unconditional 0 it used
+    to return.
+    """
+    ledger = ActionLedger(storage, "pg_corr")
+    make_run(storage, "pg_corr", "index target")
+    outcome = ledger.claim("send_invoice", {}, key="invoice:42")
+    # The row the corruption is about to lie about must exist and be truthful.
+    assert storage.foreign_action(outcome.key, exclude_run="other_run") is not None
+
+    # Corrupt the projection, not the truth: the stored status is a lie. Scoped
+    # to this test's own key -- the key is store-global and unique, so an
+    # unscoped UPDATE would also corrupt every other test's rows.
+    storage._connection.execute(
+        "UPDATE action_index SET status = 'completed' WHERE key = %s", (str(outcome.key),)
+    )
+    drifted = storage.action_index_drift()
+    assert drifted >= 1, "a row whose status the log contradicts must read dirty"
+
+    # The repair reports exactly the drift that called for it. Both figures read
+    # the same table over the engine's one autocommit connection with nothing
+    # writing between them, so they must agree -- before this they never could,
+    # because the count was a constant.
+    assert storage.rebuild_action_index() == drifted
+    assert storage.action_index_drift() == 0
+
+    # A clean rebuild corrects nothing, so it reports nothing. Safe to assert
+    # absolutely now: the rebuild above left the whole store consistent.
+    assert storage.rebuild_action_index() == 0
+    # The rebuilt row reflects the truth: still STARTED, not 'completed'.
+    refreshed = storage.foreign_action(outcome.key, exclude_run="other_run")
+    assert refreshed is not None
+    assert refreshed.status is ActionStatus.STARTED
+
+
+def test_pg_rebuild_action_index_counts_spurious_rows_as_corrections(
+    storage: PostgresStorage,
+) -> None:
+    """A row the log never authorized is still a correction: the rebuild deletes
+    it, and the deleted row is counted, not silently absorbed. Phrased as a
+    delta for the same reason as the stale-row test above."""
+    make_run(storage, "pg_spurious", "index target")
+    baseline = storage.action_index_drift()
+    storage._connection.execute(
+        "INSERT INTO action_index(key, run_id, action_id, status, updated_seq, action_json) "
+        "VALUES ('pg_ghost', 'pg_spurious', 'a', 'started', 999, '{}')"
+    )
+    assert storage.action_index_drift() == baseline + 1
+
+    assert storage.rebuild_action_index() == baseline + 1
+    assert storage.action_index_drift() == 0
+
+
+def test_pg_rebuild_action_index_counts_a_lost_row(storage: PostgresStorage) -> None:
+    """The third kind of correction: a key the projection dropped. The rebuild
+    restores it, and the restoration has to be reported.
+
+    This one is not phrased as a clean ``+1`` over the baseline, and the reason
+    is worth recording: until the fold numbers a row the way the incremental
+    writer did (#1321, fixed in #1323), an action row on this engine reads as
+    drift already, so dropping one moves the count by zero rather than one.
+    What this test can still pin is the contract that matters -- the repair
+    reports the drift that called for it, and the row comes back.
+    """
+    ledger = ActionLedger(storage, "pg_lost")
+    make_run(storage, "pg_lost", "index target")
+    outcomes = [ledger.claim("send_invoice", {}, key=f"invoice:{n}") for n in (51, 52)]
+
+    storage._connection.execute("DELETE FROM action_index WHERE key = %s", (str(outcomes[0].key),))
+    drifted = storage.action_index_drift()
+    assert drifted >= 1, "a key the log has but the projection lost must read dirty"
+    # The projection genuinely lost the row, so the lookup misses.
+    assert storage.foreign_action(outcomes[0].key, exclude_run="other_run") is None
+
+    assert storage.rebuild_action_index() == drifted
+    assert storage.action_index_drift() == 0
+    restored = storage.foreign_action(outcomes[0].key, exclude_run="other_run")
+    assert restored is not None
+    assert restored.status is ActionStatus.STARTED
+
+
 @pytest.fixture
 def isolated_storage() -> Iterator[PostgresStorage]:
     """A database the test owns exclusively.

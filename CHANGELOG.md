@@ -255,6 +255,21 @@ All notable changes to this project are documented here. The format follows
   (`ledger._replay`, `gateway`, `provenance_for_run`, the reconcilers).
   Archived rows keep their original timestamps, so the window computation
   itself is unchanged and the expired-window path still rings again on time.
+
+- **`PostgresStorage.rebuild_action_index` now reports the rows it corrected,
+  so `verify --repair-index` no longer claims "0 corrected rows" on Postgres
+  after repairing real drift (#1267).** The method ended in an unconditional
+  `return 0`, while `Storage` declares it "returns corrected rows" and
+  `SQLiteStorage` honours that. It was the only return-value divergence between
+  the two engines, and the value is not internal: `cmd_verify` surfaces it
+  straight to the operator, so on Postgres a repair that fixed a corrupted
+  projection reported success-with-zero-work -- a repair report that cannot be
+  trusted to describe the repair it just ran. The count now mirrors the SQLite
+  engine exactly: changed-or-added rows plus rows the rebuild removed, with the
+  "before" snapshot read under the write lock and ahead of the `DELETE` so a row
+  a concurrent writer shifted between the two is counted rather than silently
+  absorbed.
+
 - **The docs-count guard now reads `references/` and the translated READMEs,
   and the stale counts they held are re-synced (#1109, #1071).** The guard in
   `tests/test_docs_counts.py` watched only three files, so `references/testing.md`
