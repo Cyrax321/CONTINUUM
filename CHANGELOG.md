@@ -8,6 +8,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Compaction no longer mints an environment-blind anchor checkpoint (#1049).**
+  `compact_run` took its forced anchor checkpoint without an `environment`
+  argument, so the anchor's `StateCheckpoint.environment` was always `None`.
+  That anchor becomes the run's newest checkpoint, and `RecoveryEngine.assess`
+  hands `None` to the validator, which marks every pinned dependency `UNKNOWN`
+  for want of a snapshot to compare against. A run that resumed cleanly one
+  moment before compaction downgraded to `REQUEST_HUMAN` one moment after,
+  with nothing about the world having changed. Both engines now thread an
+  optional `environment` through `compact_run`: `continuum compact` captures
+  one from `--env` the way `continuum validate` does, and when the caller
+  supplies none, the anchor carries forward the environment the run's newest
+  checkpoint already recorded, because compaction observes the world rather
+  than changing it. A run with no recorded checkpoint still anchors with
+  `None` rather than inventing a snapshot.
 - **The edit-precondition gate now raises the exception subclass matching the
   edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
   forks but the plain `EditPreconditionError` for every other edit type, so

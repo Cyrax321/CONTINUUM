@@ -228,6 +228,27 @@ def test_compact_archives_prefix_and_verify_stays_ok(storage: PostgresStorage) -
     assert storage.verify_events("pg_k").ok is True
 
 
+def test_compaction_carries_the_anchor_environment(storage: PostgresStorage) -> None:
+    """Issue #1049 parity with the SQLite engine: the forced anchor must
+    record an environment, not None. An environment-blind anchor becomes the
+    newest checkpoint, and the next assessment marks every pinned dependency
+    UNKNOWN, silently downgrading a clean run to request_human."""
+    from continuum.environment.snapshot import StaticProvider, capture
+
+    make_run(storage, "pg_env", "pinned task")
+    snapshot = capture("pg_env", StaticProvider(dataset="v3"))
+    storage.append_event(
+        "pg_env", EventType.DEPENDENCY_DECLARED, {"resource": "dataset", "version": "v3"}
+    )
+    CheckpointManager(storage).checkpoint("pg_env", environment=snapshot)
+
+    storage.compact_run("pg_env")
+
+    anchor = storage.latest_checkpoint("pg_env")
+    assert anchor.environment is not None
+    assert anchor.environment.resources["dataset"].version == "v3"
+
+
 def test_pg_compact_rejects_through_sequence_that_would_eat_the_anchor(
     storage: PostgresStorage,
 ) -> None:

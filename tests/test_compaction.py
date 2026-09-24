@@ -24,8 +24,17 @@ from continuum.actions.idempotency import idempotency_key
 from continuum.checkpoint import CheckpointManager
 from continuum.cli import ExitCode, main
 from continuum.cli.main import cmd_compact
+from continuum.environment.snapshot import EnvironmentSnapshot, StaticProvider, capture
 from continuum.events import Event, EventType
-from continuum.models import ActionStatus, Origin, Run, SemanticState, utcnow
+from continuum.models import (
+    ActionStatus,
+    Origin,
+    RecoveryMode,
+    Run,
+    SemanticState,
+    utcnow,
+)
+from continuum.recovery.engine import RecoveryEngine
 from continuum.replayguard import GuardKind, protected_call
 from continuum.state.semantic import project_incremental
 from continuum.state.versioning import state_fingerprint
@@ -425,3 +434,97 @@ def test_compact_run_rejects_through_sequence_that_would_eat_the_anchor(db: str)
         assert any(e.type is EventType.EVENT_LOG_ANCHORED for e in store.read_events("run_1"))
         report = store.verify_events("run_1")
         assert report.ok, [v.kind for v in report.violations]
+
+
+# --- compaction must not move a recovery verdict (issue #1049) ------------------- #
+
+
+def _seed_pinned_run(db: str) -> EnvironmentSnapshot:
+    """A run that pins a dependency and was checkpointed against an environment.
+
+    This is the shape that breaks: ``assess`` compares the pinned versions
+    against a snapshot, so an anchor checkpoint with no environment makes
+    every pin ``UNKNOWN`` and escalates the mode.
+    """
+    snapshot = capture("run_1", StaticProvider(dataset="v3"))
+    with SQLiteStorage(db) as store:
+        store.append_event(
+            "run_1", EventType.DEPENDENCY_DECLARED, {"resource": "dataset", "version": "v3"}
+        )
+        for i in range(5):
+            store.append_event("run_1", EventType.WORK_COMPLETED, {"doc": i})
+        CheckpointManager(store).checkpoint("run_1", environment=snapshot)
+    return snapshot
+
+
+def test_compaction_leaves_a_resume_verdict_unchanged(db: str) -> None:
+    """Issue #1049: the forced anchor checkpoint recorded no environment, so
+    it became the newest checkpoint and ``assess`` marked every pinned
+    dependency UNKNOWN -- a clean run downgraded to request_human because of a
+    storage hygiene operation."""
+    snapshot = _seed_pinned_run(db)
+
+    with SQLiteStorage(db) as store:
+        before = RecoveryEngine(store).assess("run_1", current_environment=snapshot)
+        assert before.mode is RecoveryMode.RESUME, before.rationale
+
+        store.compact_run("run_1")  # forced anchor, no environment supplied
+
+        # The anchor carries the environment forward rather than recording
+        # None: compaction observes the world, it does not change it.
+        anchor = store.latest_checkpoint("run_1")
+        assert anchor.environment is not None, "anchor checkpoint is environment-blind"
+        assert anchor.environment.resources["dataset"].version == "v3"
+
+        after = RecoveryEngine(store).assess("run_1", current_environment=snapshot)
+
+    assert after.mode is before.mode, after.rationale
+    assert after.safe is before.safe
+    statuses = {s.component.value: s.status.value for s in after.validation.report.statuses}
+    assert statuses.get("external_dependency") != "unknown", after.rationale
+
+
+def test_a_caller_supplied_anchor_environment_wins(db: str) -> None:
+    """``compact_run(environment=...)`` is the explicit path; it must not be
+    overridden by the carried-forward snapshot."""
+    _seed_pinned_run(db)
+    supplied = capture("run_1", StaticProvider(dataset="v4"))
+
+    with SQLiteStorage(db) as store:
+        store.compact_run("run_1", environment=supplied)
+        anchor = store.latest_checkpoint("run_1")
+
+    assert anchor.environment is not None
+    assert anchor.environment.resources["dataset"].version == "v4"
+
+
+def test_an_anchor_invents_no_environment_when_there_is_nothing_to_carry(
+    db: str,
+) -> None:
+    """A run with no recorded checkpoint has no verified environment to
+    inherit. The anchor records None rather than a fabricated snapshot."""
+    with SQLiteStorage(db) as store:
+        store.create_run(Run(run_id="run_2", goal="never checkpointed"))
+        # Never checkpoint run_2, so latest_checkpoint is None.
+        assert store.latest_checkpoint("run_2") is None
+        assert store._anchor_environment("run_2", None) is None
+        # A caller snapshot still wins when there is nothing to inherit.
+        supplied = capture("run_2", StaticProvider(dataset="v1"))
+        assert store._anchor_environment("run_2", supplied) is supplied
+
+
+def test_cli_compact_does_not_downgrade_the_verdict(db: str) -> None:
+    """The CLI forwards whatever ``--env`` captures; with none supplied the
+    carry-forward still has to hold the verdict (issue #1049)."""
+    snapshot = _seed_pinned_run(db)
+
+    with SQLiteStorage(db) as store:
+        before = RecoveryEngine(store).assess("run_1", current_environment=snapshot)
+
+    code, _out, err = run("--db", db, "compact", "run_1", "--force")
+    assert code == ExitCode.OK, err
+
+    with SQLiteStorage(db) as store:
+        after = RecoveryEngine(store).assess("run_1", current_environment=snapshot)
+
+    assert after.mode is before.mode, after.rationale

@@ -35,6 +35,7 @@ from heapq import merge
 from types import TracebackType
 from typing import Any, ClassVar
 
+from continuum.environment.snapshot import EnvironmentSnapshot
 from continuum.events import Event, EventType, IntegrityReport
 from continuum.models import Action, Origin, Run, SemanticState, StateCheckpoint
 
@@ -112,13 +113,44 @@ class Storage(ABC):
     #: catching NotImplementedError, mirroring :attr:`supports_action_index`.
     supports_compaction: ClassVar[bool] = False
 
-    def compact_run(self, run_id: str, *, through_sequence: int | None = None) -> dict[str, int]:
+    def compact_run(
+        self,
+        run_id: str,
+        *,
+        through_sequence: int | None = None,
+        environment: EnvironmentSnapshot | None = None,
+    ) -> dict[str, int]:
         """Archive the pre-anchor prefix of a run's log (issue #239).
 
         Only meaningful on engines with ``events_archive``; callers check
         :attr:`supports_compaction` first, which is the capability contract.
+
+        The forced anchor the compaction mints carries ``environment`` when the
+        caller supplies one. Without it the anchor would record no snapshot, and
+        an environment-blind checkpoint makes every pinned dependency
+        ``UNKNOWN`` at the next assessment, silently downgrading a clean run to
+        ``REQUEST_HUMAN`` (#1049). A caller that supplies nothing inherits the
+        environment the run's newest checkpoint already recorded: compaction
+        observes the world, it does not change it, so the last verified
+        environment is the one the anchor represents.
         """
         raise NotImplementedError
+
+    def _anchor_environment(
+        self, run_id: str, environment: EnvironmentSnapshot | None
+    ) -> EnvironmentSnapshot | None:
+        """The environment a forced anchor should record (#1049).
+
+        A caller-supplied snapshot wins. Without one the newest checkpoint's
+        recorded environment is carried forward: compaction observes the world,
+        it does not change it, so the last verified environment is the one the
+        boundary represents. ``None`` only survives when the run has no
+        checkpoint to inherit from, in which case there is nothing to carry.
+        """
+        if environment is not None:
+            return environment
+        prior = self.latest_checkpoint(run_id)
+        return prior.environment if prior is not None else None
 
     def _validate_compaction_bound(
         self, through_sequence: int | None, anchor_sequence: int
