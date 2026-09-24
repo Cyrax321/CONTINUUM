@@ -531,7 +531,7 @@ class SidecarHTTP:
                     return None
                 return self.rfile.read(length) if length else b"{}"
 
-            def do_POST(self) -> None:  # noqa: N802
+            def do_POST(self) -> None:
                 """Route one POST body through the sidecar dispatch."""
                 method = self.path.strip("/").split("?")[0]
                 raw = self._read_body()
