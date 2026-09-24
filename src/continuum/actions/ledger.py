@@ -74,7 +74,7 @@ from continuum.budgets import (
 from continuum.concurrency.lease import LeaseCoordinator
 from continuum.events import Event, EventType
 from continuum.models import Action, ActionStatus, ConsumedInputs, Origin, UnknownSideEffect, utcnow
-from continuum.security.hashing import stable_hash
+from continuum.security.hashing import canonical_sanitize, stable_hash
 from continuum.storage.base import Storage
 
 _ACTION_EVENT_TYPES = (
@@ -241,6 +241,34 @@ def _normalize_consumed_inputs(
     if isinstance(consumed, Mapping):
         return ConsumedInputs.model_validate(dict(consumed))
     raise ValueError("consumed_inputs must be a mapping or ConsumedInputs")
+
+
+def _settle_result(result: Mapping[str, Any]) -> tuple[Mapping[str, Any], str]:
+    """The stored form and hash of a caller-reported action result.
+
+    ``complete`` and ``reconcile`` settle an outcome *after* the side effect
+    has already run, so the write must not hinge on the shape of the value the
+    caller reports back. ``stable_hash`` canonicalizes the result and raises
+    for types it has no rule for, and an ordinary tool return can contain one:
+    a ``Decimal`` amount, a ``set`` of ids, any object without ``model_dump``.
+    Raising there would leave a successful effect recorded as STARTED forever,
+    with a retry on the same key refused as ``UnknownSideEffect``, so the
+    effect happened exactly once but the ledger could neither complete nor
+    repeat it (issue #1394).
+
+    A canonical result is stored and hashed unchanged. A result that cannot be
+    canonicalized is stored sanitized, its non-canonical parts replaced by
+    their repr, which is what the durable record holds either way: the event
+    payload is ``model_dump(mode="json")`` and JSON has no ``Decimal``, so the
+    action read back from the log already carries the JSON-native form.
+    Sanitizing at write time makes the in-memory record agree with it, so a
+    replay returns the same value before and after a reload.
+    """
+    try:
+        return result, stable_hash(result)
+    except (TypeError, ValueError):
+        sanitized = canonical_sanitize(result)
+        return sanitized, stable_hash(sanitized)
 
 
 class LedgerError(RuntimeError):
@@ -1226,14 +1254,18 @@ class ActionLedger:
         settled_result = dict(result) if result is not None else existing.result
         normalized = _normalize_consumed_inputs(consumed_inputs)
         settled_consumed = normalized if normalized is not None else existing.consumed_inputs
+        if settled_result is not None:
+            # A result the ledger cannot canonicalize (issue #1394) is stored
+            # sanitized rather than failing the write after the effect ran.
+            settled_result, settled_hash = _settle_result(settled_result)
+        else:
+            settled_hash = None
         action = existing.model_copy(
             update={
                 "status": ActionStatus.COMPLETED,
                 "external_id": settled_external,
                 "result": dict(settled_result) if settled_result is not None else None,
-                "result_hash": (
-                    stable_hash(dict(settled_result)) if settled_result is not None else None
-                ),
+                "result_hash": settled_hash,
                 "completed_at": utcnow(),
                 "side_effect_uncertain": False,
                 "consumed_inputs": settled_consumed,
@@ -1341,14 +1373,19 @@ class ActionLedger:
             settled_result = dict(result) if result is not None else existing.result
             normalized = _normalize_consumed_inputs(consumed_inputs)
             settled_consumed = normalized if normalized is not None else existing.consumed_inputs
+            if settled_result is not None:
+                # Same guard as complete: a reconciliation that confirms the
+                # effect happened must not fail on the shape of the evidence
+                # (issue #1394).
+                settled_result, settled_hash = _settle_result(settled_result)
+            else:
+                settled_hash = None
             action = existing.model_copy(
                 update={
                     "status": ActionStatus.COMPLETED,
                     "external_id": settled_external,
                     "result": dict(settled_result) if settled_result is not None else None,
-                    "result_hash": (
-                        stable_hash(dict(settled_result)) if settled_result is not None else None
-                    ),
+                    "result_hash": settled_hash,
                     "completed_at": utcnow(),
                     "side_effect_uncertain": False,
                     "last_error": note or existing.last_error,

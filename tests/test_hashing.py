@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
 from continuum.models import Goal, StateStatus
-from continuum.security.hashing import canonical, hash_content, make_id, stable_hash, to_json
+from continuum.security.hashing import (
+    canonical,
+    canonical_sanitize,
+    hash_content,
+    make_id,
+    stable_hash,
+    to_json,
+)
 
 
 def test_key_order_does_not_change_hash() -> None:
@@ -87,3 +95,59 @@ def test_make_id_is_prefixed_and_unique() -> None:
 @given(st.dictionaries(st.text(), st.integers() | st.text() | st.booleans() | st.none()))
 def test_hash_is_deterministic_for_arbitrary_json_dicts(payload: dict[str, object]) -> None:
     assert stable_hash(payload) == stable_hash(dict(reversed(list(payload.items()))))
+
+
+def test_canonical_sanitize_matches_canonical_for_canonical_values() -> None:
+    value = {
+        "b": [1, 2.5, True, None, "x", b"bytes"],
+        "a": {"z": (1, 2), "y": datetime(2026, 1, 1, tzinfo=UTC)},
+        "s": StateStatus.VALID,
+    }
+    assert canonical_sanitize(value) == canonical(value)
+
+
+def test_canonical_sanitize_degrades_unhashable_leaves() -> None:
+    # A Decimal has no canonical form; the sanitized output keeps the value
+    # distinguishable instead of dropping it.
+    assert canonical_sanitize(Decimal("19.99")) == repr(Decimal("19.99"))
+    # A set has no stable order at all, so it is degraded too.
+    tags = {"a", "b"}
+    assert canonical_sanitize(tags) == repr(tags)
+    # An arbitrary object without model_dump.
+    obj = object()
+    assert canonical_sanitize(obj) == repr(obj)
+
+
+def test_canonical_sanitize_contains_unhashable_values_in_place() -> None:
+    value = {"amount": Decimal("19.99"), "id": "tx_1", "nested": {"fee": Decimal("0.50")}}
+    got = canonical_sanitize(value)
+    # The mapping survives as a mapping; only the unhashable leaves are replaced.
+    assert got["id"] == "tx_1"
+    assert got["amount"] == repr(Decimal("19.99"))
+    assert got["nested"]["fee"] == repr(Decimal("0.50"))
+
+
+def test_canonical_sanitize_output_is_itself_hashable() -> None:
+    # Whatever it produces must be stable enough to hash, since the caller's
+    # purpose is a stored hash.
+    for value in (
+        {"amount": Decimal("19.99")},
+        {"tags": {"a", "b"}},
+        {"fn": lambda: None},
+    ):
+        stable_hash(canonical_sanitize(value))
+
+
+def test_canonical_sanitize_never_raises_on_non_finite_floats() -> None:
+    # canonical() rejects these; sanitize degrades the leaf in place and leaves
+    # the surrounding mapping intact.
+    for bad in (math.nan, math.inf, -math.inf):
+        got = canonical_sanitize({"x": bad, "y": 1})
+        assert got["y"] == 1
+        assert isinstance(got["x"], str)
+
+
+def test_canonical_sanitize_never_raises_on_ambiguous_keys() -> None:
+    # Coercion collided. Dropping a value would lose data, so the whole mapping
+    # falls back to its repr.
+    assert isinstance(canonical_sanitize({1: "a", "1": "b"}), str)

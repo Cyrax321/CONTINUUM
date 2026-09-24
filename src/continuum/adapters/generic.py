@@ -184,6 +184,16 @@ class GenericAgentAdapter(AgentAdapter):
         parsing a response *after* the server already acted. Distinguishing them
         requires knowledge only the caller has, so the default is uncertainty
         and the caller narrows it via ``reconcile_pending``.
+
+        Step 4 never fails on the shape of the result. A tool returning a value
+        the ledger cannot canonicalize (a ``Decimal`` amount, a ``set`` of ids,
+        any object without ``model_dump``) is completed all the same: completion
+        runs after the effect, and letting it raise would leave a successful
+        effect recorded as never-completed and unrepeatable (issue #1394). The
+        caller's own return value is untouched on the first call; the stored
+        copy, and therefore what a replay returns, is the JSON-native form the
+        durable record holds anyway, with any non-canonical part replaced by its
+        repr.
         """
         ledger = ActionLedger(self.storage, run_id)
         outcome = ledger.claim(
