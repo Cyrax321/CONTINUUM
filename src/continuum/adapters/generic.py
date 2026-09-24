@@ -104,10 +104,16 @@ class GenericAgentAdapter(AgentAdapter):
 
         Stored as ``DEPENDENCY_DECLARED`` events (not written onto the
         checkpoint state) so the declaration survives projection and restore, is
-        covered by the hash chain, and carries the same external-agent provenance
-        as the rest of the adapter's writes. Only new or re-pinned resources are
-        appended, so a scheduled checkpoint with an unchanged environment adds
-        nothing.
+        covered by the hash chain, and carries the same provenance as the rest
+        of the adapter's writes. This adapter is the trusted in-process facade
+        (README "Generic Python agent"): every other write it makes, the
+        checkpoint annotation and the ledger events, defaults to
+        ``Origin.DETERMINISTIC``. The pinned environment is captured by that
+        same trusted local code, so it is declared deterministic too. The MCP
+        server and serve sidecar mirror this routine with ``AGENT_SOURCE``
+        because *their* callers really are external agents; this one is not
+        (issue #1391). Only new or re-pinned resources are appended, so a
+        scheduled checkpoint with an unchanged environment adds nothing.
         """
         env_map = {name: str(res.version) for name, res in environment.resources.items()}
         if not env_map:
@@ -131,7 +137,7 @@ class GenericAgentAdapter(AgentAdapter):
                 run_id,
                 EventType.DEPENDENCY_DECLARED,
                 {"resource": name, "version": version},
-                source=Origin.EXTERNAL_AGENT,
+                source=Origin.DETERMINISTIC,
             )
 
     def restore_state(

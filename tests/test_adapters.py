@@ -4,7 +4,7 @@ import pytest
 
 from continuum.adapters import AgentAdapter, GenericAgentAdapter
 from continuum.environment import StaticProvider, capture
-from continuum.models import Goal, Progress, RecoveryMode, SemanticState
+from continuum.models import Goal, Progress, RecoveryMode, Run, SemanticState
 from continuum.storage import SQLiteStorage
 
 
@@ -240,3 +240,95 @@ def test_adapter_resume(store: SQLiteStorage) -> None:
     decision = adapter.resume("run_104", current_environment=env)
     assert decision.mode is RecoveryMode.RESUME
     assert decision.safe
+
+
+def test_captured_environment_is_declared_with_the_adapters_provenance(
+    store: SQLiteStorage,
+) -> None:
+    """A trusted facade must not stamp its own capture as an agent self-report.
+
+    This adapter is the in-process facade; every write it makes is
+    ``Origin.DETERMINISTIC``. Declaring the environment it pinned itself as
+    ``EXTERNAL_AGENT`` made a fully trusted local run carry one untrusted,
+    agent-self-reported fact (issue #1391).
+    """
+    from continuum.events import EventType
+    from continuum.models import Origin
+    from continuum.state.semantic import project
+
+    adapter = GenericAgentAdapter(store)
+    adapter.start_run(goal="Pin env", run_id="run_120")
+    adapter.storage.append_event(
+        "run_120", EventType.RUN_STARTED, {"goal": "Pin env"}
+    )
+
+    state = SemanticState(run_id="run_120", goal=Goal(description="Pin env"))
+    env = capture("run_120", StaticProvider(dataset="v1"))
+    adapter.capture_state("run_120", state, environment=env, reason="pin")
+
+    events = list(store.read_events("run_120"))
+    declared = [e for e in events if e.type is EventType.DEPENDENCY_DECLARED]
+    assert [e.payload["resource"] for e in declared] == ["dataset"]
+
+    # The rest of the adapter's writes are deterministic: the checkpoint
+    # annotation and the ledger events. The declaration must match them.
+    annotated = [e for e in events if e.type is EventType.STATE_CHECKPOINTED]
+    assert annotated and annotated[0].source is Origin.DETERMINISTIC
+    assert {e.source for e in declared} == {Origin.DETERMINISTIC}
+
+    # And it must still be deterministic once projection carries it forward.
+    dependency = project("run_120", events).external_dependencies[0]
+    assert dependency.provenance.origin is Origin.DETERMINISTIC
+
+
+def test_a_pinned_environment_does_not_degrade_the_advisory_trust_score(
+    store: SQLiteStorage,
+) -> None:
+    """The mislabelled declaration cost the run a third of its trust (issue #1391).
+
+    A run whose dependency the adapter pinned scored 0.622 against 0.967 for the
+    identical run that declared the same dependency deterministically, so the
+    advisory score reported a trusted in-process run as partly self-certified.
+    """
+    from continuum.analysis.prefix_trust import trust_over_prefix
+    from continuum.events import EventType
+    from continuum.models import Origin
+    from continuum.state.semantic import project
+
+    def score(declared_with: Origin) -> float:
+        with SQLiteStorage(":memory:") as inner:
+            inner.create_run(Run(run_id="r", goal="g"))
+            inner.append_event("r", EventType.RUN_STARTED, {"goal": "g"})
+            inner.append_event(
+                "r", EventType.WORK_COMPLETED, {"count": 1, "task_id": "t"}
+            )
+            inner.append_event(
+                "r",
+                EventType.DEPENDENCY_DECLARED,
+                {"resource": "dataset", "version": "v1"},
+                source=declared_with,
+            )
+            return trust_over_prefix(project("r", list(inner.read_events("r"))))[
+                "trust_score"
+            ]
+
+    adapter = GenericAgentAdapter(store)
+    adapter.start_run(goal="g", run_id="r")
+    adapter.storage.append_event("r", EventType.RUN_STARTED, {"goal": "g"})
+    adapter.storage.append_event(
+        "r", EventType.WORK_COMPLETED, {"count": 1, "task_id": "t"}
+    )
+    state = project("r", list(store.read_events("r")))
+    adapter.capture_state(
+        "r",
+        state,
+        environment=capture("r", StaticProvider(dataset="v1")),
+        reason="pin",
+    )
+
+    actual = trust_over_prefix(project("r", list(store.read_events("r"))))[
+        "trust_score"
+    ]
+    assert actual == score(Origin.DETERMINISTIC)
+    assert actual > score(Origin.EXTERNAL_AGENT)
+
