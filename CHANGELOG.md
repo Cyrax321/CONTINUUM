@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The Level 4 MCP inspector walkthrough now names the config the repository
+  ships (#1395).** `references/testing.md` pointed
+  `@modelcontextprotocol/inspector --cli` at `mcp-config.json`, which has never
+  existed anywhere in the tree (not tracked, never committed, absent on disk),
+  so the copy-pasted command failed at the exact step meant to exercise the
+  protocol boundary. It now points at the tracked `.mcp.json`, whose
+  `continuum-mcp` entry is the server the `--server continuum-mcp` flag names. A
+  guard in `tests/test_docs_mcp_inspector.py` folds the fenced command's
+  backslash continuations and asserts, for every inspector command in
+  `references/` and `docs/`, that its `--config` file is present in the tree and
+  its `--server` name is an entry in that file, so a walkthrough cannot drift
+  back out of sync with the shipped config.
+
 - **The edit-precondition gate now raises the exception subclass matching the
   edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
   forks but the plain `EditPreconditionError` for every other edit type, so
