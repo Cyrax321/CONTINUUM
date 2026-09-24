@@ -37,6 +37,7 @@ continuum briefing                               # session-start context injecti
 continuum gateway --port 8765                    # enforcing proxy for registered upstreams. mutates
 continuum hooks install <client> [--with-gate]   # wire a coding CLI (claude-code, gemini, codex)
 continuum health <run_id>                        # advisory prefix-trust health check
+continuum policy-review [run_id]                 # advisory recovery-history report by action type
 continuum impact <run_id> --evidence <id>        # downstream impact of an evidence item
 continuum provenance <run_id>                    # show provenance DAG
 continuum record-plan <run_id> --plan-id <id>    # record structured plan upsert. mutates
@@ -54,7 +55,7 @@ continuum benchmark [--total N]                  # run CONTINUUM-Bench harness
 
 Most commands accept global `--json` **before** the subcommand (e.g. `continuum --json resume RUN`). Read-only commands (`inspect`, `status`, `history`, `events`,
 `diff`, `validate`, `resume`, `verify`, `actions`, `show-contract`, `replay`, `budget`, `tree`,
-`gate`, `briefing`, `health`, `impact`, `provenance`, `export-evidence`, `watch`) do not mutate
+`gate`, `briefing`, `health`, `policy-review`, `impact`, `provenance`, `export-evidence`, `watch`) do not mutate
 run state or checkpoints. **Exception:** plain `resume` (without `--repair`) may still append
 `NOTIFICATION_SENT` / `NOTIFICATION_FAILED` events when `.continuum/webhooks.json` is configured
 for a blocked decision — the recovery decision itself remains non-mutating. Mutating commands (`start`,

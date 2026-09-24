@@ -59,6 +59,7 @@ continuum --json <command>                    # machine-readable output
 | `health` | Advisory prefix-trust health check. Read-only. |
 | `impact` | Show downstream impact of an evidence item. Read-only. |
 | `merge` | Merge into a run at an anchor. Mutates storage. |
+| `policy-review [run_id]` | Advisory per-action-type report over recovery history (attempts, human gates, compaction survival, reconciliation outcomes). Read-only. See [policy learning](../research/policy_learning.md). |
 | `precompact` | Checkpoint before context compaction (PreCompact hook). Mutates the run. |
 | `provenance` | Show provenance DAG. Read-only. |
 | `record-plan` | Record a structured plan upsert. Mutates storage. |
