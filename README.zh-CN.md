@@ -94,7 +94,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI 入口
 continuum-mcp --help             # MCP 服务器入口（需要 [mcp] 或 [dev]）
-pytest -q                        # 最小环境中约 2,501 个收集，约 2,361 个通过，约 41 个跳过（具体数量因环境而异）
+pytest -q                        # 最小环境中约 2,536 个收集，约 2,361 个通过，约 41 个跳过（具体数量因环境而异）
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI 强制的三扇门禁
 ```
@@ -431,7 +431,7 @@ CONTINUUM 是一个库（`src/continuum`，124 个模块）加上大型测试套
 | `mcp/` | 12 个 stdio 工具加上鉴权 `authz.py` token 鉴权、allowlist、确认 token |
 | `serve/` | Sidecar stdio JSON 线路 + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Web 仪表板 `app.py` `hitl.py` 带 HITL 按钮确认、对账和完成，前缀信任建议，钉扎 |
-| `cli/` | 38 个 argparse 命令，退出码即裁决，`runs、start、inspect、resume、verify、health、tree、benchmark、attest、dashboard` |
+| `cli/` | 47 个 argparse 命令，退出码即裁决，`runs、start、inspect、resume、verify、health、tree、benchmark、attest、dashboard` |
 | `otel.py` | OpenTelemetry 跨度处理器桥 |
 | `benchmark/` | CONTINUUM-Bench  harness，5 个崩溃场景 + 参数漂移 + 14 场景恢复套件 |
 

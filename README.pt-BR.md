@@ -96,7 +96,7 @@ Verifique:
 ```bash
 continuum --help                 # ponto de entrada CLI
 continuum-mcp --help             # ponto de entrada do servidor MCP (precisa de [mcp] ou [dev])
-pytest -q                        # ~2,501 coletados, ~2,361 passando, ~41 pulados em um ambiente mínimo (as contagens exatas variam)
+pytest -q                        # ~2,536 coletados, ~2,361 passando, ~41 pulados em um ambiente mínimo (as contagens exatas variam)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # os três portões que o CI exige
 ```
@@ -417,7 +417,7 @@ O CONTINUUM é uma biblioteca (`src/continuum`, 124 módulos) mais uma suíte de
 | `mcp/` | 12 ferramentas stdio mais autorização `authz.py` autenticação por token, allowlist, token de confirmação |
 | `serve/` | Sidecar stdio fio JSON + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Dashboard web `app.py` `hitl.py` com botões HITL confirmar/reconciliar/completar, aviso de confiança de prefixo, fixações |
-| `cli/` | 38 comandos argparse, códigos de saída como veredito, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 47 comandos argparse, códigos de saída como veredito, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | Ponte de processador de spans do OpenTelemetry |
 | `benchmark/` | Harness do CONTINUUM-Bench, 5 cenários de queda + deriva de argumentos + suíte de recuperação de 14 cenários |
 

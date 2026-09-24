@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from continuum.cli.main import build_parser
 
 TABLE = Path(__file__).resolve().parents[1] / "docs" / "api" / "cli.md"
@@ -84,6 +86,37 @@ def test_readme_module_map_command_count_matches_parser() -> None:
     live = len(build_parser()._subparsers._group_actions[0].choices)
     assert documented == live, (
         f"README module map says {documented} argparse commands but the parser builds {live}"
+    )
+
+
+#: Each translation phrases the ``cli/`` count differently, but states the same
+#: figure. All five read 38 while the parser built 47 (#1013 review): nothing
+#: compared them with anything, so a translated README described a smaller CLI
+#: than the one its own readers had installed.
+_TRANSLATED_CLI_COUNTS = {
+    "README.es.md": r"^\|\s*`cli/`\s*\|\s*(\d+) comandos argparse",
+    "README.pt-BR.md": r"^\|\s*`cli/`\s*\|\s*(\d+) comandos argparse",
+    "README.ja.md": r"^\|\s*`cli/`\s*\|\s*(\d+) の argparse コマンド",
+    "README.ko.md": r"^\|\s*`cli/`\s*\|\s*(\d+)개 argparse 명령",
+    "README.zh-CN.md": r"^\|\s*`cli/`\s*\|\s*(\d+) 个 argparse 命令",
+}
+
+
+@pytest.mark.parametrize("filename,pattern", sorted(_TRANSLATED_CLI_COUNTS.items()))
+def test_translated_readme_command_count_matches_parser(filename: str, pattern: str) -> None:
+    """A translation's ``cli/`` row must state the live command count too.
+
+    The English row is guarded above; the translations rotted behind the same
+    parser because no guard read them. Matched against the parser rather than
+    a literal, for the same reason: the count moves with every subcommand.
+    """
+    readme = (Path(__file__).resolve().parents[1] / filename).read_text(encoding="utf-8")
+    match = re.search(pattern, readme, re.MULTILINE)
+    assert match, f"{filename} has no `cli/` argparse-commands count to guard"
+    documented = int(match.group(1))
+    live = len(build_parser()._subparsers._group_actions[0].choices)
+    assert documented == live, (
+        f"{filename} says {documented} argparse commands but the parser builds {live}"
     )
 
 

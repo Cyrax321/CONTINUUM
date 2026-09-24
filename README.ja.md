@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI エントリーポイント
 continuum-mcp --help             # MCP サーバーエントリーポイント（[mcp] または [dev] が必要）
-pytest -q                        # 最小環境で約 2,501 件収集、約 2,361 件通過、約 41 件スキップ（正確な数は異なる）
+pytest -q                        # 最小環境で約 2,536 件収集、約 2,361 件通過、約 41 件スキップ（正確な数は異なる）
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI が強制する三つのゲート
 ```
@@ -416,7 +416,7 @@ CONTINUUM は一つのライブラリ（`src/continuum`、124 モジュール）
 | `mcp/` | 12 の stdio ツールに加え認可 `authz.py` トークン認証、allowlist、確認トークン |
 | `serve/` | Sidecar stdio JSON ワイヤ + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Web ダッシュボード `app.py` `hitl.py` と HITL ボタン確認、照合、完了、接頭辞信頼助言、ピン留め |
-| `cli/` | 38 の argparse コマンド、終了コードが評決、`runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 47 の argparse コマンド、終了コードが評決、`runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | OpenTelemetry スパンプロセッサーブリッジ |
 | `benchmark/` | CONTINUUM-Bench ハーネス、5 つのクラッシュシナリオ + 引数ドリフト + 14 シナリオのリカバリスイート |
 

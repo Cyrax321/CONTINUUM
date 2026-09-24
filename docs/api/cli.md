@@ -42,6 +42,7 @@ continuum --json <command>                    # machine-readable output
 | `briefing [--run-id <id>] [--raw-summary]` | Session-start context, curated by provenance: verified contract facts and system-derived lessons before agent-authored summaries, stale items quarantined with reasons. Read-only; `--raw-summary` is the diagnostic path to the verbatim agent summary (#742). |
 | `gate` | Decide whether a tool call may proceed (pre-tool-use hook). Read-only. |
 | `hooks` | Manage host-side observation hooks. |
+| `mcp doctor` | Diagnose why an MCP host cannot connect: SDK extra, command resolution, live `initialize` handshake. Read-only. |
 | `verify <run_id>` | Re-audit the event chain for tampering. |
 | `reconcile <run_id>` | Settle uncertain actions with registered probes. Mutates storage. |
 | `actions <run_id>` | List recorded side effects and flag uncertain outcomes. |
