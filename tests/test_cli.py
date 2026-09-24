@@ -1466,3 +1466,34 @@ def test_json_flag_works_after_the_subcommand(db: str) -> None:
     code, out, _ = run("--db", db, "watch", "run_1", "--max-silence", "1h", "--json")
     assert code == ExitCode.OK, out
     assert json.loads(out)["breached"] is False
+
+
+def test_json_flag_is_discoverable_on_every_subcommand() -> None:
+    """--json appears in each subcommand's own help, not just the top parser (#328).
+
+    Newcomers check ``continuum <command> --help`` and used to see no ``--json``
+    there, so JSON output was invisible to them. Every subcommand inherits the
+    flag now, so its help must advertise it.
+    """
+    import argparse
+
+    from continuum.cli.main import build_parser
+
+    parser = build_parser()
+    subs = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    missing = [name for name, sp in subs.choices.items() if "--json" not in sp.format_help()]
+    assert missing == []
+
+
+def test_trailing_json_works_on_a_command_that_never_declared_it(db: str) -> None:
+    """``runs --json`` is accepted and equals ``--json runs`` (#328).
+
+    ``runs`` never declared its own ``--json``; before #328 a trailing flag was
+    rejected as unrecognised. The inherited flag must produce identical JSON in
+    either position and must not clobber the global flag back to text.
+    """
+    trailing_code, trailing_out, _ = run("--db", db, "runs", "--json")
+    global_code, global_out, _ = run("--db", db, "--json", "runs")
+    assert trailing_code == ExitCode.OK, trailing_out
+    assert global_code == ExitCode.OK, global_out
+    assert json.loads(trailing_out) == json.loads(global_out)

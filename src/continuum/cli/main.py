@@ -3813,9 +3813,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
+    # `--json` is a global flag, but newcomers check `continuum <cmd> --help` and
+    # never saw it there, so they missed JSON output entirely (#328). Hang it off
+    # a parent parser every subcommand inherits, so it shows in every subcommand's
+    # help. ``default=argparse.SUPPRESS`` keeps a subcommand-position ``--json``
+    # from shadowing the global flag back to False when omitted (the #677 pattern).
+    json_parent = argparse.ArgumentParser(add_help=False)
+    json_parent.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="emit machine-readable JSON (same as the global flag).",
+    )
+
     def add(name: str, func: Any, help_text: str) -> argparse.ArgumentParser:
         """Register a subcommand bound to ``func``, returning it for more arguments."""
-        p = sub.add_parser(name, help=help_text, description=help_text)
+        p = sub.add_parser(name, help=help_text, description=help_text, parents=[json_parent])
         p.set_defaults(func=func)
         return p
 
@@ -3907,14 +3920,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dashboard", action="store_true", help="render the Phase 14 recovery dashboard."
     )
 
-    health = with_run(add("health", cmd_health, "Advisory prefix-trust health check. Read-only."))
-    # Subparser default SUPPRESS: accepts trailing --json without shadowing the global flag (#677).
-    health.add_argument(
-        "--json",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="emit machine-readable JSON (same as the global flag).",
-    )
+    with_run(add("health", cmd_health, "Advisory prefix-trust health check. Read-only."))
     # health is advisory only; it never gates, never moves mode, never changes exit code
     # (issue #401). It reports trust_score with per-dimension breakdown.
 
@@ -4382,13 +4388,6 @@ def build_parser() -> argparse.ArgumentParser:
         dest="webhook_url",
         default=None,
         help="webhook URL for --on-breach webhook",
-    )
-    # Subparser default SUPPRESS: accepts trailing --json without shadowing the global flag (#677).
-    watch.add_argument(
-        "--json",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="emit machine-readable JSON (same as the global flag).",
     )
 
     return parser
