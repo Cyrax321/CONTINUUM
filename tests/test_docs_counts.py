@@ -25,6 +25,7 @@ REQUIRED_FILES = (
     ROOT / "README.md",
     ROOT / "docs" / "CONTRIBUTING_ONBOARDING.md",
     ROOT / "CHANGELOG.md",
+    ROOT / "references" / "install.md",
 )
 
 # Docs that may state it. references/ and the translated READMEs are
@@ -99,6 +100,55 @@ def live_total() -> int:
     return int(match.group(1).replace(",", ""))
 
 
+def _tree_module_count() -> int:
+    """``.py`` files under ``src/continuum`` minus the top ``__init__.py``.
+
+    The convention is not arbitrary: #1068 recovered it from the commit that
+    introduced the "124 modules" figure, running the same command there
+    returned 124, so this measures exactly what the prose describes. Package
+    markers in subpackages still count, only ``src/continuum/__init__.py``
+    itself is excluded.
+    """
+    top_init = ROOT / "src" / "continuum" / "__init__.py"
+    return len(
+        [
+            p
+            for p in (ROOT / "src" / "continuum").rglob("*.py")
+            if "__pycache__" not in p.parts and p != top_init
+        ]
+    )
+
+
+def _tree_test_file_count() -> int:
+    """``test_*.py`` files anywhere under ``tests/``."""
+    return len([p for p in (ROOT / "tests").rglob("test_*.py") if "__pycache__" not in p.parts])
+
+
+def test_readme_module_and_file_counts_match_the_tree() -> None:
+    """README's module and test-file counts are pinned to the tree (#1068).
+
+    Both figures had aged silently since the commit that wrote them, and the
+    collected-total guard never saw them because they are not test counts.
+    Unlike the suite size they are deterministic properties of the tree, so
+    they are pinned exactly rather than within a tolerance.
+    """
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    modules = re.search(r"`src/continuum`, (\d+) modules", text)
+    assert modules, "README states no module count"
+    assert int(modules.group(1)) == _tree_module_count(), (
+        f"README says {modules.group(1)} modules but the tree has "
+        f"{_tree_module_count()}: the count in README.md's module-map "
+        "sentence needs the figure from `_tree_module_count`"
+    )
+    test_files = re.search(r"(\d+) test files", text)
+    assert test_files, "README states no test-file count"
+    assert int(test_files.group(1)) == _tree_test_file_count(), (
+        f"README says {test_files.group(1)} test files but the tree has "
+        f"{_tree_test_file_count()}: the count in README.md's module-map "
+        "sentence needs the figure from `_tree_test_file_count`"
+    )
+
+
 def test_required_files_state_a_total() -> None:
     stated = {f.name: documented_total(f) for f in REQUIRED_FILES}
     missing = [name for name, total in stated.items() if total is None]
@@ -129,6 +179,37 @@ def test_documented_narrative_count_forms(tmp_path: Path) -> None:
         path = tmp_path / f"doc-{index}.md"
         path.write_text(text, encoding="utf-8")
         assert documented_total(path) == expected
+
+
+def test_index_html_test_figure_matches_the_docs() -> None:
+    """The marketing page states the suite size too, so it is watched (#840).
+
+    ``docs/index.html`` said ``2,163 tests`` while every guarded file said
+    ~2,195: the page is edited rarely enough that nothing compared it with the
+    rest of the docs. Its tool-count and CLI-command figures are already
+    guarded (``tests/test_mcp_docs.py`` scans ``*.html``); this pins the test
+    figure to the same total the markdown files carry.
+    """
+    text = (ROOT / "docs" / "index.html").read_text(encoding="utf-8")
+    # The page states the figure three ways and the original guard saw one. The
+    # meta description carries plain "2,324 tests" inside the tag's attribute,
+    # which tag-stripping destroys, so it is matched on the raw text; the hero
+    # footer ("2,324 TESTS PASSING") and the metrics card ("2,324+ TESTS
+    # PASSING", split across spans so the markup has to go first) only surface
+    # after the tags are stripped. Matching any one of the three let the other
+    # two contradict it unnoticed (#840 review).
+    stripped = re.sub(r"<[^>]+>", " ", text)
+    pattern = re.compile(r"\b([\d,]+)\s*\+?\s*tests\b", re.IGNORECASE)
+    figures = list(dict.fromkeys(pattern.findall(text) + pattern.findall(stripped)))
+    assert figures, "docs/index.html states no test-count figure"
+    expected = documented_total(COUNTED_FILES[0])
+    for figure in figures:
+        stated = int(figure.replace(",", ""))
+        assert stated == expected, (
+            f"docs/index.html states {stated} tests, but the docs say ~{expected}: "
+            "bump the figure in the meta description, the hero footer and the "
+            "metrics card together with the markdown files"
+        )
 
 
 @pytest.mark.slow
