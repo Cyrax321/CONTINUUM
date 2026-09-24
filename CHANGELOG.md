@@ -224,6 +224,26 @@ All notable changes to this project are documented here. The format follows
   but it was wrong in the direction of hiding drift, which is the opposite of
   what a drift report is for. `latest_pinning` now folds `read_all_events`, the
   same history the assess (#1050) and watch (#1072) folds already read.
+- **The content-addressed snapshot store now rejects a key that is not a digest
+  before it is joined into a path, so a traversal string cannot turn `rewind`
+  into a file-read primitive (#1268).** `snapshot_path` built its storage
+  location by pure concatenation, so a `sha256` containing `../` escaped
+  `.continuum/file-snapshots` and landed anywhere the process could reach;
+  `restore_file` then copied whatever that path pointed at over a workspace
+  file, and `snapshot_path(key).exists()` was an existence oracle for the same
+  range. The write side of this store was hardened in #1110 (issue #1077), which
+  closed filing content under a digest it does not have without touching the
+  read side -- the worse direction, reached through `continuum rewind`, the
+  command whose purpose is to restore trusted content. A key is now only a name
+  here when it is a 64-char lowercase hex digest: `snapshot_path` raises
+  `ValueError`, `snapshot_file` and `restore_file` fail closed to their existing
+  `None`/`False` contracts so a caller that does not catch still cannot reach
+  `copyfile`, and `rewind` reports the poisoned key as unrecoverable rather than
+  following it. Stated honestly, no shipped CLI or MCP path lets an agent plant
+  such a string today -- every `TOOL_COMPLETED` writer computes its own digest
+  -- so this is a defect in the sink, not a complete exploit chain; it is worth
+  closing because the content-addressed contract the store relies on was
+  enforced nowhere on the side that copies bytes into the workspace.
 - **The Postgres action index no longer reads as permanently dirty on an
   ordinary store (#1321).** `action_index_drift` compares the projection
   against a canonical fold of the log, and the two sides numbered each row on

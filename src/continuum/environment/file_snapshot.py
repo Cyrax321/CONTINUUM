@@ -3,18 +3,43 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 from pathlib import Path
 
-__all__ = ["snapshot_file", "restore_file", "snapshot_path", "MAX_SNAPSHOT_BYTES", "file_digest"]
+__all__ = [
+    "snapshot_file",
+    "restore_file",
+    "snapshot_path",
+    "MAX_SNAPSHOT_BYTES",
+    "file_digest",
+    "is_content_digest",
+]
 
 MAX_SNAPSHOT_BYTES = 10 * 1024 * 1024
 
 _SNAPSHOT_DIR = Path(".continuum/file-snapshots")
 
+# A SHA-256 hex digest: 64 lowercase hex characters and nothing else. The store
+# is content-addressed, so the path *is* the digest -- anything else joined into
+# it is a path, not a key (issue #1268).
+_DIGEST_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+
+
+def is_content_digest(sha256: object) -> bool:
+    """Return whether ``sha256`` is a literal SHA-256 hex digest."""
+    return isinstance(sha256, str) and _DIGEST_RE.match(sha256) is not None
+
 
 def snapshot_path(sha256: str) -> Path:
-    """Return the content-addressed snapshot path for a SHA-256 digest."""
+    """Return the content-addressed snapshot path for a SHA-256 digest.
+
+    The store is content-addressed, so the digest *is* the path; a value that is
+    not a 64-character hex digest is rejected rather than joined into the
+    filesystem, where ``../`` would escape the snapshot directory (issue #1268).
+    """
+    if not is_content_digest(sha256):
+        raise ValueError(f"not a SHA-256 digest: {sha256!r}")
     return _SNAPSHOT_DIR / sha256
 
 
@@ -37,7 +62,12 @@ def snapshot_file(path: str | Path, *, sha256: str | None = None) -> Path | None
         sha256 = file_digest(src)
         if sha256 is None:
             return None
-    dst = snapshot_path(sha256)
+    try:
+        dst = snapshot_path(sha256)
+    except ValueError:
+        # A caller-supplied digest that is not a digest at all is refused with
+        # None, like a mismatched one is, rather than raising (issue #1268).
+        return None
     if dst.exists():
         return dst
     try:
@@ -58,8 +88,21 @@ def snapshot_file(path: str | Path, *, sha256: str | None = None) -> Path | None
 
 
 def restore_file(path: str | Path, sha256: str) -> bool:
-    """Restore a snapshot atomically, returning ``False`` when restoration fails."""
-    src = snapshot_path(sha256)
+    """Restore a snapshot atomically, returning ``False`` when restoration fails.
+
+    A ``sha256`` that is not a content address also returns ``False``. This is
+    the read side, where an unvalidated key is not a failed lookup but a copy of
+    whatever the joined path happens to point at into the workspace (#1268), so
+    it fails closed like any other restore failure rather than raising: the
+    callers that can reach it are adapters and embedding applications, and the
+    store's contract on every other failure path is a ``False`` they already
+    handle. ``snapshot_path`` still rejects the value, so a caller that needs to
+    tell a bad key from a missing one can pre-check ``is_content_digest``.
+    """
+    try:
+        src = snapshot_path(sha256)
+    except ValueError:
+        return False
     if not src.exists():
         return False
     dst = Path(path)
