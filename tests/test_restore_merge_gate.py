@@ -379,6 +379,126 @@ def test_falsifiable_restore_skipping_unsettled_claim_refuses_like_fork() -> Non
         storage.close()
 
 
+# --- the check-only halves are a live-DB read, not a duplicate (#1094) -------- #
+
+
+@pytest.mark.parametrize("check", ["restore", "merge"])
+def test_precondition_check_appends_nothing(check: str) -> None:
+    """restore_to_anchor / merge_to_anchor exist to be safe against a live
+    database while an agent is mid-run. That promise is void if the check
+    itself writes."""
+    from continuum.recovery.merge import merge_to_anchor
+    from continuum.recovery.restore import restore_to_anchor
+
+    storage = _make_storage()
+    try:
+        before = len(list(storage.read_events("run_1")))
+        fn = restore_to_anchor if check == "restore" else merge_to_anchor
+        derivation, carry_set, summary = fn(storage, "run_1", 0)
+        assert derivation is not None
+        assert summary is not None
+        assert len(list(storage.read_events("run_1"))) == before
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("check", ["restore", "merge"])
+def test_precondition_check_takes_no_reason(check: str) -> None:
+    """Both wrappers declared a keyword-only ``reason`` and never read it, so a
+    caller passed an audit string that silently went nowhere. A precondition
+    check appends no event to carry a reason on, so the parameter is gone
+    rather than retained-but-ignored."""
+    from continuum.recovery.merge import merge_to_anchor
+    from continuum.recovery.restore import restore_to_anchor
+
+    storage = _make_storage()
+    try:
+        fn = restore_to_anchor if check == "restore" else merge_to_anchor
+        with pytest.raises(TypeError):
+            fn(storage, "run_1", 0, reason="goes nowhere")  # type: ignore[call-arg]
+    finally:
+        storage.close()
+
+
+def test_approve_restore_stamps_exactly_what_the_check_returned() -> None:
+    """The approve path routes its precondition check through restore_to_anchor
+    rather than spelling check_preconditions a second time. If it stopped
+    forwarding the caller's carry_forward, the refusal it raised and the
+    summary it stamped would not be the one the read-only API describes."""
+    from continuum.recovery.restore import restore_to_anchor
+
+    storage = _make_storage()
+    try:
+        # A real checkpoint mid-run so the anchor is not the degenerate 0, and
+        # work before it lands in the surviving prefix. The unsettled
+        # authorization after it is the only thing in (anchor, head], so the
+        # summary the check returns is non-trivial and the carry through the
+        # approve path is load-bearing.
+        storage.append_event("run_1", EventType.WORK_ADDED, {"task_id": "w1", "description": "w1"})
+        CheckpointManager(storage).checkpoint("run_1", trigger="test")
+        anchor = storage.latest_checkpoint("run_1").state.source_sequence
+        storage.append_event(
+            "run_1", EventType.APPROVAL_GRANTED, {"approval_id": "ap-1", "subject": "s"}
+        )
+        derivation, carry_set, summary = restore_to_anchor(
+            storage, "run_1", anchor, carry_forward=["ap-1"]
+        )
+        assert summary["unsettled_authorizations"], "scenario must be non-degenerate"
+        assert anchor == 2, "scenario assumed anchor 2; adjust if the chain shifted"
+        approve_restore(
+            storage,
+            "run_1",
+            reason="same derivation",
+            anchor_sequence=anchor,
+            carry_forward=["ap-1"],
+        )
+        payload = [
+            e.payload for e in storage.read_events("run_1") if e.type is EventType.RUN_RESTORED
+        ][-1]
+        assert payload["preconditions"] == summary
+        assert payload["carry_forward"] == sorted(carry_set)
+    finally:
+        storage.close()
+
+
+def test_approve_merge_stamps_exactly_what_the_check_returned() -> None:
+    """Same wiring on the merge side, target-only branch: approve_merge derives
+    its refused set through merge_to_anchor."""
+    from continuum.recovery.merge import merge_to_anchor
+
+    storage = _make_storage()
+    try:
+        # Same non-degenerate shape as the restore test: work before the
+        # checkpoint is in the surviving prefix, and the only thing in
+        # (anchor, head] is an unsettled authorization the carry must account
+        # for.
+        storage.append_event("run_1", EventType.WORK_ADDED, {"task_id": "w1", "description": "w1"})
+        CheckpointManager(storage).checkpoint("run_1", trigger="test")
+        anchor = storage.latest_checkpoint("run_1").state.source_sequence
+        storage.append_event(
+            "run_1", EventType.APPROVAL_GRANTED, {"approval_id": "ap-1", "subject": "s"}
+        )
+        derivation, carry_set, summary = merge_to_anchor(
+            storage, "run_1", anchor, carry_forward=["ap-1"]
+        )
+        assert summary["unsettled_authorizations"], "scenario must be non-degenerate"
+        assert anchor == 2, "scenario assumed anchor 2; adjust if the chain shifted"
+        approve_merge(
+            storage,
+            "run_1",
+            reason="same derivation",
+            anchor_sequence=anchor,
+            carry_forward=["ap-1"],
+        )
+        payload = [
+            e.payload for e in storage.read_events("run_1") if e.type is EventType.RUN_MERGED
+        ][-1]
+        assert payload["preconditions"] == summary
+        assert payload["carry_forward"] == sorted(carry_set)
+    finally:
+        storage.close()
+
+
 @pytest.mark.parametrize("edit_type", EDIT_TYPES)
 def test_refusal_raises_edit_type_specific_subclass(edit_type: str) -> None:
     """The gate raises the subclass matching ``edit_type``, never the base (#1114).

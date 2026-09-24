@@ -87,10 +87,17 @@ def restore_to_anchor(
     run_id: str,
     anchor: int,
     *,
-    reason: str,
     carry_forward: Collection[str] | None = None,
 ) -> tuple[Any, set[str], dict[str, Any]]:
-    """Check preconditions for restoring ``run_id`` to ``anchor``."""
+    """Check preconditions for restoring ``run_id`` to ``anchor``.
+
+    Read-only: derives the refused set without appending anything, so a
+    caller can ask whether a restore would be blocked against a live
+    database while an agent is mid-run. The mutating half is
+    :func:`approve_restore`, which routes its own check through here and
+    records ``reason`` on the ``RUN_RESTORED`` event it appends; a
+    precondition check has no event to put a reason on, so it takes none.
+    """
     return check_preconditions(
         storage,
         run_id,
@@ -121,11 +128,10 @@ def approve_restore(
     else:
         anchor = _anchor_for(storage, run_id, target)
 
-    derivation, carry_set, summary = check_preconditions(
+    derivation, carry_set, summary = restore_to_anchor(
         storage,
         run_id,
         anchor,
-        edit_type="restore",
         carry_forward=carry_forward,
     )
 

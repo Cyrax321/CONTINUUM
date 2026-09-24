@@ -57,6 +57,20 @@ All notable changes to this project are documented here. The format follows
   (`continuum.budgets` keeps `FALLBACK_MAX_ATTEMPTS` private to its own
   defaulting). Both are per-module policy, so only modules that define their
   whole surface are pinned.
+- **The precondition check wrappers are wired to the approve paths they were written for, and no longer take a `reason` they discarded (#1094).**
+  `restore_to_anchor` (`src/continuum/recovery/restore.py`) was exported in
+  `__all__` with zero callers and a keyword-only `reason` parameter it never
+  read, while the live restore path (`approve_restore`) spelled
+  `check_preconditions` directly. Its sibling `merge_to_anchor` was in the
+  same state minus the test coverage. Both wrappers are the read-only half of
+  their edit: a caller asks "would this be blocked?" against a live database
+  while an agent is mid-run, so the mutating half now routes through them
+  instead of duplicating the call, and the discarded `reason` is removed
+  outright: a precondition check appends no event to carry a reason on, and a
+  caller who passed one was writing an audit string that went nowhere.
+  `approve_merge`'s source-side branch still calls `check_merge_preconditions`
+  directly, because the union form drops the per-side summaries its lineage
+  payload stamps.b2c9fbf (docs(recovery): replace the two em dashes in the #1094 changelog entry)
 
 - **The TUI `tree` view fetches the run once instead of twice (#1157).**
   `family_lines` in `src/continuum/tui/model.py` called
@@ -1135,7 +1149,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,501 collected, ~2,423 passed, ~28 skipped on a minimal env).
+  (~2,516 collected, ~2,423 passed, ~28 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

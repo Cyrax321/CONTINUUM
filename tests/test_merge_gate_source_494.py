@@ -142,9 +142,7 @@ def test_clean_merge_of_two_branches_passes_and_stamps_both_summaries() -> None:
         try:
             _make_run(storage2, "t2")
             _make_run(storage2, "s2")
-            derivation, carry_set, summary = merge_to_anchor(
-                storage2, "t2", 0, reason="clean2", source_run_id="s2"
-            )
+            derivation, carry_set, summary = merge_to_anchor(storage2, "t2", 0, source_run_id="s2")
             assert summary["unsettled_authorizations"] == []
             assert summary["depended_results"] == []
         finally:
@@ -335,10 +333,10 @@ def test_merge_to_anchor_with_source_union() -> None:
         ledger = ActionLedger(storage, "source")
         out = ledger.claim("slack.notify", {"channel": "#ops"}, key="k1")
         with pytest.raises(EditPreconditionError):
-            merge_to_anchor(storage, "target", 0, reason="block", source_run_id="source")
+            merge_to_anchor(storage, "target", 0, source_run_id="source")
         # carry by source key passes
         _, _, summary = merge_to_anchor(
-            storage, "target", 0, reason="carry", source_run_id="source", carry_forward=[out.key]
+            storage, "target", 0, source_run_id="source", carry_forward=[out.key]
         )
         assert summary is not None
     finally:
