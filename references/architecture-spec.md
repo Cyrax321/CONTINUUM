@@ -31,11 +31,13 @@ needs to continue after a crash, a model switch, or a changed environment.
 Layer 1 - Agents and clients
   - Claude Code
   - LangGraph agent
+  - LangChain agent
   - OpenAI agent
   - Generic Python agent (in-process facade)
 
 Layer 2 - Framework adapters (optional installs)
   - LangGraphAgentAdapter
+  - LangChainAgentAdapter
   - OpenAIAgentAdapter
   - GenericAgentAdapter
 
@@ -74,6 +76,7 @@ Thin wrappers that translate a framework's native loop into CONTINUUM calls.
 - GenericAgentAdapter: in-process Python facade, trusted as Origin.DETERMINISTIC.
 - OpenAIAgentAdapter: wraps the OpenAI Agents SDK.
 - LangGraphAgentAdapter: subclasses GenericAgentAdapter; wraps a LangGraph StateGraph.
+- LangChainAgentAdapter: subclasses GenericAgentAdapter; wraps a LangChain runtime (tool wrapping plus a checkpoint node for LCEL pipelines).
 These are optional. An agent can also call the SDK or MCP server directly.
 
 ### 3.3 MCP server (stdio, deny by default)
@@ -200,7 +203,7 @@ gap.
 
 ---
 
-## 4. SemanticState data model (10 semantic fields)
+## 4. SemanticState data model (14 semantic fields)
 
 The actual attribute names on the SemanticState model:
 
@@ -214,11 +217,20 @@ The actual attribute names on the SemanticState model:
 - approvals: human approvals required or granted (type list[Approval]).
 - external_dependencies: outside resources the run depends on
   (type list[ExternalDependency]).
+- pins: active constraint pins, keyed by constraint id
+  (type dict[str, ConstraintPin]).
+- unmatched_pin_retractions: constraint ids retracted without a matching
+  active pin, recorded so the mismatch stays visible (type list[str]).
+- attempt_lessons: structured lessons distilled from failed attempts
+  (type list[AttemptLesson]).
+- trajectory_reports: sleep-time reports distilled from archived history
+  (type list[TrajectoryReport]).
 - model: model identity and model-specific assumptions
   (type ModelState | None).
 
 (Plus metadata fields: run_id, version, source_sequence, created_at,
-updated_at.)
+updated_at. Degraded-fold bookkeeping - status and the unprojectable_*
+fields - is not counted among the semantic fields.)
 
 ---
 
