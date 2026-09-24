@@ -394,12 +394,14 @@ def decide(
 
         global_key = _expected_key(action_type, run_id, rendered)
         action = actions_by_key.get(global_key)
+        adopted_foreign = False
         if action is None and storage is not None:
             try:
                 if getattr(storage, "supports_action_index", False):
                     foreign = storage.foreign_action(global_key, exclude_run=run_id)
                     if foreign is not None:
                         action = foreign
+                        adopted_foreign = True
             except Exception:
                 action = None
         if action is None:
@@ -427,6 +429,18 @@ def decide(
                 )
             return Decision(False, message, fork_candidates=candidates)
         if action.status is ActionStatus.STARTED:
+            if adopted_foreign:
+                # A STARTED claim in *another* run for a global memory key is a
+                # concurrent write in flight, not this run's live claim. Deny it,
+                # matching gateway.match_route, which refuses any foreign action
+                # for the same #565 guarantee. Adopting a foreign STARTED as a
+                # "live claim" would wave this run through the very cross-run
+                # double-write the foreign lookup exists to catch (issue #1375).
+                return Decision(
+                    False,
+                    f"{action_type!r} with key {rendered!r} already has a claim "
+                    f"in another run (started); reconcile it first",
+                )
             return Decision(True, f"live claim {rendered!r}")
         if action.status is ActionStatus.COMPLETED:
             return Decision(

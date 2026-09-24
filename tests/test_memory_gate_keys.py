@@ -181,6 +181,85 @@ def test_same_record_same_tenant_dedupes_cross_run_via_index(tmp_path: Path) -> 
         assert "already completed" in with_store.reason
 
 
+def test_foreign_started_claim_is_denied_matching_the_gateway(tmp_path: Path) -> None:
+    """A STARTED claim in another run for a global mem key must be denied, not
+    adopted as this run's live claim. gate.decide used to return "live claim"
+    on a foreign STARTED while gateway.match_route denied any foreign action --
+    the two enforcers diverging exactly on the concurrent double-write the
+    foreign lookup exists to catch (issue #1375). They must agree: both deny.
+    """
+    from continuum.gateway import Route, match_route
+
+    path = str(tmp_path / "mem.db")
+    with SQLiteStorage(path) as store:
+        for rid in ("run_1", "run_2"):
+            store.create_run(Run(run_id=rid, goal="g"))
+            store.append_event(rid, EventType.RUN_STARTED, {"goal": "g"})
+        # Run_1 opens a claim on the global mem key and leaves it in flight.
+        a = ActionLedger(store, "run_1")
+        rendered = "mem:pgvector_main:acme:rec-42"
+        started = a.claim("mem_write", {}, key=rendered, scoped_to_run=False)
+        assert started.action.status is ActionStatus.STARTED
+        # Run_2's local log is empty; only the foreign index sees run_1's claim.
+        folded2 = fold_action_events(store.read_events("run_2"))
+        assert folded2 == {}
+        body = {"store_id": "pgvector_main", "tenant": "acme", "record_key": "rec-42"}
+
+        gate_dec = gate_decide(
+            CONFIG["tools"],
+            "pgvector.upsert",
+            body,
+            run_id="run_2",
+            actions_by_key=folded2,
+            storage=store,
+        )
+        route = Route(
+            host="h",
+            methods=("POST",),
+            prefix="/v",
+            action_type="mem_write",
+            key_template="mem:{store_id}:{tenant}:{record_key}",
+        )
+        gw_dec = match_route(
+            [route],
+            host="h",
+            method="POST",
+            path="/v/x",
+            body=body,
+            actions_by_key=folded2,
+            run_id="run_2",
+            storage=store,
+        )
+        # Same store state, same verdict: both deny the foreign STARTED.
+        assert gate_dec.allow is False
+        assert gw_dec.allow is False
+        assert "another run (started)" in gate_dec.reason
+        assert "another run (started)" in gw_dec.reason
+
+
+def test_a_local_started_claim_is_still_a_live_claim(tmp_path: Path) -> None:
+    """The fix must not touch the ordinary case: a STARTED claim in *this* run
+    is still a live claim the gate allows to proceed."""
+    path = str(tmp_path / "mem.db")
+    with SQLiteStorage(path) as store:
+        store.create_run(Run(run_id="run_1", goal="g"))
+        store.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+        ledger = ActionLedger(store, "run_1")
+        rendered = "mem:pgvector_main:acme:rec-42"
+        ledger.claim("mem_write", {}, key=rendered, scoped_to_run=False)
+        folded = fold_action_events(store.read_events("run_1"))
+        decision = gate_decide(
+            CONFIG["tools"],
+            "pgvector.upsert",
+            {"store_id": "pgvector_main", "tenant": "acme", "record_key": "rec-42"},
+            run_id="run_1",
+            actions_by_key=folded,
+            storage=store,
+        )
+        assert decision.allow is True
+        assert "live claim" in decision.reason
+
+
 def test_ledger_cross_run_dedup_without_gate(tmp_path: Path) -> None:
     """Direct ledger claim with global scope dedupes without any gate.
 
