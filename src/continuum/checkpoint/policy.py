@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from continuum.events import Event, EventType
-from continuum.models import SemanticState, StateStatus, utcnow
+from continuum.models import SemanticState, utcnow
 from continuum.state.versioning import state_fingerprint
 
 __all__ = [
@@ -255,12 +255,13 @@ class SemanticPolicy(CheckpointPolicy):
     def _structural_changes(
         previous: SemanticState, current: SemanticState
     ) -> Sequence[tuple[str, bool]]:
-        def invalidated(state: SemanticState) -> int:
-            """Count decisions and findings with terminal invalidation statuses."""
-            terminal = {StateStatus.INVALID, StateStatus.STALE, StateStatus.CONFLICTED}
-            return sum(1 for d in state.decisions if d.status in terminal) + sum(
-                1 for f in state.findings if f.status in terminal
-            )
+        def decision_signature(state: SemanticState) -> tuple[tuple[str, str], ...]:
+            """Return a canonical sorted tuple of decision identifiers and statuses."""
+            return tuple(sorted((d.decision_id, d.status.value) for d in state.decisions))
+
+        def finding_signature(state: SemanticState) -> tuple[tuple[str, str], ...]:
+            """Return a canonical sorted tuple of finding identifiers and statuses."""
+            return tuple(sorted((f.finding_id, f.status.value) for f in state.findings))
 
         def dependency_signature(state: SemanticState) -> tuple[tuple[str, str | None], ...]:
             """Return a canonical sorted tuple of external dependencies and versions."""
@@ -270,11 +271,21 @@ class SemanticPolicy(CheckpointPolicy):
             """Return a canonical sorted tuple of approval identifiers and statuses."""
             return tuple(sorted((a.approval_id, a.status.value) for a in state.approvals))
 
+        # Decisions and findings are compared by an identity+status signature,
+        # not by count. A count check missed a status transition that leaves the
+        # count unchanged -- e.g. a decision moving REQUIRES_REVIEW -> VALID (now
+        # approved, so the agent may act on it), which changes what the agent is
+        # allowed to do next and which state_fingerprint already treats as a
+        # change of meaning. The signature subsumes the old count check (an
+        # add/remove changes it too) and the lumped terminal tally (a transition
+        # between two terminal statuses changes it too) (issue #1353).
         return (
             ("goal changed", previous.goal != current.goal),
-            ("a decision was recorded", len(current.decisions) != len(previous.decisions)),
-            ("a finding was recorded", len(current.findings) != len(previous.findings)),
-            ("state was invalidated", invalidated(current) != invalidated(previous)),
+            (
+                "a decision changed",
+                decision_signature(previous) != decision_signature(current),
+            ),
+            ("a finding changed", finding_signature(previous) != finding_signature(current)),
             (
                 "an external dependency changed",
                 dependency_signature(previous) != dependency_signature(current),

@@ -192,6 +192,34 @@ def test_invalidating_a_decision_checkpoints() -> None:
     assert decision.trigger == CheckpointTrigger.IMPORTANT_STATE_CHANGE
 
 
+def test_approving_a_decision_checkpoints_though_the_count_is_unchanged() -> None:
+    """Issue #1353: a status transition that leaves the count and the terminal
+    tally unchanged is still a change in what the agent may do next.
+
+    REQUIRES_REVIEW -> VALID (the decision is now approved) is invisible to a
+    count-based check -- nothing added or removed, neither status terminal -- yet
+    state_fingerprint already treats it as a change of meaning.
+    """
+    reviewing = Decision(decision_id="d1", decision="cut over", status=StateStatus.REQUIRES_REVIEW)
+    previous = state(decisions=[reviewing])
+    current = state(decisions=[reviewing.model_copy(update={"status": StateStatus.VALID})])
+
+    decision = SemanticPolicy().should_checkpoint(context(state=current, previous_state=previous))
+    assert decision.should
+    assert decision.trigger == CheckpointTrigger.IMPORTANT_STATE_CHANGE
+
+
+def test_a_finding_moving_between_two_terminal_statuses_checkpoints() -> None:
+    """The lumped terminal tally was unchanged by STALE -> CONFLICTED, so the
+    old detector missed it; the identity+status signature catches it (#1353)."""
+    stale = Finding(finding_id="f1", claim="c", status=StateStatus.STALE)
+    previous = state(findings=[stale])
+    current = state(findings=[stale.model_copy(update={"status": StateStatus.CONFLICTED})])
+
+    decision = SemanticPolicy().should_checkpoint(context(state=current, previous_state=previous))
+    assert decision.should
+
+
 def test_an_invalid_stride_is_refused() -> None:
     with pytest.raises(ValueError, match="progress_stride"):
         SemanticPolicy(progress_stride=0)
