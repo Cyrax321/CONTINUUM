@@ -80,7 +80,7 @@ after claiming.
 
 ```bash
 npx @modelcontextprotocol/inspector --cli \
-  --config mcp-config.json --server continuum-mcp \
+  --config .mcp.json --server continuum-mcp \
   --method tools/list --format json
 ```
 
