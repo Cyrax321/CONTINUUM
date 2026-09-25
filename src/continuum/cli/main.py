@@ -455,7 +455,12 @@ def cmd_record_plan(args: argparse.Namespace, storage: Storage, out: Any, err: A
         print(f"error: {exc}", file=err)
         return ExitCode.NOT_FOUND
     payload = {"plan_id": plan_id, "units": sorted_units}
-    history = list(storage.read_events(args.run_id))
+    # Full history, archive prefix included, so a compacted run still carries
+    # its RUN_STARTED. The live tail alone has no goal to project from, and a
+    # preflight that read only the tail would reject a plan the run can absorb
+    # (issue #1438). The candidate sequence comes from the same scan: the anchor
+    # is the live head after compaction, so this matches what append_event assigns.
+    history = list(storage.read_all_events(args.run_id))
     head = history[-1].sequence if history else 0
     candidate = Event(
         run_id=args.run_id,
@@ -470,7 +475,7 @@ def cmd_record_plan(args: argparse.Namespace, storage: Storage, out: Any, err: A
         print(f"error: plan would leave run unprojectable and was not recorded: {exc}", file=err)
         return ExitCode.ERROR
     event = storage.append_event(args.run_id, EventType.PLAN_UPSERT, payload, source=Origin.HUMAN)
-    state = project(args.run_id, storage.read_events(args.run_id))
+    state = project(args.run_id, storage.read_all_events(args.run_id))
     _emit(
         {
             "run_id": args.run_id,
