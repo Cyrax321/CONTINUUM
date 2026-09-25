@@ -63,7 +63,7 @@ jobs:
 
       - name: Upload the matrix report
         if: always()
-        uses: actions/upload-artifact@v4.6.0
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: latency-matrix-report
           path: benchmarks/out/latency_matrix_report.*
