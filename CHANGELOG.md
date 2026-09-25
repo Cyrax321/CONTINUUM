@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **build_contract no longer advertises automatic repair steps under a human-gated verdict (#1388).**
+  `build_contract` previously nulled `next_allowed_action` only for `BLOCKED`
+  and `UNSAFE` (the `ROLLBACK` and `ABORT` verdicts, fixed by #1058). When the
+  engine reached `REQUEST_HUMAN` for a reason that did not place a human step
+  at the head of the repair plan (such as a consumed authority or a risk-policy
+  escalation), the contract advertised the plan's first step (an automatic
+  action such as `revalidate_dependency`) as permitted, and `permits()` returned
+  `True` for it. Under `REQUIRES_HUMAN`, `build_contract` now withholds
+  `next_allowed_action` unless the step itself requires human intervention,
+  preventing machine callers from bypassing the human gate while keeping the
+  repair steps listed in `required_actions` for auditability.
+
 - **The edit-precondition gate now raises the exception subclass matching the
   edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
   forks but the plain `EditPreconditionError` for every other edit type, so
