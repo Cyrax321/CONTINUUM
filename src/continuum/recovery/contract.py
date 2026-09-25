@@ -149,10 +149,15 @@ def build_contract(
     # permits repair. A risk-driven ROLLBACK or ABORT can coexist with a
     # non-empty plan, and advertising the plan's first step there would hand
     # any caller gating on permits() a green light on a run the engine has
-    # declared must not proceed (issue #1058). required_actions still lists
-    # the work for an auditor; nothing is permitted until the mode changes.
+    # declared must not proceed (issue #1058). Under REQUIRES_HUMAN, only a
+    # step that itself requires human intervention may be advertised; an
+    # automatic repair step is withheld so machines are not handed permission
+    # to continue (issue #1388). required_actions still lists the work for an
+    # auditor; nothing is permitted until the mode changes or a human acts.
     if safety in (RecoverySafety.BLOCKED, RecoverySafety.UNSAFE):
         next_action = None
+    elif safety is RecoverySafety.REQUIRES_HUMAN:
+        next_action = plan.first.action_name if (plan.first and plan.first.requires_human) else None
     else:
         next_action = plan.first.action_name if plan.first else None
 

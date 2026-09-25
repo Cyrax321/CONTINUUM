@@ -359,6 +359,49 @@ def test_a_rollback_contract_advertises_no_next_action(store: SQLiteStorage) -> 
     assert decision.permits("revalidate_dependency:dataset") is False
 
 
+def test_a_human_gated_contract_withholds_automatic_next_action(
+    store: SQLiteStorage,
+) -> None:
+    """Issue #1388: a REQUEST_HUMAN verdict must not advertise an automatic step.
+
+    Extends #1058 to the human-gate verdict. When REQUEST_HUMAN is imposed by a
+    consumed authority or a risk policy that does not add a human step to the
+    plan, the contract must not advertise an automatic repair step as
+    next_allowed_action, and permits() must not green-light it.
+    """
+    from continuum.actions.authority import record_authority_consumed
+
+    seed(store)
+    record_authority_consumed(store, "run_1", "auth-xyz")
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v4"))
+
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    assert decision.contract.recovery_status is RecoverySafety.REQUIRES_HUMAN
+    # A repair plan exists for the drift, but its first step is automatic
+    assert decision.plan.first is not None
+    assert decision.plan.first.requires_human is False
+    assert decision.contract.next_allowed_action is None
+    assert decision.permits("revalidate_dependency:dataset") is False
+    # The required actions list remains intact for auditors
+    assert decision.contract.required_actions
+
+
+def test_a_human_gated_contract_preserves_human_next_action(
+    store: SQLiteStorage,
+) -> None:
+    """A human step (like reconcile_action) remains advertised under REQUEST_HUMAN."""
+    seed(store)
+    ActionLedger(store, "run_1").claim("github.create_issue", {"title": "Bug"})
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v3"))
+
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    assert decision.contract.recovery_status is RecoverySafety.REQUIRES_HUMAN
+    assert decision.plan.first is not None
+    assert decision.plan.first.requires_human is True
+    assert decision.contract.next_allowed_action == decision.plan.first.action_name
+    assert decision.permits(decision.contract.next_allowed_action) is True
+
+
 def test_contracts_are_deterministic(store: SQLiteStorage) -> None:
     seed(store)
     engine = RecoveryEngine(store)
