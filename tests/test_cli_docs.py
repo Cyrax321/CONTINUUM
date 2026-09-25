@@ -121,3 +121,23 @@ def test_references_cli_documented_flag_defaults_match_parser() -> None:
                 f"{match.group(1)} {flag} documents {documented} but the parser defaults to {live}"
             )
     assert checked, "no [--flag N] default reached the guard; the regex drifted"
+
+
+def test_references_cli_state_diff_example_parses() -> None:
+    """The State Diff example in references/cli.md must be runnable arguments (#1390).
+
+    Line 110 documented `continuum diff checkpoint_a checkpoint_b`, which passes
+    two string identifiers instead of the run_id, from_version (int), and
+    to_version (int) required by the parser.
+    """
+    text = REF_CLI.read_text(encoding="utf-8")
+    section_start = text.index("### State Diff")
+    code_match = re.search(r"```bash\s*\ncontinuum diff\s+([^\n`]+)\n```", text[section_start:])
+    assert code_match, "State Diff section missing continuum diff bash block"
+    args = code_match.group(1).split()
+    parser = build_parser()
+    parsed = parser.parse_args(["diff", *args])
+    assert parsed.command == "diff"
+    assert parsed.run_id == "run_42"
+    assert parsed.from_version == 1
+    assert parsed.to_version == 2
