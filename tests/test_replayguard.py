@@ -10,6 +10,7 @@ crash points from the durable-execution survey as executable tests.
 from __future__ import annotations
 
 import io
+from decimal import Decimal
 from pathlib import Path
 from typing import TypedDict
 
@@ -240,6 +241,69 @@ def test_a_legacy_return_journal_still_unwraps_on_replay(db: str) -> None:
     assert value == "legacy-value"
 
 
+def test_a_non_canonical_result_completes_instead_of_refiring(db: str) -> None:
+    # stable_hash has no rule for a Decimal, a set or a plain object, and
+    # complete() runs after the effect it records. A result carrying one used to
+    # raise there, stranding the slot STARTED; evaluate maps STARTED to ALLOW and
+    # protected_call re-runs fn for an ALLOW verdict, so every replay re-fired
+    # the effect and crashed the same way on completion (issue #1444).
+    fired: list[int] = []
+
+    def charge() -> dict[str, object]:
+        fired.append(len(fired))
+        return {"amount": Decimal("19.99"), "currency": "USD"}
+
+    kind1, result1 = protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="charge_card",
+        key="card:noncanonical",
+        fn=charge,
+    )
+    assert kind1 is GuardKind.ALLOW
+    assert result1 == {"amount": Decimal("19.99"), "currency": "USD"}
+    action = last_action(db)
+    assert action.status is ActionStatus.COMPLETED, "the effect ran, so the record must say so"
+
+    kind2, result2 = protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="charge_card",
+        key="card:noncanonical",
+        fn=charge,
+    )
+    assert kind2 is GuardKind.SKIP_DUPLICATE
+    assert len(fired) == 1, "the replay must answer from the record, not re-fire the effect"
+    assert result2 == repr(result1), "the journal degrades to a description of the real result"
+
+
+def test_a_non_canonical_result_degrades_only_the_journal(db: str) -> None:
+    # The caller keeps its real result from the call that ran the effect. Only
+    # the journal degrades, to a repr envelope canonical() can always hash, so a
+    # replay answers with an honest description of that value instead of firing
+    # it again (issue #1444).
+    result = {"ids": {1, 2, 3}}
+
+    kind1, result1 = protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="charge_card",
+        key="card:set",
+        fn=lambda: result,
+    )
+    assert kind1 is GuardKind.ALLOW and result1 is result
+
+    kind2, result2 = protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="charge_card",
+        key="card:set",
+        fn=lambda: {"SHOULD_NOT_RUN": True},
+    )
+    assert kind2 is GuardKind.SKIP_DUPLICATE
+    assert result2 == repr(result)
+
+
 def test_exception_marks_uncertain_failure_and_reraises(db: str) -> None:
     with pytest.raises(RuntimeError):
         protected_call(
@@ -293,6 +357,38 @@ def test_langgraph_node_fires_once_across_resume(db: str) -> None:
     # completed node is skipped and its journalled result feeds the graph.
     app2 = _graph_with_protected_node(db, counter)
     app2.invoke({"value": "start"}, cfg)
+    assert len(counter) == 1, "protected node re-fired on resume"
+
+
+def _graph_charging_node(db: str, counter: list[int]):
+    # Same shape as _graph_with_protected_node, but the node returns a dict
+    # carrying a value stable_hash has no rule for.
+    def node(state: object) -> dict[str, object]:
+        counter.append(1)
+        return {"amount": Decimal("19.99")}
+
+    g = StateGraph(dict)
+    g.add_node(
+        "charge",
+        langgraph_protected_node(SQLiteStorage(db), "run_1", action_type="node.charge")(node),
+    )
+    g.set_entry_point("charge")
+    return g.compile()
+
+
+def test_langgraph_node_with_a_non_canonical_result_fires_once_across_resume(db: str) -> None:
+    # The public decorator inherits the hazard from protected_call, and this is
+    # the path the module exists for: a node whose state carries a Decimal used
+    # to strand the slot STARTED and re-fire the effect on every resume
+    # (issue #1444).
+    counter: list[int] = []
+    cfg = {"configurable": {"thread_id": "t2"}}
+
+    _graph_charging_node(db, counter).invoke({}, cfg)
+    assert len(counter) == 1
+
+    # A fresh graph over the same storage is a resumed process.
+    _graph_charging_node(db, counter).invoke({}, cfg)
     assert len(counter) == 1, "protected node re-fired on resume"
 
 

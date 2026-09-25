@@ -128,6 +128,45 @@ def _fold(storage: Any, run_id: str) -> dict[str, Any]:
     return ActionLedger(storage, run_id).folded()
 
 
+def _complete(
+    ledger: Any,
+    key_to_use: str,
+    external_id: str,
+    result: Any,
+    journal: Mapping[str, Any],
+) -> None:
+    """Record the outcome of an effect that has already run.
+
+    ``complete`` digests the journal with ``stable_hash``, which has no rule for
+    a ``Decimal``, a ``set`` or a plain object (``security/hashing.py``), so an
+    otherwise ordinary return value raises *after* the irreversible effect. The
+    slot would stay ``STARTED``: ``evaluate`` maps ``STARTED`` to ``ALLOW``, and
+    ``protected_call`` runs ``fn`` for an ``ALLOW`` verdict, so every replay
+    would re-fire the side effect and crash the same way on completion
+    (issue #1444).
+
+    The effect happened, so the record must say so. Degrade only the journal to
+    a ``repr`` envelope, which ``canonical`` always accepts because ``repr``
+    never raises and always returns a ``str``; the action records ``COMPLETED``
+    and replays answer from the record instead of firing it again. The caller
+    still gets its real ``result`` from this call, and the degraded journal makes
+    the replay return an honest description of that value rather than the value
+    itself.
+
+    Only the two ``TypeError``/``ValueError`` families ``stable_hash`` raises are
+    degraded. A ``LedgerError`` means the record itself is in a state this caller
+    has to reconcile, and swallowing it would hide a real problem.
+    """
+    try:
+        ledger.complete(key_to_use, external_id=external_id, result=journal)
+    except (TypeError, ValueError):
+        ledger.complete(
+            key_to_use,
+            external_id=external_id,
+            result={RESULT_ENVELOPE_KEY: repr(result)},
+        )
+
+
 def protected_call(
     storage: Any,
     run_id: str,
@@ -181,7 +220,7 @@ def protected_call(
             not isinstance(result, dict) or RESULT_ENVELOPE_KEY in result or "return" in result
         )
         journal = {RESULT_ENVELOPE_KEY: result} if needs_envelope else result
-        ledger.complete(key_to_use, external_id=key, result=journal)
+        _complete(ledger, key_to_use, key, result, journal)
         return GuardKind.ALLOW, result
 
     if decision.kind is GuardKind.SKIP_DUPLICATE:
