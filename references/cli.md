@@ -107,7 +107,7 @@ $ echo $?
 ### State Diff
 
 ```bash
-continuum diff checkpoint_a checkpoint_b
+continuum diff run_42 1 2
 ```
 
 ```diff
