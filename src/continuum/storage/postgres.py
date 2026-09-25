@@ -237,7 +237,8 @@ class PostgresStorage(Storage):
         self._connection.execute(
             """
             INSERT INTO action_index(key, run_id, action_id, status, updated_seq, action_json)
-            SELECT e.payload::jsonb->>'key',
+            SELECT DISTINCT ON (e.payload::jsonb->>'key')
+                   e.payload::jsonb->>'key',
                    e.payload::jsonb->'action'->>'run_id',
                    e.payload::jsonb->'action'->>'action_id',
                    e.payload::jsonb->'action'->>'status',
@@ -245,9 +246,17 @@ class PostgresStorage(Storage):
                    (e.payload::jsonb->'action')::text
             FROM events e
             WHERE e.type IN ('ACTION_RECORDED', 'ACTION_RECONCILED', 'ACTION_COMPENSATED')
-              AND json_extract(e.payload, '$.key') IS NOT NULL
-              AND json_extract(e.payload, '$.action') IS NOT NULL
-            ORDER BY ctid
+              -- Postgres has no json_extract(); the WHERE clauses have to use the
+              -- same jsonb accessors as the SELECT list above, not SQLite's JSON1.
+              AND e.payload::jsonb->>'key' IS NOT NULL
+              AND e.payload::jsonb->'action' IS NOT NULL
+            -- A key is claimed and later completed in the log, so it appears in
+            -- several ACTION_* events; the last one per key is the live state.
+            -- DISTINCT ON keeps that row (SQLite gets the same effect from
+            -- INSERT OR REPLACE ... ORDER BY rowid), and deduping here also
+            -- keeps the INSERT from seeing a duplicate key, which Postgres
+            -- rejects where SQLite's OR REPLACE would have replaced.
+            ORDER BY e.payload::jsonb->>'key', ctid DESC
             """
         )
 

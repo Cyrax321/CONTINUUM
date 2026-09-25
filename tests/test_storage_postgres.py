@@ -450,6 +450,45 @@ def test_pg_action_index_stays_clean_after_a_rebuild_and_further_appends(
     assert newest.run_id == "pg_rb"
 
 
+def test_backfill_recovers_an_emptied_action_index(
+    isolated_storage: PostgresStorage,
+) -> None:
+    """An empty index over existing ACTION_* events rebuilds on open (#1441).
+
+    ``_backfill_action_index`` runs on every open and short-circuits unless
+    ACTION_* events exist and the index is empty, so it fires only in the
+    recovery case the method exists for: a database that predates the index,
+    or one that lost its rows. That is why the defect went unnoticed. The
+    WHERE clause used SQLite's ``json_extract()``, which Postgres does not
+    have, so opening such a store raised ``UndefinedFunction`` (SQLSTATE
+    42883) and the recovery path was dead.
+    """
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    storage = isolated_storage
+    make_run(storage, "pg_bf", "recovery target")
+    ledger = ActionLedger(storage, "pg_bf")
+    outcome = ledger.claim("process_doc", {}, key="doc:bf")
+    ledger.complete(outcome.key, external_id="doc:bf")
+    assert storage.foreign_action(outcome.key, exclude_run="other") is not None
+
+    # A database that predates the index, or one whose index rows were lost.
+    storage._connection.execute("DELETE FROM action_index")
+    assert storage.foreign_action(outcome.key, exclude_run="other") is None
+
+    # Reopening runs the backfill inside _create_schema. On the broken query
+    # this is where the store failed to open; nothing was recovered.
+    params = conninfo_to_dict(DSN)
+    params["dbname"] = storage._connection.info.dbname
+    with PostgresStorage(make_conninfo(**params)) as fresh:
+        recovered = fresh.foreign_action(outcome.key, exclude_run="other")
+
+    # The completion is the last write for the key, so that is the live state.
+    assert recovered is not None
+    assert recovered.status is ActionStatus.COMPLETED
+    assert recovered.external_id == "doc:bf"
+
+
 def test_pg_run_without_a_parent_round_trips_null(storage: PostgresStorage) -> None:
     """A parentless run must load back as parentless, not as a corrupt row."""
     make_run(storage, "pg_solo", "solo")

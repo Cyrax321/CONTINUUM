@@ -8,6 +8,33 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The Postgres action index backfill uses jsonb accessors instead of
+  SQLite's `json_extract` (#1441).** `PostgresStorage._backfill_action_index`
+  seeds the `action_index` projection from existing `ACTION_*` events when the
+  index is empty, which is the recovery path for a database that predates the
+  index (#216) or one that lost its rows. Its `INSERT ... SELECT` was ported
+  from the SQLite v3 migration, but the two `WHERE` predicates were left as
+  `json_extract(e.payload, '$.key')` while the rest of the statement had been
+  translated to jsonb. Postgres has no `json_extract`, so whenever the backfill
+  actually fired the store failed to open outright with
+  `UndefinedFunction: function json_extract(text, unknown) does not exist`
+  (SQLSTATE 42883), out of `_create_schema` on connection. No test covered the
+  case, which is why CI saw nothing: the backfill short-circuits unless
+  `ACTION_*` events exist and the index is empty, and every test database
+  starts empty in both senses. The `WHERE` clause now reads
+  `e.payload::jsonb->>'key' IS NOT NULL` and
+  `e.payload::jsonb->'action' IS NOT NULL`, matching the `SELECT` list.
+
+  The same statement also dropped SQLite's `INSERT OR REPLACE`, so a key that
+  was claimed and later completed, appearing in two `ACTION_*` events, proposed
+  a duplicate primary key and Postgres raised `UniqueViolation` where SQLite
+  would have replaced the earlier row. An `ON CONFLICT DO UPDATE` rewrite was
+  not viable: Postgres rejects that form when one statement affects the same
+  row twice (`CardinalityViolation`). The port now selects
+  `DISTINCT ON (e.payload::jsonb->>'key') ... ORDER BY ... ctid DESC`, keeping
+  the last event per key, which is the live state and also what SQLite's
+  `INSERT OR REPLACE ... ORDER BY rowid` yields.
+
 - **The edit-precondition gate now raises the exception subclass matching the
   edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
   forks but the plain `EditPreconditionError` for every other edit type, so
