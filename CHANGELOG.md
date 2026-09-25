@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **GenericAgentAdapter records dependency declarations as deterministic (#1391).**
+  `GenericAgentAdapter._declare_dependencies` previously hardcoded
+  `source=Origin.EXTERNAL_AGENT`, which contradicted its documented contract as
+  a trusted in-process facade writing `Origin.DETERMINISTIC` state. This dropped
+  the advisory prefix trust score on runs with pinned environments. The adapter
+  now stamps `DEPENDENCY_DECLARED` events with `source=Origin.DETERMINISTIC` to
+  match its checkpoint and action ledger writes.
+
 - **The edit-precondition gate now raises the exception subclass matching the
   edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
   forks but the plain `EditPreconditionError` for every other edit type, so

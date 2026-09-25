@@ -104,7 +104,7 @@ class GenericAgentAdapter(AgentAdapter):
 
         Stored as ``DEPENDENCY_DECLARED`` events (not written onto the
         checkpoint state) so the declaration survives projection and restore, is
-        covered by the hash chain, and carries the same external-agent provenance
+        covered by the hash chain, and carries the same deterministic provenance
         as the rest of the adapter's writes. Only new or re-pinned resources are
         appended, so a scheduled checkpoint with an unchanged environment adds
         nothing.
@@ -131,7 +131,7 @@ class GenericAgentAdapter(AgentAdapter):
                 run_id,
                 EventType.DEPENDENCY_DECLARED,
                 {"resource": name, "version": version},
-                source=Origin.EXTERNAL_AGENT,
+                source=Origin.DETERMINISTIC,
             )
 
     def restore_state(

@@ -240,3 +240,28 @@ def test_adapter_resume(store: SQLiteStorage) -> None:
     decision = adapter.resume("run_104", current_environment=env)
     assert decision.mode is RecoveryMode.RESUME
     assert decision.safe
+
+
+def test_generic_adapter_declares_dependencies_as_deterministic(
+    store: SQLiteStorage,
+) -> None:
+    """GenericAgentAdapter writes trusted DETERMINISTIC state, including dependencies (issue #1391)."""
+    from continuum.events import EventType
+    from continuum.models import Origin
+    from continuum.state.semantic import project
+
+    adapter = GenericAgentAdapter(store)
+    adapter.start_run(goal="Trusted task", run_id="run_dep_trust")
+    store.append_event("run_dep_trust", EventType.RUN_STARTED, {"goal": "Trusted task"})
+    state = SemanticState(run_id="run_dep_trust", goal=Goal(description="Trusted task"))
+    env = capture("run_dep_trust", StaticProvider(db="v1"))
+    adapter.capture_state("run_dep_trust", state, environment=env)
+
+    events = list(store.read_events("run_dep_trust"))
+    dep_events = [e for e in events if e.type == EventType.DEPENDENCY_DECLARED]
+    assert len(dep_events) == 1
+    assert dep_events[0].source == Origin.DETERMINISTIC
+
+    proj = project("run_dep_trust", events)
+    assert len(proj.external_dependencies) == 1
+    assert proj.external_dependencies[0].provenance.origin == Origin.DETERMINISTIC
