@@ -152,6 +152,10 @@ def curate_briefing(storage: Storage, run_id: str, decision: RecoveryDecision) -
         verified_lines.append(f"why: {contract.reason}")
     if contract.next_allowed_action:
         verified_lines.append(f"next permitted action: {contract.next_allowed_action}")
+    # The RISK_OBSERVED ids behind the verdict, so a resumed session knows which
+    # observation to explain rather than only the mode it produced (#1424).
+    if contract.triggering_risks:
+        verified_lines.append(f"triggering risks: {', '.join(contract.triggering_risks)}")
     sections.append(
         {
             "title": "recovery verdict (verified, sealed contract)",

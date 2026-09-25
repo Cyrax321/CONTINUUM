@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The recovery surfaces now name the risk observations that triggered a
+  verdict (#1424).** A risk-driven verdict already carried the `RISK_OBSERVED`
+  event ids behind it on the sealed contract as `triggering_risks`, and the
+  field was covered by the integrity hash with a legacy fallback for contracts
+  sealed before it existed, but no surface rendered it: an operator could see
+  *that* a run was rolled back and read the prose rationale, and a resumed
+  session could read the verdict, without either being able to cite the
+  observation that produced it. `render_contract` (`continuum show-contract`)
+  now lists the ids under a `triggering_risks:` block, `RecoveryDecision.render`
+  (`continuum resume` / `watch`) lists them under a `Triggering risks:` heading
+  next to the rationale, and the curated briefing's verified contract section
+  carries a `triggering risks:` line. All three omit the section entirely when
+  the verdict came from drift or the ledger alone, so an empty list stays the
+  signal that no risk drove it. The field is unchanged and still `list[str]` of
+  event ids, deduplicated by trigger (#1057), so existing sealed contracts and
+  every machine-readable consumer are unaffected.
+
 ### Fixed
 
 - **The edit-precondition gate now raises the exception subclass matching the

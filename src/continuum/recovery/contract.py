@@ -236,6 +236,12 @@ def render_contract(contract: RecoveryContract) -> str:
         else "none (settle required_actions first)"
     )
     lines.append(f"next_allowed:      {contract.next_allowed_action or fallback}")
+    # The RISK_OBSERVED ids that drove the verdict, so an operator reading the
+    # contract can see which observation produced it instead of only its
+    # consequence (issue #1424). Empty when the verdict came from drift alone.
+    if contract.triggering_risks:
+        lines.append("triggering_risks:")
+        lines += [f"  - {risk_id}" for risk_id in contract.triggering_risks]
     if contract.reason:
         lines.append(f"reason:            {contract.reason}")
     if contract.evidence:

@@ -415,6 +415,45 @@ def test_the_decision_renders_a_full_report(store: SQLiteStorage) -> None:
     assert "Next permitted action:" in rendered
 
 
+def test_the_report_names_the_risks_that_triggered_the_verdict(store: SQLiteStorage) -> None:
+    """Issue #1424: a risk-driven verdict names the RISK_OBSERVED ids that
+    produced it, on both the decision report and the contract rendering, so an
+    operator can cite the observation rather than only its consequence."""
+    store.create_run(Run(run_id="r1", goal="do X"))
+    store.append_event("r1", EventType.RUN_STARTED, {"goal": "do X"}, source=Origin.EXTERNAL_AGENT)
+    store.append_event(
+        "r1",
+        EventType.RISK_OBSERVED,
+        {"risk_id": "risk-1", "trigger": "meltdown"},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+
+    decision = RecoveryEngine(store).assess("r1")
+    assert decision.contract.triggering_risks, "precondition: no risk drove the verdict"
+
+    rendered = decision.render()
+    assert "Triggering risks:" in rendered
+    assert decision.contract.triggering_risks[0] in rendered
+
+    contract_rendered = render_contract(decision.contract)
+    assert "triggering_risks:" in contract_rendered
+    assert decision.contract.triggering_risks[0] in contract_rendered
+
+
+def test_the_report_omits_a_triggering_risks_section_when_none_drove_the_verdict(
+    store: SQLiteStorage,
+) -> None:
+    """A verdict from drift alone renders no triggering-risks section (#1424):
+    the field is the audit link to a risk observation, and an empty list is the
+    signal none exists, not a section to fill with a placeholder."""
+    seed(store)
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v4"))
+
+    assert decision.contract.triggering_risks == []
+    assert "Triggering risks:" not in decision.render()
+    assert "triggering_risks:" not in render_contract(decision.contract)
+
+
 def test_a_clean_report_says_the_ledger_is_clear(store: SQLiteStorage) -> None:
     seed(store)
     rendered = RecoveryEngine(store).assess("run_1", current_environment=env("v3")).render()
