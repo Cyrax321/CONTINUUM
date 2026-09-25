@@ -158,6 +158,13 @@ class RecoveryDecision:
         """
         if self.mode is RecoveryMode.RESUME:
             return True
+        # A contract that names no permitted action permits nothing. The
+        # comparison alone would answer ``permits(None) is True`` on a
+        # BLOCKED, UNSAFE or human-gated verdict, where next_allowed_action is
+        # deliberately empty, and a caller reading the action back out of the
+        # contract would get a green light for no action at all (issue #1388).
+        if self.contract.next_allowed_action is None:
+            return False
         return action == self.contract.next_allowed_action
 
     def render(self) -> str:
