@@ -38,6 +38,25 @@ All notable changes to this project are documented here. The format follows
   since declaring such fields `volatile` at every call site is not a fix: a
   caller that wants around the cap simply forgets to declare them.
 
+- **A human-gated contract no longer advertises a machine-executable step as
+  the next permitted action (#1388).** `build_contract` nulled
+  `next_allowed_action` only for `ROLLBACK` and `ABORT` (the #1058 fix), so
+  `RecoverySafety.REQUIRES_HUMAN` fell through to the `else` and named
+  `plan.first`. That step stays automatic whenever the verdict is imposed
+  *after* the plan is built, which a consumed authority and a risk-policy
+  escalation both do without adding a `RepairStep` of their own, so the engine
+  declared a human must gate while the sealed contract handed out a green
+  light, and `permits()` confirmed it. Under `REQUIRES_HUMAN` a step is now
+  named only when it itself requires a person, so the #42 reconcile step and
+  the unreadable-log repair (#385) keep their action and their permission, and
+  `REQUIRES_REPAIR` / `REQUIRES_REVALIDATION` are untouched. `permits()` also
+  returns `False` when the contract names no action at all: the plain
+  comparison answered `permits(None) is True` on any verdict that deliberately
+  permits nothing, so a caller reading the action back out of the contract was
+  told it may proceed. `required_actions` is unchanged, so an auditor still
+  sees the work; only the single permitted action is held until the gate
+  clears.
+
 ### Changed
 
 - **The `__all__` guard now walks the installed package instead of five

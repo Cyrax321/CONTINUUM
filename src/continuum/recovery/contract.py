@@ -151,8 +151,21 @@ def build_contract(
     # any caller gating on permits() a green light on a run the engine has
     # declared must not proceed (issue #1058). required_actions still lists
     # the work for an auditor; nothing is permitted until the mode changes.
+    #
+    # The human gate has the same shape from the other direction: a
+    # REQUEST_HUMAN imposed *after* the plan is built -- a consumed authority
+    # or a risk-policy escalation -- adds no human step of its own, so
+    # plan.first is still an automatic step like revalidate_dependency.
+    # Advertising it would name a machine-executable action a caller could
+    # take without the human the verdict exists to demand, so under
+    # REQUIRES_HUMAN only a step that itself requires a person may be named
+    # (issue #1388). REQUIRES_REPAIR and REQUIRES_REVALIDATION legitimately
+    # want plan.first, and a REQUEST_HUMAN that came from an uncertain action
+    # already has a human step first (#42), so both keep working.
     if safety in (RecoverySafety.BLOCKED, RecoverySafety.UNSAFE):
         next_action = None
+    elif safety is RecoverySafety.REQUIRES_HUMAN:
+        next_action = plan.first.action_name if (plan.first and plan.first.requires_human) else None
     else:
         next_action = plan.first.action_name if plan.first else None
 

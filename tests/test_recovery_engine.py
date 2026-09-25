@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from continuum.actions import ActionLedger, ProbeReconciler, Resolution, reconcile_pending
+from continuum.actions.authority import record_authority_consumed
 from continuum.checkpoint import CheckpointManager
 from continuum.environment import CallableProvider, StaticProvider, capture
 from continuum.events import EventType
@@ -357,6 +358,59 @@ def test_a_rollback_contract_advertises_no_next_action(store: SQLiteStorage) -> 
     assert decision.contract.recovery_status is RecoverySafety.BLOCKED
     assert decision.contract.next_allowed_action is None
     assert decision.permits("revalidate_dependency:dataset") is False
+
+
+def test_a_human_gated_contract_advertises_no_machine_step(store: SQLiteStorage) -> None:
+    """Issue #1388: a REQUEST_HUMAN imposed *after* the plan is built adds no
+    human step of its own, so plan.first is still a machine-executable action.
+
+    A consumed authority that never reconciles is one such path; a risk-policy
+    escalation has the same shape. Naming that automatic step as the next
+    allowed action would hand any caller gating on permits() a green light on a
+    run the engine has declared a human must gate -- the human-gate sibling of
+    the #1058 fix. Only a step that itself requires a person may be named under
+    REQUIRES_HUMAN, so the consumed-authority verdict advertises nothing.
+    """
+    seed(store)
+    record_authority_consumed(store, "run_1", "auth-xyz")
+
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v4"))
+
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    assert decision.contract.recovery_status is RecoverySafety.REQUIRES_HUMAN
+    # The plan is real and its first step is automatic -- exactly the shape that
+    # used to leak through as a permitted action.
+    assert decision.plan.first is not None
+    assert decision.plan.first.requires_human is False
+    assert decision.contract.next_allowed_action is None
+    # The advisory gate agrees, both for the automatic step and for a caller that
+    # reads the action straight back out of the contract.
+    assert decision.permits(decision.plan.first.action_name) is False
+    assert decision.permits(decision.contract.next_allowed_action) is False
+    # An auditor still sees the work; only the permission is held until a human
+    # clears the gate.
+    assert decision.plan.first.action_name in decision.contract.required_actions
+
+
+def test_a_human_step_is_still_advertised_under_a_human_gated_verdict(
+    store: SQLiteStorage,
+) -> None:
+    """The #1388 guard withholds machine steps, not the human one a plan asks for.
+
+    A REQUEST_HUMAN originating from an unreadable log puts a requires_human step
+    first (#385); that step is the gate the verdict is asking for, so it stays
+    named and permitted.
+    """
+    seed(store)
+    store.append_event("run_1", EventType.TASK_UPDATED, {"completed": 999, "failed": 0})
+
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v3"))
+
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    assert decision.plan.first is not None
+    assert decision.plan.first.requires_human is True
+    assert decision.contract.next_allowed_action == decision.plan.first.action_name
+    assert decision.permits(decision.contract.next_allowed_action) is True
 
 
 def test_contracts_are_deterministic(store: SQLiteStorage) -> None:
