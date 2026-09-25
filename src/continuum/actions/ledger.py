@@ -1240,15 +1240,20 @@ class ActionLedger:
             }
         )
         recorded = self._record(key, action)
-        self._count_complete()
-        # Settlement drawdown (issue #413): same per-authorization bucket as the
-        # claim that opened this slot. The claim pinned the id onto the record
+        # Both the completion counter and the settlement drawdown belong to a
+        # genuine settlement of an in-flight claim, so both are gated on the
+        # pre-call status being STARTED. Re-reporting an already ``COMPLETED``
+        # action asserts nothing new (see the docstring), so it must move
+        # neither: the sibling ``claim`` counter is likewise skipped when a
+        # claim defers to a COMPLETED record rather than opening a new one
+        # (issue #1032). The claim pinned the settlement id onto the record
         # (issue #1052), so read it back rather than re-deriving: token
         # derivation reads the caller's ``volatile`` declaration, and a claim
         # that declared one while this method always derives with none would put
         # the confirmation in a different bucket from the attempt it settles.
         # Records written before the field existed are re-derived as before.
         if existing.status is ActionStatus.STARTED:
+            self._count_complete()
             auth_settle = self._settlement_authorization_id(existing)
             if auth_settle is not None:
                 self._budget_consume_settlement(existing.action_type, auth_settle)

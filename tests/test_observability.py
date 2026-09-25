@@ -173,6 +173,42 @@ def test_product_paths_increment_the_counters() -> None:
     assert counters[VALIDATIONS_RUN] == 1, "assess() did not count"
 
 
+def test_idempotent_completion_re_report_does_not_re_count() -> None:
+    """Re-reporting an already-COMPLETED action must not re-count it.
+
+    ``complete`` documents that re-reporting a COMPLETED action after a dropped
+    response is allowed and "is not asserting anything new", and its settlement
+    drawdown is already gated on the pre-call status being STARTED. The
+    completion counter added by #1032 was left ungated, so each idempotent
+    re-report bumped ``actions.completed`` again -- inflating a monotonic
+    recovery signal for a settlement that already happened once. The sibling
+    ``claim`` counter is the correct model: it does not count when a claim
+    defers to a COMPLETED record. This pins both counters to the settlement,
+    not the call.
+    """
+    from continuum.actions import ActionLedger
+    from continuum.events import EventType
+    from continuum.models import Run
+    from continuum.observability import ACTIONS_CLAIMED, ACTIONS_COMPLETED
+    from continuum.storage import SQLiteStorage
+
+    reset_metrics()
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="dup_run", goal="idempotent completion"))
+    storage.append_event("dup_run", EventType.RUN_STARTED, {"goal": "g"})
+    ledger = ActionLedger(storage, run_id="dup_run")
+
+    outcome = ledger.claim("send_email", {"to": "nobody@example.com"})
+    ledger.complete(outcome.key, external_id="mid-1")
+    # Two idempotent re-reports of the same completion (dropped-response retry).
+    ledger.complete(outcome.key, external_id="mid-1")
+    ledger.complete(outcome.key, external_id="mid-1")
+
+    counters = get_metrics().snapshot()["counters"]
+    assert counters[ACTIONS_CLAIMED] == 1, "one claim, counted once"
+    assert counters[ACTIONS_COMPLETED] == 1, "one settlement, re-reports assert nothing new"
+
+
 def test_metrics_failures_never_break_the_safety_critical_path() -> None:
     """A broken collector must not change what claim/complete return.
 
