@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`record-plan` no longer refuses a plan on a compacted run (#1438).** The
+  command read both its preflight projection and its post-write emission from
+  `read_events`, which returns only the live tail. After compaction the archived
+  prefix holds `RUN_STARTED`, the tail starts at the anchor, and the preflight
+  concluded the run had no goal, so every upsert died with `plan would leave run
+  unprojectable and was not recorded` and wrote nothing. Both reads now fold
+  `read_all_events`, matching `replay` (#1172) and `provenance` (#554): an
+  archived `RUN_STARTED` is still a recorded `RUN_STARTED`. The candidate
+  sequence is unaffected, because the anchor is the live head after compaction
+  and `append_event` assigns from that same head. The preflight gate itself is
+  unchanged, so a run with no goal at all is still refused and nothing is
+  written.
+
 - **The edit-precondition gate now raises the exception subclass matching the
   edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
   forks but the plain `EditPreconditionError` for every other edit type, so
