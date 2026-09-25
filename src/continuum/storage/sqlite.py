@@ -517,7 +517,18 @@ class SQLiteStorage(Storage):
 
         lv = self.latest_version(run_id)
         head = self.last_sequence(run_id)
-        needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
+        # A caller-supplied environment has to land on a checkpoint, so it
+        # forces the fresh-anchor path whatever the log state. In practice the
+        # other terms already cover every reachable state (a version's
+        # STATE_CHECKPOINTED annotation sits one past its source_sequence, so
+        # head always outruns it); this term keeps the caller's request from
+        # depending on that invariant (#1049).
+        needs_fresh_anchor = (
+            lv is None
+            or through_sequence is not None
+            or lv.source_sequence < head
+            or environment is not None
+        )
         if needs_fresh_anchor:
             try:
                 manager = CheckpointManager(self)
