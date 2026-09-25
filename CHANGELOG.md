@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The escalation policy that budgets human attention (#1409).** Every action
+  the ledger cannot settle on its own becomes `REQUIRES_REVIEW` and interrupts
+  a human at once, and on a weeks-long run that floods the reviewer into
+  approving without reading, which is a gate with no gate in it. This ships
+  the schema, the loader and the deterministic scorer for the
+  attention-budgeted human gate: an `hourly_prompt_cap`, a
+  `batch_window_seconds` buffering window, a `blast_radius_threshold` above
+  which an item skips batching and interrupts immediately, and `risk_weights`
+  per action type or resource class. `load_escalation_policy` in
+  `src/continuum/recovery/escalation.py` reads `.continuum/escalation.json`,
+  falling back to a fail-safe default when the file is absent and raising
+  `EscalationPolicyError` when it exists but cannot be honoured, so a broken
+  policy never silently substitutes a risk posture the operator never chose.
+  `evaluate_action_risk` scores an action as the highest applicable weight,
+  because when two classifications disagree the more dangerous one should
+  govern. Nothing consumes the policy yet: the deferred review queue (#1410)
+  and the reviewer fatigue telemetry (#1411) are its wired consumers, so the
+  scorer is shipped and tested on its own rather than arriving with a heuristic
+  that moves while the queue is built.
+
 ### Fixed
 
 - **The edit-precondition gate now raises the exception subclass matching the
@@ -1135,7 +1157,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,501 collected, ~2,423 passed, ~28 skipped on a minimal env).
+  (~2,559 collected, ~2,423 passed, ~28 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

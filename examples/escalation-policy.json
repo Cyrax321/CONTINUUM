@@ -1,0 +1,11 @@
+{
+  "hourly_prompt_cap": 10,
+  "batch_window_seconds": 3600,
+  "blast_radius_threshold": 0.8,
+  "risk_weights": {
+    "default": 0.2,
+    "mem_write": 0.4,
+    "mem_delete": 0.9,
+    "fs_write": 0.6
+  }
+}
