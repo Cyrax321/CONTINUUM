@@ -223,7 +223,9 @@ class PostgresStorage(Storage):
         The table is a derived projection: an empty index over existing
         ACTION_* events means the database predates the index or lost its
         rows, and rebuilding from events is always safe. Payload is stored as
-        TEXT, so JSON functions apply directly.
+        TEXT, so it is cast to ``jsonb`` before the ``->``/``->>`` accessors
+        apply (Postgres has no ``json_extract``; that is the SQLite spelling in
+        ``migrations.py``).
         """
         has_events = self._connection.execute(
             "SELECT 1 FROM events WHERE type IN "
@@ -245,8 +247,8 @@ class PostgresStorage(Storage):
                    (e.payload::jsonb->'action')::text
             FROM events e
             WHERE e.type IN ('ACTION_RECORDED', 'ACTION_RECONCILED', 'ACTION_COMPENSATED')
-              AND json_extract(e.payload, '$.key') IS NOT NULL
-              AND json_extract(e.payload, '$.action') IS NOT NULL
+              AND e.payload::jsonb->>'key' IS NOT NULL
+              AND e.payload::jsonb->'action' IS NOT NULL
             ORDER BY ctid
             """
         )

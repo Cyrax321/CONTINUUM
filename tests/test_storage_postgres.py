@@ -196,6 +196,37 @@ def test_action_status_enum_round_trip(storage: PostgresStorage) -> None:
     assert statuses["deploy"] is ActionStatus.FAILED
 
 
+def test_pg_backfill_reseeds_the_index_when_empty_with_existing_actions() -> None:
+    # A database that predates the index (issue #216) or lost its rows has
+    # ACTION_* events but an empty action_index. Reopening must reseed the
+    # projection from the log, not raise: the backfill query has to speak
+    # Postgres JSON (``::jsonb->>``), never SQLite's ``json_extract``.
+    seed = PostgresStorage(DSN)
+    try:
+        a = ActionLedger(seed, "pg_bf")
+        make_run(seed, "pg_bf", "backfill")
+        first = a.claim("send_invoice", {}, key="invoice:BF-1", scoped_to_run=False)
+        a.complete(first.key, external_id="INV-BF")
+        # Simulate the lost/absent projection (autocommit commits immediately).
+        seed._connection.execute("DELETE FROM action_index")
+        assert seed._connection.execute("SELECT 1 FROM action_index LIMIT 1").fetchone() is None
+    finally:
+        seed.close()
+
+    reopened = PostgresStorage(DSN)
+    try:
+        # Reopening ran _backfill_action_index over the existing ACTION_* events;
+        # the reseeded row is functional, so a cross-run claim on the same key
+        # deduplicates through the index.
+        b = ActionLedger(reopened, "pg_bf2")
+        make_run(reopened, "pg_bf2", "b")
+        again = b.claim("send_invoice", {}, key="invoice:BF-1", scoped_to_run=False)
+        assert again.fresh is False
+        assert again.action.external_id == "INV-BF"
+    finally:
+        reopened.close()
+
+
 # --- langgraph tables exist (schema v4 baseline) ---------------------------------- #
 
 
