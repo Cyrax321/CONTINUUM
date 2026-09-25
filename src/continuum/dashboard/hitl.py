@@ -28,6 +28,7 @@ from continuum.storage.base import Storage
 
 __all__ = [
     "DEFAULT_HITL_TOKEN_ENV",
+    "HitlUnauthorized",
     "pending_actions_with_keys",
     "confirm_run",
     "complete_run",
