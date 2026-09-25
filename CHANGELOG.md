@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **PostgresStorage action-index fold skips malformed JSON payloads (#1386).**
+  `PostgresStorage._canonical_index_rows` decoded raw payload strings without
+  guarding against decode errors, so an event with a malformed JSON payload
+  raised an unhandled `json.JSONDecodeError` during `action_index_drift()` and
+  `rebuild_action_index()`. `SQLiteStorage` already wrapped the parse in
+  `try/except json.JSONDecodeError: continue` to skip corrupt rows and complete
+  the fold. The Postgres fold now guards payload decoding with matching
+  skip-not-crash semantics, allowing `continuum verify --index` to complete
+  consistently across backends on partially corrupted stores.
+
 - **The edit-precondition gate now raises the exception subclass matching the
   edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
   forks but the plain `EditPreconditionError` for every other edit type, so

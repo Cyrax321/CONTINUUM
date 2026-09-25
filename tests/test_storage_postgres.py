@@ -450,6 +450,27 @@ def test_pg_action_index_stays_clean_after_a_rebuild_and_further_appends(
     assert newest.run_id == "pg_rb"
 
 
+def test_pg_action_index_drift_skips_malformed_json_payload(
+    storage: PostgresStorage,
+) -> None:
+    """Postgres fold skips a malformed JSON payload without raising JSONDecodeError (#1386)."""
+    make_run(storage, "pg_corrupt", "corrupt payload")
+    ledger = ActionLedger(storage, "pg_corrupt")
+    outcome = ledger.claim("process_doc", {}, key="doc:corrupt")
+    ledger.complete(outcome.key, external_id="doc:corrupt")
+
+    with storage._write():
+        storage._connection.execute(
+            "UPDATE events SET payload = '{not valid json' WHERE run_id = 'pg_corrupt' AND sequence = 2"
+        )
+
+    # action_index_drift and rebuild_action_index must skip the corrupt row instead of crashing
+    drift = storage.action_index_drift()
+    assert isinstance(drift, int)
+    rebuilt = storage.rebuild_action_index()
+    assert isinstance(rebuilt, int)
+
+
 def test_pg_run_without_a_parent_round_trips_null(storage: PostgresStorage) -> None:
     """A parentless run must load back as parentless, not as a corrupt row."""
     make_run(storage, "pg_solo", "solo")

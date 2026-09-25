@@ -768,9 +768,13 @@ class PostgresStorage(Storage):
         canonical: dict[str, tuple[tuple[str, str, str, str, str], int]] = {}
         order = 0
         for row in [*archived, *rows]:
-            payload = (
-                row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
-            )
+            raw = row["payload"]
+            if not isinstance(raw, dict):
+                try:
+                    raw = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            payload = raw
             entry = index_entry_from_payload(EventType(row["type"]), payload)
             if entry is None:
                 continue  # consumed no nextval, so it advances no position

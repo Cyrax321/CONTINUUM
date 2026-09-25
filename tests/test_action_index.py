@@ -345,3 +345,54 @@ def test_repair_refuses_when_the_chain_fails(tmp_path: Path) -> None:
     assert body.get("action_index_repair") == "refused_chain_failed"
     # And the drift is reported as unknown rather than silently repaired.
     assert body["action_index_drift"] is None
+
+
+def test_sqlite_action_index_drift_skips_malformed_json_payload(tmp_path: Path) -> None:
+    """A corrupt payload is skipped during fold rather than crashing (issue #1386)."""
+    db = str(tmp_path / "corrupt_payload.db")
+    with SQLiteStorage(db) as store:
+        make_run(store, "run_1")
+        ActionLedger(store, "run_1").claim("send_invoice", {}, key="k-valid")
+        # Intentionally corrupt payload of the recorded action
+        store._connection.execute(
+            "UPDATE events SET payload = '{not valid json' WHERE type = 'ACTION_RECORDED'"
+        )
+        drift = store.action_index_drift()
+        assert isinstance(drift, int)
+        rebuilt = store.rebuild_action_index()
+        assert isinstance(rebuilt, int)
+
+
+def test_postgres_canonical_index_rows_skips_malformed_json() -> None:
+    """The Postgres action-index fold must skip malformed JSON payloads rather
+    than raising JSONDecodeError (issue #1386, parity with SQLite)."""
+    from unittest.mock import MagicMock
+
+    from continuum.storage.postgres import PostgresStorage
+
+    store = object.__new__(PostgresStorage)
+    mock_read = MagicMock()
+    mock_read.__enter__ = MagicMock(return_value=None)
+    mock_read.__exit__ = MagicMock(return_value=None)
+    store._read = MagicMock(return_value=mock_read)
+
+    mock_conn = MagicMock()
+    archived_exec = MagicMock()
+    archived_exec.fetchall.return_value = [
+        {"type": "ACTION_RECORDED", "payload": "{malformed json"},
+    ]
+    rows_exec = MagicMock()
+    rows_exec.fetchall.return_value = [
+        {
+            "type": "ACTION_RECORDED",
+            "payload": (
+                '{"key": "k1", "action": {"run_id": "r1", "action_id": "a1", "status": "completed"}}'
+            ),
+        },
+    ]
+    mock_conn.execute.side_effect = [archived_exec, rows_exec]
+    store._connection = mock_conn
+
+    canonical = store._canonical_index_rows()
+    assert "k1" in canonical
+    assert canonical["k1"][1] == 1
