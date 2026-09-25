@@ -25,7 +25,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from continuum.models import EnvironmentSnapshot, EnvResource, utcnow
+from continuum.models import EnvironmentSnapshot as EnvironmentSnapshot
+from continuum.models import EnvResource, utcnow
 from continuum.security.hashing import stable_hash
 
 __all__ = [
