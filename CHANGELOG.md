@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **ActionLedger.compensate() now enforces a completed status precondition (#1387).**
+  The method accepted any existing record and transitioned it to `COMPENSATED`
+  while clearing `side_effect_uncertain`, mirroring the gap #366 and #733 fixed
+  for `complete()` and `fail()`. Because `claim()` deliberately treats a
+  compensated action as re-fireable, compensating an interrupted or uncertain
+  (`UNKNOWN`) action laundered the recovery blocker away and allowed duplicate
+  execution of an external effect that may have already run. `compensate()` now
+  verifies the action is in `(ActionStatus.COMPLETED, ActionStatus.COMPENSATED)`,
+  raising `LedgerError` for any in-flight or un-reconciled record.
+
 - **The edit-precondition gate now raises the exception subclass matching the
   edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
   forks but the plain `EditPreconditionError` for every other edit type, so
