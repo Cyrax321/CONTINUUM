@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -143,7 +144,7 @@ class ConstraintRegistry:
     def __len__(self) -> int:
         return len(self._constraints)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[ConstraintSpec]:
         return iter(self._constraints)
 
     @property
