@@ -191,6 +191,12 @@ class RecoveryDecision:
         lines += ["", f"Recovery decision: {self.mode.value.upper()}"]
         for reason in self.rationale:
             lines.append(f"  because {reason}")
+        # The risk observations that produced this verdict, alongside the prose
+        # rationale, so a reader can cite the event that triggered it (issue
+        # #1424). Absent when the decision came from drift or the ledger alone.
+        if self.contract.triggering_risks:
+            lines.append("Triggering risks:")
+            lines += [f"  {risk_id}" for risk_id in self.contract.triggering_risks]
 
         if self.plan:
             lines += ["", "Repairs required:", self.plan.render()]
