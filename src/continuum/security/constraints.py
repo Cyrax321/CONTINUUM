@@ -222,8 +222,7 @@ def _spec_from_mapping(idx: int, raw: Any) -> ConstraintSpec:
     cid = raw.get("id")
     if not isinstance(cid, str) or not _CONSTRAINT_ID_PATTERN.fullmatch(cid):
         raise ConstraintRegistryError(
-            f"constraint #{idx + 1} id must be 1-128 chars from ASCII letters, "
-            f"digits and . _ : -"
+            f"constraint #{idx + 1} id must be 1-128 chars from ASCII letters, digits and . _ : -"
         )
     level = raw.get("level", "hard")
     if level not in ("hard", "soft"):
@@ -250,8 +249,7 @@ def _spec_from_mapping(idx: int, raw: Any) -> ConstraintSpec:
         )
     if len(scope_raw) > _MAX_SCOPE_ENTRIES:
         raise ConstraintRegistryError(
-            f"constraint #{idx + 1} ({cid}) scope lists at most "
-            f"{_MAX_SCOPE_ENTRIES} entries"
+            f"constraint #{idx + 1} ({cid}) scope lists at most {_MAX_SCOPE_ENTRIES} entries"
         )
     scope: list[str] = []
     for entry in scope_raw:
@@ -309,7 +307,9 @@ def load_constraints(
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ConstraintRegistryError(f"constraint registry {target} is not valid JSON: {exc}") from exc
+        raise ConstraintRegistryError(
+            f"constraint registry {target} is not valid JSON: {exc}"
+        ) from exc
     return _from_mapping(data, source=str(target))
 
 

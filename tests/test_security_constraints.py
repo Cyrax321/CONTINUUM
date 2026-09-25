@@ -125,8 +125,9 @@ def test_digest_is_stable_across_process_restarts() -> None:
         {"id": "a", "level": "hard", "predicate": "p", "scope": []},
         {"id": "b", "level": "soft", "predicate": "p", "scope": ["x"]},
     ]
-    assert constraints_digest([_spec("a"), _spec("b", level=ConstraintLevel.SOFT, scope=("x",))]) \
-        == stable_hash(canon)
+    assert constraints_digest(
+        [_spec("a"), _spec("b", level=ConstraintLevel.SOFT, scope=("x",))]
+    ) == stable_hash(canon)
 
 
 @pytest.mark.parametrize(
@@ -136,7 +137,10 @@ def test_digest_is_stable_across_process_restarts() -> None:
         ({"constraints": "not-a-list"}, "constraints"),
         ({"constraints": []}, "no constraints"),
         ({"constraints": [{}]}, "id must be"),
-        ({"constraints": [{"id": "ok", "predicate": "p"}, {"id": "ok", "predicate": "q"}]}, "more than once"),
+        (
+            {"constraints": [{"id": "ok", "predicate": "p"}, {"id": "ok", "predicate": "q"}]},
+            "more than once",
+        ),
         ({"constraints": [{"id": "bad id!", "predicate": "p"}]}, "id must be"),
         ({"constraints": [{"id": "x", "predicate": "p", "level": "maybe"}]}, "level must be"),
         ({"constraints": [{"id": "x", "predicate": "p", "scope": [123]}]}, "scope entry"),
@@ -178,10 +182,12 @@ def test_scope_matches_by_prefix_and_star() -> None:
 
 
 def test_in_scope_filters_by_level() -> None:
-    reg = ConstraintRegistry([
-        _spec("hard-db", level=ConstraintLevel.HARD, scope=("db.",)),
-        _spec("soft-cache", level=ConstraintLevel.SOFT),
-    ])
+    reg = ConstraintRegistry(
+        [
+            _spec("hard-db", level=ConstraintLevel.HARD, scope=("db.",)),
+            _spec("soft-cache", level=ConstraintLevel.SOFT),
+        ]
+    )
     hits = reg.in_scope("db.write")
     assert {c.id for c in hits} == {"hard-db", "soft-cache"}
     assert {c.id for c in reg.in_scope("db.write", level=ConstraintLevel.HARD)} == {"hard-db"}
