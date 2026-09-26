@@ -734,6 +734,22 @@ def test_path_canonicalization_does_not_collapse_distinct_paths() -> None:
     assert a != b
 
 
+def test_path_canonicalization_is_platform_independent() -> None:
+    """Paths with forward and backward slashes hash identically to POSIX form (#1437)."""
+    from continuum.actions.idempotency import _canonicalize_paths
+    from continuum.security.hashing import stable_hash
+
+    assert _canonicalize_paths("data/output/report.txt") == "data/output/report.txt"
+    assert _canonicalize_paths("data\\output\\report.txt") == "data/output/report.txt"
+
+    expected_hash = stable_hash({"path": "data/output/report.txt"})
+    assert arguments_hash({"path": "data/output/report.txt"}) == expected_hash
+    assert arguments_hash({"path": "data\\output\\report.txt"}) == expected_hash
+    assert idempotency_key("file_write", {"path": "data\\output\\report.txt"}) == idempotency_key(
+        "file_write", {"path": "data/output/report.txt"}
+    )
+
+
 def test_identity_match_recognises_a_completed_action_across_field_renames(
     ledger: ActionLedger,
 ) -> None:

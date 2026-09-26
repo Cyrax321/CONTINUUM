@@ -24,6 +24,7 @@ one. Nothing is excluded by default.
 from __future__ import annotations
 
 import os
+import posixpath
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -62,12 +63,14 @@ def _canonicalize_paths(value: Any) -> Any:
 
     Only values that look like local filesystem paths are touched (they contain
     a separator and are not URLs), and normalization is purely lexical
-    (``normpath`` plus ``~`` expansion). It never resolves against the process
-    working directory, so the result is deterministic on any machine.
+    (``posixpath.normpath`` plus ``~`` expansion). It never resolves against
+    the process working directory, and normalizes separators to forward slashes
+    so the result is deterministic across platforms.
     """
     if isinstance(value, str):
         if "://" not in value and ("/" in value or "\\" in value):
-            return os.path.normpath(os.path.expanduser(value))
+            expanded = os.path.expanduser(value.replace("\\", "/")).replace("\\", "/")
+            return posixpath.normpath(expanded)
         return value
     if isinstance(value, Mapping):
         return {k: _canonicalize_paths(v) for k, v in value.items()}
@@ -318,8 +321,9 @@ def identity_tokens(
             tokens.add(str(value))
         elif isinstance(value, str):
             tokens.add(value)
-            base = os.path.basename(value.rstrip("/\\"))
-            stem, _ = os.path.splitext(base)
+            sanitized = value.rstrip("/\\").replace("\\", "/")
+            base = posixpath.basename(sanitized)
+            stem, _ = posixpath.splitext(base)
             if base != value:
                 tokens.add(base)
             if stem and stem != base:
@@ -376,7 +380,7 @@ def _segments(path: str) -> list[str]:
     compared was written by whatever machine recorded the action and need not
     match the one reading it.
     """
-    normalized = os.path.normpath(os.path.expanduser(path)).replace("\\", "/")
+    normalized = posixpath.normpath(os.path.expanduser(path.replace("\\", "/")).replace("\\", "/"))
     return [segment for segment in normalized.split("/") if segment not in ("", ".")]
 
 

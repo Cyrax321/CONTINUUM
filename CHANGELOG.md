@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Path canonicalization in idempotency hashing is now platform-independent (#1437).**
+  `_canonicalize_paths` previously used `os.path.normpath`, which converted separators
+  to backslashes on Windows while leaving forward slashes on POSIX. Because `stable_hash`
+  hashes canonical JSON strings, equivalent path arguments hashed differently on Windows
+  versus Linux, causing shared ledgers or cross-platform replays to generate mismatched
+  idempotency keys and fail deduplication. Normalization now standardizes separators to
+  forward slashes using `posixpath.normpath` across all operating systems.
+
+
 - **The edit-precondition gate now raises the exception subclass matching the
   edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
   forks but the plain `EditPreconditionError` for every other edit type, so
