@@ -222,6 +222,41 @@ class TestWithMockedOpenAIAgents:
         adapter._ensure_run_exists("run_existing_oa", types.SimpleNamespace(name="my-agent"))
         assert store.get_run("run_existing_oa").goal == "preexisting"
 
+    def test_ensure_run_exists_does_not_duplicate_run_started_after_compaction(
+        self, adapter: Any, store: SQLiteStorage
+    ) -> None:
+        """_ensure_run_exists must not append duplicate RUN_STARTED or wipe constraints after compaction (#1453)."""
+        import types
+
+        from continuum.events import EventType
+        from continuum.models import Origin, Run
+        from continuum.state.semantic import project
+
+        run_id = "oa_compact_1"
+        store.create_run(Run(run_id=run_id, goal="ship release"))
+        store.append_event(
+            run_id,
+            EventType.RUN_STARTED,
+            {"goal": "ship release", "constraints": ["no-network", "read-only"], "total": 10},
+            source=Origin.HUMAN,
+        )
+        store.append_event(
+            run_id,
+            EventType.WORK_ADDED,
+            {"task_id": "w1", "description": "prepare artifacts"},
+            source=Origin.HUMAN,
+        )
+        store.compact_run(run_id)
+
+        adapter._ensure_run_exists(run_id, types.SimpleNamespace(name="ship release"))
+
+        events = store.read_all_events(run_id)
+        run_started_events = [e for e in events if e.type is EventType.RUN_STARTED]
+        assert len(run_started_events) == 1
+
+        state = project(run_id, events)
+        assert state.goal.constraints == ["no-network", "read-only"]
+
     def test_start_run_and_capture_restore(self, adapter: Any) -> None:
         adapter.start_run(goal="OpenAI task", run_id="run_oa_1")
 

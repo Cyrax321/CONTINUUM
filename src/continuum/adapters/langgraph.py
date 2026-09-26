@@ -47,7 +47,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol, cast, runtime_checkable
 
 from continuum.adapters.generic import GenericAgentAdapter
-from continuum.events import EventType
+from continuum.events import Event, EventType
 from continuum.models import (
     EnvironmentSnapshot,
     Origin,
@@ -163,7 +163,17 @@ class LangGraphAgentAdapter(GenericAgentAdapter):
         except RunNotFound:
             run = self.storage.create_run(run)
 
-        first = self.storage.read_events(run.run_id, upto=1)
+        archived = self.storage.read_archived_events(run.run_id)
+        if archived:
+            first: Event | None = archived[0]
+        else:
+            live = self.storage.read_events(run.run_id, upto=1)
+            if live:
+                first = live[0]
+            else:
+                all_live = self.storage.read_events(run.run_id)
+                first = all_live[0] if all_live else None
+
         if not first:
             self.storage.append_event(
                 run.run_id,
@@ -171,10 +181,10 @@ class LangGraphAgentAdapter(GenericAgentAdapter):
                 {"goal": run.goal},
                 source=Origin.DETERMINISTIC,
             )
-        elif first[0].type is not EventType.RUN_STARTED:
+        elif first.type is not EventType.RUN_STARTED:
             raise ValueError(
                 f"run {run.run_id!r} does not begin with RUN_STARTED "
-                f"(first event is {first[0].type.value}). CONTINUUM cannot backfill "
+                f"(first event is {first.type.value}). CONTINUUM cannot backfill "
                 f"it after the fact without misordering the run's history; recreate "
                 f"the run, or record RUN_STARTED before any other event."
             )
