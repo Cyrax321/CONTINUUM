@@ -2709,7 +2709,7 @@ def cmd_gateway(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
         )
         return ExitCode.ERROR
 
-    bound_tenant = load_gateway_tenant(config_path)
+    bound_tenant = getattr(args, "tenant", None) or load_gateway_tenant(config_path)
     active = storage.get_active_run()
     run_id = args.run_id or (active.run_id if active else None)
     server = GatewayServer(
@@ -4115,6 +4115,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         default=None,
         help="route registry path (default: .continuum/gateway.json).",
+    )
+    gateway_cmd.add_argument(
+        "--tenant",
+        default=None,
+        help="bound tenant identity to enforce on memory-store routes.",
     )
 
     briefing = add(

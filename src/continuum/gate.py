@@ -43,6 +43,7 @@ __all__ = [
     "Decision",
     "GateConfigError",
     "MEMORY_KEY_PREFIX",
+    "MEMORY_KEY_PREFIXES",
     "MEMORY_REQUIRED_FIELDS",
     "is_memory_template",
     "is_memory_key",
@@ -67,6 +68,7 @@ DEFAULT_GATE_CONFIG_PATH = ".continuum/gate.json"
 #: so the ledger's ``action_index`` can catch a double-write from a later run.
 #: See ``docs/guides/memory_governance.md`` and issue #565 (parent #304).
 MEMORY_KEY_PREFIX = "mem:"
+MEMORY_KEY_PREFIXES = ("mem:", "memory:")
 
 #: Required placeholders for a memory-store template. ``tenant`` carries the
 #: tenancy boundary, ``store_id`` names the backing store, ``record_key`` is
@@ -218,12 +220,12 @@ def is_memory_template(template: str) -> bool:
     the identity tenant-scoped and global to the store, not to the run, so
     the ledger's ``action_index`` can catch a double-write from a later run.
     """
-    return template.startswith(MEMORY_KEY_PREFIX)
+    return template.startswith(MEMORY_KEY_PREFIXES)
 
 
 def is_memory_key(rendered: str) -> bool:
     """Whether a rendered key is a memory-store identity."""
-    return rendered.startswith(MEMORY_KEY_PREFIX)
+    return rendered.startswith(MEMORY_KEY_PREFIXES)
 
 
 def load_gate_config(path: Path) -> dict[str, dict[str, Any]] | None:
@@ -258,7 +260,10 @@ def load_gate_config(path: Path) -> dict[str, dict[str, Any]] | None:
             import string as _string
 
             fields = {name for _, name, _, _ in _string.Formatter().parse(template) if name}
-            missing = [f for f in MEMORY_REQUIRED_FIELDS if f not in fields]
+            has_tenant = "tenant" in fields or "tenant_id" in fields
+            missing = [f for f in ("store_id", "record_key") if f not in fields]
+            if not has_tenant:
+                missing.append("tenant")
             if missing:
                 raise GateConfigError(
                     f"{location}: tool {tool!r} memory template {template!r} "

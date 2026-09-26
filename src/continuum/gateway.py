@@ -136,11 +136,11 @@ def load_gateway_config(path: Path) -> list[Route]:
 def load_gateway_tenant(path: Path) -> str | None:
     """Read optional bound tenant from gateway config.
 
-    When present, memory-store routes (``mem:``) are tenant-scoped: a
-    request whose ``tenant`` field does not match the bound identity is
+    When present, memory-store routes (``mem:`` or ``memory:``) are tenant-scoped: a
+    request whose tenant field does not match the bound identity is
     denied at the gateway rather than surfacing later as a breach. This
     is configuration and a check, not new infrastructure (issue #566,
-    parent #304).
+    parent #304, issue #1415).
     """
     if not path.exists():
         return None
@@ -150,7 +150,7 @@ def load_gateway_tenant(path: Path) -> str | None:
         return None
     if not isinstance(raw, dict):
         return None
-    bound = raw.get("bound_tenant") or raw.get("tenant")
+    bound = raw.get("bound_tenant") or raw.get("tenant") or raw.get("tenant_id")
     if isinstance(bound, str) and bound.strip():
         return bound.strip()
     return None
@@ -285,15 +285,27 @@ def match_route(
     except GatewayConfigError as exc:
         return Decision(False, f"gateway configuration error: {exc}")
 
-    # Tenant deny (issue #566): memory keys carry tenant in the
-    # rendered identity. When a bound tenant is configured, a claim
-    # whose tenant prefix does not match is denied at the gate rather
-    # than surfacing later as a breach.
+    # Tenant boundary enforcement (issue #566, issue #1415): memory keys carry
+    # tenant in the rendered identity. When a bound tenant is configured or
+    # present in the run context, a claim whose tenant namespace does not match
+    # is denied at the gate rather than surfacing later as a breach.
+    if bound_tenant is None and storage is not None and hasattr(storage, "get_run"):
+        try:
+            run_obj = storage.get_run(run_id)
+            if run_obj and getattr(run_obj, "metadata", None):
+                meta_tenant = run_obj.metadata.get("tenant_id") or run_obj.metadata.get("tenant")
+                if meta_tenant and str(meta_tenant).strip():
+                    bound_tenant = str(meta_tenant).strip()
+        except Exception:
+            pass
+
     if is_memory_key(rendered) and bound_tenant is not None:
         # Extract tenant from rendered mem key: mem:store:tenant:record
+        # or memory:store:tenant_id:namespace:record
         try:
             parts = rendered.split(":")
             # mem:{store_id}:{tenant}:{record_key} -> tenant is third segment
+            # memory:{store_id}:{tenant_id}:{namespace}:{record_key} -> tenant is third segment
             if len(parts) >= 4:
                 tenant_in_key = parts[2]
                 if tenant_in_key != bound_tenant:
@@ -525,6 +537,50 @@ class GatewayServer:
                     from continuum.gate import collect_consumed_authorities
 
                     consumed = collect_consumed_authorities(history)
+
+                    bound_tenant = getattr(server, "_bound_tenant", None)
+                    header_tenant = (
+                        self.headers.get("X-Continuum-Tenant")
+                        or self.headers.get("X-Tenant-Id")
+                        or self.headers.get("X-Tenant")
+                    )
+                    if header_tenant:
+                        header_tenant = str(header_tenant).strip()
+
+                    run_obj = storage.get_run(run_id) if hasattr(storage, "get_run") else None
+                    run_metadata = getattr(run_obj, "metadata", {}) or {}
+                    run_tenant = run_metadata.get("tenant_id") or run_metadata.get("tenant")
+                    if run_tenant:
+                        run_tenant = str(run_tenant).strip()
+
+                    if bound_tenant and header_tenant and bound_tenant != header_tenant:
+                        self._respond(
+                            403,
+                            {
+                                "error": "denied by CONTINUUM gateway",
+                                "reason": (
+                                    f"tenant mismatch: header {header_tenant!r} "
+                                    f"does not match bound tenant {bound_tenant!r}"
+                                ),
+                            },
+                        )
+                        return
+
+                    if run_tenant and header_tenant and run_tenant != header_tenant:
+                        self._respond(
+                            403,
+                            {
+                                "error": "denied by CONTINUUM gateway",
+                                "reason": (
+                                    f"tenant mismatch: header {header_tenant!r} "
+                                    f"does not match run tenant {run_tenant!r}"
+                                ),
+                            },
+                        )
+                        return
+
+                    effective_tenant = bound_tenant or header_tenant or run_tenant
+
                     decision = match_route(
                         server._routes,
                         host=host.split(":")[0],
@@ -533,7 +589,7 @@ class GatewayServer:
                         body=body,
                         actions_by_key=actions,
                         run_id=run_id,
-                        bound_tenant=getattr(server, "_bound_tenant", None),
+                        bound_tenant=effective_tenant,
                         storage=storage,
                         consumed_authorities=consumed,
                     )
