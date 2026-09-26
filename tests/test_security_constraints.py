@@ -57,7 +57,7 @@ def _spec(cid: str, **kw) -> ConstraintSpec:
 
 
 def test_load_valid_registry(tmp_path: Path) -> None:
-    reg = load_constraints(_write(tmp_path, GOOD))
+    reg = load_constraints(_write(tmp_path, GOOD), asserted_by=Origin.HUMAN)
     assert isinstance(reg, ConstraintRegistry)
     assert len(reg) == 3
     assert set(reg.ids()) == {"no-direct-db-writes", "no-prod-deploy", "prefer-cache"}
@@ -71,12 +71,12 @@ def test_missing_file_fails_closed(tmp_path: Path) -> None:
     # A missing registry is an error, not an empty one: a deployment that meant
     # to ship constraints and did not should be loud about it.
     with pytest.raises(ConstraintRegistryError, match="not found"):
-        load_constraints(tmp_path / "absent.json")
+        load_constraints(tmp_path / "absent.json", asserted_by=Origin.HUMAN)
 
 
 def test_load_or_none_relaxes_only_the_missing_case(tmp_path: Path) -> None:
-    assert load_constraints_or_none(tmp_path / "absent.json") is None
-    reg = load_constraints_or_none(_write(tmp_path, GOOD))
+    assert load_constraints_or_none(tmp_path / "absent.json", asserted_by=Origin.HUMAN) is None
+    reg = load_constraints_or_none(_write(tmp_path, GOOD), asserted_by=Origin.HUMAN)
     assert reg is not None and len(reg) == 3
 
 
@@ -92,6 +92,7 @@ def test_default_path_is_the_shipped_convention() -> None:
         (Origin.EXTERNAL_AGENT, False),
         (Origin.LLM, False),
         (Origin.IMPORTED, False),
+        (Origin.EXTERNAL_MONITOR, False),
     ],
 )
 def test_operator_only_provenance(tmp_path: Path, origin: Origin, allowed: bool) -> None:
@@ -149,7 +150,7 @@ def test_digest_is_stable_across_process_restarts() -> None:
 )
 def test_malformed_registries_fail_closed(tmp_path: Path, data: object, fragment: str) -> None:
     with pytest.raises(ConstraintRegistryError, match=fragment):
-        load_constraints(_write(tmp_path, data))
+        load_constraints(_write(tmp_path, data), asserted_by=Origin.HUMAN)
 
 
 def test_corrupt_json_fails_closed(tmp_path: Path) -> None:
@@ -157,13 +158,40 @@ def test_corrupt_json_fails_closed(tmp_path: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("{ this is not json ", encoding="utf-8")
     with pytest.raises(ConstraintRegistryError, match="not valid JSON"):
-        load_constraints(target)
+        load_constraints(target, asserted_by=Origin.HUMAN)
+
+
+def test_non_utf8_file_fails_closed(tmp_path: Path) -> None:
+    target = tmp_path / ".continuum" / "constraints.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"\xff\xfe\x00\x00")
+    with pytest.raises(ConstraintRegistryError, match="unreadable"):
+        load_constraints(target, asserted_by=Origin.HUMAN)
 
 
 def test_constraint_count_cap(tmp_path: Path) -> None:
     data = {"constraints": [{"id": f"c{i}", "predicate": "p"} for i in range(300)]}
     with pytest.raises(ConstraintRegistryError, match="cap"):
-        load_constraints(_write(tmp_path, data))
+        load_constraints(_write(tmp_path, data), asserted_by=Origin.HUMAN)
+
+
+def test_dangling_symlink_fails_closed(tmp_path: Path) -> None:
+    link = tmp_path / "broken_link.json"
+    target = tmp_path / "does_not_exist.json"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported in this environment")
+    with pytest.raises(ConstraintRegistryError, match="not found"):
+        load_constraints_or_none(link, asserted_by=Origin.HUMAN)
+
+
+def test_digest_override_must_match_computed() -> None:
+    specs = [_spec("a")]
+    reg = ConstraintRegistry(specs, digest=constraints_digest(specs))
+    assert reg.digest == constraints_digest(specs)
+    with pytest.raises(ConstraintRegistryError, match="digest mismatch"):
+        ConstraintRegistry(specs, digest="forged_digest")
 
 
 def test_scope_matches_by_prefix_and_star() -> None:
@@ -172,11 +200,16 @@ def test_scope_matches_by_prefix_and_star() -> None:
     assert scoped.matches_scope("db")
     assert not scoped.matches_scope("deploy.prod")
 
+    exact = _spec("write", scope=("db.write",))
+    assert exact.matches_scope("db.write")
+    assert not exact.matches_scope("db.writer")
+    assert not exact.matches_scope("db.write_audit")
+
     star = _spec("all", scope=("*",))
     assert star.matches_scope("anything.at.all")
 
     bare = _spec("bare")
-    # An unspecfied scope governs everything: a global constraint.
+    # An unspecified scope governs everything: a global constraint.
     assert bare.matches_scope("db.write")
     assert bare.matches_scope("deploy")
 

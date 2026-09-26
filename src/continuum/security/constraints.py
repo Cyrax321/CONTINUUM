@@ -64,6 +64,10 @@ _MAX_PREDICATE_CHARS = 2048
 _MAX_CONSTRAINTS = 256
 _MAX_SCOPE_ENTRIES = 64
 
+#: Origins permitted to load or author constraints. Only human operators
+#: and CONTINUUM's deterministic orchestration paths are authorized.
+_OPERATOR_ORIGINS: frozenset[Origin] = frozenset({Origin.HUMAN, Origin.DETERMINISTIC})
+
 
 class ConstraintRegistryError(ValueError):
     """Raised when the constraint registry is malformed or unreadable.
@@ -110,11 +114,9 @@ class ConstraintSpec(BaseModel):
         if not self.scope:
             return True
         for entry in self.scope:
-            if entry == "*":
+            if entry == "*" or name == entry:
                 return True
-            if name == entry or name.startswith(entry):
-                return True
-            if entry.endswith(".") and name == entry[:-1]:
+            if entry.endswith(".") and (name.startswith(entry) or name == entry[:-1]):
                 return True
         return False
 
@@ -139,7 +141,12 @@ class ConstraintRegistry:
     ) -> None:
         self._constraints = list(constraints)
         self._source = source
-        self._digest = digest if digest is not None else constraints_digest(self._constraints)
+        computed = constraints_digest(self._constraints)
+        if digest is not None and digest != computed:
+            raise ConstraintRegistryError(
+                f"constraint registry digest mismatch: declared {digest}, computed {computed}"
+            )
+        self._digest = computed
 
     def __len__(self) -> int:
         return len(self._constraints)
@@ -272,7 +279,7 @@ def _spec_from_mapping(idx: int, raw: Any) -> ConstraintSpec:
 def load_constraints(
     path: Path | None = None,
     *,
-    asserted_by: Origin = Origin.HUMAN,
+    asserted_by: Origin,
 ) -> ConstraintRegistry:
     """Load and validate the constraint registry, failing closed.
 
@@ -280,11 +287,11 @@ def load_constraints(
         path: Registry location. Defaults to ``.continuum/constraints.json``.
         asserted_by: The origin of whoever is loading this registry. The
             operator paths are ``HUMAN`` (a person) and ``DETERMINISTIC`` (the
-            CLI or CONTINUUM's own orchestration). Anything self-certified
-            (``EXTERNAL_AGENT``, ``LLM``, ``IMPORTED``) is refused: an agent
-            cannot install the constraints that govern it, and the refusal is
-            here rather than at every call site so no future caller can bypass
-            it.
+            CLI or CONTINUUM's own orchestration). Non-operator origins
+            (``EXTERNAL_AGENT``, ``LLM``, ``IMPORTED``, ``EXTERNAL_MONITOR``)
+            are refused: an agent cannot install the constraints that govern
+            it, and the refusal is here rather than at every call site so no
+            future caller can bypass it.
 
     Raises:
         ConstraintRegistryError: The file is missing, unreadable, or its
@@ -292,7 +299,7 @@ def load_constraints(
             error, not an empty registry, because a deployment that meant to
             ship constraints and did not should be loud about it.
     """
-    if asserted_by.self_certified:
+    if asserted_by not in _OPERATOR_ORIGINS:
         raise ConstraintRegistryError(
             f"constraints may only be loaded by an operator, not by "
             f"{asserted_by.value} (an agent cannot pin the constraints that "
@@ -303,7 +310,7 @@ def load_constraints(
         raise ConstraintRegistryError(f"constraint registry not found: {target}")
     try:
         text = target.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise ConstraintRegistryError(f"constraint registry {target} is unreadable: {exc}") from exc
     try:
         data = json.loads(text)
@@ -349,16 +356,16 @@ def _from_mapping(data: Any, *, source: str) -> ConstraintRegistry:
 def load_constraints_or_none(
     path: Path | None = None,
     *,
-    asserted_by: Origin = Origin.HUMAN,
+    asserted_by: Origin,
 ) -> ConstraintRegistry | None:
     """Load the registry, returning ``None`` when the file is absent.
 
     For callers that treat "no registry shipped" as a legitimate state (a
     development checkout) rather than a misconfiguration. Every other failure
     mode still raises, so this is not a silent fallback: only the missing-file
-    case is relaxed.
+    case is relaxed. Dangling symlinks proceed to fail closed.
     """
     target = Path(path) if path is not None else DEFAULT_CONSTRAINTS_PATH
-    if not target.exists():
+    if not target.exists() and not target.is_symlink():
         return None
     return load_constraints(target, asserted_by=asserted_by)
