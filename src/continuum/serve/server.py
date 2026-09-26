@@ -35,7 +35,7 @@ from typing import Any, TextIO, cast
 from continuum.actions.ledger import ActionLedger
 from continuum.adapters.generic import GenericAgentAdapter
 from continuum.environment import StaticProvider, capture
-from continuum.events import EventType
+from continuum.events import Event, EventType
 from continuum.models import (
     ActionStatus,
     EnvironmentSnapshot,
@@ -267,15 +267,24 @@ class SidecarServer:
             if goal is None:
                 raise
             run = self.storage.create_run(Run(run_id=run_id, goal=goal))
-        first = self.storage.read_events(run_id, upto=1)
+        archived = self.storage.read_archived_events(run_id)
+        if archived:
+            first: Event | None = archived[0]
+        else:
+            live = self.storage.read_events(run_id, upto=1)
+            if live:
+                first = live[0]
+            else:
+                all_live = self.storage.read_events(run_id)
+                first = all_live[0] if all_live else None
         if not first:
             self.storage.append_event(
                 run_id, EventType.RUN_STARTED, {"goal": goal or run.goal}, source=AGENT_SOURCE
             )
-        elif first[0].type is not EventType.RUN_STARTED:
+        elif first.type is not EventType.RUN_STARTED:
             raise MalformedRunLog(
                 f"run {run_id!r} does not begin with RUN_STARTED "
-                f"(first event is {first[0].type.value})"
+                f"(first event is {first.type.value})"
             )
         return run
 

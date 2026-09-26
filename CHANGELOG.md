@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`ensure_run` now checks archived history so compaction does not inject a duplicate `RUN_STARTED` (#1436).**
+  `ContinuumMCP.ensure_run` and `SidecarServer._ensure_run` checked `read_events(run_id, upto=1)`
+  to decide whether a run needed its genesis event backfilled. On a compacted run, events up to
+  the anchor sequence reside in `events_archive`, so the live query returned an empty list,
+  causing both servers to append a second `RUN_STARTED` event into the live tail. The duplicate
+  event wiped initial goal constraints, reset progress counters, and corrupted projected state.
+  Both entry points now inspect archived events first, recognizing that a compacted run was
+  already started properly.
+
 - **The edit-precondition gate now raises the exception subclass matching the
   edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
   forks but the plain `EditPreconditionError` for every other edit type, so

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
 
 import pytest
 
@@ -560,3 +561,37 @@ def test_malformed_consumed_inputs_is_bad_params_not_internal() -> None:
                 "consumed_inputs": [1, 2],
             },
         )
+
+
+def test_serve_ensure_run_recognises_archived_run_started_after_compaction(tmp_path: Path) -> None:
+    """SidecarServer._ensure_run must not append duplicate RUN_STARTED after compaction (#1436)."""
+    from continuum.events import EventType
+    from continuum.models import Origin, Run
+    from continuum.state.semantic import project
+    from continuum.storage.sqlite import SQLiteStorage
+
+    storage = SQLiteStorage(str(tmp_path / "serve_compacted_ensure.db"))
+    storage.create_run(Run(run_id="run_sc", goal="deliver package"))
+    storage.append_event(
+        "run_sc",
+        EventType.RUN_STARTED,
+        {"goal": "deliver package", "constraints": ["fragile", "same-day"], "total": 5},
+        source=Origin.HUMAN,
+    )
+    storage.append_event(
+        "run_sc",
+        EventType.WORK_ADDED,
+        {"task_id": "w1", "description": "pack item"},
+        source=Origin.HUMAN,
+    )
+    storage.compact_run("run_sc")
+
+    srv = SidecarServer(storage=storage)
+    srv._ensure_run("run_sc")
+
+    events = storage.read_all_events("run_sc")
+    run_started_events = [e for e in events if e.type is EventType.RUN_STARTED]
+    assert len(run_started_events) == 1
+
+    state = project("run_sc", events)
+    assert state.goal.constraints == ["fragile", "same-day"]
