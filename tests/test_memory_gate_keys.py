@@ -111,6 +111,38 @@ def test_load_gate_config_accepts_documented_example(tmp_path: Path) -> None:
     assert loaded["pgvector.upsert"]["key_template"] == "mem:{store_id}:{tenant}:{record_key}"
 
 
+def test_load_gate_config_accepts_tenant_id_memory_template(tmp_path: Path) -> None:
+    """Accept memory template using 'tenant_id' and structured namespace (#1415)."""
+    cfg = tmp_path / "gate.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "tools": {
+                    "vector.upsert": {
+                        "key_template": "memory:{store_id}:{tenant_id}:{namespace}:{record_key}",
+                        "action_type": "memory_write",
+                    }
+                }
+            }
+        )
+    )
+    loaded = load_gate_config(cfg)
+    assert loaded is not None
+    assert "vector.upsert" in loaded
+    assert loaded["vector.upsert"]["key_template"] == (
+        "memory:{store_id}:{tenant_id}:{namespace}:{record_key}"
+    )
+
+
+def test_is_memory_helpers_recognize_memory_prefix() -> None:
+    """is_memory_template and is_memory_key accept both 'mem:' and 'memory:' prefixes (#1415)."""
+    from continuum.gate import MEMORY_KEY_PREFIXES, is_memory_key, is_memory_template
+
+    assert "memory:" in MEMORY_KEY_PREFIXES
+    assert is_memory_template("memory:{store_id}:{tenant_id}:{namespace}:{record_key}") is True
+    assert is_memory_key("memory:pgvector:tenant_1:kb:doc_10") is True
+
+
 # --- ledger: cross-run dedup via action_index ------------------------------ #
 
 
