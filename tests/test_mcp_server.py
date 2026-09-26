@@ -2635,3 +2635,34 @@ async def test_an_interrupted_claim_still_reconciles_at_budget(
         and e.payload.get("action", {}).get("status") == ActionStatus.STARTED.value
     ]
     assert len(slots) == 1
+
+
+def test_ensure_run_recognises_archived_run_started_after_compaction(tmp_path: Any) -> None:
+    """ensure_run must not append duplicate RUN_STARTED or wipe constraints after compaction (#1436)."""
+    from continuum.state.semantic import project
+
+    storage = SQLiteStorage(str(tmp_path / "compacted_ensure.db"))
+    storage.create_run(Run(run_id="run_c", goal="deliver cargo"))
+    storage.append_event(
+        "run_c",
+        EventType.RUN_STARTED,
+        {"goal": "deliver cargo", "constraints": ["refrigerated", "priority"], "total": 10},
+        source=Origin.HUMAN,
+    )
+    storage.append_event(
+        "run_c",
+        EventType.WORK_ADDED,
+        {"task_id": "w1", "description": "load pallet"},
+        source=Origin.HUMAN,
+    )
+    storage.compact_run("run_c")
+
+    ctx = ContinuumMCP(storage=storage)
+    ctx.ensure_run("run_c")
+
+    events = storage.read_all_events("run_c")
+    run_started_events = [e for e in events if e.type is EventType.RUN_STARTED]
+    assert len(run_started_events) == 1
+
+    state = project("run_c", events)
+    assert state.goal.constraints == ["refrigerated", "priority"]
