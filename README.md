@@ -612,5 +612,5 @@ Deep reference material:
 
 ## Quick links
 
-- Issues for bugs/features
-- Discussions for design proposals
+- [Issues](https://github.com/Cyrax321/CONTINUUM/issues) for bugs/features
+- [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) for design proposals
