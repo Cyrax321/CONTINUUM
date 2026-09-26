@@ -34,14 +34,14 @@
 </p>
 
 <p align="center">
-  <sub><strong>English</strong> | <a href="README.zh-CN.md">ç®ä½ä¸­æ</a> | <a href="README.es.md">EspaÃ±ol</a> | <a href="README.ja.md">æ¥æ¬èª</a> | <a href="README.pt-BR.md">PortuguÃªs</a> | <a href="README.ko.md">íêµ­ì´</a></sub>
+  <sub><strong>English</strong> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.es.md">Español</a> | <a href="README.ja.md">日本語</a> | <a href="README.pt-BR.md">Português</a> | <a href="README.ko.md">한국어</a></sub>
 </p>
 
 ---
 
 ## Contents
 
-[Why](#why) Â· [Quick Start](#quick-start) Â· [How it works](#how-it-works) Â· [Where CONTINUUM sits](#where-continuum-sits) Â· [Features](#features) Â· [Security Extension](#security-extension) Â· [Empirical Verification](#empirical-verification) Â· [MCP Integration](#mcp-integration) Â· [Framework Integration](#framework-integration) Â· [Core Concepts](#core-concepts) Â· [Architecture](#architecture) Â· [API and CLI](#api-and-cli) Â· [Roadmap](#roadmap) Â· [What CONTINUUM Is Not](#what-continuum-is-not) Â· [Related work](#related-work) Â· [Status and limitations](#status-and-limitations) Â· [Contributing](#contributing) Â· [License](#license)
+[Why](#why) · [Quick Start](#quick-start) · [How it works](#how-it-works) · [Where CONTINUUM sits](#where-continuum-sits) · [Features](#features) · [Security Extension](#security-extension) · [Empirical Verification](#empirical-verification) · [MCP Integration](#mcp-integration) · [Framework Integration](#framework-integration) · [Core Concepts](#core-concepts) · [Architecture](#architecture) · [API and CLI](#api-and-cli) · [Roadmap](#roadmap) · [What CONTINUUM Is Not](#what-continuum-is-not) · [Related work](#related-work) · [Status and limitations](#status-and-limitations) · [Contributing](#contributing) · [License](#license)
 
 ---
 
@@ -335,15 +335,15 @@ CONTINUUM is organised around one invariant: **every fact carries its origin, an
 Any harness plugs into the same hash chained log. The same run can be written by Claude Code, resumed by LangGraph, inspected by the CLI, and approved on the dashboard. No framework cooperation is required.
 
 ```text
-  Claude Code ââ
-  Gemini CLI âââ¤
-  Codex ââââââââ¤
-  LangGraph ââââ¼ââ 5 seams âââº  One durable log  âââº  Recovery + Dashboard + CLI
-  LangChain ââââ¤                (hash chained,        (sealed contract,
-  OpenAI SDK âââ¤                 provenance tagged,     verify, health,
-  CrewAI âââââââ¤                 exactly once)          family)
-  Any HTTP âââââ¤
-  Any OTel app â
+  Claude Code ─┐
+  Gemini CLI ──┤
+  Codex ───────┤
+  LangGraph ───┼── 5 seams ──►  One durable log  ──►  Recovery + Dashboard + CLI
+  LangChain ───┤                (hash chained,        (sealed contract,
+  OpenAI SDK ──┤                 provenance tagged,     verify, health,
+  CrewAI ──────┤                 exactly once)          family)
+  Any HTTP ────┤
+  Any OTel app ┘
 
   Seams: 1 In-process  2 MCP  3 CLI hooks  4 Gateway  5 OTel
 ```
@@ -545,7 +545,7 @@ In early 2026 I saw long running agents fail on recovery, not reasoning. Checkpo
 
 Over three weeks I built CONTINUUM from one invariant, every fact carries its origin. The result is a hash chained log with `verify()`, a ledger with stable key deduplication, a gate and gateway that block unclaimed effects, and a recovery engine that seals a contract. Five seams expose the same log to Claude Code, LangGraph, LangChain, OpenAI, HTTP and OpenTelemetry. Validated with real kills and 1380 tests, it prints `0 duplicates` where naive replay prints `50`.
 
-CONTINUUM was created by **Anandhu P Shaji** ([@Cyrax321](https://github.com/Cyrax321) Â· [LinkedIn](https://www.linkedin.com/in/anandhupshaji/)) and is maintained by the original creator. It is open source under the [Apache-2.0](LICENSE) license. Community contributions are welcome via [CONTRIBUTING.md](CONTRIBUTING.md) and are credited in [AUTHORS.md](AUTHORS.md) and [graphs/contributors](https://github.com/Cyrax321/CONTINUUM/graphs/contributors).
+CONTINUUM was created by **Anandhu P Shaji** ([@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/)) and is maintained by the original creator. It is open source under the [Apache-2.0](LICENSE) license. Community contributions are welcome via [CONTRIBUTING.md](CONTRIBUTING.md) and are credited in [AUTHORS.md](AUTHORS.md) and [graphs/contributors](https://github.com/Cyrax321/CONTINUUM/graphs/contributors).
 
 ## Contributing
 
@@ -582,7 +582,7 @@ Thanks to our community contributors, ordered by contributions:
 If CONTINUUM helps your agents recover reliably, consider sponsoring to support long term maintenance.
 
 <p align="center">
-  <a href="https://github.com/sponsors/Cyrax321"><img src="https://img.shields.io/badge/Sponsor-â¤-ff69b4?style=for-the-badge&logo=githubsponsors" alt="Sponsor Cyrax321" /></a>
+  <a href="https://github.com/sponsors/Cyrax321"><img src="https://img.shields.io/badge/Sponsor-❤-ff69b4?style=for-the-badge&logo=githubsponsors" alt="Sponsor Cyrax321" /></a>
 </p>
 
 <p align="center">
@@ -612,5 +612,5 @@ Deep reference material:
 
 ## Quick links
 
-- [Issues](https://github.com/Cyrax321/CONTINUUM/issues) for bugs/features
-- [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) for design proposals
+- Issues for bugs/features
+- Discussions for design proposals
