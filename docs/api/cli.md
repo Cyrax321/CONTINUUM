@@ -61,6 +61,7 @@ continuum --json <command>                    # machine-readable output
 | `merge` | Merge into a run at an anchor. Mutates storage. |
 | `precompact` | Checkpoint before context compaction (PreCompact hook). Mutates the run. |
 | `provenance` | Show provenance DAG. Read-only. |
+| `report --trajectory <run_id>` | Distil claims, uncertain side effects, scar rate and stall sites from the archive and the active log, and audit the stored reports. Read-only. |
 | `record-plan` | Record a structured plan upsert. Mutates storage. |
 | `restore` | Restore a run to an anchor checkpoint. Mutates storage. |
 | `rewind` | Rewind workspace and projection to a checkpoint. |

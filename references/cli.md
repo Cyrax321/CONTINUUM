@@ -39,6 +39,7 @@ continuum hooks install <client> [--with-gate]   # wire a coding CLI (claude-cod
 continuum health <run_id>                        # advisory prefix-trust health check
 continuum impact <run_id> --evidence <id>        # downstream impact of an evidence item
 continuum provenance <run_id>                    # show provenance DAG
+continuum report --trajectory <run_id>           # claims, uncertain side effects, scar rate, stall sites
 continuum record-plan <run_id> --plan-id <id>    # record structured plan upsert. mutates
 continuum export-evidence <run_id>               # export evidence as JSON lines
 continuum forget --tenant <id> [--dry-run]       # tombstone memory records for a tenant. mutates

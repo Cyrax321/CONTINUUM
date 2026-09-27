@@ -69,6 +69,7 @@ from continuum.models import (
     RunStatus,
     SemanticState,
     StateStatus,
+    TrajectoryReport,
 )
 from continuum.observability import render_dashboard
 from continuum.provenance.graph import build_provenance_graph, downstream_of
@@ -2522,6 +2523,96 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     return ExitCode.OK
 
 
+def cmd_report(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Analytical reports distilled from a run's own history (issue #1427).
+
+    Read-only, and deliberately the wrong tool for recovery: it summarises what
+    a run did, it does not say whether resuming it is safe (that is `status`).
+    ``--trajectory`` folds the archive and the active log together, so the
+    figures cover the whole run even after compaction moved most of it out of
+    the live log, and prints a digest check so the summary can be held against
+    the events it claims to describe instead of taken on trust.
+    """
+    if not getattr(args, "trajectory", False):
+        print(
+            "error: report needs a kind; the only kind available is --trajectory",
+            file=err,
+        )
+        return ExitCode.ERROR
+
+    storage.get_run(args.run_id)  # raises RunNotFound if it truly does not exist
+
+    from continuum.analysis.trajectory_report import analyze_trajectory, render_trajectory_report
+
+    report = analyze_trajectory(storage, args.run_id)
+    if report is None:
+        _emit(
+            {"trajectory_report": None},
+            f"No events recorded for run {args.run_id}; nothing to report on.",
+            as_json=args.json,
+            stream=out,
+            palette=getattr(args, "_palette", None),
+        )
+        return ExitCode.OK
+
+    # The quiet-time path persists its own TRAJECTORY_REPORT events. Each is
+    # auditable on its own terms: its id must be the prefix of the digest its
+    # stored fields recompute. One that is not was edited after it was built, or
+    # written by a version that hashed different fields; either way it cannot be
+    # traced back to the events it summarises, which is an integrity failure
+    # rather than a stylistic difference. The fresh fold is checked the same way.
+    stored_reports = _stored_trajectory_reports(storage, args.run_id)
+    unverified = [r for r in stored_reports if not r.digest_matches()]
+
+    lines = render_trajectory_report(report)
+    if not stored_reports:
+        lines.append(f"  digest {report.digest()} (no stored report to audit)")
+    elif not unverified:
+        lines.append(
+            f"  digest {report.digest()} ({len(stored_reports)} stored report(s) all verify)"
+        )
+    else:
+        lines.append(
+            f"  digest {report.digest()} ({len(unverified)} of {len(stored_reports)} stored "
+            "report(s) fail their own digest check)"
+        )
+
+    _emit(
+        {
+            "trajectory_report": report.model_dump(mode="json"),
+            "digest": report.digest(),
+            "stored_report_ids": [r.report_id for r in stored_reports],
+            "unverified_stored_report_ids": [r.report_id for r in unverified],
+        },
+        "\n".join(lines),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK if not unverified else ExitCode.CORRUPTED
+
+
+def _stored_trajectory_reports(storage: Storage, run_id: str) -> list[TrajectoryReport]:
+    """Every trajectory report the run has persisted, archive and live log.
+
+    Skips payloads the model cannot read: a report that does not parse cannot
+    be audited, and the projection reports unreadable records separately.
+    """
+    try:
+        events = list(storage.read_events(run_id)) + list(storage.read_archived_events(run_id))
+    except Exception:
+        events = list(storage.read_events(run_id))
+    reports: list[TrajectoryReport] = []
+    for event in events:
+        if event.type is not EventType.TRAJECTORY_REPORT:
+            continue
+        try:
+            reports.append(TrajectoryReport.model_validate(event.payload))
+        except Exception:
+            continue
+    return reports
+
+
 #: Snapshots written beside the log at the compaction boundary (issue #449).
 #: The paths are the ones docs/guides/embed-claude-code.md already tells
 #: operators to read, so automating the hook does not move the files out from
@@ -3917,6 +4008,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     # health is advisory only; it never gates, never moves mode, never changes exit code
     # (issue #401). It reports trust_score with per-dimension breakdown.
+
+    # The analyser folds the archive alongside the live log, so it stays correct
+    # after compaction (issue #1427).
+    report = with_run(add("report", cmd_report, "Analyse a run's history. Read-only."))
+    report.add_argument(
+        "--trajectory",
+        action="store_true",
+        help="distil claims, uncertain side effects, scar rate and stall sites "
+        "from the archive and the active log.",
+    )
+    # Subparser default SUPPRESS: accepts a trailing --json without shadowing
+    # the global flag (#677), so `continuum report --trajectory RUN --json`
+    # parses the way the synopsis reads.
+    report.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="emit machine-readable JSON (same as the global flag).",
+    )
 
     resume = with_env(add("resume", cmd_resume, "Decide how a run may resume."))
     resume.add_argument(

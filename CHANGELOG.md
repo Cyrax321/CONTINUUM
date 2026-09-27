@@ -6,6 +6,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`continuum report --trajectory <run_id>` distils a run's whole history into
+  an auditable summary (#1427).** Operators had no high-level view of a
+  long-running agent's archived behaviour: replaying the raw log is expensive
+  and there was no structured way to inspect failure patterns once compaction
+  moved most of the history out of the live log. The new command folds
+  `events_archive` and the active log together, so the figures cover the whole
+  run regardless of compaction, and it is read-only -- it says what the run did,
+  never whether resuming it is safe (`status` answers that). The report carries
+  the counts the issue named: `total_attempts` (actions put into flight, counted
+  once each, since the ledger records a claim and its settlement as two
+  `ACTION_RECORDED` events), `uncertain_count` (side effects still flagged
+  `side_effect_uncertain`, i.e. awaiting reconciliation), `scar_rate`, and the
+  stall sites, which now rank a re-claimed-but-unsettled action type as a retry
+  site so a single retry surfaces before any type has failed twice. `--json`
+  emits the full model; the human form renders the same figures, and both carry
+  the report's digest. `TrajectoryReport` gained a `digest()` method that hashes
+  its own analytical fields deterministically, and `report_id` is now the prefix
+  of that digest, so a stored report can be checked against the events it
+  summarises instead of taken on trust; the command exits non-zero when a
+  persisted `TRAJECTORY_REPORT` no longer hashes to its own id. The two new
+  fields default to zero, so reports written before this change still load.
+  Existing quiet-time generation is unchanged.
+
 ### Fixed
 
 - **The edit-precondition gate now raises the exception subclass matching the
