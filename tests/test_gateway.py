@@ -751,6 +751,77 @@ def test_a_route_without_a_prefix_keeps_the_whole_host(tmp_path: Path) -> None:
     assert decision.allow is True
 
 
+def _mem_scenario(final: str) -> Decision:
+    """Seed a foreign run holding a global memory key in ``final`` state, then
+    return the gateway's verdict for a second run that has no local claim."""
+    from continuum.actions.ledger import fold_action_events
+
+    memkey = "mem:store1:tenantA:rec1"
+    atype = "mem_write"
+    store = SQLiteStorage(":memory:")
+    for rid in ("runA", "runB"):
+        store.create_run(Run(run_id=rid, goal="g"))
+        store.append_event(rid, EventType.RUN_STARTED, {"goal": "g"})
+    other = ActionLedger(store, "runA")
+    oc = other.claim(atype, {"k": "rec1"}, key=memkey, scoped_to_run=False)
+    if final == "failed":
+        other.fail(oc.key, "rejected upstream", certain=True)
+    elif final == "compensated":
+        other.complete(oc.key)
+        other.compensate(oc.key, note="rolled back")
+    elif final == "completed":
+        other.complete(oc.key, external_id="EXT1")
+    # "started" leaves the foreign claim live.
+    route = Route(
+        host="api.example.com",
+        methods=("POST",),
+        prefix="/v1/mem",
+        action_type=atype,
+        key_template=memkey,
+    )
+    actions_b = fold_action_events(store.read_events("runB"))
+    return match_route(
+        [route],
+        host="api.example.com",
+        method="POST",
+        path="/v1/mem",
+        body={"k": "rec1"},
+        actions_by_key=actions_b,
+        run_id="runB",
+        storage=store,
+    )
+
+
+def test_foreign_memory_record_gets_a_status_specific_verdict() -> None:
+    """A foreign claim on a global memory key is denied with guidance that
+    matches its status, mirroring gate.decide rather than telling the caller
+    to "reconcile" a record that cannot be reconciled.
+
+    Regression for the blanket "reconcile it first" message: reconcile only
+    fits an UNKNOWN outcome. A terminal foreign record (failed/compensated)
+    left no live effect, so the way forward is a fresh claim (#765e4bc); a
+    completed one must not be repeated. Every foreign status is still denied.
+    """
+    started = _mem_scenario("started")
+    assert started.allow is False
+    assert "claimed live in another run" in started.reason
+
+    completed = _mem_scenario("completed")
+    assert completed.allow is False
+    assert "already completed in another run" in completed.reason
+    assert "do not repeat" in completed.reason
+    assert "EXT1" in completed.reason
+
+    unknown_route = _mem_scenario("failed")  # exercised below; keep failed here
+    assert unknown_route.allow is False
+    assert "claim it again through continuum_intercept_action" in unknown_route.reason
+
+    compensated = _mem_scenario("compensated")
+    assert compensated.allow is False
+    assert "closed (status compensated)" in compensated.reason
+    assert "reconcile it first" not in compensated.reason
+
+
 def test_gateway_enforces_tenant_scoped_memory_boundary_and_header(tmp_path: Path) -> None:
     """Enforce tenant-scoped namespace boundaries on external memory claims (#1415)."""
     from continuum.actions.ledger import fold_action_events

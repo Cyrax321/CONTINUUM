@@ -266,7 +266,10 @@ def test_foreign_started_claim_is_denied_matching_the_gateway(tmp_path: Path) ->
         assert gate_dec.allow is False
         assert gw_dec.allow is False
         assert "another run (started)" in gate_dec.reason
-        assert "another run (started)" in gw_dec.reason
+        # The gateway mirrors the gate's denial by status rather than reusing its
+        # wording, so a foreign STARTED reads as a live claim in another run
+        # (#1472). Same status, same verdict, different phrasing.
+        assert "claimed live in another run" in gw_dec.reason
 
 
 def test_a_local_started_claim_is_still_a_live_claim(tmp_path: Path) -> None:
