@@ -13,8 +13,11 @@ All notable changes to this project are documented here. The format follows
   to backslashes on Windows while leaving forward slashes on POSIX. Because `stable_hash`
   hashes canonical JSON strings, equivalent path arguments hashed differently on Windows
   versus Linux, causing shared ledgers or cross-platform replays to generate mismatched
-  idempotency keys and fail deduplication. Normalization now standardizes separators to
-  forward slashes using `posixpath.normpath` across all operating systems.
+  idempotency keys and fail deduplication. Normalization now standardizes Windows path
+  separators to forward slashes using `posixpath.normpath` across all operating systems,
+  while preserving backslashes in POSIX filenames and regex-like strings. Note that
+  existing ledger entries recorded on Windows with backslash paths will compute new
+  idempotency keys under the normalized representation.
 
 
 - **The edit-precondition gate now raises the exception subclass matching the
