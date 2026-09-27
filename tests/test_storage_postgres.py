@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from itertools import count
+from pathlib import Path
 
 import pytest
 
@@ -477,3 +478,23 @@ def test_pg_child_run_keeps_its_parent_after_the_round_trip(
 
     assert [run.run_id for run in children_of(storage, "pg_par")] == ["pg_kid"]
     assert children_of(storage, "pg_kid") == []
+
+
+def test_pg_payload_offload(storage: PostgresStorage, tmp_path: Path) -> None:
+    """PostgresStorage offloads oversized payloads to blob storage."""
+    make_run(storage, "pg_offload", "test offload")
+    storage._payload_offload_bytes = 50
+    storage._storage_dir = tmp_path
+
+    large_payload = {"details": "q" * 200}
+    event = storage.append_event("pg_offload", EventType.TOOL_CALLED, large_payload)
+    from continuum.storage.blob import OFFLOAD_KEY, is_offload_descriptor
+
+    assert is_offload_descriptor(event.payload)
+    sha256_hex = event.payload[OFFLOAD_KEY]
+    blob_file = tmp_path / "blobs" / f"{sha256_hex}.blob"
+    assert blob_file.exists()
+    assert event.hash == event.digest()
+
+    report = storage.verify_events("pg_offload")
+    assert report.ok

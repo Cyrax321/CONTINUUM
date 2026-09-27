@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Out-of-band blob store and `CONTINUUM_PAYLOAD_OFFLOAD_BYTES` threshold (#1418).**
+  Event payloads exceeding the configurable byte threshold `CONTINUUM_PAYLOAD_OFFLOAD_BYTES`
+  (default 0, disabled) are offloaded to content-addressed canonical JSON blob files at
+  `<storage_dir>/blobs/<sha256>.blob`. Stored event records replace inline payloads with an
+  offload descriptor `{"__offloaded": sha256_hex, "size_bytes": length, "keys": list(payload.keys())}`.
+  The event hash chain calculation covers the offload descriptor, maintaining full cryptographic
+  tamper evidence while preventing row bloat and scan degradation across SQLite and Postgres.
+
 ### Fixed
 
 - **`DependencyGraph.impacted_by` now cascades taint along finding-to-finding
