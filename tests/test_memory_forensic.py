@@ -274,7 +274,10 @@ def test_gateway_denies_foreign_memory_claim(tmp_path) -> None:
         )
 
     assert decision.allow is False
-    assert "already has a claim in another run" in decision.reason
+    # The foreign claim is STARTED (claim leaves it in flight), so the gateway
+    # denies with the status-specific "claimed live" message mirroring gate's
+    # table, not the old blanket "reconcile it first" (issue #1472).
+    assert "claimed live in another run" in decision.reason
 
 
 def test_memory_observation_unverified_escalates(tmp_path) -> None:
