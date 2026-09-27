@@ -766,6 +766,8 @@ def _mem_scenario(final: str) -> Decision:
     oc = other.claim(atype, {"k": "rec1"}, key=memkey, scoped_to_run=False)
     if final == "failed":
         other.fail(oc.key, "rejected upstream", certain=True)
+    elif final == "unknown":
+        other.fail(oc.key, "connection dropped", certain=False)
     elif final == "compensated":
         other.complete(oc.key)
         other.compensate(oc.key, note="rolled back")
@@ -812,9 +814,15 @@ def test_foreign_memory_record_gets_a_status_specific_verdict() -> None:
     assert "do not repeat" in completed.reason
     assert "EXT1" in completed.reason
 
-    unknown_route = _mem_scenario("failed")  # exercised below; keep failed here
-    assert unknown_route.allow is False
-    assert "claim it again through continuum_intercept_action" in unknown_route.reason
+    unknown = _mem_scenario("unknown")
+    assert unknown.allow is False
+    assert "unknown outcome in another run" in unknown.reason
+    assert "reconcile it first (continuum_reconcile_action)" in unknown.reason
+
+    failed = _mem_scenario("failed")
+    assert failed.allow is False
+    assert "claim it again through continuum_intercept_action" in failed.reason
+    assert "closed (status failed)" in failed.reason
 
     compensated = _mem_scenario("compensated")
     assert compensated.allow is False
