@@ -261,13 +261,23 @@ def load_gate_config(path: Path) -> dict[str, dict[str, Any]] | None:
 
             fields = {name for _, name, _, _ in _string.Formatter().parse(template) if name}
             has_tenant = "tenant" in fields or "tenant_id" in fields
-            missing = [f for f in ("store_id", "record_key") if f not in fields]
+            required = (
+                ("store_id", "namespace", "record_key")
+                if template.startswith("memory:")
+                else ("store_id", "record_key")
+            )
+            missing = [f for f in required if f not in fields]
             if not has_tenant:
                 missing.append("tenant")
+            required_fields = (
+                ("store_id", "tenant", "namespace", "record_key")
+                if template.startswith("memory:")
+                else MEMORY_REQUIRED_FIELDS
+            )
             if missing:
                 raise GateConfigError(
                     f"{location}: tool {tool!r} memory template {template!r} "
-                    f"must include placeholders {MEMORY_REQUIRED_FIELDS}, missing {missing}"
+                    f"must include placeholders {required_fields}, missing {missing}"
                 )
     return tools
 

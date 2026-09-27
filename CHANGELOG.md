@@ -12,7 +12,7 @@ All notable changes to this project are documented here. The format follows
   External memory mutation claims now support the standardized structured key convention
   `memory:<store_id>:<tenant_id>:<namespace>:<record_key>` alongside `mem:<store_id>:<tenant>:<record_key>`.
   `continuum gateway` binds the authorized tenant identity from server configuration, request headers
-  (`X-Continuum-Tenant`, `X-Tenant-Id`, `X-Tenant`), or run context metadata (`tenant_id`, `tenant`),
+  (`X-Continuum-Tenant`), or run context metadata (`tenant_id`, `tenant`),
   and denies cross-tenant write attempts with HTTP 403 before outbound requests reach external stores.
   The gateway CLI command also exposes `--tenant` to allow operators to pin the tenant boundary at proxy startup.
 

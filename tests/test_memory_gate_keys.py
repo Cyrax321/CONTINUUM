@@ -341,3 +341,73 @@ def test_scoped_non_memory_keys_do_not_cross_run_dedupe(tmp_path: Path) -> None:
         b = ActionLedger(store, "run_2")
         second = b.claim("send_invoice", {}, key="invoice:7", scoped_to_run=True)
         assert second.fresh is True
+
+
+def test_load_gate_config_requires_namespace_for_memory_template(tmp_path: Path) -> None:
+    """memory: templates must include {namespace} placeholder (#1415)."""
+    bad = tmp_path / "bad_gate.json"
+    bad.write_text(
+        json.dumps(
+            {
+                "tools": {
+                    "vector.upsert": {
+                        "key_template": "memory:{store_id}:{tenant_id}:{record_key}",
+                        "action_type": "memory_write",
+                    }
+                }
+            }
+        )
+    )
+    with pytest.raises(GateConfigError, match="must include placeholders"):
+        load_gate_config(bad)
+
+
+def test_cmd_forget_supports_structured_memory_keys(tmp_path: Path) -> None:
+    """cmd_forget enumerates and filters both mem: and memory: prefix records (#1415)."""
+    import argparse
+    import io
+
+    from continuum.cli.main import cmd_forget
+
+    db_path = str(tmp_path / "forget.db")
+    with SQLiteStorage(db_path) as store:
+        store.create_run(Run(run_id="run_f", goal="g"))
+        store.append_event("run_f", EventType.RUN_STARTED, {"goal": "g"})
+        store.append_event(
+            "run_f",
+            EventType.ACTION_RECORDED,
+            {
+                "rendered_key": "mem:pgvector:acme:doc_1",
+                "action_type": "memory_write",
+            },
+        )
+        store.append_event(
+            "run_f",
+            EventType.ACTION_RECORDED,
+            {
+                "rendered_key": "memory:pgvector:acme:kb:doc_2",
+                "action_type": "memory_write",
+            },
+        )
+        store.append_event(
+            "run_f",
+            EventType.ACTION_RECORDED,
+            {
+                "rendered_key": "memory:pgvector:globex:kb:doc_3",
+                "action_type": "memory_write",
+            },
+        )
+
+        out = io.StringIO()
+        err = io.StringIO()
+        args = argparse.Namespace(
+            tenant="acme",
+            dry_run=True,
+            run_id="run_f",
+            reason="GDPR",
+            json=False,
+        )
+        code = cmd_forget(args, store, out, err)
+        assert code == 0
+        output = out.getvalue()
+        assert "2 record(s) found" in output

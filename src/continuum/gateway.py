@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from continuum.events import EventType
-from continuum.gate import is_memory_key, normalize_key_value
+from continuum.gate import is_memory_key, is_memory_template, normalize_key_value
 from continuum.models import Origin
 
 __all__ = [
@@ -119,13 +119,31 @@ def load_gateway_config(path: Path) -> list[Route]:
         raise GatewayConfigError(f"{location}: expected {{'upstreams': [...]}}")
     for entry in entries:
         try:
+            kt = str(entry["key_template"])
+            if is_memory_template(kt):
+                import string as _string
+
+                fields = {name for _, name, _, _ in _string.Formatter().parse(kt) if name}
+                has_tenant = "tenant" in fields or "tenant_id" in fields
+                required = (
+                    ("store_id", "namespace", "record_key")
+                    if kt.startswith("memory:")
+                    else ("store_id", "record_key")
+                )
+                missing = [f for f in required if f not in fields]
+                if not has_tenant:
+                    missing.append("tenant")
+                if missing:
+                    raise GatewayConfigError(
+                        f"{location}: upstream key template {kt!r} missing required placeholder(s): {', '.join(missing)}"
+                    )
             routes.append(
                 Route(
                     host=str(entry["host"]),
                     methods=tuple(m.upper() for m in entry.get("methods", ("POST",))),
                     prefix=str(entry.get("prefix", "/")),
                     action_type=str(entry["action_type"]),
-                    key_template=str(entry["key_template"]),
+                    key_template=kt,
                 )
             )
         except KeyError as exc:
@@ -300,25 +318,19 @@ def match_route(
             pass
 
     if is_memory_key(rendered) and bound_tenant is not None:
-        # Extract tenant from rendered mem key: mem:store:tenant:record
-        # or memory:store:tenant_id:namespace:record
-        try:
-            parts = rendered.split(":")
-            # mem:{store_id}:{tenant}:{record_key} -> tenant is third segment
-            # memory:{store_id}:{tenant_id}:{namespace}:{record_key} -> tenant is third segment
-            if len(parts) >= 4:
-                tenant_in_key = parts[2]
-                if tenant_in_key != bound_tenant:
-                    return Decision(
-                        False,
-                        f"tenant mismatch: bound {bound_tenant!r} but key {rendered!r} carries tenant {tenant_in_key!r}",
-                        route=route,
-                    )
-            else:
-                # Malformed mem key but already rendered; deny closed
-                return Decision(False, f"malformed memory key {rendered!r}", route=route)
-        except Exception:
-            return Decision(False, f"tenant check failed for {rendered!r}", route=route)
+        import string as _string
+
+        fields = [f for _, f, _, _ in _string.Formatter().parse(route.key_template) if f]
+        if any(":" in str(normalize_key_value(body.get(f, ""))) for f in fields):
+            return Decision(False, f"malformed memory key {rendered!r}", route=route)
+        tenant_field = "tenant_id" if "tenant_id" in fields else "tenant"
+        tenant_in_key = str(normalize_key_value(body.get(tenant_field, "")))
+        if tenant_in_key != bound_tenant:
+            return Decision(
+                False,
+                f"tenant mismatch: bound {bound_tenant!r} but key {rendered!r} carries tenant {tenant_in_key!r}",
+                route=route,
+            )
 
     # Memory keys are global to the store, not the run, so use scope=None
     # to let the action_index catch cross-run double-writes.
@@ -530,24 +542,15 @@ class GatewayServer:
                     if run_id is None:
                         self._respond(403, {"error": "no active CONTINUUM run"})
                         return
-                    from continuum.actions.ledger import fold_action_events
-
-                    history = storage.read_all_events(run_id)
-                    actions = fold_action_events(history)
-                    from continuum.gate import collect_consumed_authorities
-
-                    consumed = collect_consumed_authorities(history)
-
                     bound_tenant = getattr(server, "_bound_tenant", None)
-                    header_tenant = (
-                        self.headers.get("X-Continuum-Tenant")
-                        or self.headers.get("X-Tenant-Id")
-                        or self.headers.get("X-Tenant")
-                    )
+                    header_tenant = self.headers.get("X-Continuum-Tenant")
                     if header_tenant:
                         header_tenant = str(header_tenant).strip()
 
-                    run_obj = storage.get_run(run_id) if hasattr(storage, "get_run") else None
+                    try:
+                        run_obj = storage.get_run(run_id) if hasattr(storage, "get_run") else None
+                    except Exception:
+                        run_obj = None
                     run_metadata = getattr(run_obj, "metadata", {}) or {}
                     run_tenant = run_metadata.get("tenant_id") or run_metadata.get("tenant")
                     if run_tenant:
@@ -580,6 +583,14 @@ class GatewayServer:
                         return
 
                     effective_tenant = bound_tenant or header_tenant or run_tenant
+
+                    from continuum.actions.ledger import fold_action_events
+
+                    history = storage.read_all_events(run_id)
+                    actions = fold_action_events(history)
+                    from continuum.gate import collect_consumed_authorities
+
+                    consumed = collect_consumed_authorities(history)
 
                     decision = match_route(
                         server._routes,

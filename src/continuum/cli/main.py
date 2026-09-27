@@ -54,6 +54,7 @@ from continuum.gate import (
     DEFAULT_GATE_CONFIG_PATH,
     GateConfigError,
     collect_consumed_authorities,
+    is_memory_key,
     load_gate_config,
 )
 from continuum.gate import (
@@ -3302,18 +3303,24 @@ def cmd_forget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
                 continue
             payload = dict(ev.payload)
             rendered = payload.get("rendered_key") or ""
-            if not isinstance(rendered, str) or not rendered.startswith("mem:"):
+            if not isinstance(rendered, str) or not is_memory_key(rendered):
                 continue
-            # Tenant is third segment of mem:{store}:{tenant}:{record}
             parts = rendered.split(":")
-            if len(parts) < 4:
-                continue
-            tenant_in_key = parts[2]
-            if tenant_in_key != tenant:
-                continue
-            record_key = parts[3] if len(parts) >= 4 else rendered
-            # Also handle longer record keys with colons? Use join remainder
-            if len(parts) > 4:
+            if rendered.startswith("memory:"):
+                # memory:{store_id}:{tenant_id}:{namespace}:{record_key...}
+                if len(parts) < 5:
+                    continue
+                tenant_in_key = parts[2]
+                if tenant_in_key != tenant:
+                    continue
+                record_key = ":".join(parts[4:])
+            else:
+                # mem:{store_id}:{tenant}:{record_key...}
+                if len(parts) < 4:
+                    continue
+                tenant_in_key = parts[2]
+                if tenant_in_key != tenant:
+                    continue
                 record_key = ":".join(parts[3:])
             hits.append({"run_id": run.run_id, "rendered_key": rendered, "record_key": record_key})
             record_keys.add(record_key)
