@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`RecoveryLedger` now evaluates the human gate per external dependency, not
+  only for the run as a whole (#1428).** A single flaky upstream (a
+  rate-limited sandbox, a weather API) failed repeatedly and drained the run's
+  one global attempt budget, and once that pool was empty every later recovery,
+  including unrelated and highly reliable core tasks, escalated to a person.
+  `record_attempt` accepts a `dependency` and tags the attempt with it;
+  `requires_human` accepts the same `dependency` and counts only that
+  dependency's attempts against its own ceiling. Escalation writes a
+  namespaced, anchored `human_required:<dependency>` gate entry rather than the
+  run-wide marker, so exhausting one dependency escalates only that dependency,
+  and the marker survives compaction the same way the global one does.
+  Dependency ceilings come from an optional `dependency_budgets` section in
+  `.continuum/budgets.json` (`{"dependency_budgets": {"ext:weather-api": 2}}`),
+  validated on load like every other integer in the registry: a positive
+  integer, with a boolean or a float rejected rather than silently read as a cap
+  of 1. A dependency the section does not name falls back to
+  `default_max_attempts`, then to the caller's own threshold, so a registry
+  never has to list every dependency to govern all of them. The change is
+  additive: entries written before the field existed load with no dependency tag
+  and behave exactly as before.
+
 ### Fixed
 
 - **The edit-precondition gate now raises the exception subclass matching the
@@ -1135,7 +1158,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,501 collected, ~2,423 passed, ~28 skipped on a minimal env).
+  (~2,533 collected, ~2,423 passed, ~28 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

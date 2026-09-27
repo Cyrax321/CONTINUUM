@@ -32,13 +32,14 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
+from continuum.budgets import max_attempts_for_dependency
 from continuum.concurrency.lease import LeaseCoordinator
 from continuum.models import RecoveryContract, utcnow
 from continuum.security.hashing import make_id, stable_hash
@@ -57,6 +58,17 @@ __all__ = [
 
 GENESIS = "genesis"
 HUMAN_REQUIRED = "human_required"
+
+
+def _dependency_gate(dependency: str) -> str:
+    """The gate name that records escalation for a single dependency (#1428).
+
+    Namespaced rather than a bare ``human_required`` so the two escalations stay
+    distinguishable: a dependency that exhausted only its own allowance must not
+    set the run-wide marker, and readers that ask ``requires_human()`` for the
+    run as a whole must not see it either.
+    """
+    return f"{HUMAN_REQUIRED}:{dependency}"
 
 
 class LedgerError(RuntimeError):
@@ -95,6 +107,10 @@ class RecoveryLedgerEntry:
     anchor: bool
     created_at: datetime
     note: str = ""
+    #: The external dependency an ATTEMPT went through (#1428). ``None`` on every
+    #: other kind and on attempts not tied to one, so a ledger written before the
+    #: field existed loads unchanged.
+    dependency: str | None = None
 
     def content(self) -> dict[str, Any]:
         """The sealed portion of the entry, excluding its own hash."""
@@ -109,6 +125,7 @@ class RecoveryLedgerEntry:
             "anchor": self.anchor,
             "created_at": self.created_at.isoformat(),
             "note": self.note,
+            "dependency": self.dependency,
         }
 
     def verify(self) -> bool:
@@ -145,6 +162,7 @@ class RecoveryLedgerEntry:
             anchor=rec.get("anchor", False),
             created_at=datetime.fromisoformat(rec["created_at"]),
             note=rec.get("note", ""),
+            dependency=rec.get("dependency"),
         )
 
 
@@ -320,6 +338,7 @@ class RecoveryLedger:
         gate: str | None = None,
         anchor: bool = False,
         note: str = "",
+        dependency: str | None = None,
     ) -> RecoveryLedgerEntry:
         # Sequence and prev_hash must follow the highest-sequence entry, not
         # the last position of the backend's load order: after compact() the
@@ -340,6 +359,7 @@ class RecoveryLedger:
             anchor=anchor,
             created_at=utcnow(),
             note=note,
+            dependency=dependency,
         )
         sealed = replace(partial, content_hash=stable_hash(partial.content()))
         self._backend.save(sealed)
@@ -354,6 +374,7 @@ class RecoveryLedger:
         gate: str | None = None,
         anchor: bool = False,
         note: str = "",
+        dependency: str | None = None,
     ) -> RecoveryLedgerEntry:
         return self._seal_and_save(
             run_id,
@@ -363,6 +384,7 @@ class RecoveryLedger:
             gate=gate,
             anchor=anchor,
             note=note,
+            dependency=dependency,
         )
 
     def append_decision(
@@ -386,17 +408,40 @@ class RecoveryLedger:
             )
 
     def record_attempt(
-        self, run_id: str, *, note: str = "", max_attempts: int | None = None
+        self,
+        run_id: str,
+        *,
+        note: str = "",
+        max_attempts: int | None = None,
+        dependency: str | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
     ) -> int:
-        """Record one recovery attempt and return the new attempt count.
+        """Record one recovery attempt and return the new (global) attempt count.
 
         When ``max_attempts`` is given and the new count reaches it, an anchored
         ``human_required`` gate entry is written (once), so the escalation
         survives later compaction of the ATTEMPT entries.
+
+        When ``dependency`` names the external resource the attempt went through,
+        the entry is tagged with it and counted against that dependency's own
+        ceiling (#1428), leaving the global counter and every other dependency's
+        allowance untouched. ``dependency_budgets`` is either the loaded budget
+        registry or a bare ``{dependency: limit}`` mapping; an entry it does not
+        carry falls back to the global default (see
+        :func:`continuum.budgets.max_attempts_for_dependency`). Escalation writes
+        a namespaced, anchored gate entry rather than the run-wide marker, so a
+        flaky dependency escalates only itself. The returned count is still the
+        global one, because the global gate still watches it.
         """
         with self._locked(run_id):
             entries = self._backend.load(run_id)
-            sealed = self._seal_and_save(run_id, entries, kind=LedgerEntryKind.ATTEMPT, note=note)
+            sealed = self._seal_and_save(
+                run_id,
+                entries,
+                kind=LedgerEntryKind.ATTEMPT,
+                note=note,
+                dependency=dependency,
+            )
             count = sum(1 for e in entries if e.kind == LedgerEntryKind.ATTEMPT.value) + 1
             escalated = any(
                 e.kind == LedgerEntryKind.GATE.value and e.gate == HUMAN_REQUIRED for e in entries
@@ -410,26 +455,108 @@ class RecoveryLedger:
                     anchor=True,
                     note=f"attempt {count} reached the escalation threshold {max_attempts}",
                 )
+            if dependency is not None:
+                self._maybe_escalate_dependency(
+                    entries, sealed, dependency, dependency_budgets, max_attempts
+                )
             return count
 
-    def attempts(self, run_id: str) -> int:
+    def _maybe_escalate_dependency(
+        self,
+        entries: Sequence[RecoveryLedgerEntry],
+        sealed: RecoveryLedgerEntry,
+        dependency: str,
+        dependency_budgets: Mapping[str, Any] | None,
+        global_max: int | None,
+    ) -> None:
+        """Write the per-dependency escalation marker if this attempt used its ceiling.
+
+        ``sealed`` is already saved, so it counts but is not in ``entries``; the
+        gate entry is appended after it exactly the way the global one is, so
+        both markers sort after the attempt that tripped them.
+        """
+        limit = max_attempts_for_dependency(dependency_budgets, dependency, fallback=global_max)
+        if limit is None:
+            return
+        gate = _dependency_gate(dependency)
+        if any(e.kind == LedgerEntryKind.GATE.value and e.gate == gate for e in entries):
+            return  # already escalated: one marker is enough, and it is anchored
+        used = (
+            sum(
+                1
+                for e in entries
+                if e.kind == LedgerEntryKind.ATTEMPT.value and e.dependency == dependency
+            )
+            + 1
+        )
+        if used >= limit:
+            self._seal_and_save(
+                run_id=sealed.run_id,
+                entries=[*entries, sealed],
+                kind=LedgerEntryKind.GATE,
+                gate=gate,
+                anchor=True,
+                dependency=dependency,
+                note=(
+                    f"dependency {dependency!r} reached its escalation threshold {limit} "
+                    f"(attempt {used})"
+                ),
+            )
+
+    def attempts(self, run_id: str, *, dependency: str | None = None) -> int:
         """The run's recovery-attempt count: how many ATTEMPT entries survive.
+
+        With ``dependency``, only attempts tagged for that dependency count, so
+        a caller can report what one external resource has used of its own
+        allowance (#1428).
 
         Compaction can lower this count, which is why escalation is recorded
         as an anchored GATE entry (see ``record_attempt``) rather than
         inferred from the number.
         """
-        return sum(1 for e in self.entries(run_id) if e.kind == LedgerEntryKind.ATTEMPT.value)
+        return sum(
+            1
+            for e in self.entries(run_id)
+            if e.kind == LedgerEntryKind.ATTEMPT.value
+            and (dependency is None or e.dependency == dependency)
+        )
 
-    def requires_human(self, run_id: str, *, max_attempts: int = 3) -> bool:
+    def requires_human(
+        self,
+        run_id: str,
+        *,
+        max_attempts: int = 3,
+        dependency: str | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
+    ) -> bool:
         """True once attempts have reached the human-in-the-loop threshold.
 
         Also True if a persisted ``human_required`` marker exists, so a prior
         escalation is not forgotten when compaction drops old ATTEMPT entries.
+
+        With ``dependency``, the threshold is that dependency's own ceiling and
+        only its own attempts count against it (#1428): one flaky external
+        service escalating itself must not starve unrelated core tasks of their
+        recovery attempts. A run-wide ``human_required`` marker still wins, and
+        is deliberately fail-closed in that direction: once the whole run needs a
+        person, so does every dependency in it.
         """
         entries = self.entries(run_id)
         if any(e.kind == LedgerEntryKind.GATE.value and e.gate == HUMAN_REQUIRED for e in entries):
             return True
+        if dependency is not None:
+            gate = _dependency_gate(dependency)
+            if any(e.kind == LedgerEntryKind.GATE.value and e.gate == gate for e in entries):
+                return True
+            limit = max_attempts_for_dependency(
+                dependency_budgets, dependency, fallback=max_attempts
+            )
+            used = sum(
+                1
+                for e in entries
+                if e.kind == LedgerEntryKind.ATTEMPT.value and e.dependency == dependency
+            )
+            return limit is not None and used >= limit
         return sum(1 for e in entries if e.kind == LedgerEntryKind.ATTEMPT.value) >= max_attempts
 
     def record_gate(self, run_id: str, status: str, *, note: str = "") -> RecoveryLedgerEntry:
