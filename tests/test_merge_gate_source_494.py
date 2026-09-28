@@ -116,6 +116,97 @@ def test_source_depended_with_carry_forward_passes_and_lineage_stamps() -> None:
         storage.close()
 
 
+def test_source_completion_reconciled_away_does_not_strand_merge() -> None:
+    """A source completion reconciled to absent is not a live depended result (#1505).
+
+    ``reconcile(occurred=False)`` folds an already-COMPLETED action to FAILED and
+    clears its receipt, so the effect no longer exists. Stranding it is then
+    impossible and the merge must pass. The cross-run fold has to follow the
+    newest status, as ``derive()`` does, instead of keeping the first COMPLETED
+    entry for the key.
+    """
+    storage = SQLiteStorage(":memory:")
+    try:
+        _make_run(storage, "target")
+        _make_run(storage, "source")
+        ledger_src = ActionLedger(storage, "source")
+        outcome = ledger_src.claim("github.create_issue", {"title": "t"}, key="k1")
+        ledger_src.complete(outcome.key, external_id="42")
+        expected_key = idempotency_key(
+            "github.create_issue", {"title": "t"}, scope="source", key="k1"
+        )
+        storage.append_event(
+            "target",
+            EventType.WORK_ADDED,
+            {"task_id": "w1", "prerequisite": [expected_key]},
+        )
+        # Control: with the completion still live, the merge is refused.
+        with pytest.raises(EditPreconditionError):
+            approve_merge(
+                storage,
+                "target",
+                source_run_id="source",
+                anchor_sequence=0,
+                reason="cross",
+            )
+        # The probe contradicts the optimistic complete(): no external effect.
+        ledger_src.reconcile(outcome.key, occurred=False)
+        # Nothing is stranded now, so the same merge succeeds.
+        merged = approve_merge(
+            storage,
+            "target",
+            source_run_id="source",
+            anchor_sequence=0,
+            reason="cross",
+        )
+        assert merged.run_id == "target"
+    finally:
+        storage.close()
+
+
+def test_source_completion_compensated_away_does_not_strand_merge() -> None:
+    """A compensated source completion is not a live depended result either (#1505).
+
+    Compensation undoes the effect deliberately, so a target step referencing it
+    cannot be stranded by the merge. Same newest-status-wins rule, reached
+    through the compensate path rather than reconcile.
+    """
+    storage = SQLiteStorage(":memory:")
+    try:
+        _make_run(storage, "target")
+        _make_run(storage, "source")
+        ledger_src = ActionLedger(storage, "source")
+        outcome = ledger_src.claim("github.create_issue", {"title": "t"}, key="k1")
+        ledger_src.complete(outcome.key, external_id="42")
+        expected_key = idempotency_key(
+            "github.create_issue", {"title": "t"}, scope="source", key="k1"
+        )
+        storage.append_event(
+            "target",
+            EventType.WORK_ADDED,
+            {"task_id": "w1", "prerequisite": [expected_key]},
+        )
+        with pytest.raises(EditPreconditionError):
+            approve_merge(
+                storage,
+                "target",
+                source_run_id="source",
+                anchor_sequence=0,
+                reason="cross",
+            )
+        ledger_src.compensate(outcome.key)
+        merged = approve_merge(
+            storage,
+            "target",
+            source_run_id="source",
+            anchor_sequence=0,
+            reason="cross",
+        )
+        assert merged.run_id == "target"
+    finally:
+        storage.close()
+
+
 def test_clean_merge_of_two_branches_passes_and_stamps_both_summaries() -> None:
     storage = SQLiteStorage(":memory:")
     try:
