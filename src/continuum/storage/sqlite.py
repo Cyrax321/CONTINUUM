@@ -45,6 +45,7 @@ from continuum.storage.base import (
     Storage,
 )
 from continuum.storage.blob import (
+    audit_blob_descriptor,
     get_payload_offload_threshold,
     is_offload_descriptor,
     load_blob_payload,
@@ -555,6 +556,9 @@ class SQLiteStorage(Storage):
         rejected (issue #705) instead of silently deleting the anchor and
         every live row, which would leave the next append minting a fresh
         genesis and fork the hash chain away from the archive.
+
+        Content-addressed blobs referenced by archived events remain preserved
+        in the blob directory without modification (issues #254, #1419).
         """
         from continuum.checkpoint.manager import CheckpointManager
 
@@ -618,13 +622,18 @@ class SQLiteStorage(Storage):
 
         return {"archived": max(archived, 0)}
 
-    def read_archived_events(self, run_id: str) -> Sequence[Event]:
+    def read_archived_events(
+        self,
+        run_id: str,
+        *,
+        rehydrate: bool = True,
+    ) -> Sequence[Event]:
         """Compacted events from the archive, oldest first."""
         with self._read() as conn:
             rows = conn.execute(
                 "SELECT * FROM events_archive WHERE run_id = ? ORDER BY sequence ASC", (run_id,)
             ).fetchall()
-        return [self._row_to_event(row) for row in rows]
+        return [self._row_to_event(row, rehydrate=rehydrate) for row in rows]
 
     def foreign_action(self, key: str, *, exclude_run: str) -> Action | None:
         """Indexed cross-run ledger lookup (issue #216).
@@ -725,8 +734,7 @@ class SQLiteStorage(Storage):
             except json.JSONDecodeError:
                 continue
             if is_offload_descriptor(payload):
-                with suppress(Exception):
-                    payload = load_blob_payload(self.storage_dir, payload)
+                payload = load_blob_payload(self.storage_dir, payload)
             entry = index_entry_from_payload(EventType(row["type"]), payload)
             if entry is not None:
                 order = int(row["rid"]) if position >= offset else position - offset
@@ -745,6 +753,7 @@ class SQLiteStorage(Storage):
         *,
         after_sequence: int = 0,
         upto: int | None = None,
+        rehydrate: bool = True,
     ) -> Sequence[Event]:
         """Live events in sequence order, windowed by ``after_sequence``/``upto``."""
         query = "SELECT * FROM events WHERE run_id = ? AND sequence > ?"
@@ -755,7 +764,7 @@ class SQLiteStorage(Storage):
         query += " ORDER BY sequence ASC"
         with self._read() as conn:
             rows = conn.execute(query, params).fetchall()
-        return [self._row_to_event(row) for row in rows]
+        return [self._row_to_event(row, rehydrate=rehydrate) for row in rows]
 
     def last_sequence(self, run_id: str) -> int:
         """Highest live sequence number; 0 when the run has no events yet."""
@@ -765,8 +774,27 @@ class SQLiteStorage(Storage):
             ).fetchone()
         return int(row["seq"]) if row and row["seq"] is not None else 0
 
-    @staticmethod
-    def _row_to_event(row: sqlite3.Row) -> Event:
+    def _row_to_event(self, row: sqlite3.Row, *, rehydrate: bool = True) -> Event:
+        try:
+            raw_payload = json.loads(row["payload"])
+        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
+            raise CorruptedRecord(
+                f"event {row['event_id']!r} (run {row['run_id']!r}, seq {row['sequence']}) "
+                f"failed to load: {exc}"
+            ) from exc
+
+        if rehydrate and is_offload_descriptor(raw_payload):
+            sha256_hex = raw_payload.get("__offloaded")
+            seq = row["sequence"]
+            try:
+                effective_payload = load_blob_payload(self.storage_dir, raw_payload)
+            except CorruptedRecord as exc:
+                raise CorruptedRecord(
+                    f"event sequence {seq} (run {row['run_id']!r}) missing or corrupt blob {sha256_hex!r}: {exc}"
+                ) from exc
+        else:
+            effective_payload = raw_payload
+
         try:
             return Event(
                 event_id=row["event_id"],
@@ -774,19 +802,19 @@ class SQLiteStorage(Storage):
                 sequence=row["sequence"],
                 type=row["type"],
                 timestamp=row["timestamp"],
-                payload=json.loads(row["payload"]),
+                payload=effective_payload,
                 causer_event_id=row["causer_event_id"],
                 source=row["source"],
                 prev_hash=row["prev_hash"],
                 hash=row["hash"],
             )
-        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
+        except (ValidationError, ValueError) as exc:
             raise CorruptedRecord(
                 f"event {row['event_id']!r} (run {row['run_id']!r}, seq {row['sequence']}) "
                 f"failed to load: {exc}"
             ) from exc
 
-    def verify_events(self, run_id: str) -> IntegrityReport:
+    def verify_events(self, run_id: str, *, deep: bool = False) -> IntegrityReport:
         """Re-audit a persisted chain without loading it into an EventLog.
 
         For a compacted run (#239) the walk resumes at the archive boundary:
@@ -796,6 +824,9 @@ class SQLiteStorage(Storage):
         only while its archived prefix is intact; removing the boundary
         events or editing history in the archive fails here instead of
         minting a fresh genesis out of whatever live rows survive.
+
+        When deep=True, also audits all referenced out-of-band blobs across
+        both live and archived events.
         """
         violations: list[IntegrityViolation] = []
         checked = 0
@@ -819,7 +850,7 @@ class SQLiteStorage(Storage):
                 is not None
             )
             if has_archive or any(r["type"] == "EVENT_LOG_ANCHORED" for r in rows):
-                archive_violations, archive_edge = self._audit_archive(conn, run_id)
+                archive_violations, archive_edge = self._audit_archive(conn, run_id, deep=deep)
                 violations.extend(archive_violations)
                 if archive_violations:
                     intact = False
@@ -833,7 +864,7 @@ class SQLiteStorage(Storage):
             checked += 1
             healthy = True
             try:
-                event = self._row_to_event(row)
+                event = self._row_to_event(row, rehydrate=False)
             except CorruptedRecord as exc:
                 violations.append(
                     IntegrityViolation(
@@ -887,6 +918,18 @@ class SQLiteStorage(Storage):
                     )
                 )
 
+            if deep:
+                blob_violation = audit_blob_descriptor(
+                    self.storage_dir,
+                    event.payload,
+                    run_id=run_id,
+                    sequence=event.sequence,
+                    event_id=event.event_id,
+                )
+                if blob_violation is not None:
+                    healthy = False
+                    violations.append(blob_violation)
+
             if healthy and intact:
                 last_good = event.sequence
             else:
@@ -901,9 +944,8 @@ class SQLiteStorage(Storage):
             trusted_through={run_id: last_good},
         )
 
-    @classmethod
     def _audit_archive(
-        cls, conn: sqlite3.Connection, run_id: str
+        self, conn: sqlite3.Connection, run_id: str, *, deep: bool = False
     ) -> tuple[list[IntegrityViolation], tuple[int, str] | None]:
         """Deep-audit one run's archived prefix (issue #239).
 
@@ -924,7 +966,7 @@ class SQLiteStorage(Storage):
         ).fetchall()
         for row in rows:
             try:
-                event = cls._row_to_event(row)
+                event = self._row_to_event(row, rehydrate=False)
             except CorruptedRecord as exc:
                 violations.append(
                     IntegrityViolation(
@@ -973,6 +1015,19 @@ class SQLiteStorage(Storage):
                         ),
                     )
                 )
+
+            if deep:
+                blob_violation = audit_blob_descriptor(
+                    self.storage_dir,
+                    event.payload,
+                    run_id=run_id,
+                    sequence=event.sequence,
+                    event_id=event.event_id,
+                    prefix="archived",
+                )
+                if blob_violation is not None:
+                    violations.append(blob_violation)
+
             prev_hash = event.hash
             expected_sequence = event.sequence + 1
             edge = (event.sequence, event.hash) if event.hash is not None else None

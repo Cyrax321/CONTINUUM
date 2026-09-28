@@ -21,6 +21,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from continuum.events import IntegrityViolation
 from continuum.security.hashing import to_json
 from continuum.storage.base import CorruptedRecord, StorageError
 
@@ -28,6 +29,7 @@ __all__ = [
     "DEFAULT_PAYLOAD_OFFLOAD_BYTES",
     "OFFLOAD_KEY",
     "PAYLOAD_OFFLOAD_ENV_VAR",
+    "audit_blob_descriptor",
     "create_offload_descriptor",
     "get_blob_dir",
     "get_blob_path",
@@ -100,7 +102,10 @@ def write_blob(
     target_path = get_blob_path(storage_dir, sha256_hex)
     if target_path.exists():
         try:
-            if target_path.stat().st_size == len(canonical_bytes):
+            if (
+                target_path.stat().st_size == len(canonical_bytes)
+                and target_path.read_bytes() == canonical_bytes
+            ):
                 return target_path
         except OSError:
             pass
@@ -112,6 +117,8 @@ def write_blob(
         tmp_path = blob_dir / tmp_name
         with tmp_path.open("wb") as f:
             f.write(canonical_bytes)
+            f.flush()
+            os.fsync(f.fileno())
         tmp_path.replace(target_path)
         return target_path
     except Exception as exc:
@@ -196,3 +203,67 @@ def maybe_rehydrate_payload(
     if is_offload_descriptor(payload):
         return load_blob_payload(storage_dir, payload)
     return payload
+
+
+def audit_blob_descriptor(
+    storage_dir: str | Path,
+    descriptor: Mapping[str, Any],
+    *,
+    run_id: str,
+    sequence: int,
+    event_id: str,
+    prefix: str = "",
+) -> IntegrityViolation | None:
+    """Audit a single offload descriptor against disk.
+
+    Returns an IntegrityViolation if the referenced blob is missing or corrupt,
+    or None if the blob exists and its SHA-256 digest matches.
+    """
+    if not is_offload_descriptor(descriptor):
+        return None
+
+    sha256_hex = str(descriptor.get(OFFLOAD_KEY, "")).lower()
+    blob_path = get_blob_path(storage_dir, sha256_hex)
+    tag = f"{prefix}: " if prefix else ""
+
+    if not blob_path.exists():
+        return IntegrityViolation(
+            kind="BLOB_MISSING",
+            run_id=run_id,
+            sequence=sequence,
+            event_id=event_id,
+            detail=f"{tag}missing blob {sha256_hex!r} at {blob_path}",
+        )
+
+    try:
+        data = blob_path.read_bytes()
+    except OSError as exc:
+        return IntegrityViolation(
+            kind="BLOB_MISSING",
+            run_id=run_id,
+            sequence=sequence,
+            event_id=event_id,
+            detail=f"{tag}unreadable blob {sha256_hex!r} at {blob_path}: {exc}",
+        )
+
+    computed = hashlib.sha256(data).hexdigest()
+    if computed != sha256_hex:
+        return IntegrityViolation(
+            kind="BLOB_DIGEST_MISMATCH",
+            run_id=run_id,
+            sequence=sequence,
+            event_id=event_id,
+            detail=f"{tag}corrupted blob {sha256_hex!r}: computed digest {computed!r}",
+        )
+
+    expected_size = descriptor.get("size_bytes")
+    if isinstance(expected_size, int) and len(data) != expected_size:
+        return IntegrityViolation(
+            kind="BLOB_DIGEST_MISMATCH",
+            run_id=run_id,
+            sequence=sequence,
+            event_id=event_id,
+            detail=f"{tag}corrupted blob {sha256_hex!r}: size {len(data)} != expected {expected_size}",
+        )
+
+    return None

@@ -16,6 +16,16 @@ All notable changes to this project are documented here. The format follows
   The event hash chain calculation covers the offload descriptor, maintaining full cryptographic
   tamper evidence while preventing row bloat and scan degradation across SQLite and Postgres.
 
+- **Transparent blob payload rehydration and deep integrity verification (#1419).**
+  Event payloads offloaded to content-addressed blobs are transparently rehydrated during
+  `read_events()`, `read_archived_events()`, and `read_all_events()`, allowing downstream
+  projections, validators, and replays to operate seamlessly over complete payloads without
+  descriptor-awareness. If a referenced blob is missing or tampered with on disk, reads fail
+  closed by raising `CorruptedRecord` identifying the event sequence number and sha256 digest.
+  Extended `continuum verify` and storage engines with `--deep` / `deep=True` verification to
+  audit the existence and content hashes of on-disk blobs across both live and archived events.
+  Compaction preserves content-addressed blobs for archived event records.
+
 ### Fixed
 
 - **`DependencyGraph.impacted_by` now cascades taint along finding-to-finding
@@ -1155,7 +1165,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,501 collected, ~2,423 passed, ~28 skipped on a minimal env).
+  (~2,533 collected, ~2,423 passed, ~28 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
