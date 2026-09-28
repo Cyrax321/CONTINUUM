@@ -46,7 +46,7 @@ Optional installs. An agent may also call the SDK or MCP server directly.
 
 ## 4. MCP server (stdio, deny by default) `src/continuum/mcp/`
 
-Server name: `continuum-mcp` (`server.py`). Twelve tools, all names prefixed,
+Server name: `continuum-mcp` (`server.py`). Thirteen tools, all names prefixed,
 recounted from the tool registrations on 2026-08-24.
 
 | Tool (exact name) | Kind | Source |
@@ -111,18 +111,27 @@ source of truth, and events persist to storage.
 
 - Append-only, hash-chained: each event stores the digest of the prior event.
 - `EventLog.verify()` re-walks the chain and localizes the first corrupted
-  event (`events.py:304`).
-- 29 event types (`EventType` StrEnum, `events.py:46`). Complete list:
+  event (`events.py:401`).
+- 51 event types (`EventType` StrEnum, `events.py:47`). Complete list:
 
 ```
-RUN_STARTED, RUN_COMPLETED, RUN_ABORTED, TASK_UPDATED, TOOL_CALLED,
-TOOL_COMPLETED, TOOL_FAILED, DECISION_CREATED, DECISION_INVALIDATED,
-EVIDENCE_ADDED, FINDING_ADDED, FINDING_INVALIDATED, WORK_ADDED,
-WORK_COMPLETED, DEPENDENCY_DECLARED, APPROVAL_REQUESTED, APPROVAL_GRANTED,
-APPROVAL_REVOKED, MODEL_CHANGED, MODEL_ASSUMPTION_RECORDED,
-STATE_CHECKPOINTED, STATE_VALIDATED, ENVIRONMENT_CHANGED, RECOVERY_STARTED,
-RECOVERY_COMPLETED, RECOVERY_BLOCKED, ACTION_RECORDED, ACTION_RECONCILED,
-ACTION_COMPENSATED
+RUN_STARTED, RUN_COMPLETED, RUN_ABORTED, TASK_UPDATED,
+RUN_FORKED, RUN_RESTORED, RUN_MERGED, TOOL_CALLED,
+TOOL_COMPLETED, TOOL_FAILED, DECISION_CREATED,
+DECISION_INVALIDATED, EVIDENCE_ADDED, FINDING_ADDED,
+FINDING_INVALIDATED, WORK_ADDED, WORK_COMPLETED,
+DEPENDENCY_DECLARED, CONSTRAINT_PINNED, CONSTRAINT_RETRACTED,
+APPROVAL_REQUESTED, APPROVAL_GRANTED, APPROVAL_REVOKED,
+MODEL_CHANGED, MODEL_ASSUMPTION_RECORDED, STATE_CHECKPOINTED,
+STATE_VALIDATED, ENVIRONMENT_CHANGED, RECOVERY_STARTED,
+RECOVERY_COMPLETED, RECOVERY_BLOCKED, REVIEW_CONFIRMED,
+REASONING_SUMMARY, EVENT_LOG_ANCHORED, PERCEPTION_OBSERVED,
+BRANCH_RESOLVED, ACTION_RECORDED, ACTION_RECONCILED,
+ACTION_COMPENSATED, GRANT_DENIED, LIVENESS_SILENCE_DETECTED,
+LIVENESS_RECOVERED, RISK_OBSERVED, AUTHORITY_CONSUMED,
+AUTHORITY_RECONCILED, ATTEMPT_LESSON, TRAJECTORY_REPORT,
+PLAN_UPSERT, MEMORY_TOMBSTONED, NOTIFICATION_SENT,
+NOTIFICATION_FAILED
 ```
 
 ---
@@ -324,7 +333,7 @@ Vertical, tiered. Group boxes by the tiers in section 1.
   - Row 2: State Engine, Checkpoint Manager, Environment
   - Row 3: Validator, Recovery Engine, Security
   - Pill at top-right of the SDK container:
-    "MCP server: deny by default, 12 tools (3 read-only, 9 mutating)".
+    "MCP server: deny by default, 13 tools (3 read-only, 10 mutating)".
 - Fourth tier: two boxes side by side: "Durable Storage (SQLite, WAL)" and
   "External Systems (GitHub, email, APIs)".
 - Bottom tier: one centered box "Resume (bounded recovery context)".

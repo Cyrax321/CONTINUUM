@@ -11,8 +11,10 @@ from __future__ import annotations
 import io
 import json
 import sqlite3
+import threading
 from collections.abc import Iterator
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -22,6 +24,7 @@ from continuum.events import EventType
 from continuum.models import Action, ActionStatus, Run, UnknownSideEffect
 from continuum.storage import SQLiteStorage
 from continuum.storage.migrations import SCHEMA_VERSION
+from continuum.storage.postgres import PostgresStorage
 
 
 @pytest.fixture
@@ -396,3 +399,45 @@ def test_postgres_canonical_index_rows_skips_malformed_json() -> None:
     canonical = store._canonical_index_rows()
     assert "k1" in canonical
     assert canonical["k1"][1] == 1
+
+
+def test_postgres_rebuild_action_index_reports_corrected_count() -> None:
+    """PostgresStorage.rebuild_action_index must return the number of corrected rows (issue #1267)."""
+    store = object.__new__(PostgresStorage)
+    store._lock = threading.RLock()
+
+    # Canonical fold has two keys:
+    # "k1": updated_seq 1, status "completed"
+    # "k2": updated_seq 2, status "started" (missing from index)
+    canonical = {
+        "k1": (("k1", "run1", "a1", "completed", "{}"), 1),
+        "k2": (("k2", "run1", "a2", "started", "{}"), 2),
+    }
+    store._canonical_index_rows = lambda: canonical  # type: ignore[method-assign]
+
+    # Stored action_index before rebuild:
+    # "k1": updated_seq 1, status "started" (stale/changed status)
+    # "k_spurious": updated_seq 99, status "started" (spurious row, not in canonical)
+    # Total corrections:
+    # - "k1": status changed from started to completed (+1)
+    # - "k2": missing from stored (+1)
+    # - "k_spurious": spurious row deleted (+1)
+    # Total expected: 3
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    mock_conn.execute.return_value.fetchall.return_value = [
+        {"key": "k1", "updated_seq": 1, "status": "started"},
+        {"key": "k_spurious", "updated_seq": 99, "status": "started"},
+    ]
+    store._connection = mock_conn
+
+    corrected = store.rebuild_action_index()
+    assert corrected == 3
+
+    # Rebuild when already consistent reports 0 corrections.
+    mock_conn.execute.return_value.fetchall.return_value = [
+        {"key": "k1", "updated_seq": 1, "status": "completed"},
+        {"key": "k2", "updated_seq": 2, "status": "started"},
+    ]
+    assert store.rebuild_action_index() == 0
