@@ -83,6 +83,18 @@ matters for the same reason `CONTINUUM_MCP_CONFIRM_TOKEN` does: the receiver
 must be able to trust that the notification came from CONTINUUM and was not
 forged by the very agent being reported on.
 
+The secret comes from either of two places. A per-endpoint `secret` string in
+the webhook registry wins when it is present; otherwise `CONTINUUM_WEBHOOK_SECRET`
+is the default signing secret for every endpoint that does not declare one:
+
+```bash
+export CONTINUUM_WEBHOOK_SECRET="$(openssl rand -hex 32)"
+```
+
+Set neither and the wire format is the plain JSON POST above -- the signature
+header is simply absent, which is what an endpoint opting out of verification
+sees.
+
 ## Verify the wiring
 
 `continuum notify-test` posts a test payload to every configured endpoint -

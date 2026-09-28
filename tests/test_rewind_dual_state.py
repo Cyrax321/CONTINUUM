@@ -7,6 +7,9 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
+from continuum.checkpoint.rewind import RewindError, resolve_checkpoint, rewind_to_checkpoint
 from continuum.cli import main
 from continuum.cli.exitcodes import ExitCode
 from continuum.events import EventType
@@ -246,3 +249,90 @@ def test_docs_updated() -> None:
     cli = (root / "references/cli.md").read_text(encoding="utf-8")
     assert "rewind" in arch.lower()
     assert "rewind" in cli.lower()
+
+
+def test_rewind_unknown_checkpoint_raises_rewind_error(tmp_path: Path) -> None:
+    db = str(tmp_path / "rewind.db")
+    run_id = "run_unknown_cp"
+    storage = SQLiteStorage(db)
+    storage.create_run(Run(run_id=run_id, goal="unknown cp"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+
+    with pytest.raises(RewindError, match=r"no checkpoint 'nonexistent' for run 'run_unknown_cp'"):
+        resolve_checkpoint(storage, run_id, "nonexistent")
+
+    with pytest.raises(RewindError, match=r"no checkpoint 'nonexistent' for run 'run_unknown_cp'"):
+        rewind_to_checkpoint(storage, run_id, "nonexistent")
+    storage.close()
+
+
+def test_rewind_conflicts_without_force_raises_rewind_error(tmp_path: Path) -> None:
+    db = str(tmp_path / "rewind.db")
+    run_id = "run_conflict_raise"
+    storage = SQLiteStorage(db)
+    storage.create_run(Run(run_id=run_id, goal="conflict raise"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "conflict raise"})
+
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    file_a = workdir / "a.txt"
+    file_a.write_text("base content", encoding="utf-8")
+    from continuum.clienthooks import observe_event_payload
+    from continuum.environment.file_snapshot import snapshot_file
+
+    payload_a = observe_event_payload(
+        {"tool_name": "Write", "tool_input": {"file_path": str(file_a)}}
+    )
+    snapshot_file(file_a, sha256=payload_a.get("sha256"))
+    storage.append_event(run_id, EventType.TOOL_COMPLETED, payload_a)
+
+    from continuum.checkpoint.manager import CheckpointManager
+
+    cp = CheckpointManager(storage).checkpoint(run_id)
+
+    file_a.write_text("modified after cp", encoding="utf-8")
+    payload_a2 = observe_event_payload(
+        {"tool_name": "Edit", "tool_input": {"file_path": str(file_a)}}
+    )
+    snapshot_file(file_a, sha256=payload_a2.get("sha256"))
+    storage.append_event(run_id, EventType.TOOL_COMPLETED, payload_a2)
+
+    # External tamper causing digest mismatch
+    file_a.write_text("external tamper", encoding="utf-8")
+
+    # Without force: raises RewindError
+    with pytest.raises(RewindError, match="conflict"):
+        rewind_to_checkpoint(storage, run_id, cp.checkpoint_id, force=False)
+
+    # With force: succeeds without raising RewindError
+    result = rewind_to_checkpoint(storage, run_id, cp.checkpoint_id, force=True)
+    assert len(result.conflicts) > 0
+    assert not result.ok
+    storage.close()
+
+
+def test_rewind_precondition_unexpected_error_raises_rewind_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = str(tmp_path / "rewind.db")
+    run_id = "run_precondition_err"
+    storage = SQLiteStorage(db)
+    storage.create_run(Run(run_id=run_id, goal="precondition err"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+
+    from continuum.checkpoint.manager import CheckpointManager
+
+    cp = CheckpointManager(storage).checkpoint(run_id)
+
+    import continuum.recovery.gate as gate_mod
+
+    def _broken_preconditions(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("simulated gate precondition failure")
+
+    monkeypatch.setattr(gate_mod, "check_preconditions", _broken_preconditions)
+
+    with pytest.raises(RewindError, match="simulated gate precondition failure") as exc_info:
+        rewind_to_checkpoint(storage, run_id, cp.checkpoint_id)
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    storage.close()

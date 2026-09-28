@@ -29,7 +29,6 @@ from continuum.models import utcnow
 
 __all__ = [
     "DEFAULT_TTL",
-    "LeaseError",
     "LeaseCoordinator",
     "InMemoryLeaseCoordinator",
     "SQLiteLeaseCoordinator",
@@ -42,10 +41,6 @@ DEFAULT_TTL = timedelta(seconds=60)
 #: A clock returning the current UTC time. Injectable so tests control expiry
 #: without sleeping.
 LeaseClock = Callable[[], datetime]
-
-
-class LeaseError(RuntimeError):
-    """A lease operation could not be completed."""
 
 
 def _to_epoch(when: datetime) -> float:

@@ -24,12 +24,13 @@ of raising.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from continuum.events import EventType
+from continuum.events import Event, EventType
 from continuum.models import RecoveryContract, utcnow
 from continuum.recovery.notify import post_webhook
 from continuum.security.hashing import stable_hash
@@ -217,21 +218,31 @@ class DeliveryRecord:
 
 
 def _within_dedup_window(
-    storage: Storage,
-    run_id: str,
+    history: Sequence[Event],
     endpoint: WebhookEndpoint,
     key: str,
     now: datetime,
 ) -> bool:
     """Whether this exact verdict was already delivered to ``endpoint`` recently.
 
+    Takes the already-merged full history, not the storage: ``notify_blocked``
+    serves every subscribed endpoint out of one read, and re-reading the
+    archive per endpoint re-deserializes a long compacted run N times on the
+    CLI critical path.
+
     Both SENT and FAILED rows count: a notification that did not get through
     still consumed the attempt, and re-firing it every minute against a dead
     receiver is the spam the dedup exists to prevent. The operator discovers
     the dead letter by polling the log, the same way they discovered the
     blockage before #305.
+
+    The history must include the archived prefix: the NOTIFICATION_SENT row
+    can predate a compaction (issue #1186). Compacting a long blocked run is
+    exactly what the docs prescribe for it, and archived rows keep their
+    original timestamps, so the window itself is unaffected by the archived
+    prefix, only the scan has to look there.
     """
-    for event in storage.read_events(run_id):
+    for event in history:
         if event.type not in (EventType.NOTIFICATION_SENT, EventType.NOTIFICATION_FAILED):
             continue
         payload = event.payload
@@ -271,9 +282,12 @@ def notify_blocked(
         return []
     now = now or utcnow()
     key = verdict_key(mode, contract)
+    # One archive-aware read serves every endpoint; re-reading per endpoint
+    # would re-deserialise a long compacted run once per subscription.
+    history = storage.read_all_events(run_id)
     records: list[DeliveryRecord] = []
     for endpoint in endpoints:
-        if _within_dedup_window(storage, run_id, endpoint, key, now):
+        if _within_dedup_window(history, endpoint, key, now):
             records.append(
                 DeliveryRecord(
                     url=endpoint.url,

@@ -7,13 +7,11 @@ from continuum.concurrency.lease import (
     DEFAULT_TTL,
     InMemoryLeaseCoordinator,
     LeaseCoordinator,
-    LeaseError,
     SQLiteLeaseCoordinator,
 )
 
 __all__ = [
     "DEFAULT_TTL",
-    "LeaseError",
     "LeaseCoordinator",
     "InMemoryLeaseCoordinator",
     "SQLiteLeaseCoordinator",

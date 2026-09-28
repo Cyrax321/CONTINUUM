@@ -12,6 +12,8 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from benchmarks.fault_injection.emitter import emit_fault_injection_report
 from benchmarks.fault_injection.faults import CI_FAULTS, FAULT_CLASSES
 from benchmarks.fault_injection.runner import (
@@ -128,3 +130,83 @@ def test_fault_corpus_has_expected_classes() -> None:
     all_names = {f.name for f in FAULT_CLASSES}
     assert "dropped_constraint" in all_names
     assert "laundered_lesson" in all_names
+
+
+def test_emitter_rate_is_order_independent() -> None:
+    """The published suite rate must not depend on result order (#1061).
+
+    The emitter used to read the suite-level rate off ``results[0]`` on the
+    premise that every result carries the same aggregates. That is false: the
+    clean control scenario reports only its own false-positive rate, so a
+    control placed first published a detection rate of ``0`` for a suite that
+    detected every fault. The rate is now the mean over the scenarios that
+    reported it, so a reorder changes nothing.
+    """
+    import os
+    import tempfile
+
+    report = run_benchmark_suite()
+    # The premise the old code relied on: the control measures no detection.
+    control = next(r for r in report.results if r.scenario == "fault_control_clean")
+    assert "detection_rate" not in control.metrics
+
+    def published(rep):
+        out = os.path.join(tempfile.mkdtemp(), "fi")
+        json_path, _ = emit_fault_injection_report(rep, out)
+        return json.loads(Path(json_path).read_text())["summary"]["detection_rate"]
+
+    baseline = published(report)
+    assert baseline == 1.0
+    # Rotate every result through the front; any dependence on results[0]
+    # surfaces as a change in the published figure.
+    for _ in range(len(report.results)):
+        report.results.append(report.results.pop(0))
+        assert published(report) == baseline
+
+
+def test_published_detection_rate_reads_the_results_not_a_summary_default() -> None:
+    """The README bench line reports the suite's real rates (#1060).
+
+    ``BenchmarkReport.summary()`` counts outcomes only -- it never returns
+    ``detection_rate`` or ``unsafe_resume_rate`` -- so reading them off it
+    silently rendered a detection rate of ``0`` for a suite that detects every
+    fault, in both ``README.md`` and ``references/bench.md``. The renderer now
+    averages the rates the scenarios actually carry, like the horizon columns
+    do, so this is the guard that the published number can never fall back to
+    the default again.
+    """
+    from benchmarks.run import _mean_rate
+
+    report = run_benchmark_suite()
+    # The reason the old read returned 0: the key is not on summary() at all.
+    assert "detection_rate" not in report.summary()
+    # The clean control carries only its own false-positive rate, so it must
+    # stay out of the detection average rather than counting as a zero.
+    control = report.results[-1]
+    assert "detection_rate" not in control.metrics
+    assert _mean_rate(report.results, "detection_rate") == 1.0
+    assert _mean_rate(report.results, "unsafe_resume_rate") == 0.0
+    # A scenario set that reports nothing still answers 0 rather than raising.
+    assert _mean_rate([], "detection_rate") == 0
+
+
+@pytest.mark.slow
+def test_published_bench_line_carries_the_real_detection_rate() -> None:
+    """The rendered bench table line matches the suite's own summary figures."""
+    from benchmarks.horizon.runner import run_horizon_suite
+    from benchmarks.run import _bench_table_lines
+
+    report = run_benchmark_suite()
+    _, suite_summary = run_fault_injection_suite()
+    line = next(
+        line
+        for line in _bench_table_lines(run_horizon_suite(), report)
+        if line.startswith("Fault-injection:")
+    )
+    assert "detection 1.0" in line, line
+    assert "unsafe 0.0" in line, line
+    assert f"{len(report.results)} scenarios" in line
+    # The published rates must agree with the suite's own summary, not just
+    # happen to look right.
+    assert suite_summary["detection_rate"] == 1.0
+    assert suite_summary["unsafe_resume_rate"] == 0.0

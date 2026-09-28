@@ -11,6 +11,7 @@ from continuum.models import RecoveryContract, RecoverySafety
 from continuum.recovery import (
     FileLedgerBackend,
     LedgerEntryKind,
+    LedgerLockError,
     MemoryLedgerBackend,
     RecoveryLedger,
 )
@@ -217,3 +218,52 @@ def test_append_under_cross_process_lock() -> None:
     ledger = RecoveryLedger(MemoryLedgerBackend(), lock=InMemoryLeaseCoordinator())
     ledger.append_decision("run_1", _contract())
     assert len(ledger.entries("run_1")) == 1
+
+
+def test_ledger_lock_contention_raises_ledger_lock_error() -> None:
+    coord = InMemoryLeaseCoordinator()
+    # Lease already held by another entity
+    assert coord.acquire("run_1", "other_holder") is True
+
+    ledger = RecoveryLedger(MemoryLedgerBackend(), lock=coord)
+
+    with pytest.raises(LedgerLockError, match=r"could not acquire ledger lock for run 'run_1'"):
+        ledger.append_decision("run_1", _contract())
+
+    with pytest.raises(LedgerLockError, match=r"could not acquire ledger lock for run 'run_1'"):
+        ledger.record_attempt("run_1")
+
+    with pytest.raises(LedgerLockError, match=r"could not acquire ledger lock for run 'run_1'"):
+        ledger.record_gate("run_1", "approved")
+
+    with pytest.raises(LedgerLockError, match=r"could not acquire ledger lock for run 'run_1'"):
+        ledger.compact("run_1")
+
+    # Once released, operations succeed
+    coord.release("run_1", "other_holder")
+    entry = ledger.append_decision("run_1", _contract())
+    assert entry.sequence == 0
+    assert ledger.record_attempt("run_1") == 1
+    gate_entry = ledger.record_gate("run_1", "approved")
+    assert gate_entry.gate == "approved"
+
+
+def test_ledger_lock_stub_refusal_raises_ledger_lock_error() -> None:
+    class ContestedLeaseStub:
+        def acquire(self, run_id: str, holder_id: str, ttl: object = None) -> bool:
+            return False
+
+        def release(self, run_id: str, holder_id: str) -> None:
+            pass
+
+    ledger = RecoveryLedger(MemoryLedgerBackend(), lock=ContestedLeaseStub())  # type: ignore[arg-type]
+
+    with pytest.raises(
+        LedgerLockError, match=r"could not acquire ledger lock for run 'run_contested'"
+    ):
+        ledger.append_decision("run_contested", _contract())
+
+    with pytest.raises(
+        LedgerLockError, match=r"could not acquire ledger lock for run 'run_contested'"
+    ):
+        ledger.record_attempt("run_contested")
