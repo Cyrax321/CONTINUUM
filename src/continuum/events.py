@@ -398,7 +398,13 @@ class EventLog:
 
     # -- integrity -------------------------------------------------------- #
 
-    def verify(self, run_id: str | None = None, *, max_violations: int = 1000) -> IntegrityReport:
+    def verify(
+        self,
+        run_id: str | None = None,
+        *,
+        max_violations: int = 1000,
+        deep: bool = False,
+    ) -> IntegrityReport:
         """Recompute every digest and re-walk the chain(s).
 
         The walk propagates the *recomputed* digest rather than the stored one,
