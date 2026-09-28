@@ -8,6 +8,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A compensated or reconciled-away completion is no longer counted as a live
+  depended result (#1505).** The edit gate folds the action-event stream to
+  build the set of completed side-effects a surviving step still depends on,
+  in `_collect_completions` (the cross-run merge path) and the restore branch
+  of `_filtered_depended_for_edit`. Both kept the first `COMPLETED` entry for a
+  ledger key: a later `ACTION_COMPENSATED` or `ACTION_RECONCILED` with
+  `occurred=False`, which flips the action to `COMPENSATED` or `FAILED`, hit a
+  bare `continue` and left the stale entry behind. An effect that had been
+  undone or confirmed absent was therefore still treated as live, so a merge
+  or restore that stranded nothing was refused outright. Both folds now pop the
+  key on any non-completed record, making them newest-status-wins like the
+  canonical `derive()` they were written to mirror. This is reachable through
+  the ordinary `ledger.reconcile(key, occurred=False)` surface, not only
+  through compensate.
+
 - **`DependencyGraph.impacted_by` now cascades taint along finding-to-finding
   citation edges to a fixpoint (#1475).** Findings may cite other findings
   (blessed by `SemanticState.dangling_evidence`), and `StateValidator._propagate`

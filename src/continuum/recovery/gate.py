@@ -293,7 +293,13 @@ def _filtered_depended_for_edit(
             action = Action.model_validate(event.payload["action"])
         except Exception:
             continue
+        # Newest status wins, mirroring the canonical fold in derive(): a
+        # later record for the same key that flips the action out of
+        # COMPLETED (a compensation, or a reconcile that confirmed the effect
+        # never happened) must drop the earlier entry, instead of leaving a
+        # completion that no longer exists counted as a live depended result.
         if action.status is not ActionStatus.COMPLETED:
+            completions.pop(str(raw_key), None)
             continue
         from continuum.recovery.preconditions import DependedResult
 
@@ -392,7 +398,13 @@ def _collect_completions(storage: Storage, run_id: str, anchor: int, head: int) 
             action = Action.model_validate(event.payload["action"])
         except Exception:
             continue
+        # Newest status wins, mirroring the canonical fold in derive(): a
+        # later record for the same key that flips the action out of
+        # COMPLETED (a compensation, or a reconcile that confirmed the effect
+        # never happened) must drop the earlier entry, instead of leaving a
+        # completion that no longer exists counted as a live depended result.
         if action.status is not ActionStatus.COMPLETED:
+            completions.pop(str(raw_key), None)
             continue
         from continuum.recovery.preconditions import DependedResult
 
