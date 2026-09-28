@@ -222,3 +222,90 @@ def test_property_random_ordering_deterministic(tmp_path: Path) -> None:
     assert [p.step_id for p in state2.plan] == ["u1", "u2"]
     storage.close()
     storage2.close()
+
+
+def test_record_plan_on_compacted_run(tmp_path: Path) -> None:
+    """record-plan must succeed on a compacted run (issue #1438).
+
+    Compaction archives the pre-anchor prefix of the log, including RUN_STARTED.
+    cmd_record_plan reads full event history so both the preflight projection
+    and the post-append state calculation find RUN_STARTED and succeed.
+    """
+    import io
+
+    from continuum.cli import main
+    from continuum.cli.exitcodes import ExitCode
+
+    db = str(tmp_path / "compacted_plan.db")
+    storage = SQLiteStorage(db)
+    storage.create_run(Run(run_id="run_compacted", goal="long running task"))
+    storage.append_event(
+        "run_compacted",
+        EventType.RUN_STARTED,
+        {"goal": "long running task"},
+        source=Origin.HUMAN,
+    )
+    storage.append_event(
+        "run_compacted",
+        EventType.WORK_ADDED,
+        {"task_id": "w1", "description": "phase 1"},
+        source=Origin.HUMAN,
+    )
+    storage.compact_run("run_compacted")
+    storage.close()
+
+    plan_units = [{"id": "u1", "title": "step 1", "status": "pending", "depends_on": []}]
+    out, err = io.StringIO(), io.StringIO()
+    code = main(
+        [
+            "--db",
+            db,
+            "record-plan",
+            "run_compacted",
+            "--plan-id",
+            "plan_1",
+            "--units",
+            json.dumps(plan_units),
+        ],
+        out=out,
+        err=err,
+    )
+    assert code == ExitCode.OK, err.getvalue()
+    assert "Plan 'plan_1' upserted 1 unit(s)" in out.getvalue()
+
+    out_inspect, err_inspect = io.StringIO(), io.StringIO()
+    code_inspect = main(
+        ["--db", db, "--json", "inspect", "run_compacted"],
+        out=out_inspect,
+        err=err_inspect,
+    )
+    assert code_inspect == ExitCode.OK, err_inspect.getvalue()
+    data = json.loads(out_inspect.getvalue())
+    assert len(data.get("plan", [])) == 1
+    assert data["plan"][0]["step_id"] == "u1"
+    assert data["plan"][0]["description"] == "step 1"
+
+    out_json, err_json = io.StringIO(), io.StringIO()
+    code_json = main(
+        [
+            "--db",
+            db,
+            "--json",
+            "record-plan",
+            "run_compacted",
+            "--plan-id",
+            "plan_1",
+            "--units",
+            json.dumps(
+                [{"id": "u2", "title": "step 2", "status": "pending", "depends_on": ["u1"]}]
+            ),
+        ],
+        out=out_json,
+        err=err_json,
+    )
+    assert code_json == ExitCode.OK, err_json.getvalue()
+    result = json.loads(out_json.getvalue())
+    assert result["run_id"] == "run_compacted"
+    assert result["plan_id"] == "plan_1"
+    assert len(result["plan"]) == 2
+    assert [p["id"] for p in result["plan"]] == ["u1", "u2"]

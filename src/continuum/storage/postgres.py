@@ -696,9 +696,21 @@ class PostgresStorage(Storage):
             ) from exc
 
     def rebuild_action_index(self) -> int:
-        """Recompute the whole index from the log (global key space)."""
+        """Recompute the whole index from the log; returns corrected rows.
+
+        Always global by design: keys live in one store-wide namespace, so a
+        per-run rewrite could collide with another run's legitimate row of
+        the same key. A correction is any key whose stored row was missing,
+        stale or spurious.
+        """
         canonical = self._canonical_index_rows()
         with self._write():
+            before = {
+                r["key"]: (int(r["updated_seq"]), r["status"])
+                for r in self._connection.execute(
+                    "SELECT key, updated_seq, status FROM action_index"
+                ).fetchall()
+            }
             self._connection.execute("DELETE FROM action_index")
             # psycopg's Connection has no executemany; the cursor does.
             with self._connection.cursor() as cur:
@@ -710,7 +722,13 @@ class PostgresStorage(Storage):
                         for key, (entry, seq) in canonical.items()
                     ],
                 )
-        return 0
+        corrections = sum(
+            1
+            for k, val in ((k, (seq, entry[3])) for k, (entry, seq) in canonical.items())
+            if before.get(k) != val
+        )
+        corrections += len(set(before) - set(canonical))
+        return corrections
 
     def action_index_drift(self) -> int:
         """Count index rows that disagree with the log. Read-only.
@@ -736,13 +754,27 @@ class PostgresStorage(Storage):
     def _canonical_index_rows(self) -> dict[str, tuple[tuple[str, str, str, str, str], int]]:
         """Fold every run's action events; global last-write-per-key wins.
 
-        Compacted history (#239) folds too, archive first and live second:
-        everything in ``events_archive`` predates every live row of its run,
-        so folding the two tables in one shared stream would let an archived
-        action claimed long ago outrank a newer live write of the same key
-        (they number their rows independently). Archived rows receive
-        negative order positions below every possible live value, oldest
-        first, so last-write-per-key stays true after compaction.
+        The order value is not a position in the row stream -- it has to be
+        the same number :meth:`_maintain_action_index` stored, or
+        :meth:`action_index_drift` compares two unrelated figures and reports
+        a dirty index on a healthy store (#1321). That number comes from
+        ``action_index_ord_seq``, which advances once per action event and
+        nothing else, so the fold reaches it by counting action events only,
+        1-based: a non-action row consumes no ``nextval`` and moves no
+        position. Counting every row instead -- RUN_STARTED, TOOL_CALLED,
+        EVIDENCE_ADDED all sit between actions in an ordinary run -- made the
+        fold read one higher per intervening non-action event than the
+        incremental writer ever wrote.
+
+        Compacted history (#239) folds too, archive first and live second.
+        Within a run the archived prefix genuinely predates the live tail, so
+        a key written in both places keeps its live value, and because the
+        count is now the true global action-event number an archived write
+        can no longer outrank the same run's later live one. Across runs the
+        archive-first merge is still not insertion order -- that is #1322,
+        which makes a store read dirty after one run is compacted while
+        another holds actions. It was not reachable before only because the
+        dense scheme was already wrong on every store.
         """
         with self._read():
             archived = self._connection.execute(
@@ -752,14 +784,16 @@ class PostgresStorage(Storage):
                 "SELECT type, payload FROM events ORDER BY ctid"
             ).fetchall()
         canonical: dict[str, tuple[tuple[str, str, str, str, str], int]] = {}
-        offset = len(archived)
-        for i, row in enumerate([*archived, *rows]):
+        order = 0
+        for row in [*archived, *rows]:
             payload = (
                 row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
             )
             entry = index_entry_from_payload(EventType(row["type"]), payload)
-            if entry is not None:
-                canonical[entry[0]] = (entry, i if i >= offset else i - offset)
+            if entry is None:
+                continue  # consumed no nextval, so it advances no position
+            order += 1
+            canonical[entry[0]] = (entry, order)
         return canonical
 
     @staticmethod
