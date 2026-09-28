@@ -24,6 +24,8 @@ one. Nothing is excluded by default.
 from __future__ import annotations
 
 import os
+import posixpath
+import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -57,17 +59,66 @@ def _strip_volatile(arguments: Mapping[str, Any], volatile: Iterable[str]) -> di
     return {k: v for k, v in arguments.items() if k not in excluded}
 
 
+_REGEX_ESCAPE_RE = re.compile(
+    r"\\[.^$*+?{}[\]()|]"  # escaped regex metacharacters (\., \+, \*, \?, etc.)
+    r"|\\[dDwWsSbB](?![a-zA-Z0-9_])"  # shorthand classes not part of an identifier
+    r"|\\[0-9]+"  # backreferences
+)
+
+
+def _is_windows_path(value: str) -> bool:
+    """Return True if value looks like a Windows filesystem path."""
+    if "://" in value:
+        return False
+    # Windows drive letter (e.g. C:\foo, C:/foo)
+    if (
+        len(value) >= 2
+        and value[0].isalpha()
+        and value[1] == ":"
+        and (len(value) == 2 or value[2] in ("\\", "/"))
+    ):
+        return True
+    # UNC prefix (e.g. \\server\share)
+    if value.startswith(r"\\"):
+        return True
+    # If the string contains forward slash, it is a POSIX path; any backslash
+    # is a character in a POSIX filename (e.g. foo/bar\baz).
+    if "/" in value:
+        return False
+    # Must have at least one backslash
+    if "\\" not in value:
+        return False
+    # Check for characters illegal in Windows filesystem paths or regex escapes
+    if any(c in value for c in '*?[]|<>"'):
+        return False
+    if _REGEX_ESCAPE_RE.search(value):
+        return False
+    # Explicit Windows relative prefix (.\ or ..\)
+    if value.startswith((".\\", "..\\")):
+        return True
+    # A single backslash without drive or UNC (e.g. foo\bar) is a POSIX filename
+    # containing a backslash; Windows paths with no drive letter have multiple
+    # directory separators (e.g. data\output\report.txt).
+    return value.count("\\") >= 2
+
+
 def _canonicalize_paths(value: Any) -> Any:
     """Normalize path-like strings so equivalent spellings hash identically.
 
     Only values that look like local filesystem paths are touched (they contain
     a separator and are not URLs), and normalization is purely lexical
-    (``normpath`` plus ``~`` expansion). It never resolves against the process
-    working directory, so the result is deterministic on any machine.
+    (``posixpath.normpath`` plus ``~`` expansion). It never resolves against
+    the process working directory, and normalizes separators to forward slashes
+    so the result is deterministic across platforms. Backslashes in POSIX filenames
+    and regex-like strings are preserved.
     """
     if isinstance(value, str):
-        if "://" not in value and ("/" in value or "\\" in value):
-            return os.path.normpath(os.path.expanduser(value))
+        if "://" not in value:
+            if _is_windows_path(value):
+                expanded = os.path.expanduser(value.replace("\\", "/")).replace("\\", "/")
+                return posixpath.normpath(expanded)
+            if "/" in value:
+                return posixpath.normpath(os.path.expanduser(value))
         return value
     if isinstance(value, Mapping):
         return {k: _canonicalize_paths(v) for k, v in value.items()}
@@ -318,8 +369,12 @@ def identity_tokens(
             tokens.add(str(value))
         elif isinstance(value, str):
             tokens.add(value)
-            base = os.path.basename(value.rstrip("/\\"))
-            stem, _ = os.path.splitext(base)
+            if _is_windows_path(value):
+                sanitized = value.rstrip("/\\").replace("\\", "/")
+            else:
+                sanitized = value.rstrip("/")
+            base = posixpath.basename(sanitized)
+            stem, _ = posixpath.splitext(base)
             if base != value:
                 tokens.add(base)
             if stem and stem != base:
@@ -376,7 +431,12 @@ def _segments(path: str) -> list[str]:
     compared was written by whatever machine recorded the action and need not
     match the one reading it.
     """
-    normalized = os.path.normpath(os.path.expanduser(path)).replace("\\", "/")
+    if _is_windows_path(path):
+        normalized = posixpath.normpath(
+            os.path.expanduser(path.replace("\\", "/")).replace("\\", "/")
+        )
+    else:
+        normalized = posixpath.normpath(os.path.expanduser(path))
     return [segment for segment in normalized.split("/") if segment not in ("", ".")]
 
 

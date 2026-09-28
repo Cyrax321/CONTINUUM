@@ -37,6 +37,7 @@ import continuum.gate as gate
 import continuum.hooks as hooks
 import continuum.models as continuum_models
 import continuum.pinning as pinning
+import continuum.plugins.reconcile as plugins_reconcile
 import continuum.plugins.registry as plugins_registry
 import continuum.reconcilers as reconcilers
 import continuum.recovery.cleanup as recovery_cleanup
@@ -101,6 +102,7 @@ _LEAF_MODULES_WITH_COMPLETE_ALL = [
     phase6_scenarios,
     dashboard_app,
     hooks,
+    plugins_reconcile,
     plugins_registry,
     recovery_cleanup,
     recovery_impact,

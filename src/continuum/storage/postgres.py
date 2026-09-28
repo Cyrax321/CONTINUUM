@@ -27,11 +27,14 @@ so it runs for real in CI against a Postgres service.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
+from continuum.environment.snapshot import EnvironmentSnapshot
 from continuum.events import CAUSED_BY_TYPES, Event, EventType, IntegrityReport, IntegrityViolation
 from continuum.models import (
     Action,
@@ -51,6 +54,12 @@ from continuum.storage.base import (
     CorruptedRecord,
     RunNotFound,
     Storage,
+)
+from continuum.storage.blob import (
+    get_payload_offload_threshold,
+    is_offload_descriptor,
+    load_blob_payload,
+    maybe_offload_payload,
 )
 
 __all__ = [
@@ -185,7 +194,14 @@ class PostgresStorage(Storage):
     supports_action_index = True
     supports_compaction = True
 
-    def __init__(self, url: str | Any, *, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        url: str | Any,
+        *,
+        timeout: float = 30.0,
+        storage_dir: str | Path | None = None,
+        payload_offload_bytes: int | None = None,
+    ) -> None:
         psycopg = _require_psycopg()
         self._psycopg = psycopg
         from psycopg.rows import dict_row
@@ -197,9 +213,29 @@ class PostgresStorage(Storage):
             )
         except Exception as exc:  # connection refused, auth, missing driver, etc.
             raise RuntimeError(f"could not connect to PostgreSQL at {dsn!r}: {exc}") from exc
+        self._storage_dir = Path(storage_dir) if storage_dir is not None else None
+        self._payload_offload_bytes = (
+            max(int(payload_offload_bytes), 0) if payload_offload_bytes is not None else None
+        )
         self._lock = threading.RLock()
         self._configure()
         self._create_schema()
+
+    @property
+    def storage_dir(self) -> Path:
+        """Directory used for auxiliary files (such as blobs)."""
+        if self._storage_dir is not None:
+            return self._storage_dir
+        if os.environ.get("CONTINUUM_STORAGE_DIR"):
+            return Path(os.environ["CONTINUUM_STORAGE_DIR"])
+        return Path(".continuum")
+
+    @property
+    def payload_offload_bytes(self) -> int:
+        """Payload offload threshold in bytes (0 = disabled)."""
+        if self._payload_offload_bytes is not None:
+            return self._payload_offload_bytes
+        return get_payload_offload_threshold()
 
     @staticmethod
     def _normalize_dsn(url: str) -> str:
@@ -471,18 +507,27 @@ class PostgresStorage(Storage):
                 f"run {run_id!r} is at sequence {current}, caller expected {expected_sequence}"
             )
 
+        raw_payload = payload
+        effective_payload: Mapping[str, Any] = dict(payload or {})
+        if self.payload_offload_bytes > 0:
+            effective_payload, _ = maybe_offload_payload(
+                effective_payload,
+                storage_dir=self.storage_dir,
+                threshold=self.payload_offload_bytes,
+            )
+
         event = Event(
             event_id=make_id("event"),
             run_id=run_id,
             sequence=current + 1,
             type=type,
             timestamp=utcnow(),
-            payload=dict(payload or {}),
+            payload=effective_payload,
             causer_event_id=causer_event_id,
             source=source,
             prev_hash=head["hash"] if head else None,
         ).sealed()
-        self._insert_event(event)
+        self._insert_event(event, raw_payload=raw_payload)
         return event
 
     def append_sealed(self, event: Event) -> Event:
@@ -534,7 +579,7 @@ class PostgresStorage(Storage):
             self._insert_event(event)
         return event
 
-    def _insert_event(self, event: Event) -> None:
+    def _insert_event(self, event: Event, raw_payload: Mapping[str, Any] | None = None) -> None:
         try:
             self._connection.execute(
                 "INSERT INTO events(run_id, sequence, event_id, type, timestamp, payload, "
@@ -557,15 +602,18 @@ class PostgresStorage(Storage):
             raise ConcurrentWriteError(
                 f"run {event.run_id!r} sequence {event.sequence} was taken by another writer"
             ) from exc
-        self._maintain_action_index(event)
+        self._maintain_action_index(event, payload=raw_payload)
 
-    def _maintain_action_index(self, event: Event) -> None:
+    def _maintain_action_index(
+        self, event: Event, payload: Mapping[str, Any] | None = None
+    ) -> None:
         """Upsert the projection row for an ACTION_* event, same txn (#216).
 
         updated_seq comes from a sequence so recency is global insertion
         order, matching the global last-write-per-key fold.
         """
-        entry = index_entry_from_payload(event.type, dict(event.payload))
+        target_payload = dict(payload if payload is not None else event.payload)
+        entry = index_entry_from_payload(event.type, target_payload)
         if entry is None:
             return
         key, run_id, action_id, status, action_json = entry
@@ -587,7 +635,13 @@ class PostgresStorage(Storage):
         row = self._connection.execute("SELECT nextval('action_index_ord_seq') AS v").fetchone()
         return int(row["v"])
 
-    def compact_run(self, run_id: str, *, through_sequence: int | None = None) -> dict[str, int]:
+    def compact_run(
+        self,
+        run_id: str,
+        *,
+        through_sequence: int | None = None,
+        environment: EnvironmentSnapshot | None = None,
+    ) -> dict[str, int]:
         """Archive the pre-anchor prefix of a run's log (issue #239).
 
         A forced anchor checkpoint first records state at the boundary (its
@@ -607,12 +661,28 @@ class PostgresStorage(Storage):
         genesis and fork the hash chain away from the archive. The check is
         shared with the SQLite backend so the two cannot drift apart again
         (issue #1078).
+
+        The anchor carries ``environment`` when supplied, else the environment
+        the run's newest checkpoint already recorded (#1049): an
+        environment-blind anchor makes every pinned dependency UNKNOWN at the
+        next assessment and silently downgrades a clean run.
         """
         from continuum.checkpoint.manager import CheckpointManager
 
         lv = self.latest_version(run_id)
         head = self.last_sequence(run_id)
-        needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
+        # A caller-supplied environment has to land on a checkpoint, so it
+        # forces the fresh-anchor path whatever the log state. In practice the
+        # other terms already cover every reachable state (a version's
+        # STATE_CHECKPOINTED annotation sits one past its source_sequence, so
+        # head always outruns it); this term keeps the caller's request from
+        # depending on that invariant (#1049).
+        needs_fresh_anchor = (
+            lv is None
+            or through_sequence is not None
+            or lv.source_sequence < head
+            or environment is not None
+        )
         if needs_fresh_anchor:
             try:
                 manager = CheckpointManager(self)
@@ -622,7 +692,16 @@ class PostgresStorage(Storage):
                 # never started (issue #648). Per-turn checkpoint evaluation
                 # deliberately keeps the cheaper live-tail read.
                 state = manager.project_current(run_id, full_history=True)
-                manager.checkpoint(run_id, state=state, force_version=True)
+                manager.checkpoint(
+                    run_id,
+                    state=state,
+                    force_version=True,
+                    # The anchor carries the environment the run's newest
+                    # checkpoint already recorded when none is supplied
+                    # (#1049): an environment-blind anchor makes every pinned
+                    # dependency UNKNOWN at the next assessment.
+                    environment=self._anchor_environment(run_id, environment),
+                )
             except Exception as exc:
                 raise ValueError(f"run {run_id!r} could not be anchored: {exc}") from exc
             lv = self.latest_version(run_id)
@@ -789,6 +868,9 @@ class PostgresStorage(Storage):
             payload = (
                 row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
             )
+            if is_offload_descriptor(payload):
+                with suppress(Exception):
+                    payload = load_blob_payload(self.storage_dir, payload)
             entry = index_entry_from_payload(EventType(row["type"]), payload)
             if entry is None:
                 continue  # consumed no nextval, so it advances no position

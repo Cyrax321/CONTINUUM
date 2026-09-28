@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from itertools import count
+from pathlib import Path
 
 import pytest
 
@@ -226,6 +227,27 @@ def test_compact_archives_prefix_and_verify_stays_ok(storage: PostgresStorage) -
     assert archived[0].sequence == 1
     # Archived prefix and live tail agree on history: no gaps, hashes line up.
     assert storage.verify_events("pg_k").ok is True
+
+
+def test_compaction_carries_the_anchor_environment(storage: PostgresStorage) -> None:
+    """Issue #1049 parity with the SQLite engine: the forced anchor must
+    record an environment, not None. An environment-blind anchor becomes the
+    newest checkpoint, and the next assessment marks every pinned dependency
+    UNKNOWN, silently downgrading a clean run to request_human."""
+    from continuum.environment.snapshot import StaticProvider, capture
+
+    make_run(storage, "pg_env", "pinned task")
+    snapshot = capture("pg_env", StaticProvider(dataset="v3"))
+    storage.append_event(
+        "pg_env", EventType.DEPENDENCY_DECLARED, {"resource": "dataset", "version": "v3"}
+    )
+    CheckpointManager(storage).checkpoint("pg_env", environment=snapshot)
+
+    storage.compact_run("pg_env")
+
+    anchor = storage.latest_checkpoint("pg_env")
+    assert anchor.environment is not None
+    assert anchor.environment.resources["dataset"].version == "v3"
 
 
 def test_pg_compact_rejects_through_sequence_that_would_eat_the_anchor(
@@ -479,3 +501,23 @@ def test_pg_child_run_keeps_its_parent_after_the_round_trip(
 
     assert [run.run_id for run in children_of(storage, "pg_par")] == ["pg_kid"]
     assert children_of(storage, "pg_kid") == []
+
+
+def test_pg_payload_offload(storage: PostgresStorage, tmp_path: Path) -> None:
+    """PostgresStorage offloads oversized payloads to blob storage."""
+    make_run(storage, "pg_offload", "test offload")
+    storage._payload_offload_bytes = 50
+    storage._storage_dir = tmp_path
+
+    large_payload = {"details": "q" * 200}
+    event = storage.append_event("pg_offload", EventType.TOOL_CALLED, large_payload)
+    from continuum.storage.blob import OFFLOAD_KEY, is_offload_descriptor
+
+    assert is_offload_descriptor(event.payload)
+    sha256_hex = event.payload[OFFLOAD_KEY]
+    blob_file = tmp_path / "blobs" / f"{sha256_hex}.blob"
+    assert blob_file.exists()
+    assert event.hash == event.digest()
+
+    report = storage.verify_events("pg_offload")
+    assert report.ok
