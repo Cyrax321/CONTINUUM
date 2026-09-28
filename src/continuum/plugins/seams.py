@@ -28,9 +28,22 @@ from continuum.state.extractor import StateExtractor
 
 @dataclass
 class Reconciliation:
-    """The outcome an ``ActionReconciler`` reports for an uncertain side effect."""
+    """The outcome an ``ActionReconciler`` reports for an uncertain side effect.
 
-    occurred: bool
+    ``occurred`` is three-valued, and the third value is not a hedge:
+
+    - ``True``: confirmed occurrence: evidence the effect exists was found.
+    - ``False``: confirmed non-occurrence: evidence of absence was found.
+    - ``None``: the reconciler looked and could not obtain evidence. This is
+      *not* evidence of absence, and dispatch must never read it as one: an
+      unreachable API says nothing about whether the earlier request landed.
+
+    The fourth outcome, conflicting evidence, is not something one reconciler
+    reports. It emerges when several reconcilers disagree, so it belongs to the
+    merge layer (``continuum.plugins.reconcile``) rather than to this type.
+    """
+
+    occurred: bool | None = None
     external_id: str | None = None
     note: str = ""
 
