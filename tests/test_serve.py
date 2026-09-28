@@ -37,7 +37,8 @@ def test_list_methods_covers_the_surface() -> None:
     assert "resume" in methods
     assert "intercept_action" in methods
     assert "reconcile_action" in methods
-    assert len(methods) == 10
+    assert "compensate_action" in methods
+    assert len(methods) == 11
 
 
 def test_record_progress_creates_the_run() -> None:
@@ -234,6 +235,23 @@ def test_intercept_then_complete_action() -> None:
     assert done["status"] == "completed"
     listed = srv.dispatch("list_actions", {"run_id": "r1"})
     assert listed["actions"][0]["status"] == "completed"
+
+
+def test_intercept_complete_then_compensate_action() -> None:
+    srv = make_server()
+    srv.dispatch("record_progress", {"run_id": "r1", "completed": 1, "goal": "g"})
+    claim = srv.dispatch("intercept_action", {"run_id": "r1", "action_type": "x.do", "key": "k1"})
+    assert claim["proceed"] is True
+    done = srv.dispatch("complete_action", {"run_id": "r1", "action_key": claim["action_key"]})
+    assert done["status"] == "completed"
+    compensated = srv.dispatch(
+        "compensate_action",
+        {"run_id": "r1", "action_key": claim["action_key"], "note": "refunded", "by": "action_2"},
+    )
+    assert compensated["status"] == "compensated"
+    assert compensated["compensated_by"] == ["action_2"]
+    listed = srv.dispatch("list_actions", {"run_id": "r1"})
+    assert listed["actions"][0]["status"] == "compensated"
 
 
 def test_complete_and_reconcile_forward_consumed_inputs() -> None:
