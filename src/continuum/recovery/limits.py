@@ -34,6 +34,10 @@ def run_with_limits(
     and a ``RecoveryTimeoutError`` is raised if it does not complete in time.
     The caller can decide how to handle the timeout. Using a thread avoids
     signal restrictions on non main threads and works on all platforms.
+
+    On timeout the worker thread is not killed (Python cannot do that), it is
+    detached. The exception reaches the caller at the deadline, not when the
+    runaway happens to finish.
     """
     if timeout is None:
         return fn(*args, **kwargs)
@@ -41,9 +45,18 @@ def run_with_limits(
     if timeout <= 0:
         raise ValueError("timeout must be positive or None")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(fn, *args, **kwargs)
-        try:
-            return future.result(timeout=timeout)
-        except concurrent.futures.TimeoutError as exc:
-            raise RecoveryTimeoutError(f"recovery operation timed out after {timeout}s") from exc
+    # The executor is never joined on timeout: Python cannot kill a thread, so
+    # the runaway worker finishes (or hangs) on its own. Joining it through
+    # ``shutdown(wait=True)`` would hand the caller the very hang the timeout
+    # exists to bound.
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fn, *args, **kwargs)
+    try:
+        return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError as exc:
+        raise RecoveryTimeoutError(f"recovery operation timed out after {timeout}s") from exc
+    finally:
+        # wait=False: never join the worker, whether it finished, is still
+        # running, or hung forever. cancel_futures=True drops any not-yet
+        # started work; the running one is simply orphaned.
+        executor.shutdown(wait=False, cancel_futures=True)

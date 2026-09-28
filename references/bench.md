@@ -113,5 +113,5 @@ Accuracy: 0.8  Unnecessary escalation: 0.2  Repair precision: 0.8  Duplicate sid
 | horizon_compaction_stress_year | 177 | 2.87 | resume | resume | 1.0 |
 | horizon_abort_condition_year | 141 | 2.3 | abort | abort | 1.0 |
 
-Fault-injection: 7 scenarios, detection 0, unsafe 0
+Fault-injection: 7 scenarios, detection 1.0, unsafe 0.0
 <!-- BENCH:END -->

@@ -387,6 +387,21 @@ def test_validate_with_dashboard_renders_the_phase_14_dashboard(db: str) -> None
     assert "safe to resume:" in out
 
 
+def test_validate_with_dashboard_feeds_metrics_collector(db: str) -> None:
+    from continuum.observability import VALIDATIONS_RUN, get_metrics, reset_metrics
+
+    reset_metrics()
+    try:
+        code, out, _ = run("--db", db, "validate", "run_1", "--env", "dataset=v3", "--dashboard")
+        assert code == ExitCode.OK
+        assert "CONTINUUM RECOVERY DASHBOARD" in out
+        snap = get_metrics().snapshot()
+        assert snap["counters"].get(VALIDATIONS_RUN, 0) == 1
+        assert snap["gauges"].get("validation.components", 0) >= 1
+    finally:
+        reset_metrics()
+
+
 def test_validate_without_dashboard_stays_machine_friendly(db: str) -> None:
     code, out, _ = run("--db", db, "validate", "run_1", "--env", "dataset=v3")
     assert code == ExitCode.OK
@@ -608,6 +623,106 @@ def test_a_model_switch_can_be_declared(db: str) -> None:
     assert "no model recorded" in out
 
 
+# --- pinning drift across compaction (issue #1126) -------------------------- #
+
+
+_PINNING = {"prompt_sha256": "a" * 64, "model_id": "m-2024-09"}
+
+
+@pytest.fixture
+def compacted_pinning_db(tmp_path: Path) -> Iterator[str]:
+    """A run whose recorded pinning is known, after compaction moved the
+    ``ACTION_RECORDED`` carrying it into ``events_archive``.
+
+    The anchor marker that replaces the prefix carries no pinning, so a fold
+    over the live tail alone reads ``{}`` as the run's recorded identity.
+    """
+    path = str(tmp_path / "pinned.db")
+    with SQLiteStorage(path) as store:
+        store.create_run(Run(run_id="run_1", goal="Analyze 100 documents"))
+        store.append_event(
+            "run_1", EventType.RUN_STARTED, {"goal": "Analyze 100 documents", "total": 100}
+        )
+        # No declared dependency: compaction mints an environment-blind anchor
+        # checkpoint (#1049), which would gate resume on REQUEST_HUMAN before
+        # the drift display is reached. The pinning fold does not need one.
+        ledger = ActionLedger(store, "run_1")
+        outcome = ledger.claim("external.deploy", {}, key="deploy-1", pinning=_PINNING)
+        ledger.complete(str(outcome.key))
+        store.compact_run("run_1")
+    yield path
+
+
+def _assert_really_compacted(db: str) -> None:
+    with SQLiteStorage(db) as store:
+        assert not any(e.type is EventType.ACTION_RECORDED for e in store.read_events("run_1"))
+        assert any(e.type is EventType.ACTION_RECORDED for e in store.read_archived_events("run_1"))
+
+
+def test_resume_pinning_drift_is_not_invented_by_compaction(compacted_pinning_db: str) -> None:
+    """An unchanged pinning reports no drift, even when compaction archived the
+    only event that records it.
+
+    Before the fix the fold read ``{}`` and reported every key as newly pinned
+    -- a false alarm on a run whose identity provably did not change.
+    """
+    _assert_really_compacted(compacted_pinning_db)
+    code, out, err = run(
+        "--db",
+        compacted_pinning_db,
+        "resume",
+        "run_1",
+        "--pinning",
+        json.dumps(_PINNING),
+    )
+    assert code == ExitCode.OK, err
+    assert "Pinning drift" not in out
+
+
+def test_resume_pinning_drift_names_a_changed_hash_after_compaction(
+    compacted_pinning_db: str,
+) -> None:
+    """A genuinely changed hash renders as *changed*, with the old value.
+
+    Compaction-blind reading rendered this as "newly pinned", which hides the
+    previous hash -- the one fact that tells an operator what actually moved.
+    """
+    changed = {**_PINNING, "prompt_sha256": "b" * 64}
+    code, out, _ = run(
+        "--db",
+        compacted_pinning_db,
+        "resume",
+        "run_1",
+        "--pinning",
+        json.dumps(changed),
+    )
+    assert code == ExitCode.OK
+    assert "prompt_sha256 changed (" in out
+    assert f"{'a' * 16}..." in out  # the archived value, not "newly pinned"
+    assert "newly pinned" not in out
+
+
+def test_resume_pinning_drift_reports_an_unpinned_key_after_compaction(
+    compacted_pinning_db: str,
+) -> None:
+    """A key dropped from the request still renders, naming what was there.
+
+    The ``unpinned (was ...)`` line needs the old value, which only the archived
+    prefix holds once the run is compacted.
+    """
+    dropped = {"model_id": "m-2024-09"}
+    code, out, _ = run(
+        "--db",
+        compacted_pinning_db,
+        "resume",
+        "run_1",
+        "--pinning",
+        json.dumps(dropped),
+    )
+    assert code == ExitCode.OK
+    assert "prompt_sha256 unpinned (was" in out
+
+
 # --- invoked as a real process ---------------------------------------------- #
 
 
@@ -756,6 +871,64 @@ def test_replay_verification_is_independent_of_upto(db: str) -> None:
     assert "matches stored version" in out
 
 
+@pytest.fixture
+def compacted_db(tmp_path: Path) -> Iterator[str]:
+    """The same seeded run after compaction: the genesis prefix has moved into
+    ``events_archive``, which is the state ``--upto`` has to work over (#1172)."""
+    path = str(tmp_path / "compacted.db")
+    with SQLiteStorage(path) as store:
+        store.create_run(Run(run_id="run_1", goal="Analyze 100 documents"))
+        store.append_event(
+            "run_1", EventType.RUN_STARTED, {"goal": "Analyze 100 documents", "total": 100}
+        )
+        store.append_event(
+            "run_1", EventType.DEPENDENCY_DECLARED, {"resource": "dataset", "version": "v3"}
+        )
+        for i in range(10):
+            store.append_event("run_1", EventType.WORK_COMPLETED, {"doc": i})
+        store.append_event(
+            "run_1",
+            EventType.FINDING_ADDED,
+            {"finding_id": "finding_17", "claim": "X holds", "evidence": []},
+        )
+        store.compact_run("run_1")
+    yield path
+
+
+def test_replay_upto_survives_compaction(compacted_db: str) -> None:
+    """A compacted run replays under --upto like one that was never compacted.
+
+    ``RUN_STARTED`` lives in the archive after compaction, so a replay reading
+    only the live tail rejected every value of ``--upto`` and told the operator
+    to raise it -- the one action that cannot help, since the event had moved
+    rather than been excluded.
+    """
+    with SQLiteStorage(compacted_db) as store:
+        assert not any(e.type is EventType.RUN_STARTED for e in store.read_events("run_1"))
+        assert any(e.type is EventType.RUN_STARTED for e in store.read_archived_events("run_1"))
+
+    for upto, completed in (("4", 2), ("13", 10), ("999", 10)):
+        code, out, err = run("--db", compacted_db, "replay", "run_1", "--upto", upto)
+        assert code == ExitCode.OK, f"--upto {upto}: {err}"
+        # The window narrows the fold; 999 is past the head (13) and reads as
+        # the whole run, which is what proves the failure was about the archive
+        # rather than about the value of N.
+        assert f"{completed} completed" in out, f"--upto {upto} folded the wrong prefix: {out}"
+        assert "matches stored version" in out, f"--upto {upto}: {out}"
+
+
+def test_replay_upto_still_names_a_genuinely_excluded_genesis(compacted_db: str) -> None:
+    """The guard is not dead weight once it reads the right log: a window that
+    really does exclude ``RUN_STARTED`` is still refused, with the fix it can
+    actually suggest."""
+    code, _, err = run("--db", compacted_db, "replay", "run_1", "--upto", "0")
+    assert code == ExitCode.ERROR
+    assert (
+        "--upto 0 excludes the RUN_STARTED event for run 'run_1'; "
+        "increase --upto or omit it to replay from the beginning"
+    ) in err
+
+
 # --- event-chain attestation ------------------------------------------------ #
 
 
@@ -766,6 +939,71 @@ def test_attest_keygen_writes_pem_files(tmp_path: Path) -> None:
     assert priv.exists()
     assert (tmp_path / "signer.pem.pub").exists()
     assert "PRIVATE KEY" in priv.read_text()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="permission bits are a POSIX concept (#1056)")
+def test_attest_keygen_writes_the_private_key_owner_only(tmp_path: Path) -> None:
+    """The private PEM is unencrypted, so 0644 would hand it to every local user."""
+    import stat
+
+    priv = tmp_path / "signer.pem"
+    code, out, _ = run("attest-keygen", "--out", str(priv))
+    assert code == ExitCode.OK
+    assert stat.S_IMODE(priv.stat().st_mode) == 0o600
+    # The public key is meant to be shareable, so it keeps the ambient mode a
+    # plain write_text would give it, compared against a reference rather than
+    # a literal 0o644, which would break under a stricter umask.
+    reference = tmp_path / "reference.txt"
+    reference.write_text("public", encoding="utf-8")
+    assert stat.S_IMODE((tmp_path / "signer.pem.pub").stat().st_mode) == stat.S_IMODE(
+        reference.stat().st_mode
+    )
+    # The operator is told the mode they actually got, in the same line of text.
+    assert "mode 600" in out
+
+
+@pytest.mark.skipif(os.name != "posix", reason="permission bits are a POSIX concept (#1056)")
+def test_attest_keygen_narrows_a_preexisting_world_readable_key(tmp_path: Path) -> None:
+    """An overwritten 0644 key keeps its old mode under open(2), so narrow it."""
+    import stat
+
+    priv = tmp_path / "signer.pem"
+    priv.write_text("stale placeholder", encoding="utf-8")
+    os.chmod(priv, 0o644)
+    assert stat.S_IMODE(priv.stat().st_mode) == 0o644
+
+    code, out, _ = run("attest-keygen", "--out", str(priv))
+    assert code == ExitCode.OK
+    assert stat.S_IMODE(priv.stat().st_mode) == 0o600
+    assert priv.read_text() != "stale placeholder"
+
+
+def test_write_private_key_closes_the_fd_if_wrapping_fails(tmp_path: Path, monkeypatch) -> None:
+    """A failure to wrap the fd must not leak it (#1056)."""
+    import errno
+    import importlib
+
+    # `continuum.cli.main` the attribute is the re-exported entry point, not
+    # this module, so reach the module itself by name.
+    cli_main = importlib.import_module("continuum.cli.main")
+
+    wrapped: list[int] = []
+
+    def failing_fdopen(fd: int, *args: object, **kwargs: object) -> object:
+        wrapped.append(fd)
+        raise OSError(errno.EIO, "simulated failure")
+
+    monkeypatch.setattr(os, "fdopen", failing_fdopen)
+
+    with pytest.raises(OSError):
+        cli_main._write_private_key(tmp_path / "signer.pem", "unused")
+
+    assert wrapped, "os.fdopen was never reached"
+    for fd in wrapped:
+        # The guard closed the fd, so it is no longer a valid descriptor.
+        with pytest.raises(OSError) as exc:
+            os.fstat(fd)
+        assert exc.value.errno == errno.EBADF
 
 
 def test_attest_and_verify_round_trip(db: str, tmp_path: Path) -> None:
