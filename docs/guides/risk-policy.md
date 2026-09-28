@@ -21,8 +21,8 @@ everything else, with the most cautious proposal winning regardless of order.
   policy, takes the most severe resulting mode, and names the winning event
   ids in the contract's `triggering_risks` field.
 - Ingestion is fail-open: a malformed payload returns `False` and is dropped,
-  never blocking the run. Scores default to `0.0`, details truncate at 512
-  chars.
+  never blocking the run. Scores default to `0.0` and clamp to `[0.0, 1.0]`,
+  details are bounded to 32 keys and 512 chars per string.
 
 ## Try it
 
@@ -91,3 +91,26 @@ falls back to the built-in default when absent.
   mode, for signals you want visible in history but not yet acting.
 - Risk never certifies: a signal can only escalate toward caution, and
   `EXTERNAL_MONITOR` provenance keeps it from counting as verification.
+- An observation is knowledge, not a change (issue #1421): every recorded
+  signal is folded into `SemanticState.observed_risks`, but the fold does not
+  mint a state version. A run that was merely *seen* doing something risky is
+  the same run it was a moment ago; the mitigation is what moves it, and that
+  bumps the version through whatever it changed.
+
+## The payload schema
+
+`RiskObservedPayload` in `src/continuum/models.py` is the typed shape of a
+signal, and `ingest_risk` validates and normalises through it before anything
+reaches the log, so what is on the wire is always what the schema describes:
+
+| Field | Meaning |
+| --- | --- |
+| `trigger` | Risk class, normalised to lowercase. Not restricted to the eight the default policy knows: a monitor may name a class policy has not mapped yet, and the signal is recorded and ignored until it does. |
+| `score` | Confidence in `[0.0, 1.0]`, clamped rather than rejected. |
+| `episode_id`, `step_id` | Where the risk was seen, when the monitor reports them. |
+| `detail` | Structured diagnostics, free-form but bounded (32 keys, 512 chars per string). A plain string is accepted and wrapped as `{"message": ...}`, because ingestion predating the schema truncated detail to text. |
+| `ts` | Observation time on the monitor's own clock, as an epoch number or ISO 8601. An unparseable value is re-dated rather than dropping the signal. |
+
+`source` is deliberately absent from that table: it is not part of the payload
+a monitor sends. The writer stamps `EXTERNAL_MONITOR` unconditionally, so no
+signal can be self-certified by the agent it describes.

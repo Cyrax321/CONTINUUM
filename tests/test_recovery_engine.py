@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from continuum.actions import ActionLedger, ProbeReconciler, Resolution, reconcile_pending
+from continuum.actions.authority import record_authority_consumed
 from continuum.checkpoint import CheckpointManager
 from continuum.environment import CallableProvider, StaticProvider, capture
 from continuum.events import EventType
@@ -20,7 +21,9 @@ from continuum.models import (
 )
 from continuum.recovery import (
     SEVERITY,
+    MemoryLedgerBackend,
     RecoveryEngine,
+    RecoveryLedger,
     RepairKind,
     render_contract,
     verify_contract,
@@ -359,6 +362,59 @@ def test_a_rollback_contract_advertises_no_next_action(store: SQLiteStorage) -> 
     assert decision.permits("revalidate_dependency:dataset") is False
 
 
+def test_a_human_gated_contract_advertises_no_machine_step(store: SQLiteStorage) -> None:
+    """Issue #1388: a REQUEST_HUMAN imposed *after* the plan is built adds no
+    human step of its own, so plan.first is still a machine-executable action.
+
+    A consumed authority that never reconciles is one such path; a risk-policy
+    escalation has the same shape. Naming that automatic step as the next
+    allowed action would hand any caller gating on permits() a green light on a
+    run the engine has declared a human must gate -- the human-gate sibling of
+    the #1058 fix. Only a step that itself requires a person may be named under
+    REQUIRES_HUMAN, so the consumed-authority verdict advertises nothing.
+    """
+    seed(store)
+    record_authority_consumed(store, "run_1", "auth-xyz")
+
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v4"))
+
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    assert decision.contract.recovery_status is RecoverySafety.REQUIRES_HUMAN
+    # The plan is real and its first step is automatic -- exactly the shape that
+    # used to leak through as a permitted action.
+    assert decision.plan.first is not None
+    assert decision.plan.first.requires_human is False
+    assert decision.contract.next_allowed_action is None
+    # The advisory gate agrees, both for the automatic step and for a caller that
+    # reads the action straight back out of the contract.
+    assert decision.permits(decision.plan.first.action_name) is False
+    assert decision.permits(decision.contract.next_allowed_action) is False
+    # An auditor still sees the work; only the permission is held until a human
+    # clears the gate.
+    assert decision.plan.first.action_name in decision.contract.required_actions
+
+
+def test_a_human_step_is_still_advertised_under_a_human_gated_verdict(
+    store: SQLiteStorage,
+) -> None:
+    """The #1388 guard withholds machine steps, not the human one a plan asks for.
+
+    A REQUEST_HUMAN originating from an unreadable log puts a requires_human step
+    first (#385); that step is the gate the verdict is asking for, so it stays
+    named and permitted.
+    """
+    seed(store)
+    store.append_event("run_1", EventType.TASK_UPDATED, {"completed": 999, "failed": 0})
+
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v3"))
+
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    assert decision.plan.first is not None
+    assert decision.plan.first.requires_human is True
+    assert decision.contract.next_allowed_action == decision.plan.first.action_name
+    assert decision.permits(decision.contract.next_allowed_action) is True
+
+
 def test_contracts_are_deterministic(store: SQLiteStorage) -> None:
     seed(store)
     engine = RecoveryEngine(store)
@@ -413,6 +469,45 @@ def test_the_decision_renders_a_full_report(store: SQLiteStorage) -> None:
     assert "Recovery decision: REQUEST_HUMAN" in rendered
     assert "Repairs required:" in rendered
     assert "Next permitted action:" in rendered
+
+
+def test_the_report_names_the_risks_that_triggered_the_verdict(store: SQLiteStorage) -> None:
+    """Issue #1424: a risk-driven verdict names the RISK_OBSERVED ids that
+    produced it, on both the decision report and the contract rendering, so an
+    operator can cite the observation rather than only its consequence."""
+    store.create_run(Run(run_id="r1", goal="do X"))
+    store.append_event("r1", EventType.RUN_STARTED, {"goal": "do X"}, source=Origin.EXTERNAL_AGENT)
+    store.append_event(
+        "r1",
+        EventType.RISK_OBSERVED,
+        {"risk_id": "risk-1", "trigger": "meltdown"},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+
+    decision = RecoveryEngine(store).assess("r1")
+    assert decision.contract.triggering_risks, "precondition: no risk drove the verdict"
+
+    rendered = decision.render()
+    assert "Triggering risks:" in rendered
+    assert decision.contract.triggering_risks[0] in rendered
+
+    contract_rendered = render_contract(decision.contract)
+    assert "triggering_risks:" in contract_rendered
+    assert decision.contract.triggering_risks[0] in contract_rendered
+
+
+def test_the_report_omits_a_triggering_risks_section_when_none_drove_the_verdict(
+    store: SQLiteStorage,
+) -> None:
+    """A verdict from drift alone renders no triggering-risks section (#1424):
+    the field is the audit link to a risk observation, and an empty list is the
+    signal none exists, not a section to fill with a placeholder."""
+    seed(store)
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v4"))
+
+    assert decision.contract.triggering_risks == []
+    assert "Triggering risks:" not in decision.render()
+    assert "triggering_risks:" not in render_contract(decision.contract)
 
 
 def test_a_clean_report_says_the_ledger_is_clear(store: SQLiteStorage) -> None:
@@ -797,3 +892,135 @@ def test_a_healthy_log_still_resumes_with_degrade_wired_in(store: SQLiteStorage)
     assert decision.contract.verified == ["external_dependency:dataset", "goal", "progress"]
     assert decision.contract.invalidated == []
     assert "next_allowed:      continue" in render_contract(decision.contract)
+
+
+# --- per-dependency recovery budgets (#1428, #1459) ------------------------ #
+
+
+def test_flaky_dependency_exhausting_budget_escalates_to_request_human(
+    store: SQLiteStorage,
+) -> None:
+    """A dependency exceeding its recovery budget requests human intervention
+    while an untouched core dependency recovers automatically (#1428, #1459)."""
+    seed(store)
+    store.append_event(
+        "run_1",
+        EventType.DEPENDENCY_DECLARED,
+        {"resource": "ext:weather-api", "version": "v1"},
+    )
+    CheckpointManager(store).checkpoint(
+        "run_1",
+        environment=capture(
+            "run_1",
+            StaticProvider(dataset="v3", **{"ext:weather-api": "v1"}),
+        ),
+    )
+
+    ledger = RecoveryLedger(MemoryLedgerBackend())
+    budgets = {"dependency_budgets": {"ext:weather-api": 2}}
+
+    # Record 2 failed attempts for ext:weather-api, exhausting its ceiling of 2.
+    ledger.record_attempt("run_1", dependency="ext:weather-api", dependency_budgets=budgets)
+    ledger.record_attempt("run_1", dependency="ext:weather-api", dependency_budgets=budgets)
+
+    engine = RecoveryEngine(store, ledger=ledger, dependency_budgets=budgets)
+
+    # 1. Global assessment when both dataset and weather-api changed:
+    # ext:weather-api is exhausted, so the whole decision escalates to REQUEST_HUMAN.
+    curr_env = capture(
+        "run_1",
+        StaticProvider(dataset="v4", **{"ext:weather-api": "v2"}),
+    )
+    decision_global = engine.assess("run_1", current_environment=curr_env)
+    assert decision_global.mode is RecoveryMode.REQUEST_HUMAN
+    assert any("ext:weather-api" in r for r in decision_global.rationale)
+    # The step for ext:weather-api requires human.
+    step_weather = next(s for s in decision_global.plan.steps if s.target == "ext:weather-api")
+    assert step_weather.requires_human is True
+
+    # 2. Localized scoped assessment on the healthy/reliable core dependency 'dataset':
+    # dataset is not exhausted and was not affected by weather-api's failure, so it recovers
+    # automatically with REPAIR_AND_RESUME.
+    decision_scoped = engine.assess_scoped(
+        "run_1",
+        ["dataset"],
+        current_environment=capture("run_1", StaticProvider(dataset="v4")),
+    )
+    assert decision_scoped.mode is RecoveryMode.REPAIR_AND_RESUME
+    assert decision_scoped.contract.recovery_status is RecoverySafety.REQUIRES_REPAIR
+    assert decision_scoped.contract.next_allowed_action == "revalidate_dependency:dataset"
+    assert decision_scoped.plan.first is not None
+    assert decision_scoped.plan.first.target == "dataset"
+    assert decision_scoped.plan.first.requires_human is False
+
+
+def test_engine_record_attempt_and_requires_human_delegates(
+    store: SQLiteStorage,
+) -> None:
+    """RecoveryEngine provides helper methods to record attempts and query the human gate."""
+    seed(store)
+    ledger = RecoveryLedger(MemoryLedgerBackend())
+    budgets = {"dependency_budgets": {"ext:weather-api": 1}}
+    engine = RecoveryEngine(store, ledger=ledger, dependency_budgets=budgets)
+
+    assert engine.requires_human("run_1", dependency="ext:weather-api") is False
+    count = engine.record_attempt("run_1", dependency="ext:weather-api")
+    assert count == 1
+    assert engine.requires_human("run_1", dependency="ext:weather-api") is True
+    # The run as a whole and unrelated dependencies remain unblocked.
+    assert engine.requires_human("run_1") is False
+    assert engine.requires_human("run_1", dependency="dataset") is False
+
+
+def test_generic_agent_adapter_per_dependency_budget_and_scoping(
+    store: SQLiteStorage,
+) -> None:
+    """GenericAgentAdapter wires ledger and scoping into resume (#1459)."""
+    from continuum.adapters import GenericAgentAdapter
+
+    seed(store)
+    store.append_event(
+        "run_1",
+        EventType.DEPENDENCY_DECLARED,
+        {"resource": "ext:sandbox", "version": "v1"},
+    )
+    CheckpointManager(store).checkpoint(
+        "run_1",
+        environment=capture(
+            "run_1",
+            StaticProvider(dataset="v3", **{"ext:sandbox": "v1"}),
+        ),
+    )
+
+    ledger = RecoveryLedger(MemoryLedgerBackend())
+    budgets = {"dependency_budgets": {"ext:sandbox": 1}}
+    adapter = GenericAgentAdapter(store, ledger=ledger)
+
+    # Before exhausting budget, resume needs repair.
+    curr_env = capture(
+        "run_1",
+        StaticProvider(dataset="v4", **{"ext:sandbox": "v2"}),
+    )
+    d1 = adapter.resume("run_1", current_environment=curr_env, dependency_budgets=budgets)
+    assert d1.mode is RecoveryMode.REPAIR_AND_RESUME
+
+    # Exhaust ext:sandbox via adapter.record_attempt.
+    adapter.record_attempt("run_1", dependency="ext:sandbox", dependency_budgets=budgets)
+    assert (
+        adapter.requires_human("run_1", dependency="ext:sandbox", dependency_budgets=budgets)
+        is True
+    )
+
+    # Global resume now escalates to REQUEST_HUMAN.
+    d2 = adapter.resume("run_1", current_environment=curr_env, dependency_budgets=budgets)
+    assert d2.mode is RecoveryMode.REQUEST_HUMAN
+
+    # Scoped resume on dataset succeeds automatically.
+    d3 = adapter.resume(
+        "run_1",
+        scope=["dataset"],
+        current_environment=capture("run_1", StaticProvider(dataset="v4")),
+        dependency_budgets=budgets,
+    )
+    assert d3.mode is RecoveryMode.REPAIR_AND_RESUME
+    assert d3.contract.next_allowed_action == "revalidate_dependency:dataset"

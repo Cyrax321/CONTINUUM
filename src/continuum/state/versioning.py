@@ -35,6 +35,14 @@ def state_fingerprint(state: SemanticState) -> str:
     Including it would break fingerprint dedup across the #383 upgrade for
     every stored version, and a degraded prefix-state genuinely is the same
     task state as its healthy counterpart.
+
+    ``observed_risks`` is excluded for a different reason (issue #1421): a risk
+    observation is a witness report that changes what the projection *knows*,
+    not what the run *is*. Folding one must not mint a semantic version;
+    mitigation that actually alters the run still bumps it through whatever it
+    changed. Two states that differ only in what they were seen doing are the
+    same state for versioning purposes, exactly as two states that differ only
+    in where folding stopped are.
     """
     payload = state.model_dump(
         mode="json",

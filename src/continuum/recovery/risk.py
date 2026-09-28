@@ -8,16 +8,20 @@ never blocking the run.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from continuum.events import EventType
-from continuum.models import Origin, RecoveryMode
+from continuum.models import Origin, RecoveryMode, RiskObservedPayload
 from continuum.storage.base import Storage
 
 __all__ = [
     "ingest_risk",
+    "RiskObservedPayload",
     "RiskPayload",
     "DEFAULT_RISK_POLICY",
     "DEFAULT_RISK_POLICY_PATH",
@@ -115,8 +119,12 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-class RiskPayload(dict):  # type: ignore[type-arg]
-    """Validated RISK_OBSERVED payload, fail-open on bad input."""
+class RiskPayload(RiskObservedPayload):
+    """Superseded alias of :class:`RiskObservedPayload`.
+
+    Exported before the typed schema existed (issue #1421); kept so existing
+    imports keep resolving. New code should name ``RiskObservedPayload``.
+    """
 
     pass
 
@@ -126,39 +134,42 @@ def ingest_risk(
     run_id: str,
     payload: dict[str, Any],
 ) -> bool:
-    """Ingest a risk signal as a RISK_OBSERVED event, fail-open."""
+    """Ingest a risk signal as a RISK_OBSERVED event, fail-open.
+
+    Provenance is not caller-controllable: the event is always stamped
+    ``Origin.EXTERNAL_MONITOR`` (issue #1421), so a monitor's observation can
+    never be fabricated or self-certified by the agent it describes. Payload
+    shape is validated and normalised through ``RiskObservedPayload`` first, so
+    what lands on the wire is exactly what the schema describes.
+    """
     try:
-        trigger = payload.get("trigger")
-        if not isinstance(trigger, str) or not trigger.strip():
+        if not isinstance(payload, Mapping):
             return False
-        trigger = trigger.strip().lower()
-        score = payload.get("score", 0.0)
         try:
-            score_f = float(score) if score is not None else 0.0
-        except Exception:
-            score_f = 0.0
-        episode_id = payload.get("episode_id")
-        step_id = payload.get("step_id")
-        detail = payload.get("detail", "")
+            schema = RiskObservedPayload(
+                trigger=payload.get("trigger"),
+                score=payload.get("score", 0.0),
+                episode_id=payload.get("episode_id"),
+                step_id=payload.get("step_id"),
+                detail=payload.get("detail", ""),
+                # Prefer the caller's observation time over the ingestion clock: a
+                # probe reporting when it saw the anomaly must not have its timestamp
+                # replaced by server now, and neither spelling should be dropped
+                # (issue #1075).
+                ts=payload.get("ts") or payload.get("timestamp") or _now_iso(),
+            )
+        except ValidationError:
+            return False
         event_payload: dict[str, Any] = {
-            "trigger": trigger,
-            "score": score_f,
-            "detail": str(detail)[:512] if detail else "",
+            "trigger": schema.trigger,
+            "score": schema.score,
+            "detail": schema.detail,
+            "ts": schema.ts.isoformat(),
         }
-        if episode_id is not None:
-            event_payload["episode_id"] = str(episode_id)[:128]
-        if step_id is not None:
-            event_payload["step_id"] = str(step_id)[:128]
-        # Prefer the caller's observation time over the ingestion clock: a
-        # probe reporting when it saw the anomaly must not have its timestamp
-        # replaced by server now, and neither spelling should be dropped
-        # (issue #1075).
-        if payload.get("ts") is not None:
-            event_payload["ts"] = str(payload["ts"])[:64]
-        elif payload.get("timestamp") is not None:
-            event_payload["ts"] = str(payload["timestamp"])[:64]
-        else:
-            event_payload["ts"] = _now_iso()
+        if schema.episode_id is not None:
+            event_payload["episode_id"] = schema.episode_id
+        if schema.step_id is not None:
+            event_payload["step_id"] = schema.step_id
         storage.append_event(
             run_id, EventType.RISK_OBSERVED, event_payload, source=Origin.EXTERNAL_MONITOR
         )
