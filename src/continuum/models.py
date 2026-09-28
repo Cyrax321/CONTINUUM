@@ -21,7 +21,7 @@ import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -692,12 +692,20 @@ class AuthorityReconciled(BaseModel):
 
 
 class TrajectoryReport(BaseModel):
-    """Deterministic sleep-time report distilled from archived history (issue #393).
+    """Deterministic trajectory report distilled from archived history (issue #393).
 
     Computed from the archive plus ledger, no LLM, no network. Bounded size,
     one per compaction window, digest-auditable via TRAJECTORY_REPORT event.
     Stored alongside attempt lessons but derived from a different window, so
     the two never compete for authority.
+
+    The on-demand analyser (issue #1427) folds the whole run history, not just
+    the quiet compaction windows, so an operator can ask for the same figures
+    while the run is still busy. ``total_attempts`` and ``uncertain_count``
+    carry the two counts that fold over: how much was attempted at all, and how
+    much of it left a side effect reconciliation still has to settle. They
+    default to zero so a report written before they existed still loads; the
+    digest recomputes from whatever a payload carries.
     """
 
     model_config = Frozen
@@ -707,6 +715,8 @@ class TrajectoryReport(BaseModel):
     window_end: int = Field(ge=0)
     compaction_seq: int = Field(ge=0)
     attempts: int = Field(ge=0)
+    total_attempts: int = Field(default=0, ge=0)
+    uncertain_count: int = Field(default=0, ge=0)
     scar_rate: float = Field(ge=0.0, le=1.0)
     stall_sites: list[str] = Field(default_factory=list)
     top_failure_action_types: list[str] = Field(default_factory=list)
@@ -720,6 +730,41 @@ class TrajectoryReport(BaseModel):
         if len(trimmed) > 5:
             trimmed = trimmed[:5]
         return trimmed
+
+    #: The fields the digest covers: everything that describes what the run did.
+    #: ``report_id`` is the digest's own prefix and ``created_at`` is a
+    #: write-time stamp, so neither can be an input to the hash that names them.
+    _DIGEST_FIELDS: ClassVar[tuple[str, ...]] = (
+        "window_start",
+        "window_end",
+        "compaction_seq",
+        "attempts",
+        "total_attempts",
+        "uncertain_count",
+        "scar_rate",
+        "stall_sites",
+        "top_failure_action_types",
+        "derived_origin",
+    )
+
+    def digest(self) -> str:
+        """Deterministic content hash over the report's analytical fields.
+
+        Stable across processes and machines: the same folded events yield the
+        same digest, so a report read back from storage can be checked against
+        the events it claims to summarise.
+        """
+        return stable_hash({name: getattr(self, name) for name in self._DIGEST_FIELDS})
+
+    def digest_matches(self) -> bool:
+        """True if ``report_id`` is the prefix of the digest its content yields.
+
+        A report that drifted from its own events, or one whose fields were
+        hand-edited after the fact, fails this check. Reports written before
+        the model computed its own digest also fail: their id came from a hash
+        that included the run id, which the stored payload no longer carries.
+        """
+        return self.report_id == self.digest()[: len(self.report_id)]
 
 
 class ModelSpecificState(BaseModel):

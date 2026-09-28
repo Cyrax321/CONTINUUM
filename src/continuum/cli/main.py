@@ -54,6 +54,7 @@ from continuum.gate import (
     DEFAULT_GATE_CONFIG_PATH,
     GateConfigError,
     collect_consumed_authorities,
+    is_memory_key,
     load_gate_config,
 )
 from continuum.gate import (
@@ -69,11 +70,12 @@ from continuum.models import (
     RunStatus,
     SemanticState,
     StateStatus,
+    TrajectoryReport,
 )
 from continuum.observability import render_dashboard
 from continuum.provenance.graph import build_provenance_graph, downstream_of
 from continuum.provenance_map import summarize
-from continuum.recovery import RecoveryEngine, render_contract
+from continuum.recovery import RecoveryDecision, RecoveryEngine, render_contract
 from continuum.security.attestation import (
     generate_keypair,
     sign_chain,
@@ -455,7 +457,14 @@ def cmd_record_plan(args: argparse.Namespace, storage: Storage, out: Any, err: A
         print(f"error: {exc}", file=err)
         return ExitCode.NOT_FOUND
     payload = {"plan_id": plan_id, "units": sorted_units}
-    history = list(storage.read_events(args.run_id))
+    # Full history (read_all_events) so compaction cannot leave the run
+    # unprojectable (issue #1438): after compaction the live log holds only
+    # the anchor and tail, with RUN_STARTED in the archive. Reading live events
+    # alone would raise ProjectionError for any valid compacted run.
+    try:
+        history = list(storage.read_all_events(args.run_id))
+    except Exception:
+        history = list(storage.read_events(args.run_id))
     head = history[-1].sequence if history else 0
     candidate = Event(
         run_id=args.run_id,
@@ -470,7 +479,11 @@ def cmd_record_plan(args: argparse.Namespace, storage: Storage, out: Any, err: A
         print(f"error: plan would leave run unprojectable and was not recorded: {exc}", file=err)
         return ExitCode.ERROR
     event = storage.append_event(args.run_id, EventType.PLAN_UPSERT, payload, source=Origin.HUMAN)
-    state = project(args.run_id, storage.read_events(args.run_id))
+    try:
+        current_events = storage.read_all_events(args.run_id)
+    except Exception:
+        current_events = storage.read_events(args.run_id)
+    state = project(args.run_id, current_events)
     _emit(
         {
             "run_id": args.run_id,
@@ -1359,6 +1372,32 @@ def cmd_notify_test(args: argparse.Namespace, storage: None, out: Any, err: Any)
     return ExitCode.OK
 
 
+def _anchor_on_recovery(
+    storage: Storage, run_id: str, decision: RecoveryDecision, err: Any
+) -> None:
+    """Record a recovery anchor after a non-RESUME verdict, best-effort.
+
+    The anchor is the checkpoint a later ``continuum restore
+    --to-recovery-anchor`` rolls back to: it marks the exact state the
+    decision judged unsafe to continue from. A failure here must never change
+    the verdict or its exit code, which is why it is swallowed and reported
+    rather than raised - the decision above is already final, and the caller
+    still has the repair plan and the exit code to act on.
+    """
+    rationale = "; ".join(decision.rationale) if decision.rationale else decision.mode.value
+    try:
+        anchor = CheckpointManager(storage).checkpoint_on_recovery(run_id, reason=rationale)
+    except Exception as exc:  # noqa: BLE001 - the verdict is final; anchoring is durability
+        print(f"warning: could not record a recovery anchor: {exc}", file=err)
+        return
+    print(
+        f"Recovery anchor recorded: v{anchor.version} ({anchor.checkpoint_id}). "
+        "Restore to it with: continuum restore "
+        f"{run_id} --reason <why> --to-recovery-anchor",
+        file=err,
+    )
+
+
 def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Report how a run may resume. Read-only unless ``--repair`` is given."""
     run_id = args.run_id
@@ -1533,6 +1572,19 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             "\nRun with --repair to record the repair plan, or resolve the items above first.",
             file=err,
         )
+
+    # Recovery anchors (#1097): when the caller acts on a non-RESUME verdict,
+    # pin the pre-failure state as a rollback point. This is the wiring
+    # ARCHITECTURE_EVOLUTION.md 15.5 calls out as a small, well-isolated
+    # change: the write lives here in the acting caller, never in
+    # `RecoveryEngine.assess`, which stays read-only (judging is separate from
+    # acting). The anchor precedes the RECOVERY_STARTED event below so it
+    # captures the state the verdict judged, not the state after this repair's
+    # bookkeeping landed in the log. Without --repair `resume` stays read-only
+    # (test_resume_without_repair_is_still_read_only), since a plain resume is
+    # an inquiry a caller may repeat while polling.
+    if args.repair and decision.mode is not RecoveryMode.RESUME:
+        _anchor_on_recovery(storage, run_id, decision, err)
 
     if args.repair and decision.plan:
         storage.append_event(
@@ -1796,7 +1848,7 @@ def cmd_compact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
             file=err,
         )
         return ExitCode.ERROR
-    report = storage.compact_run(args.run_id)
+    report = storage.compact_run(args.run_id, environment=_environment(args, args.run_id))
     payload = {"run_id": args.run_id, **report}
     _emit(
         payload,
@@ -1975,7 +2027,28 @@ def cmd_restore(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     carry_forward = list(getattr(args, "carry_forward", None) or [])
     target = getattr(args, "target", None)
     anchor = getattr(args, "anchor", None)
-    anchor_seq = int(anchor) if anchor is not None else None
+    anchor_seq: int | None
+    if bool(getattr(args, "to_recovery_anchor", False)):
+        # The rollback point a non-RESUME verdict pinned (#1097). Mutually
+        # exclusive with --to/--anchor: a restore discards (anchor, head], so
+        # the target must be unambiguous.
+        if target is not None or anchor is not None:
+            print(
+                "error: --to-recovery-anchor cannot be combined with --to or --anchor",
+                file=err,
+            )
+            return ExitCode.ERROR
+        found = CheckpointManager(storage).last_recovery_anchor(args.run_id)
+        if found is None:
+            print(
+                f"error: run {args.run_id!r} has no recovery anchor. Record one with: "
+                f"continuum resume {args.run_id} --repair",
+                file=err,
+            )
+            return ExitCode.ERROR
+        anchor_seq = found.state.source_sequence
+    else:
+        anchor_seq = int(anchor) if anchor is not None else None
     try:
         result = approve_restore(
             storage,
@@ -2522,6 +2595,96 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     return ExitCode.OK
 
 
+def cmd_report(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Analytical reports distilled from a run's own history (issue #1427).
+
+    Read-only, and deliberately the wrong tool for recovery: it summarises what
+    a run did, it does not say whether resuming it is safe (that is `status`).
+    ``--trajectory`` folds the archive and the active log together, so the
+    figures cover the whole run even after compaction moved most of it out of
+    the live log, and prints a digest check so the summary can be held against
+    the events it claims to describe instead of taken on trust.
+    """
+    if not getattr(args, "trajectory", False):
+        print(
+            "error: report needs a kind; the only kind available is --trajectory",
+            file=err,
+        )
+        return ExitCode.ERROR
+
+    storage.get_run(args.run_id)  # raises RunNotFound if it truly does not exist
+
+    from continuum.analysis.trajectory_report import analyze_trajectory, render_trajectory_report
+
+    report = analyze_trajectory(storage, args.run_id)
+    if report is None:
+        _emit(
+            {"trajectory_report": None},
+            f"No events recorded for run {args.run_id}; nothing to report on.",
+            as_json=args.json,
+            stream=out,
+            palette=getattr(args, "_palette", None),
+        )
+        return ExitCode.OK
+
+    # The quiet-time path persists its own TRAJECTORY_REPORT events. Each is
+    # auditable on its own terms: its id must be the prefix of the digest its
+    # stored fields recompute. One that is not was edited after it was built, or
+    # written by a version that hashed different fields; either way it cannot be
+    # traced back to the events it summarises, which is an integrity failure
+    # rather than a stylistic difference. The fresh fold is checked the same way.
+    stored_reports = _stored_trajectory_reports(storage, args.run_id)
+    unverified = [r for r in stored_reports if not r.digest_matches()]
+
+    lines = render_trajectory_report(report)
+    if not stored_reports:
+        lines.append(f"  digest {report.digest()} (no stored report to audit)")
+    elif not unverified:
+        lines.append(
+            f"  digest {report.digest()} ({len(stored_reports)} stored report(s) all verify)"
+        )
+    else:
+        lines.append(
+            f"  digest {report.digest()} ({len(unverified)} of {len(stored_reports)} stored "
+            "report(s) fail their own digest check)"
+        )
+
+    _emit(
+        {
+            "trajectory_report": report.model_dump(mode="json"),
+            "digest": report.digest(),
+            "stored_report_ids": [r.report_id for r in stored_reports],
+            "unverified_stored_report_ids": [r.report_id for r in unverified],
+        },
+        "\n".join(lines),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK if not unverified else ExitCode.CORRUPTED
+
+
+def _stored_trajectory_reports(storage: Storage, run_id: str) -> list[TrajectoryReport]:
+    """Every trajectory report the run has persisted, archive and live log.
+
+    Skips payloads the model cannot read: a report that does not parse cannot
+    be audited, and the projection reports unreadable records separately.
+    """
+    try:
+        events = list(storage.read_events(run_id)) + list(storage.read_archived_events(run_id))
+    except Exception:
+        events = list(storage.read_events(run_id))
+    reports: list[TrajectoryReport] = []
+    for event in events:
+        if event.type is not EventType.TRAJECTORY_REPORT:
+            continue
+        try:
+            reports.append(TrajectoryReport.model_validate(event.payload))
+        except Exception:
+            continue
+    return reports
+
+
 #: Snapshots written beside the log at the compaction boundary (issue #449).
 #: The paths are the ones docs/guides/embed-claude-code.md already tells
 #: operators to read, so automating the hook does not move the files out from
@@ -2709,7 +2872,7 @@ def cmd_gateway(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
         )
         return ExitCode.ERROR
 
-    bound_tenant = load_gateway_tenant(config_path)
+    bound_tenant = getattr(args, "tenant", None) or load_gateway_tenant(config_path)
     active = storage.get_active_run()
     run_id = args.run_id or (active.run_id if active else None)
     server = GatewayServer(
@@ -3015,14 +3178,43 @@ def cmd_gate(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> 
     return 2
 
 
+def _load_dotted(spec: str) -> Any:
+    """Load a reconciler plugin from a dotted path 'module:Class'."""
+    if ":" not in spec:
+        raise ValueError(f"invalid reconciler specification '{spec}', expected 'module:ClassName'")
+    mod_name, class_name = spec.split(":", 1)
+    if not mod_name or not class_name:
+        raise ValueError(f"invalid reconciler specification '{spec}', expected 'module:ClassName'")
+    import importlib
+
+    try:
+        mod = importlib.import_module(mod_name)
+    except Exception as exc:
+        raise ValueError(f"failed to import module '{mod_name}': {exc}") from exc
+    try:
+        target = getattr(mod, class_name)
+    except AttributeError as exc:
+        raise ValueError(f"module '{mod_name}' has no attribute '{class_name}'") from exc
+    try:
+        return target() if isinstance(target, type) else target
+    except Exception as exc:
+        raise ValueError(f"failed to instantiate '{spec}': {exc}") from exc
+
+
 def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
-    """Settle uncertain actions with registered probes (issue #218).
+    """Settle uncertain actions with registered probes (issue #218) and plugins (#765).
 
     Mutating by design (it appends ACTION_RECONCILED events through the
     ledger), which is why it is its own command rather than something
     `validate`/`resume` do implicitly: those stay read-only so the exit-code
-    safety contract holds. With no registered probe for an action's type,
-    that action is left exactly as the ledger holds it.
+    safety contract holds. With no registered probe for an action's type and no
+    applicable plugin, that action is left exactly as the ledger holds it.
+
+    Plugins are the framework-neutral counterpart of the probe registry: any
+    ``ActionReconciler`` the operator names with ``--reconciler`` is dispatched
+    over the actions the probes left pending. Both paths settle through the same
+    ledger method, and neither can lower the other's caution: a plugin never
+    un-settles what a probe decided, only advises on what it left open.
     """
     from continuum.actions.ledger import ActionLedger
     from continuum.reconcilers import (
@@ -3042,13 +3234,28 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
         print(f"error: {exc}", file=err)
         return ExitCode.ERROR
 
+    # Plugins resolve from dotted paths the operator named explicitly, never by
+    # discovery: a reconcile must not execute code nobody asked it to run.
+    specs: list[str] = list(getattr(args, "reconciler", None) or [])
+    plugins: list[Any] = []
+    for spec in specs:
+        try:
+            plugins.append(_load_dotted(spec))
+        except ValueError as exc:
+            print(f"error: {exc}", file=err)
+            return ExitCode.ERROR
+
     # Authority probe path (issue #289c)
     authority_id = getattr(args, "authority", None)
     if authority_id:
         authority_report = settle_authority(
             storage, args.run_id, authority_id, probes, dry_run=args.dry_run
         )
-        payload = {"run_id": args.run_id, "dry_run": args.dry_run, **authority_report.as_dict()}
+        authority_payload = {
+            "run_id": args.run_id,
+            "dry_run": args.dry_run,
+            **authority_report.as_dict(),
+        }
         # Keep existing shape for actions report when authority path taken
         if authority_report.valid is True:
             line = f"authority {authority_id!r} still valid, reconciled and unblocked"
@@ -3060,7 +3267,7 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
         if args.dry_run:
             lines.append("dry run: nothing was written")
         _emit(
-            payload,
+            authority_payload,
             "\n".join(lines),
             as_json=args.json,
             stream=out,
@@ -3070,7 +3277,7 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
 
     pending = ActionLedger(storage, args.run_id).pending()
     report = settle_run(storage, args.run_id, probes, dry_run=args.dry_run)
-    payload = {"run_id": args.run_id, "dry_run": args.dry_run, **report.as_dict()}
+    payload: dict[str, Any] = {"run_id": args.run_id, "dry_run": args.dry_run, **report.as_dict()}
     lines = [
         f"pending actions: {len(pending)}, "
         f"settled: {report.settled} "
@@ -3080,6 +3287,39 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
     ]
     for action_type, detail in report.unresolved:
         lines.append(f"  [!!] {action_type}: {detail}")
+
+    # Plugin pass (issue #765): only actions the probes left pending are seen
+    # here, so a probe's settlement is never revisited or contradicted.
+    unresolved_after_plugins = 0
+    if plugins:
+        from continuum.plugins.reconcile import (
+            ReconciliationOutcome,
+            settle_with_reconcilers,
+        )
+
+        # Counted before the pass: an action the plugins escalate to
+        # REQUIRES_REVIEW leaves `pending()` (which only lists STARTED and
+        # UNKNOWN), so re-reading the ledger afterwards would report an
+        # escalated conflict as resolved and exit OK on a run a human must see.
+        open_before = len(ActionLedger(storage, args.run_id).pending())
+        plugin_report = settle_with_reconcilers(storage, args.run_id, plugins, dry_run=args.dry_run)
+        payload["plugins"] = plugin_report.as_dict()
+        unresolved_after_plugins = open_before - plugin_report.settled
+        lines.append(
+            f"plugin reconcilers: {len(plugins)} registered, "
+            f"settled: {plugin_report.settled} "
+            f"(occurred {len(plugin_report.settled_true)}, "
+            f"not-occurred {len(plugin_report.settled_false)}), "
+            f"escalated: {len(plugin_report.escalated)}"
+        )
+        for assessment in plugin_report.assessments:
+            # Only the escalated ones carry the warning sigil: a confirmed
+            # outcome is good news and must not render red in the terminal.
+            rendered = assessment.render().splitlines()[0]
+            if assessment.outcome is ReconciliationOutcome.CONFIRMED_OCCURRED:
+                lines.append(f"  [ok] {rendered}")
+            else:
+                lines.append(f"  [!!] {rendered}")
     if args.dry_run:
         lines.append("dry run: nothing was written")
     _emit(
@@ -3089,7 +3329,7 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
         stream=out,
         palette=getattr(args, "_palette", None),
     )
-    remaining = len(pending) - report.settled
+    remaining = unresolved_after_plugins if plugins else len(pending) - report.settled
     return ExitCode.OK if remaining <= 0 else ExitCode.REQUIRES_HUMAN
 
 
@@ -3302,18 +3542,24 @@ def cmd_forget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
                 continue
             payload = dict(ev.payload)
             rendered = payload.get("rendered_key") or ""
-            if not isinstance(rendered, str) or not rendered.startswith("mem:"):
+            if not isinstance(rendered, str) or not is_memory_key(rendered):
                 continue
-            # Tenant is third segment of mem:{store}:{tenant}:{record}
             parts = rendered.split(":")
-            if len(parts) < 4:
-                continue
-            tenant_in_key = parts[2]
-            if tenant_in_key != tenant:
-                continue
-            record_key = parts[3] if len(parts) >= 4 else rendered
-            # Also handle longer record keys with colons? Use join remainder
-            if len(parts) > 4:
+            if rendered.startswith("memory:"):
+                # memory:{store_id}:{tenant_id}:{namespace}:{record_key...}
+                if len(parts) < 5:
+                    continue
+                tenant_in_key = parts[2]
+                if tenant_in_key != tenant:
+                    continue
+                record_key = ":".join(parts[4:])
+            else:
+                # mem:{store_id}:{tenant}:{record_key...}
+                if len(parts) < 4:
+                    continue
+                tenant_in_key = parts[2]
+                if tenant_in_key != tenant:
+                    continue
                 record_key = ":".join(parts[3:])
             hits.append({"run_id": run.run_id, "rendered_key": rendered, "record_key": record_key})
             record_keys.add(record_key)
@@ -3918,6 +4164,25 @@ def build_parser() -> argparse.ArgumentParser:
     # health is advisory only; it never gates, never moves mode, never changes exit code
     # (issue #401). It reports trust_score with per-dimension breakdown.
 
+    # The analyser folds the archive alongside the live log, so it stays correct
+    # after compaction (issue #1427).
+    report = with_run(add("report", cmd_report, "Analyse a run's history. Read-only."))
+    report.add_argument(
+        "--trajectory",
+        action="store_true",
+        help="distil claims, uncertain side effects, scar rate and stall sites "
+        "from the archive and the active log.",
+    )
+    # Subparser default SUPPRESS: accepts a trailing --json without shadowing
+    # the global flag (#677), so `continuum report --trajectory RUN --json`
+    # parses the way the synopsis reads.
+    report.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="emit machine-readable JSON (same as the global flag).",
+    )
+
     resume = with_env(add("resume", cmd_resume, "Decide how a run may resume."))
     resume.add_argument(
         "run_id",
@@ -4022,6 +4287,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--anchor", type=int, default=None, help="anchor sequence to restore to."
     )
     restore_cmd.add_argument(
+        "--to-recovery-anchor",
+        dest="to_recovery_anchor",
+        action="store_true",
+        help="restore to the most recent RECOVERY anchor (recorded by `resume --repair`).",
+    )
+    restore_cmd.add_argument(
         "--carry-forward",
         dest="carry_forward",
         action="append",
@@ -4043,8 +4314,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="identifier to carry forward (repeatable: approval_id, key, action_id or sequence).",
     )
 
-    compact = with_run(
-        add("compact", cmd_compact, "Archive the pre-anchor log prefix. Mutates storage.")
+    compact = with_env(
+        with_run(add("compact", cmd_compact, "Archive the pre-anchor log prefix. Mutates storage."))
     )
     compact.add_argument("--force", action="store_true", help="apply without confirmation.")
 
@@ -4115,6 +4386,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         default=None,
         help="route registry path (default: .continuum/gateway.json).",
+    )
+    gateway_cmd.add_argument(
+        "--tenant",
+        default=None,
+        help="bound tenant identity to enforce on memory-store routes.",
     )
 
     briefing = add(
@@ -4270,6 +4546,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--authority",
         default=None,
         help="probe a consumed authority id via reconcilers.json instead of actions",
+    )
+    reconcile_auto.add_argument(
+        "--reconciler",
+        action="append",
+        default=None,
+        metavar="module.path:ClassName",
+        help=(
+            "register an ActionReconciler plugin by dotted path (repeatable). "
+            "Dispatched over actions the probes left pending (issue #765)."
+        ),
     )
     with_run(add("actions", cmd_actions, "List external side effects."))
     with_env(with_run(add("show-contract", cmd_contract, "Print the recovery contract.")))

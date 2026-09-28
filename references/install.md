@@ -26,7 +26,7 @@ uv pip install -e ".[dev]"
 uv pip install -e .
 
 # Composable extras
-uv pip install -e ".[mcp]"           # MCP server (12 stdio tools), requires mcp>=2.0
+uv pip install -e ".[mcp]"           # MCP server (13 stdio tools), requires mcp>=2.0
 uv pip install -e ".[otel]"          # OpenTelemetry bridge, opentelemetry-api>=1.20
 uv pip install -e ".[langgraph]"     # LangGraph adapter
 uv pip install -e ".[openai]"        # OpenAI Agents SDK adapter (also pulls mcp transitively)
@@ -97,14 +97,14 @@ continuum-mcp --help             # needs [mcp] or [dev]
 # powershell -ExecutionPolicy Bypass -File .\try-it.ps1
 # powershell -ExecutionPolicy Bypass -File .\try-it.ps1 cli --help
 
-# Full test suite (~2,559 tests; exact skips vary by environment)
+# Full test suite (~2,728 tests; exact skips vary by environment)
 pytest -q                        # or: ./try-it.sh test
 pytest --no-cov --tb=short -q    # faster, no coverage
 pytest tests/test_events.py -v   # single file
 
 # Lint and type-check (must pass for PRs)
-ruff check src/ tests/ examples/
-ruff format --check src/ tests/ examples/
+ruff check src/ tests/ examples/ scripts/ demo-run/
+ruff format --check src/ tests/ examples/ scripts/ demo-run/
 mypy src/continuum
 ```
 
