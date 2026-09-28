@@ -213,3 +213,40 @@ def test_grace_window_default_advisory() -> None:
 
     finally:
         storage.close()
+
+
+def test_rendered_section_spells_pins_the_way_the_emitter_does() -> None:
+    """The ACTIVE CONSTRAINTS section uses the public emitter's markers (issue #1099).
+
+    The docs say markers are emitted by ``pin_markers_for_state``; the accounting
+    looks for exactly those strings in the rendered context. If the section ever
+    hand-rolled its own marker spelling again, a pin could read as absent in a
+    context that does list it.
+    """
+    storage, run_id = _make_storage_with_pins(["c1", "c2"])
+    try:
+        state = project(run_id, storage.read_events(run_id))
+        rendered = build_recovery_context(state).render()
+        for marker in pin_markers_for_state(state):
+            assert marker in rendered
+        # ...and every emitted marker is what the accounting keys on, so the
+        # section and the verdict cannot drift apart.
+        accounting = account_pins_in_context(state, rendered)
+        assert all(info["status"] == "present" for info in accounting.values())
+    finally:
+        storage.close()
+
+
+def test_context_module_does_not_reach_for_the_private_marker() -> None:
+    """``checkpoint/context.py`` must not import the private ``_pin_marker`` (issue #1099).
+
+    The private twin is an inline duplicate of the public one-liner. Reaching
+    across modules for it is what let the two surfaces diverge in the first
+    place, so the import is pinned out by name.
+    """
+    from pathlib import Path
+
+    import continuum.checkpoint.context as context_mod
+
+    source = Path(context_mod.__file__).read_text(encoding="utf-8")
+    assert "_pin_marker" not in source
