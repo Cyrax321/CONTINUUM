@@ -67,17 +67,12 @@ def _collect_origins(state: SemanticState) -> list[Origin]:
     for d in state.decisions:
         origins.append(d.provenance.origin)
     for dep in state.external_dependencies:
-        # ExternalDependency does not carry provenance in the model, but its
-        # freshness is captured via StateStatus in the contract; we approximate
-        # by treating a dependency with a version as trusted if it was declared
-        # by a deterministic source. Without provenance, we fall back to
-        # counting it as trusted only when the overall state is not self-
-        # certified. For simplicity, count it as trusted if the state's goal is
-        # trusted, which is the common case for clean runs.
-        # To keep the score deterministic and simple, we treat dependencies
-        # as trusted when their version is present, which is a proxy for
-        # freshness (cited: ExternalDependency.version).
-        origins.append(Origin.DETERMINISTIC if dep.version else Origin.EXTERNAL_AGENT)
+        # A dependency carries provenance (cited: ExternalDependency.provenance,
+        # populated by the declaring event's origin in state/semantic.py). Score
+        # it by that origin like every other fact, so an agent cannot raise its
+        # own trust score by declaring a versioned dependency: a version is not
+        # a certificate of who recorded it (issue #1065).
+        origins.append(dep.provenance.origin)
     for appr in state.approvals:
         # Approval provenance is not stored per se, but its status is
         # derived from human or deterministic grants; treat GRANTED as
@@ -154,11 +149,16 @@ def _score_evidence(state: SemanticState) -> float:
             scored += 0.2
     for dep in state.external_dependencies:
         total += 1
-        # Fresh dependency (version present) is more trusted
-        if dep.version:
-            scored += 0.9
+        # A version means the dependency was pinned, which is worth credit only
+        # when a trusted source recorded it. Awarding 0.9 unconditionally let an
+        # agent self-certify by typing a version string (issue #1065); scale the
+        # freshness credit by whether the declaration itself is trusted.
+        if _origin_is_trusted(dep.provenance.origin):
+            scored += 0.9 if dep.version else 0.3
+        elif dep.version:
+            scored += 0.2
         else:
-            scored += 0.3
+            scored += 0.1
     if total == 0:
         return 1.0
     return scored / total

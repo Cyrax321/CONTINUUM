@@ -44,7 +44,7 @@ continuum export-evidence <run_id>               # export evidence as JSON lines
 continuum forget --tenant <id> [--dry-run]       # tombstone memory records for a tenant. mutates
 continuum watch <run_id>                         # watch run for liveness breach
 continuum serve                                  # run JSON sidecar over stdio
-continuum dashboard [--port 8080]                # serve web dashboard
+continuum dashboard [--port 8000]                # serve web dashboard
 continuum tui [--refresh N]                      # full-screen terminal dashboard
 continuum attest-keygen                          # generate Ed25519 signer key pair
 continuum attest <run_id>                        # sign run event-chain attestation
@@ -52,10 +52,12 @@ continuum attest-verify <run_id> --attest <file> # verify signed attestation aga
 continuum benchmark [--total N]                  # run CONTINUUM-Bench harness
 ```
 
-Every command accepts `--json`. Read-only commands (`inspect`, `status`, `history`, `events`,
+Most commands accept global `--json` **before** the subcommand (e.g. `continuum --json resume RUN`). Read-only commands (`inspect`, `status`, `history`, `events`,
 `diff`, `validate`, `resume`, `verify`, `actions`, `show-contract`, `replay`, `budget`, `tree`,
-`gate`, `briefing`, `health`, `impact`, `provenance`, `export-evidence`, `watch`) never write, so
-they are safe against a live database while an agent is mid-run. Mutating commands (`start`,
+`gate`, `briefing`, `health`, `impact`, `provenance`, `export-evidence`, `watch`) do not mutate
+run state or checkpoints. **Exception:** plain `resume` (without `--repair`) may still append
+`NOTIFICATION_SENT` / `NOTIFICATION_FAILED` events when `.continuum/webhooks.json` is configured
+for a blocked decision — the recovery decision itself remains non-mutating. Mutating commands (`start`,
 `checkpoint`, `confirm`, `complete`, `fork`, `merge`, `restore`, `compact`, `precompact`, `rewind`,
 `observe`, `reconcile`, `gateway`, `record-plan`, `forget`) say so in their help.
 
@@ -77,6 +79,7 @@ That line must never launch an agent onto stale state, so **only a verified-safe
 | Code | Meaning |
 |:--|:--|
 | `0` | verified safe to resume |
+| `1` | usage error or unexpected command failure |
 | `10` | recoverable, but repairs are required first |
 | `20` | a human must decide (typically an unreconciled side effect) |
 | `30` | not safe to resume |

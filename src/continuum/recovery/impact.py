@@ -3,7 +3,7 @@
 The semantic state forms a derivation graph:
 
     external_dependency -> evidence          (via ``Evidence.source``)
-    evidence            -> finding           (via ``Finding.evidence``)
+    evidence | finding  -> finding           (via ``Finding.evidence``)
     evidence | finding  -> decision          (via ``Decision.evidence``)
 
 When an external dependency moves (v3 -> v4) or disappears, only the subgraph
@@ -23,6 +23,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from continuum.models import SemanticState
+
+__all__ = [
+    "DependencyGraph",
+    "ImpactedSet",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +66,7 @@ class DependencyGraph:
             if item.source is not None:
                 self._resource_to_evidence.setdefault(item.source, []).append(item.evidence_id)
 
-        # finding id -> evidence ids it rests on
+        # finding id -> evidence/finding ids it rests on
         self._finding_evidence: dict[str, frozenset[str]] = {
             f.finding_id: frozenset(f.evidence) for f in state.findings
         }
@@ -75,14 +80,24 @@ class DependencyGraph:
         """Return exactly the subgraph invalidated by ``resources``.
 
         A resource invalidates the evidence sourced from it, every finding that
-        cites any of that evidence, and every decision that cites any of that
-        evidence or any of those findings.
+        cites any of that evidence or any tainted finding, and every decision
+        that cites any of that evidence or any of those findings.
         """
         scoped = frozenset(resources)
         evidence = frozenset(
             eid for res in scoped for eid in self._resource_to_evidence.get(res, ())
         )
-        findings = frozenset(fid for fid, evs in self._finding_evidence.items() if evs & evidence)
+        tainted_findings: set[str] = set()
+        changed = True
+        while changed:
+            changed = False
+            for fid, evs in self._finding_evidence.items():
+                if fid in tainted_findings:
+                    continue
+                if (evs & evidence) or (evs & tainted_findings):
+                    tainted_findings.add(fid)
+                    changed = True
+        findings = frozenset(tainted_findings)
         support = evidence | findings
         decisions = frozenset(did for did, sup in self._decision_support.items() if sup & support)
         return ImpactedSet(

@@ -4,7 +4,7 @@ This spec extends the Phase 1 contract seal with an optional keyed seal that can
 
 ## Current seal (Phase 1)
 
-`seal_contract` in `src/continuum/recovery/contract.py:42` computes `integrity_hash = stable_hash(payload)` where payload excludes `integrity_hash` and `created_at`. `verify_contract` recomputes the same hash and also checks a legacy payload without `evidence` and `reason` so contracts sealed before those fields existed still verify.
+`seal_contract` in `src/continuum/recovery/contract.py:66` computes `integrity_hash = stable_hash(payload)` where payload excludes `integrity_hash` and `created_at`. `verify_contract` recomputes the same hash and also checks a legacy payload without `evidence` and `reason` so contracts sealed before those fields existed still verify.
 
 ## Goal
 

@@ -97,13 +97,13 @@ root.
 
 ```bash
 # Lint with ruff
-ruff check src/ tests/
+ruff check src/ tests/ examples/
 
 # Auto-fix safe issues
-ruff check --fix src/ tests/
+ruff check --fix src/ tests/ examples/
 
 # Format check
-ruff format --check src/ tests/
+ruff format --check src/ tests/ examples/
 
 # Type-check with mypy (strict mode)
 mypy src/continuum
@@ -214,13 +214,20 @@ docs/                    # Website (deployed to GitHub Pages)
 
 ## Versioning
 
-The version string lives in **two** places:
+The version string lives in **five** places, and a bump must move all of them
+in one PR:
 
 - `pyproject.toml` → `version = "X.Y.Z"`
 - `src/continuum/__init__.py` → `__version__ = "X.Y.Z"`
+- `README.md` → the two `continuum-agent==X.Y.Z` pins (the install line and the
+  quick-start table)
+- `CITATION.cff` → `version: X.Y.Z`
+- the release tag `vX.Y.Z`
 
-Update both when bumping. CI will fail if they diverge once version-checking is
-added to the release workflow.
+`tests/test_version_drift.py` already runs in CI and enforces every one of
+those except the tag, which it checks when the tag exists locally. A bump that
+touches only some of the sites fails CI there rather than silently shipping a
+citation file a release behind.
 
 ---
 

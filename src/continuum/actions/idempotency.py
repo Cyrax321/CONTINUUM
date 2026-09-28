@@ -112,10 +112,6 @@ def idempotency_key(
     same logical operation do not deduplicate against each other within that
     ledger. A narrower scope (for example, a run id) is what most callers want.
 
-    ``scope`` narrows the key, typically to a run, so two runs performing the
-    same logical operation do not deduplicate against each other within that
-    ledger. A narrower scope (for example, a run id) is what most callers want.
-
     Note: ``scope`` only shapes the derived key. With the default per-run scope
     the key is unique to that run. With ``scope=None`` (``scoped_to_run=False``)
     the key is store-global and ``ActionLedger.claim`` consults every run's log,

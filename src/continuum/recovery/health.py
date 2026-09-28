@@ -2,8 +2,21 @@
 
 A cadence contract declares the maximum expected wall-clock interval between
 ledger appends. Evaluation is purely comparative: ``now - last_event_ts``
-against a threshold, with an injected clock so tests never sleep. Breach is
-advisory only, it never moves the recovery mode.
+against a threshold, with an injected clock so tests never sleep.
+
+Breach is advisory, not self-enacting: this module reports the reading and
+appends its audit events, it never rolls state back or rewrites a checkpoint.
+But the reading is not inert. ``RecoveryEngine.assess`` feeds it into
+``_decide``, where a breach proposes ``RecoveryMode.WAIT`` (never
+``ROLLBACK``, per #302), and when WAIT is the most cautious proposal it wins.
+Through ``exit_code_for`` that lands as ``ExitCode.REQUIRES_HUMAN`` (20), so
+``continuum resume`` exits non-zero and a chained
+``continuum resume "$RUN" && ./start-agent.sh`` short-circuits.
+
+The threshold is therefore an operator-set gate on resumption, not a passive
+annotation. Setting ``max_silence_seconds`` low can turn an otherwise-green
+run into a blocked one; that is the intended behaviour, and it is the reason
+the value is worth tuning deliberately.
 """
 
 from __future__ import annotations
@@ -206,8 +219,11 @@ def advisory_for_storage(
     """Compute liveness advisory for a run, injected clock.
 
     Shared by CLI, dashboard, MCP and sidecar read paths so every surface
-    surfaces the same advisory with the same semantics. Breach is advisory
-    only, never moves recovery mode.
+    surfaces the same advisory with the same semantics. Breach is advisory,
+    not self-enacting: this read never rolls state back, but the engine folds
+    it into a WAIT proposal (never ROLLBACK), which reaches ``continuum
+    resume`` as exit code 20 when it is the most cautious signal. See the
+    module docstring.
     """
     try:
         contract = load_cadence_contract()

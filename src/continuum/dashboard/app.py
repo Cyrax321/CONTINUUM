@@ -15,6 +15,15 @@ from typing import Any
 from continuum.recovery import RecoveryEngine
 from continuum.storage.base import Storage
 
+__all__ = [
+    "DASHBOARD_DRAIN_LIMIT_BYTES",
+    "MAX_DASHBOARD_BODY",
+    "make_dashboard_server",
+    "render_dashboard_html",
+    "render_run_detail_html",
+    "serve_dashboard",
+]
+
 MAX_DASHBOARD_BODY = 1 * 1024 * 1024
 
 #: Upper bound on how much to drain before giving up, matching gateway (#317).
