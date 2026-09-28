@@ -32,6 +32,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from continuum.environment.snapshot import EnvironmentSnapshot
 from continuum.events import CAUSED_BY_TYPES, Event, EventType, IntegrityReport, IntegrityViolation
 from continuum.models import Action, Origin, Run, RunStatus, SemanticState, StateCheckpoint, utcnow
 from continuum.security.hashing import make_id
@@ -539,7 +540,13 @@ class SQLiteStorage(Storage):
             ) from exc
         _maintain_action_index(conn, event, int(cursor.lastrowid or 0), payload=raw_payload)
 
-    def compact_run(self, run_id: str, *, through_sequence: int | None = None) -> dict[str, int]:
+    def compact_run(
+        self,
+        run_id: str,
+        *,
+        through_sequence: int | None = None,
+        environment: EnvironmentSnapshot | None = None,
+    ) -> dict[str, int]:
         """Archive the pre-anchor prefix of a run's log (issue #239).
 
         A forced anchor checkpoint first records state at the boundary (its
@@ -559,12 +566,28 @@ class SQLiteStorage(Storage):
 
         Content-addressed blobs referenced by archived events remain preserved
         in the blob directory without modification (issues #254, #1419).
+
+        The anchor carries ``environment`` when supplied, else the environment
+        the run's newest checkpoint already recorded (#1049): an
+        environment-blind anchor makes every pinned dependency UNKNOWN at the
+        next assessment and silently downgrades a clean run.
         """
         from continuum.checkpoint.manager import CheckpointManager
 
         lv = self.latest_version(run_id)
         head = self.last_sequence(run_id)
-        needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
+        # A caller-supplied environment has to land on a checkpoint, so it
+        # forces the fresh-anchor path whatever the log state. In practice the
+        # other terms already cover every reachable state (a version's
+        # STATE_CHECKPOINTED annotation sits one past its source_sequence, so
+        # head always outruns it); this term keeps the caller's request from
+        # depending on that invariant (#1049).
+        needs_fresh_anchor = (
+            lv is None
+            or through_sequence is not None
+            or lv.source_sequence < head
+            or environment is not None
+        )
         if needs_fresh_anchor:
             try:
                 manager = CheckpointManager(self)
@@ -574,7 +597,16 @@ class SQLiteStorage(Storage):
                 # never started (issue #648). Per-turn checkpoint evaluation
                 # deliberately keeps the cheaper live-tail read.
                 state = manager.project_current(run_id, full_history=True)
-                manager.checkpoint(run_id, state=state, force_version=True)
+                manager.checkpoint(
+                    run_id,
+                    state=state,
+                    force_version=True,
+                    # The anchor carries the environment the run's newest
+                    # checkpoint already recorded when none is supplied
+                    # (#1049): an environment-blind anchor makes every pinned
+                    # dependency UNKNOWN at the next assessment.
+                    environment=self._anchor_environment(run_id, environment),
+                )
             except Exception as exc:
                 raise ValueError(f"run {run_id!r} could not be anchored: {exc}") from exc
             lv = self.latest_version(run_id)
@@ -734,7 +766,8 @@ class SQLiteStorage(Storage):
             except json.JSONDecodeError:
                 continue
             if is_offload_descriptor(payload):
-                payload = load_blob_payload(self.storage_dir, payload)
+                with suppress(Exception):
+                    payload = load_blob_payload(self.storage_dir, payload)
             entry = index_entry_from_payload(EventType(row["type"]), payload)
             if entry is not None:
                 order = int(row["rid"]) if position >= offset else position - offset

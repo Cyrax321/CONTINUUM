@@ -18,7 +18,7 @@ diffed, logged and tested without touching the world.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -155,7 +155,13 @@ class RepairPlan(BaseModel):
         return "\n".join(f"  {i}. {s.render()}" for i, s in enumerate(self.steps, 1))
 
 
-def _step_for(entry: ComponentValidationEntry, *, strict_unknown: bool = True) -> RepairStep | None:
+def _step_for(
+    entry: ComponentValidationEntry,
+    *,
+    strict_unknown: bool = True,
+    exhausted_dependencies: Collection[str] = (),
+    run_budget_exhausted: bool = False,
+) -> RepairStep | None:
     """Map one validation finding to the repair it implies."""
     if entry.status is StateStatus.VALID:
         return None
@@ -164,6 +170,7 @@ def _step_for(entry: ComponentValidationEntry, *, strict_unknown: bool = True) -
 
     match entry.component:
         case Component.EXTERNAL_DEPENDENCY:
+            is_exhausted = run_budget_exhausted or (target in exhausted_dependencies)
             return RepairStep(
                 kind=RepairKind.REVALIDATE_DEPENDENCY,
                 target=target,
@@ -172,7 +179,10 @@ def _step_for(entry: ComponentValidationEntry, *, strict_unknown: bool = True) -
                 # nobody knows what is true. Callers who opted into tolerating
                 # uncertainty get an automatic step instead: the policy has to
                 # hold here too, or the setting would be silently ignored.
-                requires_human=entry.status is StateStatus.UNKNOWN and strict_unknown,
+                # A dependency whose recovery attempt budget is exhausted also
+                # requires human intervention (#1428, #1459).
+                requires_human=is_exhausted
+                or (entry.status is StateStatus.UNKNOWN and strict_unknown),
             )
         case Component.EVIDENCE:
             return RepairStep(kind=RepairKind.REDERIVE_EVIDENCE, target=target, reason=entry.detail)
@@ -222,6 +232,8 @@ def plan_repairs(
     uncertain_actions: Sequence[Action] = (),
     strict_unknown: bool = True,
     unprojectable: tuple[int, str, str] | None = None,
+    exhausted_dependencies: Collection[str] = (),
+    run_budget_exhausted: bool = False,
 ) -> RepairPlan:
     """Build an ordered repair plan from validation findings and ledger state.
 
@@ -263,8 +275,12 @@ def plan_repairs(
         # unknown while strict mode is on: the engine escalates such runs to
         # REQUEST_HUMAN, so the step must agree rather than quietly offering an
         # automatic reconcile the contract would then permit (issue #42).
+        # An action tagged to an exhausted dependency also requires human (#1459).
         escalated = action.status is ActionStatus.REQUIRES_REVIEW
-        needs_person = escalated or strict_unknown
+        is_action_exhausted = run_budget_exhausted or (
+            bool(action.dep_scope) and action.dep_scope in exhausted_dependencies
+        )
+        needs_person = escalated or strict_unknown or is_action_exhausted
         steps.append(
             RepairStep(
                 kind=RepairKind.RECONCILE_ACTION,
@@ -282,7 +298,12 @@ def plan_repairs(
         )
 
     for entry in findings:
-        step = _step_for(entry, strict_unknown=strict_unknown)
+        step = _step_for(
+            entry,
+            strict_unknown=strict_unknown,
+            exhausted_dependencies=exhausted_dependencies,
+            run_budget_exhausted=run_budget_exhausted,
+        )
         if step is not None:
             steps.append(step)
 

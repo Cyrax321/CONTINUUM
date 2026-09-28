@@ -193,7 +193,7 @@ Passo a passo completo com código em `docs/recovery_walkthrough.md` (`examples/
 | Adaptadores de frameworks | Integrações Python genérico, OpenAI Agents SDK, LangGraph e LangChain |
 | Loop de planejamento seguro | Verificação de observações com dois sinais escala ramos de alto risco para REQUIRES_REVIEW |
 | Revalidação periódica | Ambiente verificado novamente em agenda, detectando deriva no meio da execução dentro de um ciclo |
-| Log à prova de adulteração | Log de eventos encadeado (36 tipos de eventos) com verificação de integridade |
+| Log à prova de adulteração | Log de eventos encadeado (51 tipos de eventos) com verificação de integridade |
 | Porta de cumprimento | Chamadas de efeitos colaterais não reivindicadas são recusadas antes de disparar, mensagens de negação ensinam o protocolo de reivindicação |
 | Hooks de observação | Cada arquivo que uma CLI de código escreve se torna evidência verificada por digest, fora do controle do modelo |
 | Briefing de sessão | Sessões frescas aprendem o estado da execução de forma determinística no início, incluindo o resumo de raciocínio da sessão anterior |
@@ -385,7 +385,7 @@ Esquema v6. SQLite é primário, Postgres verificado por CI. Um log, muitas proj
 
 | Tabela | Propósito |
 |:--|:--|
-| `events` | Log somente anexado encadeado (44 tipos de eventos em v0.2) |
+| `events` | Log somente anexado encadeado (51 tipos de eventos) |
 | `runs` | Metadados de execução com `parent_run_id` para multiagente |
 | `versions` | Instantâneos de SemanticState por checkpoint |
 | `checkpoints` | Registros de checkpoint selados com âncoras `RECOVERY` |

@@ -191,7 +191,7 @@ python demo-run/generate_crash_visual.py
 | 框架适配器 | 通用 Python、OpenAI Agents SDK、LangGraph 和 LangChain 集成 |
 | 安全规划循环 | 双信号观测验证将高风险分支提升至 REQUIRES_REVIEW |
 | 周期性重验证 | 按计划重新检查环境，在一个周期内捕获运行中漂移 |
-| 防篡改日志 | 哈希链事件日志（36 种事件类型）带完整性验证 |
+| 防篡改日志 | 哈希链事件日志（51 种事件类型）带完整性验证 |
 | 强制门控 | 未声明的副作用调用在触发前被拒绝，拒绝信息会教授声明协议 |
 | 观测钩子 | 编码 CLI 写入的每个文件都会成为摘要验证的证据，位于模型控制之外 |
 | 会话简报 | 全新会话在开始时确定性地学习运行状态，包括上一会话的推理摘要 |
@@ -399,7 +399,7 @@ Schema v6。SQLite 为主，Postgres 经 CI 验证。单一日志，多重投影
 
 | 表 | 用途 |
 |:--|:--|
-| `events` | 哈希链仅追加日志（v0.2 中 44 种事件类型） |
+| `events` | 哈希链仅追加日志（51 种事件类型） |
 | `runs` | Run 元数据，带 `parent_run_id` 用于多智能体 |
 | `versions` | 每个检查点的 SemanticState 快照 |
 | `checkpoints` | 带 `RECOVERY` 锚点的密封检查点记录 |

@@ -193,7 +193,7 @@ Recorrido completo con código en `docs/recovery_walkthrough.md` (`examples/reco
 | Adaptadores de frameworks | Integraciones Python genérico, OpenAI Agents SDK, LangGraph y LangChain |
 | Bucle de planificación seguro | La verificación de observaciones con dos señales escala ramas de alto riesgo a REQUIRES_REVIEW |
 | Revalidación periódica | El entorno se vuelve a comprobar según agenda, detectando deriva a mitad de ejecución dentro de un ciclo |
-| Registro a prueba de manipulaciones | Registro de eventos encadenado (36 tipos de eventos) con verificación de integridad |
+| Registro a prueba de manipulaciones | Registro de eventos encadenado (51 tipos de eventos) con verificación de integridad |
 | Puerta de cumplimiento | Llamadas a efectos secundarios no reclamadas se rechazan antes de ejecutarse, los mensajes de denegación enseñan el protocolo de reclamo |
 | Hooks de observación | Cada archivo que una CLI de código escribe se convierte en evidencia verificada por digest, fuera del control del modelo |
 | Briefing de sesión | Sesiones frescas aprenden el estado de la ejecución de forma determinista al inicio, incluido el resumen de razonamiento de la sesión anterior |
@@ -385,7 +385,7 @@ Esquema v6. SQLite es primario, Postgres verificado por CI. Un registro, muchas 
 
 | Tabla | Propósito |
 |:--|:--|
-| `events` | Registro solo anexado encadenado (44 tipos de eventos en v0.2) |
+| `events` | Registro solo anexado encadenado (51 tipos de eventos) |
 | `runs` | Metadatos de ejecución con `parent_run_id` para multiagente |
 | `versions` | Instantáneas de SemanticState por checkpoint |
 | `checkpoints` | Registros de checkpoint sellados con anclas `RECOVERY` |

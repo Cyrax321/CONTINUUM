@@ -193,6 +193,7 @@ def test_audit_blob_descriptor_unit(tmp_path: Path) -> None:
     assert "archived:" in mismatch_violation.detail
 
 
+
 def test_maybe_offload_payload_thresholds(tmp_path: Path) -> None:
     """maybe_offload_payload respects threshold limits and descriptor formats."""
     small_payload = {"short": "val"}
@@ -381,9 +382,11 @@ def test_postgres_append_event_offload_mock(
 
         # Hash chain covers the offloaded descriptor
         assert event.hash == event.digest()
+        # Corrupted blob during _row_to_event rehydration raises CorruptedRecord
+        blob_path.unlink()
+        with pytest.raises(CorruptedRecord, match="missing or corrupt blob"):
+            store._row_to_event(mock_row, rehydrate=True)
 
-
-def test_sqlite_read_events_transparent_rehydration(tmp_path: Path) -> None:
     """read_events and read_all_events rehydrate payloads by default, returning raw descriptors when rehydrate=False."""
     db_file = tmp_path / "rehydrate_test.db"
     threshold = 50

@@ -122,6 +122,7 @@ async def test_every_tool_is_registered(server_ctx: tuple[Any, Any]) -> None:
         "continuum_complete_action",
         "continuum_fail_action",
         "continuum_reconcile_action",
+        "continuum_compensate_action",
         "continuum_list_actions",
         "continuum_confirm",
         "continuum_record_summary",
@@ -139,6 +140,7 @@ async def test_read_only_tools_are_annotated_as_such(server_ctx: tuple[Any, Any]
     assert hints["continuum_list_actions"] is True
     assert hints["continuum_checkpoint"] is False
     assert hints["continuum_intercept_action"] is False
+    assert hints["continuum_compensate_action"] is False
 
 
 @pytest.mark.asyncio
@@ -1422,6 +1424,62 @@ async def test_reconciling_an_unknown_outcome_records_that_it_was_a_correction(
 
 
 @pytest.mark.asyncio
+async def test_compensate_action_records_undo_and_emits_event(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """ActionLedger.compensate has an MCP transport (issue #1096).
+
+    Records a compensating settlement, marks the action COMPENSATED, emits
+    ACTION_COMPENSATED, and surfaces in recovery summary briefings.
+    """
+    from continuum.models import StateValidationResult
+    from continuum.recovery.summary import build_informed_retry, render_informed_retry
+
+    server, ctx = server_ctx
+    await seed_run(server)
+
+    claimed = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="stripe.charge",
+        arguments={"customer": "c_1", "amount": 5000},
+    )
+    await call(
+        server,
+        "continuum_complete_action",
+        run_id="run_1",
+        action_key=claimed["action_key"],
+        external_id="ch_123",
+    )
+
+    compensated = await call(
+        server,
+        "continuum_compensate_action",
+        run_id="run_1",
+        action_key=claimed["action_key"],
+        note="refunded full amount",
+        by="stripe.refund:ref_1",
+    )
+
+    assert compensated["status"] == "compensated"
+    assert compensated["compensated_by"] == ["stripe.refund:ref_1"]
+
+    events = ctx.storage.read_events("run_1")
+    assert EventType.ACTION_COMPENSATED in [e.type for e in events]
+
+    block = build_informed_retry(
+        ctx.storage,
+        "run_1",
+        validation_report=StateValidationResult(run_id="run_1", statuses=[]),
+    )
+    assert block is not None
+    assert block["compensations"] == 1
+    rendered = render_informed_retry(block)
+    assert any("compensations applied: 1" in line for line in rendered)
+
+
+@pytest.mark.asyncio
 async def test_reconcile_can_store_the_evidence_it_was_given(
     server_ctx: tuple[Any, Any],
 ) -> None:
@@ -2635,3 +2693,90 @@ async def test_an_interrupted_claim_still_reconciles_at_budget(
         and e.payload.get("action", {}).get("status") == ActionStatus.STARTED.value
     ]
     assert len(slots) == 1
+
+
+def test_ensure_run_recognises_archived_run_started_after_compaction(tmp_path: Any) -> None:
+    """ensure_run must not append duplicate RUN_STARTED or wipe constraints after compaction (#1436)."""
+    from continuum.state.semantic import project
+
+    storage = SQLiteStorage(str(tmp_path / "compacted_ensure.db"))
+    storage.create_run(Run(run_id="run_c", goal="deliver cargo"))
+    storage.append_event(
+        "run_c",
+        EventType.RUN_STARTED,
+        {"goal": "deliver cargo", "constraints": ["refrigerated", "priority"], "total": 10},
+        source=Origin.HUMAN,
+    )
+    storage.append_event(
+        "run_c",
+        EventType.WORK_ADDED,
+        {"task_id": "w1", "description": "load pallet"},
+        source=Origin.HUMAN,
+    )
+    storage.compact_run("run_c")
+
+    ctx = ContinuumMCP(storage=storage)
+    ctx.ensure_run("run_c")
+
+    events = storage.read_all_events("run_c")
+    run_started_events = [e for e in events if e.type is EventType.RUN_STARTED]
+    assert len(run_started_events) == 1
+
+    state = project("run_c", events)
+    assert state.goal.constraints == ["refrigerated", "priority"]
+
+
+async def _compact_out_run_started(ctx: Any, run_id: str = "run_1") -> None:
+    """Archive the pre-anchor prefix so ``RUN_STARTED`` leaves the live tail.
+
+    Mirrors a long run that has been compacted: the goal-bearing genesis event
+    lives only in ``events_archive`` afterwards, which is precisely the state a
+    live-tail read cannot project (issue #1133).
+    """
+    live = list(ctx.storage.read_events(run_id))
+    # Bound below the anchor the next append would mint; seq 1 (RUN_STARTED) and
+    # the first update move to the archive, the tail keeps a valid anchor.
+    ctx.storage.compact_run(run_id, through_sequence=live[1].sequence)
+    assert not any(e.type is EventType.RUN_STARTED for e in ctx.storage.read_events(run_id)), (
+        "precondition: RUN_STARTED must be out of the live tail"
+    )
+    assert any(e.type is EventType.RUN_STARTED for e in ctx.storage.read_all_events(run_id)), (
+        "precondition: RUN_STARTED must survive in the archive"
+    )
+
+
+@pytest.mark.asyncio
+async def test_record_progress_survives_compaction(server_ctx: tuple[Any, Any]) -> None:
+    """Regression (#1133): record_progress folds full history, not the live tail.
+
+    PR #1219 fixed this and was dropped in a merge-of-main, so a compacted run
+    (``RUN_STARTED`` archived) again refused every progress update as
+    "unprojectable" -- exactly the long runs the tool exists for. The candidate
+    fold must read the archive too so the goal still projects.
+    """
+    server, ctx = server_ctx
+    await call(server, "continuum_record_progress", run_id="run_1", completed=1, total=10, goal="G")
+    await call(server, "continuum_record_progress", run_id="run_1", completed=2, total=10)
+    await _compact_out_run_started(ctx)
+    payload = await call(server, "continuum_record_progress", run_id="run_1", completed=4, total=10)
+    assert payload["completed"] == 4
+    assert payload["pending"] == 6
+
+
+@pytest.mark.asyncio
+async def test_record_plan_survives_compaction(server_ctx: tuple[Any, Any]) -> None:
+    """Regression (#1133): record_plan shares the same candidate fold as progress,
+    so a compacted run must accept a plan upsert instead of rejecting it."""
+    server, ctx = server_ctx
+    await call(server, "continuum_record_progress", run_id="run_1", completed=1, total=10, goal="G")
+    await call(server, "continuum_record_progress", run_id="run_1", completed=2, total=10)
+    await _compact_out_run_started(ctx)
+    payload = await call(
+        server,
+        "continuum_record_plan",
+        run_id="run_1",
+        plan_id="p1",
+        units=[{"id": "u1", "title": "do the thing", "status": "working"}],
+    )
+    assert payload["plan_id"] == "p1"
+    assert payload["units"] == 1

@@ -34,9 +34,9 @@ Install once with `uv sync --extra dev` (or `pip install -e ".[dev]"`).
 - Run a single area: `uv run pytest tests/test_checkpoint_phase4.py -v`
 - Fast loop (skip slow integration tests): `uv run pytest -m "not slow"` or `pytest -q -m "not slow"`
 - Full suite (as CI runs it, slow tests included): `uv run pytest` or `pytest -q`
-- Lint: `uv run ruff check src/ tests/ examples/`
-- Format check: `uv run ruff format --check src/ tests/ examples/`
-- Auto fix lint and format: `uv run ruff check --fix src/ tests/ examples/` then `uv run ruff format src/ tests/ examples/`
+- Lint: `uv run ruff check src/ tests/ examples/ scripts/ demo-run/`
+- Format check: `uv run ruff format --check src/ tests/ examples/ scripts/ demo-run/`
+- Auto fix lint and format: `uv run ruff check --fix src/ tests/ examples/ scripts/ demo-run/` then `uv run ruff format src/ tests/ examples/ scripts/ demo-run/`
 - Type check: `uv run mypy src/continuum` (strict, with the `pydantic.mypy` plugin)
 
 CI runs the same three jobs on Python 3.11, 3.12, and 3.13 and on lint and type check. A change must pass all four required status checks.
