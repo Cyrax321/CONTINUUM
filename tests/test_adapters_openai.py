@@ -587,13 +587,23 @@ def test_wrap_function_tool_invocation_binds_args_and_intercepts(
         seen_ctx.append(ctx)
         return {"endpoint": endpoint, "method": method}
 
+    payload = '{"endpoint": "https://x", "method": "POST"}'
+
     class FakeTC(ToolContext):
         def __init__(self) -> None:
-            self.tool_name = "api_call"
-            self.context = ContinuumContext(continuum_run_id=run_id, goal="g")
-            self.tool_input = {"continuum_run_id": run_id}
+            # Must go through ToolContext.__init__: newer openai-agents
+            # versions (0.22.2+) set internal state there
+            # (_function_tool_arguments, _custom_data) that on_invoke_tool
+            # reads. Bypassing it with plain attribute assignment breaks
+            # with AttributeError surfaced as a tool error string.
+            super().__init__(
+                context=ContinuumContext(continuum_run_id=run_id, goal="g"),
+                tool_name="api_call",
+                tool_call_id="fake-call-1",
+                tool_arguments=payload,
+                tool_input={"continuum_run_id": run_id},
+            )
 
-    payload = '{"endpoint": "https://x", "method": "POST"}'
     first = asyncio.run(api_call.on_invoke_tool(FakeTC(), payload))
     second = asyncio.run(api_call.on_invoke_tool(FakeTC(), payload))
 

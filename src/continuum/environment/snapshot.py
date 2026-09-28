@@ -36,6 +36,7 @@ __all__ = [
     "CallableProvider",
     "GitProvider",
     "capture",
+    "process_fingerprint",
     "UNKNOWN_VERSION",
 ]
 

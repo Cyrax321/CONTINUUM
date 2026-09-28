@@ -2630,3 +2630,122 @@ async def test_an_uncertain_action_still_refuses_at_budget(
     assert again["proceed"] is False
     assert again["status"] == ActionStatus.UNKNOWN.value
     assert "reconcile" in again["guidance"].lower()
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_claim_still_reconciles_at_budget(
+    server_ctx: tuple[Any, Any],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claim interrupted mid-flight never reaches a status the gate may settle.
+
+    The sibling test above reaches the reconciliation path through
+    ``fail_action(certain=False)``, which records UNKNOWN, and UNKNOWN was in
+    the gate's settled set. A claim whose caller simply died before reporting
+    anything is still STARTED, and STARTED was not in that set, so with
+    ``max_attempts: 1`` the one and only attempt was already spent when the
+    recovering agent came back. The gate then raised "retry budget exhausted"
+    in front of the interrupted-action answer it exists to pass through
+    (issue #1080): the run is pointed at a limit that is working as intended
+    while the real situation is that an outcome is owed and unknown.
+
+    No explicit ``key`` is passed, so the operation is identified by argument
+    hashing, which is the caller shape the issue describes.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".continuum").mkdir()
+    (tmp_path / ".continuum" / "budgets.json").write_text('{"default_max_attempts": 1}')
+    server, _ = server_ctx
+    await seed_run(server)
+
+    claim = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="charge",
+        arguments={"invoice": "INV-1", "cents": 500},
+    )
+    assert claim["proceed"] is True
+    interrupted_key = claim["action_key"]
+
+    # No complete, no failure report: the caller died mid-action, so the record
+    # is still STARTED and its single attempt slot is spent.
+    again = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="charge",
+        arguments={"invoice": "INV-1", "cents": 500},
+    )
+    assert again["proceed"] is False
+    assert again["status"] == ActionStatus.UNKNOWN.value
+    assert again["action_key"] == interrupted_key
+    assert "reconcile" in again["guidance"].lower()
+    # Asking again did not buy a second attempt slot: the claim was interrupted,
+    # not retried, so the allowance the gate is protecting is still intact.
+    _, ctx = server_ctx
+    slots = [
+        e
+        for e in ctx.storage.read_all_events("run_1")
+        if e.type.value == "ACTION_RECORDED"
+        and str(e.payload.get("key", "")) == interrupted_key
+        and e.payload.get("action", {}).get("status") == ActionStatus.STARTED.value
+    ]
+    assert len(slots) == 1
+
+
+async def _compact_out_run_started(ctx: Any, run_id: str = "run_1") -> None:
+    """Archive the pre-anchor prefix so ``RUN_STARTED`` leaves the live tail.
+
+    Mirrors a long run that has been compacted: the goal-bearing genesis event
+    lives only in ``events_archive`` afterwards, which is precisely the state a
+    live-tail read cannot project (issue #1133).
+    """
+    live = list(ctx.storage.read_events(run_id))
+    # Bound below the anchor the next append would mint; seq 1 (RUN_STARTED) and
+    # the first update move to the archive, the tail keeps a valid anchor.
+    ctx.storage.compact_run(run_id, through_sequence=live[1].sequence)
+    assert not any(e.type is EventType.RUN_STARTED for e in ctx.storage.read_events(run_id)), (
+        "precondition: RUN_STARTED must be out of the live tail"
+    )
+    assert any(e.type is EventType.RUN_STARTED for e in ctx.storage.read_all_events(run_id)), (
+        "precondition: RUN_STARTED must survive in the archive"
+    )
+
+
+@pytest.mark.asyncio
+async def test_record_progress_survives_compaction(server_ctx: tuple[Any, Any]) -> None:
+    """Regression (#1133): record_progress folds full history, not the live tail.
+
+    PR #1219 fixed this and was dropped in a merge-of-main, so a compacted run
+    (``RUN_STARTED`` archived) again refused every progress update as
+    "unprojectable" -- exactly the long runs the tool exists for. The candidate
+    fold must read the archive too so the goal still projects.
+    """
+    server, ctx = server_ctx
+    await call(server, "continuum_record_progress", run_id="run_1", completed=1, total=10, goal="G")
+    await call(server, "continuum_record_progress", run_id="run_1", completed=2, total=10)
+    await _compact_out_run_started(ctx)
+    payload = await call(server, "continuum_record_progress", run_id="run_1", completed=4, total=10)
+    assert payload["completed"] == 4
+    assert payload["pending"] == 6
+
+
+@pytest.mark.asyncio
+async def test_record_plan_survives_compaction(server_ctx: tuple[Any, Any]) -> None:
+    """Regression (#1133): record_plan shares the same candidate fold as progress,
+    so a compacted run must accept a plan upsert instead of rejecting it."""
+    server, ctx = server_ctx
+    await call(server, "continuum_record_progress", run_id="run_1", completed=1, total=10, goal="G")
+    await call(server, "continuum_record_progress", run_id="run_1", completed=2, total=10)
+    await _compact_out_run_started(ctx)
+    payload = await call(
+        server,
+        "continuum_record_plan",
+        run_id="run_1",
+        plan_id="p1",
+        units=[{"id": "u1", "title": "do the thing", "status": "working"}],
+    )
+    assert payload["plan_id"] == "p1"
+    assert payload["units"] == 1

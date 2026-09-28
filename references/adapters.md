@@ -386,6 +386,22 @@ reconciliation first. An unclaimed request gets `403` with a reason that names
 rather than just being blocked. Unknown hosts are refused rather than forwarded:
 a proxy that forwards anywhere would be an open relay wearing CONTINUUM's name.
 
+`prefix` is enforced, not just recorded: the request path must fall within it,
+on a whole-segment boundary, so a claim for `/v1/invoices` covers
+`/v1/invoices/49` but not `/v1/refunds` or `/v1/invoices-archived`. It is the
+only per-path scope a route has; without the check one claim spends itself on
+every path the host serves, and the recorded evidence says the invoice was sent
+while the upstream saw something else. A route written without a `prefix` keeps
+the whole host, which is what the default `/` has always meant. The path is
+normalised before the comparison (query stripped, percent-decoded, `..`
+collapsed), because the upstream rewrites `/v1/invoices/../refunds` before it
+dispatches and the refusal has to be about the path that is actually served.
+It is normalised exactly once: `unquote` is not idempotent, so a second pass
+turns a doubly-encoded separator like `/v1%252finvoices/49` into a real one,
+and the boundary would then judge `/v1/invoices/49` while the upstream decodes
+once and serves `/v1%2finvoices/49`, one literal segment that is not under the
+prefix at all.
+
 The claim itself comes from whichever seam the app already uses:
 `ActionLedger.claim(...)` in process, `continuum_intercept_action` over MCP, or
 one of the adapters above. What the gateway adds is that it settles that claim

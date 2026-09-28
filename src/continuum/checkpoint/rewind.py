@@ -90,7 +90,11 @@ def resolve_checkpoint(storage: Storage, run_id: str, to: str) -> StateCheckpoin
 
 
 def _collect_tool_completed(storage: Storage, run_id: str) -> list[Any]:
-    return [e for e in storage.read_events(run_id) if e.type is EventType.TOOL_COMPLETED]
+    # Full history, not the live tail: after compaction the pre-checkpoint
+    # TOOL_COMPLETED events live in the archive. Reading the tail alone leaves
+    # the before-set empty, so a file that should be restored from its
+    # checkpoint-time snapshot takes the delete branch instead (issue #1053).
+    return [e for e in storage.read_all_events(run_id) if e.type is EventType.TOOL_COMPLETED]
 
 
 def rewind_to_checkpoint(
@@ -132,7 +136,7 @@ def rewind_to_checkpoint(
         raise
     except Exception as exc:
         raise RewindError(str(exc)) from exc
-    _ = project(run_id, storage.read_events(run_id), upto=target.state.source_sequence)
+    _ = project(run_id, storage.read_all_events(run_id), upto=target.state.source_sequence)
     all_tool_events = _collect_tool_completed(storage, run_id)
     checkpoint_seq = target.state.source_sequence
     after = [e for e in all_tool_events if e.sequence > checkpoint_seq]
