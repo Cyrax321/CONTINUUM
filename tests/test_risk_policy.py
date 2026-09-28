@@ -199,3 +199,88 @@ def test_risk_rationale_dedupes_a_repeated_trigger(tmp_path: Path) -> None:
 
     assert decision.contract.reason == "risk error_cascade triggers wait"
     assert decision.contract.reason.count("error_cascade") == 1
+
+
+def test_risk_rationale_locates_repeating_steps(tmp_path: Path) -> None:
+    # Issue #1426: a loop verdict that names the trigger but not the steps
+    # leaves the replanning agent no way to avoid the repetition it was warned
+    # about. The step ids the feed supplied must ride along with the verdict.
+    from continuum.recovery import RecoveryEngine
+
+    db = str(tmp_path / "risk_steps.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_steps"
+        store.create_run_started(Run(run_id=run_id, goal="located guidance"))
+        # Two distinct steps, observed in this order, with a repeat: the
+        # guidance must read as one set in first-seen order.
+        for step in ("analyze", "report", "analyze"):
+            ingest_risk(store, run_id, {"trigger": "loop", "step_id": step})
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    assert decision.mode.value == "replan"
+    assert decision.contract.reason == (
+        "risk loop triggers replan; repeating steps to avoid: analyze, report"
+    )
+    assert decision.contract.reason.count("analyze") == 1
+
+
+def test_risk_rationale_omits_step_guidance_when_feed_gave_none(tmp_path: Path) -> None:
+    # A trigger that carries no step id must not gain an empty guidance clause:
+    # "repeating steps to avoid:" with nothing after it is not guidance.
+    from continuum.recovery import RecoveryEngine
+
+    db = str(tmp_path / "risk_no_steps.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_no_steps"
+        store.create_run_started(Run(run_id=run_id, goal="unlocated"))
+        ingest_risk(store, run_id, {"trigger": "meltdown", "score": 0.99})
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    assert decision.mode.value == "rollback"
+    assert decision.contract.reason == "risk meltdown triggers rollback"
+    assert "repeating steps to avoid" not in decision.contract.reason
+
+
+def test_risk_step_id_from_a_losing_trigger_is_not_guidance(tmp_path: Path) -> None:
+    # A less severe trigger loses, so the step it located must not survive into
+    # the winner's guidance: guidance describes what the winning verdict covers.
+    from continuum.recovery import RecoveryEngine
+
+    db = str(tmp_path / "risk_losing.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_losing"
+        store.create_run_started(Run(run_id=run_id, goal="severity wins"))
+        ingest_risk(store, run_id, {"trigger": "loop", "step_id": "analyze"})
+        ingest_risk(store, run_id, {"trigger": "meltdown", "score": 0.99})
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    assert decision.mode.value == "rollback"
+    assert decision.contract.reason == "risk meltdown triggers rollback"
+    assert "analyze" not in decision.contract.reason
+
+
+def test_risk_step_id_ignored_when_blank_or_absent(tmp_path: Path) -> None:
+    # The feed is fail-open, so a probe that sent a blank or missing step id
+    # contributes no location rather than an empty or bogus one. A numeric id
+    # is normalized to a string at ingestion, which is a real step reference.
+    from continuum.recovery import RecoveryEngine
+
+    db = str(tmp_path / "risk_blank_step.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_blank_step"
+        store.create_run_started(Run(run_id=run_id, goal="malformed step id"))
+        ingest_risk(store, run_id, {"trigger": "loop", "step_id": "   "})
+        ingest_risk(store, run_id, {"trigger": "loop"})
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    assert decision.mode.value == "replan"
+    assert "repeating steps to avoid" not in decision.contract.reason
+
+    db = str(tmp_path / "risk_numeric_step.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_numeric_step"
+        store.create_run_started(Run(run_id=run_id, goal="numeric step id"))
+        ingest_risk(store, run_id, {"trigger": "loop", "step_id": 42})
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    assert decision.contract.reason == ("risk loop triggers replan; repeating steps to avoid: 42")
