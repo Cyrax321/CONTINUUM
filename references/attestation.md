@@ -57,6 +57,21 @@ continuum verify <run_id> --attest attest.json [--expect-hash <head>]
 
 `--sign` on `verify` is not needed; verification never requires the private key.
 
+### Environment variables
+
+Both signing inputs can be supplied by flag or by environment variable; a flag
+on the command line wins when both are present.
+
+`CONTINUUM_SIGNER_KEY`
+: The private key PEM path `continuum attest` signs with when `--key` is not
+passed. Without either, the command refuses with "no signing key" rather than
+looking for a default.
+
+`CONTINUUM_SIGNER`
+: The signer name embedded in the attestation document when `--signer` is not
+passed. It records who issued the signature; nothing derives authority from it,
+so a verifier that cares about identity must still check `public_key`.
+
 ## Threat model and limits (documented honestly)
 
 - Attestation proves *authenticity of a claim about a point in history*. It does

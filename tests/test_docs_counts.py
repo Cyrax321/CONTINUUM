@@ -53,6 +53,19 @@ _COLLECTED_RES = (
     re.compile(r"roughly\s+([\d,]+)\s+tests\s+collected"),
     re.compile(r"approximately\s+([\d,]+)\s+tests\b"),
     re.compile(r"~([\d,]+)\s+tests\b"),
+    re.compile(r"\bwith\s+~?([\d,]+)\s+tests\b", re.IGNORECASE),
+    re.compile(
+        r"\bvalidated(?:\s+\w+){0,5}\s+and\s+~?([\d,]+)\s+tests\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bvalidado(?:\s+\w+){0,5}\s+y\s+~?([\d,]+)\s+tests\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bcerca\s+de\s+~?([\d,]+)\s+tests\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"^pytest\s+-q\s+#.*?([\d,]+)", re.MULTILINE),
 )
 
@@ -99,6 +112,23 @@ def test_documented_counts_agree() -> None:
         if total is not None:
             stated[f.name] = total
     assert len(set(stated.values())) == 1, f"documented counts disagree: {stated}"
+
+
+def test_documented_narrative_count_forms(tmp_path: Path) -> None:
+    """Narrative English and Spanish count claims must remain detectable."""
+    cases = (
+        ("Built with ~2,241 tests.", 2241),
+        ("Built with 2241 tests.", 2241),
+        ("Validated with real kills and 1380 tests.", 1380),
+        ("Validated with real kills and ~2,241 tests.", 2241),
+        ("Validado con muertes reales y 1380 tests.", 1380),
+        ("Validado con muertes reales y ~2,241 tests.", 2241),
+        ("cerca de 2,311 tests", 2311),
+    )
+    for index, (text, expected) in enumerate(cases):
+        path = tmp_path / f"doc-{index}.md"
+        path.write_text(text, encoding="utf-8")
+        assert documented_total(path) == expected
 
 
 @pytest.mark.slow
