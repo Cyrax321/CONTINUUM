@@ -18,8 +18,8 @@ git checkout main
 git pull --ff-only origin main
 
 pytest                                  # full test suite
-ruff check src/ tests/ examples/ benchmarks/
-ruff format --check src/ tests/ examples/ benchmarks/
+ruff check src/ tests/ examples/ benchmarks/ scripts/ demo-run/
+ruff format --check src/ tests/ examples/ benchmarks/ scripts/ demo-run/
 mypy src/continuum                      # strict mode, as configured
 ```
 

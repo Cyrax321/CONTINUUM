@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from continuum.events import EventType
-from continuum.gate import is_memory_key, normalize_key_value
+from continuum.gate import is_memory_key, is_memory_template, normalize_key_value
 from continuum.models import Origin
 
 __all__ = [
@@ -119,13 +119,31 @@ def load_gateway_config(path: Path) -> list[Route]:
         raise GatewayConfigError(f"{location}: expected {{'upstreams': [...]}}")
     for entry in entries:
         try:
+            kt = str(entry["key_template"])
+            if is_memory_template(kt):
+                import string as _string
+
+                fields = {name for _, name, _, _ in _string.Formatter().parse(kt) if name}
+                has_tenant = "tenant" in fields or "tenant_id" in fields
+                required = (
+                    ("store_id", "namespace", "record_key")
+                    if kt.startswith("memory:")
+                    else ("store_id", "record_key")
+                )
+                missing = [f for f in required if f not in fields]
+                if not has_tenant:
+                    missing.append("tenant")
+                if missing:
+                    raise GatewayConfigError(
+                        f"{location}: upstream key template {kt!r} missing required placeholder(s): {', '.join(missing)}"
+                    )
             routes.append(
                 Route(
                     host=str(entry["host"]),
                     methods=tuple(m.upper() for m in entry.get("methods", ("POST",))),
                     prefix=str(entry.get("prefix", "/")),
                     action_type=str(entry["action_type"]),
-                    key_template=str(entry["key_template"]),
+                    key_template=kt,
                 )
             )
         except KeyError as exc:
@@ -136,11 +154,11 @@ def load_gateway_config(path: Path) -> list[Route]:
 def load_gateway_tenant(path: Path) -> str | None:
     """Read optional bound tenant from gateway config.
 
-    When present, memory-store routes (``mem:``) are tenant-scoped: a
-    request whose ``tenant`` field does not match the bound identity is
+    When present, memory-store routes (``mem:`` or ``memory:``) are tenant-scoped: a
+    request whose tenant field does not match the bound identity is
     denied at the gateway rather than surfacing later as a breach. This
     is configuration and a check, not new infrastructure (issue #566,
-    parent #304).
+    parent #304, issue #1415).
     """
     if not path.exists():
         return None
@@ -150,7 +168,7 @@ def load_gateway_tenant(path: Path) -> str | None:
         return None
     if not isinstance(raw, dict):
         return None
-    bound = raw.get("bound_tenant") or raw.get("tenant")
+    bound = raw.get("bound_tenant") or raw.get("tenant") or raw.get("tenant_id")
     if isinstance(bound, str) and bound.strip():
         return bound.strip()
     return None
@@ -285,28 +303,34 @@ def match_route(
     except GatewayConfigError as exc:
         return Decision(False, f"gateway configuration error: {exc}")
 
-    # Tenant deny (issue #566): memory keys carry tenant in the
-    # rendered identity. When a bound tenant is configured, a claim
-    # whose tenant prefix does not match is denied at the gate rather
-    # than surfacing later as a breach.
-    if is_memory_key(rendered) and bound_tenant is not None:
-        # Extract tenant from rendered mem key: mem:store:tenant:record
+    # Tenant boundary enforcement (issue #566, issue #1415): memory keys carry
+    # tenant in the rendered identity. When a bound tenant is configured or
+    # present in the run context, a claim whose tenant namespace does not match
+    # is denied at the gate rather than surfacing later as a breach.
+    if bound_tenant is None and storage is not None and hasattr(storage, "get_run"):
         try:
-            parts = rendered.split(":")
-            # mem:{store_id}:{tenant}:{record_key} -> tenant is third segment
-            if len(parts) >= 4:
-                tenant_in_key = parts[2]
-                if tenant_in_key != bound_tenant:
-                    return Decision(
-                        False,
-                        f"tenant mismatch: bound {bound_tenant!r} but key {rendered!r} carries tenant {tenant_in_key!r}",
-                        route=route,
-                    )
-            else:
-                # Malformed mem key but already rendered; deny closed
-                return Decision(False, f"malformed memory key {rendered!r}", route=route)
+            run_obj = storage.get_run(run_id)
+            if run_obj and getattr(run_obj, "metadata", None):
+                meta_tenant = run_obj.metadata.get("tenant_id") or run_obj.metadata.get("tenant")
+                if meta_tenant and str(meta_tenant).strip():
+                    bound_tenant = str(meta_tenant).strip()
         except Exception:
-            return Decision(False, f"tenant check failed for {rendered!r}", route=route)
+            pass
+
+    if is_memory_key(rendered) and bound_tenant is not None:
+        import string as _string
+
+        fields = [f for _, f, _, _ in _string.Formatter().parse(route.key_template) if f]
+        if any(":" in str(normalize_key_value(body.get(f, ""))) for f in fields):
+            return Decision(False, f"malformed memory key {rendered!r}", route=route)
+        tenant_field = "tenant_id" if "tenant_id" in fields else "tenant"
+        tenant_in_key = str(normalize_key_value(body.get(tenant_field, "")))
+        if tenant_in_key != bound_tenant:
+            return Decision(
+                False,
+                f"tenant mismatch: bound {bound_tenant!r} but key {rendered!r} carries tenant {tenant_in_key!r}",
+                route=route,
+            )
 
     # Memory keys are global to the store, not the run, so use scope=None
     # to let the action_index catch cross-run double-writes.
@@ -518,6 +542,48 @@ class GatewayServer:
                     if run_id is None:
                         self._respond(403, {"error": "no active CONTINUUM run"})
                         return
+                    bound_tenant = getattr(server, "_bound_tenant", None)
+                    header_tenant = self.headers.get("X-Continuum-Tenant")
+                    if header_tenant:
+                        header_tenant = str(header_tenant).strip()
+
+                    try:
+                        run_obj = storage.get_run(run_id) if hasattr(storage, "get_run") else None
+                    except Exception:
+                        run_obj = None
+                    run_metadata = getattr(run_obj, "metadata", {}) or {}
+                    run_tenant = run_metadata.get("tenant_id") or run_metadata.get("tenant")
+                    if run_tenant:
+                        run_tenant = str(run_tenant).strip()
+
+                    if bound_tenant and header_tenant and bound_tenant != header_tenant:
+                        self._respond(
+                            403,
+                            {
+                                "error": "denied by CONTINUUM gateway",
+                                "reason": (
+                                    f"tenant mismatch: header {header_tenant!r} "
+                                    f"does not match bound tenant {bound_tenant!r}"
+                                ),
+                            },
+                        )
+                        return
+
+                    if run_tenant and header_tenant and run_tenant != header_tenant:
+                        self._respond(
+                            403,
+                            {
+                                "error": "denied by CONTINUUM gateway",
+                                "reason": (
+                                    f"tenant mismatch: header {header_tenant!r} "
+                                    f"does not match run tenant {run_tenant!r}"
+                                ),
+                            },
+                        )
+                        return
+
+                    effective_tenant = bound_tenant or header_tenant or run_tenant
+
                     from continuum.actions.ledger import fold_action_events
 
                     history = storage.read_all_events(run_id)
@@ -525,6 +591,7 @@ class GatewayServer:
                     from continuum.gate import collect_consumed_authorities
 
                     consumed = collect_consumed_authorities(history)
+
                     decision = match_route(
                         server._routes,
                         host=host.split(":")[0],
@@ -533,7 +600,7 @@ class GatewayServer:
                         body=body,
                         actions_by_key=actions,
                         run_id=run_id,
-                        bound_tenant=getattr(server, "_bound_tenant", None),
+                        bound_tenant=effective_tenant,
                         storage=storage,
                         consumed_authorities=consumed,
                     )

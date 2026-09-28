@@ -28,7 +28,7 @@ flowchart TB
         proj["State Engine<br/>projection of events"]
         ver["Versioning<br/>content-addressed"]
         dif["Semantic diff"]
-        elog[("Event Log<br/>hash-chained, 29 types")]
+        elog[("Event Log<br/>hash-chained, 51 types")]
         led["Action Ledger<br/>claim, perform, complete"]
         ckpt["Checkpoint Manager<br/>6 policies"]
         env["Environment<br/>snapshot + diff"]

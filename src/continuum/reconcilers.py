@@ -56,6 +56,7 @@ __all__ = [
     "settle_run",
     "probe_authority_verdict",
     "settle_authority",
+    "SettleReport",
     "AuthoritySettleReport",
 ]
 

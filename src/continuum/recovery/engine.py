@@ -34,9 +34,12 @@ against a live database.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from continuum.recovery.ledger import RecoveryLedger
 
 from continuum.actions.ledger import ActionLedger
 from continuum.analysis.depends import DependencyGraph as SourceDependencyGraph
@@ -85,6 +88,21 @@ _SAFETY_FOR_MODE: dict[RecoveryMode, RecoverySafety] = {
     RecoveryMode.ROLLBACK: RecoverySafety.BLOCKED,
     RecoveryMode.ABORT: RecoverySafety.UNSAFE,
 }
+
+
+def _collect_repeating_step(steps: list[str], risk_event: Any) -> None:
+    """Append a risk event's ``step_id`` to ``steps`` when it names one.
+
+    A risk observation may locate the problem at a plan step. Only string,
+    non-blank ids count: the feed is fail-open, so a probe that sent a missing
+    or malformed id contributes no location rather than a bogus one. In-place
+    and deduplicated, preserving first-seen order.
+    """
+    step = risk_event.payload.get("step_id")
+    if isinstance(step, str) and step.strip():
+        cleaned = step.strip()
+        if cleaned not in steps:
+            steps.append(cleaned)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +176,13 @@ class RecoveryDecision:
         """
         if self.mode is RecoveryMode.RESUME:
             return True
+        # A contract that names no permitted action permits nothing. The
+        # comparison alone would answer ``permits(None) is True`` on a
+        # BLOCKED, UNSAFE or human-gated verdict, where next_allowed_action is
+        # deliberately empty, and a caller reading the action back out of the
+        # contract would get a green light for no action at all (issue #1388).
+        if self.contract.next_allowed_action is None:
+            return False
         return action == self.contract.next_allowed_action
 
     def render(self) -> str:
@@ -191,6 +216,12 @@ class RecoveryDecision:
         lines += ["", f"Recovery decision: {self.mode.value.upper()}"]
         for reason in self.rationale:
             lines.append(f"  because {reason}")
+        # The risk observations that produced this verdict, alongside the prose
+        # rationale, so a reader can cite the event that triggered it (issue
+        # #1424). Absent when the decision came from drift or the ledger alone.
+        if self.contract.triggering_risks:
+            lines.append("Triggering risks:")
+            lines += [f"  {risk_id}" for risk_id in self.contract.triggering_risks]
 
         if self.plan:
             lines += ["", "Repairs required:", self.plan.render()]
@@ -213,10 +244,14 @@ class RecoveryEngine:
         *,
         validator: StateValidator | None = None,
         strict_unknown: bool = True,
+        ledger: RecoveryLedger | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
     ) -> None:
         self.storage = storage
         self.validator = validator or StateValidator(strict_unknown=strict_unknown)
         self.strict_unknown = strict_unknown
+        self.ledger = ledger
+        self.dependency_budgets = dependency_budgets
         self._manager = CheckpointManager(storage)
 
     def assess(
@@ -228,6 +263,8 @@ class RecoveryEngine:
         replay: bool = True,
         scope: Iterable[str] | None = None,
         source_graph: SourceDependencyGraph | None = None,
+        ledger: RecoveryLedger | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
     ) -> RecoveryDecision:
         """Decide how ``run_id`` may resume, without changing anything.
 
@@ -310,10 +347,10 @@ class RecoveryEngine:
             events=archive_aware_events,
         )
 
-        ledger = ActionLedger(self.storage, run_id)
+        action_ledger = ActionLedger(self.storage, run_id)
         all_uncertain = tuple(
             a
-            for a in ledger.all()
+            for a in action_ledger.all()
             if a.status
             in (ActionStatus.UNKNOWN, ActionStatus.STARTED, ActionStatus.REQUIRES_REVIEW)
         )
@@ -349,7 +386,7 @@ class RecoveryEngine:
             if broken.status is StateStatus.INVALID and broken.unprojectable_at_sequence is not None
             else None
         )
-        admissibility = check_admissibility(restored.checkpoint, ledger.all())
+        admissibility = check_admissibility(restored.checkpoint, action_ledger.all())
         if not admissibility.admissible:
             has_action_ref = any(d["consumed_inputs"]["action_ids"] for d in admissibility.details)
             status = StateStatus.REQUIRES_REVIEW if has_action_ref else StateStatus.STALE
@@ -381,11 +418,52 @@ class RecoveryEngine:
                 report=new_report,
                 environment_diff=validation.environment_diff,
             )
+        active_ledger = ledger if ledger is not None else self.ledger
+        active_budgets = (
+            dependency_budgets if dependency_budgets is not None else self.dependency_budgets
+        )
+        if active_budgets is None and active_ledger is not None:
+            try:
+                from pathlib import Path
+
+                from continuum.budgets import DEFAULT_BUDGETS_PATH, load_budgets
+
+                active_budgets = load_budgets(Path(DEFAULT_BUDGETS_PATH))
+            except Exception:
+                active_budgets = None
+
+        exhausted_dependencies: set[str] = set()
+        run_budget_exhausted = False
+        if active_ledger is not None:
+            run_budget_exhausted = active_ledger.requires_human(
+                run_id, dependency_budgets=active_budgets
+            )
+            candidate_deps: set[str] = set()
+            if scope is not None:
+                candidate_deps.update(scope)
+            else:
+                from continuum.models import Component
+
+                for entry in validation.report.statuses:
+                    if entry.component == Component.EXTERNAL_DEPENDENCY and entry.component_id:
+                        candidate_deps.add(entry.component_id)
+                for a in uncertain:
+                    if a.dep_scope:
+                        candidate_deps.add(a.dep_scope)
+
+            for dep in candidate_deps:
+                if active_ledger.requires_human(
+                    run_id, dependency=dep, dependency_budgets=active_budgets
+                ):
+                    exhausted_dependencies.add(dep)
+
         plan = plan_repairs(
             validation.report.statuses,
             uncertain_actions=uncertain,
             strict_unknown=self.validator.strict_unknown,
             unprojectable=unprojectable,
+            exhausted_dependencies=exhausted_dependencies,
+            run_budget_exhausted=run_budget_exhausted,
         )
         # Liveness: silence as WAIT, never auto-rollback (issue #302)
         liveness_advisory = None
@@ -426,6 +504,11 @@ class RecoveryEngine:
             best_mode = None
             triggering: list[str] = []
             triggers: list[str] = []
+            # Steps the risk feed flagged as repeating, collected only from the
+            # events that contribute to the winning mode. A replan verdict that
+            # names the trigger but not the steps leaves the replanning agent
+            # no way to avoid the loop it was warned about (#1426).
+            repeating_steps: list[str] = []
             for risk_ev in risk_events:
                 trig = risk_ev.payload.get("trigger")
                 if not isinstance(trig, str):
@@ -441,10 +524,14 @@ class RecoveryEngine:
                     best_mode = candidate
                     triggering = [risk_ev.event_id]
                     triggers = [trig]
+                    repeating_steps = []
                 elif SEVERITY[candidate] == SEVERITY[best_mode]:
                     triggering.append(risk_ev.event_id)
                     if trig not in triggers:
                         triggers.append(trig)
+                else:
+                    continue
+                _collect_repeating_step(repeating_steps, risk_ev)
             if best_mode is not None:
                 risk_mode = best_mode
                 triggering_risks = triggering
@@ -454,6 +541,13 @@ class RecoveryEngine:
                 # Deduplicated by trigger so an equal-severity repeat does not
                 # duplicate the sentence the way #1042's double-append did.
                 risk_rationale = f"risk {', '.join(sorted(triggers))} triggers {best_mode.value}"
+                # Located guidance: the steps the feed named, deduplicated in
+                # first-seen order so a loop observed many times reads as one
+                # set of steps to avoid, not one per observation.
+                if repeating_steps:
+                    risk_rationale = (
+                        f"{risk_rationale}; repeating steps to avoid: {', '.join(repeating_steps)}"
+                    )
         except Exception:
             triggering_risks = []
             risk_mode = None
@@ -468,6 +562,8 @@ class RecoveryEngine:
             liveness_advisory=liveness_advisory,
             risk_mode=risk_mode,
             risk_rationale=risk_rationale,
+            exhausted_dependencies=exhausted_dependencies,
+            run_budget_exhausted=run_budget_exhausted,
         )
 
         # Authority lifecycle (issue #289c): consumed authorities block resume
@@ -594,6 +690,8 @@ class RecoveryEngine:
         expected_model: str | None = None,
         replay: bool = True,
         source_graph: SourceDependencyGraph | None = None,
+        ledger: RecoveryLedger | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
     ) -> RecoveryDecision:
         """Assess ``run_id`` confined to the derivation subtree of ``resources``.
 
@@ -609,6 +707,64 @@ class RecoveryEngine:
             replay=replay,
             scope=resources,
             source_graph=source_graph,
+            ledger=ledger,
+            dependency_budgets=dependency_budgets,
+        )
+
+    def record_attempt(
+        self,
+        run_id: str,
+        *,
+        note: str = "",
+        max_attempts: int | None = None,
+        dependency: str | None = None,
+        dependencies: Iterable[str] | None = None,
+        contract: RecoveryContract | None = None,
+        action: Any | None = None,
+        scope: Iterable[str] | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
+    ) -> int:
+        """Record one recovery attempt in the configured RecoveryLedger."""
+        if self.ledger is None:
+            raise RuntimeError("RecoveryEngine was initialized without a RecoveryLedger")
+        budgets = dependency_budgets if dependency_budgets is not None else self.dependency_budgets
+        return self.ledger.record_attempt(
+            run_id,
+            note=note,
+            max_attempts=max_attempts,
+            dependency=dependency,
+            dependencies=dependencies,
+            contract=contract,
+            action=action,
+            scope=scope,
+            dependency_budgets=budgets,
+        )
+
+    def requires_human(
+        self,
+        run_id: str,
+        *,
+        max_attempts: int = 3,
+        dependency: str | None = None,
+        dependencies: Iterable[str] | None = None,
+        contract: RecoveryContract | None = None,
+        action: Any | None = None,
+        scope: Iterable[str] | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Check whether human intervention is required under the configured RecoveryLedger."""
+        if self.ledger is None:
+            return False
+        budgets = dependency_budgets if dependency_budgets is not None else self.dependency_budgets
+        return self.ledger.requires_human(
+            run_id,
+            max_attempts=max_attempts,
+            dependency=dependency,
+            dependencies=dependencies,
+            contract=contract,
+            action=action,
+            scope=scope,
+            dependency_budgets=budgets,
         )
 
     def _decide(
@@ -622,6 +778,8 @@ class RecoveryEngine:
         liveness_advisory: dict[str, object] | None = None,
         risk_mode: RecoveryMode | None = None,
         risk_rationale: str | None = None,
+        exhausted_dependencies: Collection[str] = (),
+        run_budget_exhausted: bool = False,
     ) -> tuple[RecoveryMode, tuple[str, ...]]:
         """Collect a proposal per signal and return the most cautious."""
         proposals: list[tuple[RecoveryMode, str]] = []
@@ -695,6 +853,23 @@ class RecoveryEngine:
 
         if plan.requires_human:
             proposals.append((RecoveryMode.REQUEST_HUMAN, "at least one repair needs a person"))
+
+        if exhausted_dependencies:
+            deps_str = ", ".join(sorted(exhausted_dependencies))
+            proposals.append(
+                (
+                    RecoveryMode.REQUEST_HUMAN,
+                    f"recovery budget exhausted for dependency: {deps_str}",
+                )
+            )
+
+        if run_budget_exhausted:
+            proposals.append(
+                (
+                    RecoveryMode.REQUEST_HUMAN,
+                    "recovery budget exhausted for run",
+                )
+            )
 
         # Liveness breach maps to WAIT, never auto-rollback (issue #302)
         # Silence tells us nothing about what to roll back, only that a human

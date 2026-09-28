@@ -141,19 +141,21 @@ def test_hooks_are_scoped_to_the_directories_ci_lints() -> None:
     )
     linted = _ci_lint_directories()
     assert linted, "found no ruff invocation in the CI lint job"
-    # demo-run/ and _bugaudit/ are not ruff-clean and CI does not lint them: in
-    # scope, the hooks would fail on a tree nobody touched.
-    assert "demo-run" not in linted
-    assert "_bugaudit" not in linted
+    # #1064 brought benchmarks/ inside the lint gate and #1118 added scripts/
+    # and demo-run/, so every Python directory should now be in scope.
     assert "benchmarks" in linted
+    assert "scripts" in linted
+    assert "demo-run" in linted
     for hook_id, pattern in patterns.items():
         for directory in linted:
             assert re.match(pattern, f"{directory}/module.py"), (
                 f"{hook_id} does not cover {directory}/, which CI lints"
             )
-        assert not re.match(pattern, "demo-run/worker.py"), (
-            f"{hook_id} covers demo-run/, which CI does not lint"
-        )
-        assert not re.match(pattern, "_bugaudit/check_env.py"), (
-            f"{hook_id} covers _bugaudit/, which CI does not lint"
+        # The hook and CI must scope the same directories: a directory the hook
+        # covers but CI does not would rewrite files no gate asks about, and
+        # one CI covers but the hook does not would surprise a contributor at
+        # the PR. Read the alternation out of the pattern and compare.
+        covered = {d for d in re.findall(r"[\w.-]+", pattern) if re.match(pattern, f"{d}/x.py")}
+        assert covered == linted, (
+            f"{hook_id} covers {sorted(covered)} but CI lints {sorted(linted)}"
         )
