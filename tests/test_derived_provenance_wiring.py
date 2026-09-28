@@ -165,7 +165,7 @@ def _decision(state: SemanticState, informed_retry: dict[str, Any] | None) -> Si
     """A minimal stand-in: curation only reads these attributes."""
     return SimpleNamespace(
         state=state,
-        contract=SimpleNamespace(reason=None, next_allowed_action=None),
+        contract=SimpleNamespace(reason=None, next_allowed_action=None, triggering_risks=None),
         mode=SimpleNamespace(value="request_human"),
         safe=False,
         informed_retry=informed_retry,

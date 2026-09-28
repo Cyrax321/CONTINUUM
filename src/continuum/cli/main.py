@@ -2026,6 +2026,7 @@ def cmd_restore(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     carry_forward = list(getattr(args, "carry_forward", None) or [])
     target = getattr(args, "target", None)
     anchor = getattr(args, "anchor", None)
+    anchor_seq: int | None
     if bool(getattr(args, "to_recovery_anchor", False)):
         # The rollback point a non-RESUME verdict pinned (#1097). Mutually
         # exclusive with --to/--anchor: a restore discards (anchor, head], so
@@ -3159,7 +3160,11 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
         authority_report = settle_authority(
             storage, args.run_id, authority_id, probes, dry_run=args.dry_run
         )
-        payload = {"run_id": args.run_id, "dry_run": args.dry_run, **authority_report.as_dict()}
+        authority_payload = {
+            "run_id": args.run_id,
+            "dry_run": args.dry_run,
+            **authority_report.as_dict(),
+        }
         # Keep existing shape for actions report when authority path taken
         if authority_report.valid is True:
             line = f"authority {authority_id!r} still valid, reconciled and unblocked"
@@ -3171,7 +3176,7 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
         if args.dry_run:
             lines.append("dry run: nothing was written")
         _emit(
-            payload,
+            authority_payload,
             "\n".join(lines),
             as_json=args.json,
             stream=out,

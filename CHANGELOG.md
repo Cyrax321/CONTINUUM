@@ -115,6 +115,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Re-sync shared counts and repair integration seams opened by the #1400s
+  merges.** Several branches each synced the documented collected total on its
+  own base, so once merged the tree collected 2,664 tests while every doc still
+  stated ~2,533 and the docs-count guard failed; README, the translated
+  READMEs, CHANGELOG, `docs/CONTRIBUTING_ONBOARDING.md`, `references/testing.md`
+  and `references/install.md` now all read the live total (~2,664 collected,
+  ~2,628 passed, ~36 skipped). `README.md` and `docs/api/mcp.md` still counted
+  twelve MCP tools after #1260 added a thirteenth (`continuum_compensate_action`),
+  so the tool-count guard read 12 against the server's 13. The MCP doc guard
+  also tripped because `curate_briefing` reads `contract.triggering_risks`
+  while the wiring test's contract stand-in predated that field, and the
+  pre-#1262 trajectory-render label test still asserted the old inline
+  `"unverified (derived)"` string against the shared `derived_label`. Two mypy
+  errors from the recovery-anchor wiring (`anchor_seq` narrowing and a `payload`
+  redefinition in `cmd_actions`) are fixed. No behavior changes.
+
 - **PostgresStorage action-index fold skips malformed JSON payloads (#1386).**
   `PostgresStorage._canonical_index_rows` decoded raw payload strings without
   guarding against decode errors, so an event with a malformed JSON payload
@@ -1371,7 +1387,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,533 collected, ~2,423 passed, ~28 skipped on a minimal env).
+  (~2,664 collected, ~2,628 passed, ~36 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
