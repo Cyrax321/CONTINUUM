@@ -32,6 +32,7 @@ __all__ = [
     "SidecarAuth",
     "SidecarClient",
     "SidecarClientError",
+    "SubprocessClient",
     "serve_subprocess",
     "run_serve",
     "cmd_serve",

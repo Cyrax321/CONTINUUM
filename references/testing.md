@@ -9,16 +9,16 @@ need nothing but this repository; higher levels need the named tool.
 ```bash
 pip install -e ".[dev]"
 pytest --tb=short -q --cov=continuum --cov-report=xml --cov-report=term-missing
-ruff check src/ tests/ examples/        # lint
-ruff format --check src/ tests/ examples/
+ruff check src/ tests/ examples/ scripts/ demo-run/        # lint
+ruff format --check src/ tests/ examples/ scripts/ demo-run/
 mypy src/continuum                     # strict type check
 ```
 
-On the current main branch, collection reports approximately 2,501 tests; the
+On the current main branch, collection reports approximately 2,664 tests; the
 exact count and pass/skip totals vary with Python version, platform, optional
 dependencies, and external services.
 
-What those ~2,501 tests cover without any SDK or network: event-chain
+What those ~2,664 tests cover without any SDK or network: event-chain
 integrity and tamper detection, semantic projection, checkpoint policy and
 restore, ledger claim/dedup/fail/reconcile (including cross-run unscoped
 claims through the action index), validator staleness propagation, recovery
@@ -138,7 +138,7 @@ continuum attest-verify <run_id> --attest <file>
 | 1 | pytest/ruff/format/mypy clean |
 | 2 | benchmark shows 0 duplicates; verify ok; crash examples print resumed state |
 | 3 | fresh session briefs unprompted; observations `[verified]`; gate denials teach then pass |
-| 4 | inspector lists twelve tools; mutating calls honour the allowlist |
+| 4 | inspector lists thirteen tools; mutating calls honour the allowlist |
 | 5 | exactly-once holds across soft resume and hard crash for every adapter |
 | 6 | tool spans appear in `continuum events` with `via: otel` |
 | 7 | 403 -> claim -> forward -> settled, all visible in the event chain |

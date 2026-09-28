@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
 
 import pytest
 
@@ -37,7 +38,8 @@ def test_list_methods_covers_the_surface() -> None:
     assert "resume" in methods
     assert "intercept_action" in methods
     assert "reconcile_action" in methods
-    assert len(methods) == 10
+    assert "compensate_action" in methods
+    assert len(methods) == 11
 
 
 def test_record_progress_creates_the_run() -> None:
@@ -234,6 +236,23 @@ def test_intercept_then_complete_action() -> None:
     assert done["status"] == "completed"
     listed = srv.dispatch("list_actions", {"run_id": "r1"})
     assert listed["actions"][0]["status"] == "completed"
+
+
+def test_intercept_complete_then_compensate_action() -> None:
+    srv = make_server()
+    srv.dispatch("record_progress", {"run_id": "r1", "completed": 1, "goal": "g"})
+    claim = srv.dispatch("intercept_action", {"run_id": "r1", "action_type": "x.do", "key": "k1"})
+    assert claim["proceed"] is True
+    done = srv.dispatch("complete_action", {"run_id": "r1", "action_key": claim["action_key"]})
+    assert done["status"] == "completed"
+    compensated = srv.dispatch(
+        "compensate_action",
+        {"run_id": "r1", "action_key": claim["action_key"], "note": "refunded", "by": "action_2"},
+    )
+    assert compensated["status"] == "compensated"
+    assert compensated["compensated_by"] == ["action_2"]
+    listed = srv.dispatch("list_actions", {"run_id": "r1"})
+    assert listed["actions"][0]["status"] == "compensated"
 
 
 def test_complete_and_reconcile_forward_consumed_inputs() -> None:
@@ -560,3 +579,37 @@ def test_malformed_consumed_inputs_is_bad_params_not_internal() -> None:
                 "consumed_inputs": [1, 2],
             },
         )
+
+
+def test_serve_ensure_run_recognises_archived_run_started_after_compaction(tmp_path: Path) -> None:
+    """SidecarServer._ensure_run must not append duplicate RUN_STARTED after compaction (#1436)."""
+    from continuum.events import EventType
+    from continuum.models import Origin, Run
+    from continuum.state.semantic import project
+    from continuum.storage.sqlite import SQLiteStorage
+
+    storage = SQLiteStorage(str(tmp_path / "serve_compacted_ensure.db"))
+    storage.create_run(Run(run_id="run_sc", goal="deliver package"))
+    storage.append_event(
+        "run_sc",
+        EventType.RUN_STARTED,
+        {"goal": "deliver package", "constraints": ["fragile", "same-day"], "total": 5},
+        source=Origin.HUMAN,
+    )
+    storage.append_event(
+        "run_sc",
+        EventType.WORK_ADDED,
+        {"task_id": "w1", "description": "pack item"},
+        source=Origin.HUMAN,
+    )
+    storage.compact_run("run_sc")
+
+    srv = SidecarServer(storage=storage)
+    srv._ensure_run("run_sc")
+
+    events = storage.read_all_events("run_sc")
+    run_started_events = [e for e in events if e.type is EventType.RUN_STARTED]
+    assert len(run_started_events) == 1
+
+    state = project("run_sc", events)
+    assert state.goal.constraints == ["fragile", "same-day"]

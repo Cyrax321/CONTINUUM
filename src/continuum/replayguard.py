@@ -34,6 +34,7 @@ __all__ = [
     "RESULT_ENVELOPE_KEY",
     "evaluate",
     "protected_call",
+    "ReplayBlocked",
     "langgraph_protected_node",
 ]
 

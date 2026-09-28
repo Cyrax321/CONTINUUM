@@ -9,7 +9,7 @@ from heapq import merge
 
 from continuum.events import Event, EventType
 from continuum.models import Action, ActionStatus, Origin, TrajectoryReport, utcnow
-from continuum.provenance_map import derived_provenance_for_events
+from continuum.recovery.derived import derived_label, stamp_derived
 from continuum.storage.base import Storage
 
 __all__ = [
@@ -255,7 +255,6 @@ def build_trajectory_report(
     scar = _scar_rate(events)
     stalls = _truncate_list(_stall_sites(events), _MAX_STALL_SITES)
     top = _truncate_list(_top_failure_types(events), _MAX_TOP_TYPES)
-    derived_origin = derived_provenance_for_events(events)
     created = now or utcnow()
     candidate = TrajectoryReport(
         # The id is filled from the digest once the content is final, so it
@@ -271,7 +270,12 @@ def build_trajectory_report(
         stall_sites=stalls,
         top_failure_action_types=top,
         created_at=created,
-        derived_origin=derived_origin.value,
+    )
+    # A report is a derived artifact of its window, stamped through the shared
+    # non-amplification helper (#392) so its origin can never diverge from the
+    # one the informed-retry block would carry for the same events.
+    candidate = TrajectoryReport.model_validate(
+        stamp_derived(candidate.model_dump(mode="json"), events)
     )
     while (
         len(json.dumps(candidate.model_dump(mode="json"), sort_keys=True).encode())
@@ -442,11 +446,7 @@ def health_maybe_generate_trajectory_report(
 
 def render_trajectory_report(report: TrajectoryReport) -> list[str]:
     """Format a trajectory report into human-readable lines for display."""
-    label = (
-        "unverified (derived)"
-        if report.derived_origin in ("external_agent", "llm")
-        else f"derived from {report.derived_origin}"
-    )
+    label = derived_label({"derived_origin": report.derived_origin})
     lines: list[str] = []
     lines.append(
         f"trajectory report {report.report_id} window {report.window_start}->{report.window_end} [{label}]:"
