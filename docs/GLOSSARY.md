@@ -43,6 +43,8 @@ Every term here is used in issues and in code. Definitions point to the implemen
 
 - **Risk policy**
   The `.continuum/risk-policy.json` mapping from external risk names to recovery modes, loaded by `load_risk_policy` in `src/continuum/recovery/risk.py`. Operators may only tighten defaults, never loosen them. Matching risks arrive as `RISK_OBSERVED` events and land in the contract's `triggering_risks` section.
+- **RiskObservedPayload / observed_risks**
+  The typed schema for a `RISK_OBSERVED` payload (`src/continuum/models.py`, issue #1421) and the list of folded observations on `SemanticState`. A signal records what a monitor *saw*: it lands in `observed_risks` without minting a state version, since an observation changes what the projection knows rather than what the run is.
 
 - **Authority probes**
   External subprocess checks that settle whether a consumed authority is still valid. Configured in `reconcilers.json` and executed by `probe_authority_verdict` in `src/continuum/reconcilers.py:289`, fed the recorded consumption payload on stdin so verification never depends on the agent being assessed.

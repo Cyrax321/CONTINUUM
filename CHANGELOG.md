@@ -31,6 +31,23 @@ All notable changes to this project are documented here. The format follows
   fields default to zero, so reports written before this change still load.
   Existing quiet-time generation is unchanged.
 
+- **Typed `RiskObservedPayload` schema and projection of observed risks into
+  `SemanticState` (#1421).** `RISK_OBSERVED` existed as an event type with
+  `EXTERNAL_MONITOR` provenance (#303), but its payload had no typed schema and
+  the fold skipped it entirely, so a projection never reported what a run had
+  been seen doing. `RiskObservedPayload` in `src/continuum/models.py` now types
+  the wire payload (`trigger`, `score`, `episode_id`, `step_id`, `detail`,
+  `ts`), normalising what monitors send rather than refusing it: scores clamp
+  to `[0.0, 1.0]`, `detail` accepts a structured dict or a legacy plain string
+  (wrapped as `{"message": ...}`) bounded to 32 keys and 512 chars, and `ts`
+  accepts an epoch number or ISO 8601. `ingest_risk` validates and normalises
+  through the schema, so what lands on the log is always schema-shaped.
+  `project()` folds each event into `SemanticState.observed_risks` carrying its
+  provenance forward, and `RISK_OBSERVED` left `_NON_PROJECTING`. An observation
+  is knowledge rather than a change, so `observed_risks` joins
+  `PROJECTION_BOOKKEEPING`: folding one mints no state version, while mitigation
+  that actually alters the run still bumps it through whatever it changed.
+
 - **The recovery surfaces now name the risk observations that triggered a
   verdict (#1424).** A risk-driven verdict already carried the `RISK_OBSERVED`
   event ids behind it on the sealed contract as `triggering_risks`, and the
@@ -140,13 +157,13 @@ All notable changes to this project are documented here. The format follows
 
 - **Re-sync shared counts and repair integration seams opened by the #1400s
   merges.** Several branches each synced the documented collected total on its
-  own base, so once merged the tree collected 2,664 tests while every doc still
-  stated ~2,533 and the docs-count guard failed; README, the translated
-  READMEs, CHANGELOG, `docs/CONTRIBUTING_ONBOARDING.md`, `references/testing.md`
-  and `references/install.md` now all read the live total (~2,664 collected,
-  ~2,628 passed, ~36 skipped). `README.md` and `docs/api/mcp.md` still counted
-  twelve MCP tools after #1260 added a thirteenth (`continuum_compensate_action`),
-  so the tool-count guard read 12 against the server's 13. The MCP doc guard
+  own base, so once merged the tree collected more tests than every doc stated
+  and the docs-count guard failed; README, the translated READMEs, CHANGELOG,
+  `docs/CONTRIBUTING_ONBOARDING.md`, `references/testing.md` and
+  `references/install.md` now all read the live total. `README.md` and
+  `docs/api/mcp.md` still counted twelve MCP tools after #1260 added a
+  thirteenth (`continuum_compensate_action`), so the tool-count guard read 12
+  against the server's 13. The MCP doc guard
   also tripped because `curate_briefing` reads `contract.triggering_risks`
   while the wiring test's contract stand-in predated that field, and the
   pre-#1262 trajectory-render label test still asserted the old inline
@@ -1410,7 +1427,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,664 collected, ~2,628 passed, ~36 skipped on a minimal env).
+  (~2,701 collected, ~2,665 passed, ~36 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

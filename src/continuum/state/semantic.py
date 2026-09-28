@@ -43,12 +43,14 @@ from continuum.models import (
     Goal,
     ModelSpecificState,
     ModelState,
+    ObservedRisk,
     PendingWork,
     Progress,
     Provenance,
     SemanticState,
     StateStatus,
     TrajectoryReport,
+    _risk_ts,
     utcnow,
 )
 
@@ -239,6 +241,9 @@ class _Accumulator:
         )
         self.trajectory_reports: list[TrajectoryReport] = (
             list(base.trajectory_reports) if base and base.trajectory_reports else []
+        )
+        self.observed_risks: list[ObservedRisk] = (
+            list(base.observed_risks) if base and base.observed_risks else []
         )
         self.model: ModelState | None = base.model if base else None
         self.created_at: datetime | None = base.created_at if base else None
@@ -566,6 +571,35 @@ class _Accumulator:
         self.trajectory_reports.append(report)
         self.trajectory_reports.sort(key=lambda existing: existing.window_end)
 
+    def risk_observed(self, event: Event) -> None:
+        """Fold a risk observation without claiming the run changed (issue #1421).
+
+        An observation is a witness report: it adds to what the projection
+        knows and nothing else, so the accumulator appends and the state
+        fingerprint ignores the field. Provenance is carried forward so the
+        folded row still names ``EXTERNAL_MONITOR`` once the event itself has
+        scrolled out of view, which is the property that keeps a risk from ever
+        counting as verification (issue #303).
+        """
+        trigger = event.payload.get("trigger")
+        if not isinstance(trigger, str) or not trigger.strip():
+            raise ProjectionError(f"event {event.event_id}: RISK_OBSERVED must name a risk class")
+        # Pre-#1421 events copied the caller's ts verbatim, so an arbitrary
+        # string can already be on the wire. Re-dating to the event's own
+        # timestamp keeps the fold reproducible where falling back to now()
+        # would not.
+        parsed_ts = _risk_ts(event.payload.get("ts"))
+        risk = ObservedRisk(
+            trigger=trigger,
+            score=event.payload.get("score", 0.0),
+            episode_id=event.payload.get("episode_id"),
+            step_id=event.payload.get("step_id"),
+            detail=event.payload.get("detail", ""),
+            ts=parsed_ts if parsed_ts is not None else event.timestamp,
+            provenance=self._provenance_for(event),
+        )
+        self.observed_risks.append(risk)
+
     def plan_upsert(self, event: Event) -> None:
         """Fold a plan upsert, merging steps by id."""
         payload = event.payload
@@ -679,6 +713,7 @@ class _Accumulator:
             unmatched_pin_retractions=list(self.unmatched_pin_retractions),
             attempt_lessons=list(self.attempt_lessons),
             trajectory_reports=list(self.trajectory_reports),
+            observed_risks=list(self.observed_risks),
             model=self.model,
             version=self.version,
             source_sequence=self.source_sequence,
@@ -732,6 +767,8 @@ def _dispatch(acc: _Accumulator, event: Event) -> bool:
             acc.attempt_lesson(event)
         case EventType.TRAJECTORY_REPORT:
             acc.trajectory_report(event)
+        case EventType.RISK_OBSERVED:
+            acc.risk_observed(event)
         case EventType.PLAN_UPSERT:
             acc.plan_upsert(event)
         case _:
@@ -763,8 +800,8 @@ _NON_PROJECTING = frozenset(
         # liveness (issue #302): silence detection and recovery, never state
         EventType.LIVENESS_SILENCE_DETECTED,
         EventType.LIVENESS_RECOVERED,
-        # risk (issue #303): real-time risk signal, never state
-        EventType.RISK_OBSERVED,
+        # risk (issue #303/#1421) now projects into observed_risks above:
+        # an observation is folded as knowledge, not as a change to the run.
         # lineage (issue #259): restore/merge markers recording that an edit
         # happened, sibling to RUN_FORKED above. The fold reads their effect
         # off the log boundary itself, not out of these events.
