@@ -18,6 +18,25 @@ All notable changes to this project are documented here. The format follows
   verifies the action is in `(ActionStatus.COMPLETED, ActionStatus.COMPENSATED)`,
   raising `LedgerError` for any in-flight or un-reconciled record.
 
+- **The MCP candidate fold now reads the full history, so `continuum_record_progress`
+  and `continuum_record_plan` keep working on a compacted run (#1133).**
+  `_project_candidate` folded only the live tail; once compaction moved
+  `RUN_STARTED` into `events_archive`, the goal no longer projected and both
+  write tools refused every payload as "unprojectable" -- exactly the
+  long-running runs they exist for. It now folds `read_all_events`, so the goal
+  still projects and the head sequence it validates against is unchanged. The
+  original fix (PR #1219) was dropped in a merge-of-main and never landed.
+
+- **`DependencyGraph.impacted_by` now cascades taint along finding-to-finding
+  citation edges to a fixpoint (#1475).** Findings may cite other findings
+  (blessed by `SemanticState.dangling_evidence`), and `StateValidator._propagate`
+  iterated to a fixpoint so stale findings cascade down the derivation graph.
+  `impacted_by` previously only checked citations against the initial evidence
+  set in a single pass, missing findings and decisions that depended on tainted
+  findings. `DependencyGraph.impacted_by` now repeats until no new findings are
+  tainted, restoring parity with the validator and preventing stale downstream
+  findings and decisions from surviving localized repair plans.
+
 - **The edit-precondition gate now raises the exception subclass matching the
   edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
   forks but the plain `EditPreconditionError` for every other edit type, so
