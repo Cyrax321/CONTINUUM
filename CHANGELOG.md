@@ -58,6 +58,14 @@ All notable changes to this project are documented here. The format follows
   existing ledger entries recorded on Windows with backslash paths will compute new
   idempotency keys under the normalized representation.
 
+- **Agent adapters now check archived history so compaction does not inject a duplicate `RUN_STARTED` (#1453).**
+  `LangChainAgentAdapter.start_run`, `LangGraphAgentAdapter.start_run`, and `OpenAIAgentAdapter._ensure_run_exists`
+  checked `read_events(run_id, upto=1)` to decide whether a run needed its genesis event recorded. On a compacted run,
+  events up to the anchor sequence reside in `events_archive`, so the live query returned an empty list, causing
+  the adapters to append a second `RUN_STARTED` event into the live tail. The duplicate event wiped initial goal
+  constraints, reset progress counters, and corrupted projected state. All three adapters now inspect archived
+  events first, recognizing that a compacted run was already started properly.
+
 - **ActionLedger.compensate() now enforces a completed status precondition (#1387).**
   The method accepted any existing record and transitioned it to `COMPENSATED`
   while clearing `side_effect_uncertain`, mirroring the gap #366 and #733 fixed
