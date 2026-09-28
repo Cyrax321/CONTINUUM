@@ -59,6 +59,19 @@ def test_schema_normalises_trigger_and_clamps_score() -> None:
     assert RiskObservedPayload(trigger="loop", score=-0.9).score == 0.0
 
 
+def test_schema_coerces_a_mistyped_trigger_but_refuses_none() -> None:
+    # Pre-#1421 ingestion rejected any non-string trigger outright. The schema
+    # coerces instead, which is a deliberate change to the contract, not an
+    # accident: a monitor that serialises a trigger as a number has sent
+    # something malformed, but the observation behind it is still real, and
+    # the coerced name maps to no policy key so it records without proposing.
+    # Null is the other side of that line -- it means no information at all.
+    assert RiskObservedPayload(trigger=42).trigger == "42"
+    assert RiskObservedPayload(trigger=True).trigger == "true"
+    with pytest.raises(ValidationError):
+        RiskObservedPayload(trigger=None)
+
+
 def test_schema_keeps_structured_detail_and_wraps_a_legacy_string() -> None:
     structured = RiskObservedPayload(
         trigger="token_runaway", detail={"budget": "1M", "used": 900_000}
