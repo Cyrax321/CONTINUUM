@@ -801,6 +801,51 @@ def test_path_canonicalization_does_not_collapse_distinct_paths() -> None:
     assert a != b
 
 
+def test_path_canonicalization_is_platform_independent() -> None:
+    """Paths with forward and backward slashes hash identically to POSIX form (#1437)."""
+    from continuum.actions.idempotency import _canonicalize_paths
+    from continuum.security.hashing import stable_hash
+
+    assert _canonicalize_paths("data/output/report.txt") == "data/output/report.txt"
+    assert _canonicalize_paths("data\\output\\report.txt") == "data/output/report.txt"
+    assert _canonicalize_paths("C:\\foo\\bar") == "C:/foo/bar"
+    assert _canonicalize_paths("\\\\server\\share\\report.txt") == "//server/share/report.txt"
+
+    expected_hash = stable_hash({"path": "data/output/report.txt"})
+    assert arguments_hash({"path": "data/output/report.txt"}) == expected_hash
+    assert arguments_hash({"path": "data\\output\\report.txt"}) == expected_hash
+    assert idempotency_key("file_write", {"path": "data\\output\\report.txt"}) == idempotency_key(
+        "file_write", {"path": "data/output/report.txt"}
+    )
+
+
+def test_path_canonicalization_preserves_posix_backslashes() -> None:
+    """Backslashes in POSIX filenames are preserved and do not collapse into slash paths (#1437)."""
+    from continuum.actions.idempotency import _canonicalize_paths
+
+    assert _canonicalize_paths("foo\\bar") == "foo\\bar"
+    assert _canonicalize_paths("foo/bar") == "foo/bar"
+    assert arguments_hash({"path": "foo\\bar"}) != arguments_hash({"path": "foo/bar"})
+
+    assert _canonicalize_paths("foo/bar\\baz") == "foo/bar\\baz"
+    assert _canonicalize_paths("foo/bar/baz") == "foo/bar/baz"
+    assert arguments_hash({"path": "foo/bar\\baz"}) != arguments_hash({"path": "foo/bar/baz"})
+
+
+def test_path_canonicalization_preserves_regex_patterns() -> None:
+    """Regex-like escape sequences and metacharacters are not rewritten as paths (#1437)."""
+    from continuum.actions.idempotency import _canonicalize_paths
+
+    regex_val = r"\d\..\w"
+    assert _canonicalize_paths(regex_val) == regex_val
+    assert _canonicalize_paths(regex_val) != "/w"
+    assert arguments_hash({"pattern": regex_val}) != arguments_hash({"pattern": "/w"})
+    assert arguments_hash({"pattern": regex_val}) == arguments_hash({"pattern": regex_val})
+
+    assert _canonicalize_paths(r"\d+") == r"\d+"
+    assert _canonicalize_paths(r"\s*") == r"\s*"
+
+
 def test_identity_match_recognises_a_completed_action_across_field_renames(
     ledger: ActionLedger,
 ) -> None:
