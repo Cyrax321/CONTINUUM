@@ -55,6 +55,16 @@ All notable changes to this project are documented here. The format follows
   constraints, reset progress counters, and corrupted projected state. All three adapters now inspect archived
   events first, recognizing that a compacted run was already started properly.
 
+- **ActionLedger.compensate() now enforces a completed status precondition (#1387).**
+  The method accepted any existing record and transitioned it to `COMPENSATED`
+  while clearing `side_effect_uncertain`, mirroring the gap #366 and #733 fixed
+  for `complete()` and `fail()`. Because `claim()` deliberately treats a
+  compensated action as re-fireable, compensating an interrupted or uncertain
+  (`UNKNOWN`) action laundered the recovery blocker away and allowed duplicate
+  execution of an external effect that may have already run. `compensate()` now
+  verifies the action is in `(ActionStatus.COMPLETED, ActionStatus.COMPENSATED)`,
+  raising `LedgerError` for any in-flight or un-reconciled record.
+
 - **`record-plan` now succeeds on compacted runs (#1438).** `cmd_record_plan`
   queried `read_events` for its preflight projection check and post-write
   emission, which on a compacted run reads only the post-anchor live tail.
@@ -112,8 +122,6 @@ All notable changes to this project are documented here. The format follows
   since declaring such fields `volatile` at every call site is not a fix: a
   caller that wants around the cap simply forgets to declare them.
 
-### Changed
-
 - **The `__all__` guard now walks the installed package instead of five
   hand-listed modules (#1228).** `tests/test_module_all_exports.py` asserted
   that names in `__all__` resolve by importing five modules by name, so a
@@ -144,6 +152,23 @@ All notable changes to this project are documented here. The format follows
   The neighbouring views (`checkpoint_rows`, `action_rows`, `event_rows`,
   `budget_rows`) already fetched the row exactly once for the same guard
   purpose, so this removes the outlier.
+
+### Changed
+
+- **Recovery anchors are now produced by a product path (#1097).**
+  `CheckpointManager.checkpoint_on_recovery` and `last_recovery_anchor` had no
+  caller in `src/` (only tests) so the `RECOVERY` trigger, the `keep_anchors`
+  guard in `prune`, and the anchor branch in `cleanup_ephemeral_artifacts` all
+  protected a set that could never be populated. `continuum resume <run>
+  --repair` now records an anchor after a non-RESUME verdict, before the
+  `RECOVERY_STARTED` event so the pin covers the state the verdict judged rather
+  than the state after the repair bookkeeping landed, and `continuum restore
+  <run> --reason ... --to-recovery-anchor` rolls back to it (refusing with an
+  error when no anchor exists, and refusing a `--to`/`--anchor` given alongside).
+  A plain `resume` stays read-only and records nothing: judging is still
+  separate from acting, so the write lives in the CLI caller, never in
+  `RecoveryEngine.assess`. An anchor failure is reported on stderr and never
+  changes the verdict or its exit code.
 
 - **The advisory verdict contract is now stated where a reader can find it (#1031).**
   `RecoveryDecision` and its `permits()` method describe themselves as
