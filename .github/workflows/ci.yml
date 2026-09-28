@@ -145,11 +145,11 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Ruff - lint
-        # Issue #1118: scripts/ and demo-run/ inside lint gate.
-        run: ruff check src/ tests/ examples/ _bugaudit/ scripts/ demo-run/
+        # Issue #1064: benchmarks/ inside the lint gate; #1118: scripts/ and demo-run/.
+        run: ruff check src/ tests/ examples/ _bugaudit/ benchmarks/ scripts/ demo-run/
 
       - name: Ruff - format check
-        run: ruff format --check src/ tests/ examples/ _bugaudit/ scripts/ demo-run/
+        run: ruff format --check src/ tests/ examples/ _bugaudit/ benchmarks/ scripts/ demo-run/
 
       - name: mypy, strict type-check
         run: mypy src/continuum
