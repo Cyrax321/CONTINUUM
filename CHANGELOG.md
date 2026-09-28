@@ -6,6 +6,45 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Per-dependency human gate budgets are now wired into the recovery boundary (#1459).**
+  The per-dependency recovery attempt tracking introduced in #1428 is now enforced
+  across the recovery lifecycle:
+  `RecoveryEngine.assess` and `assess_scoped` accept a `ledger` and `dependency_budgets`
+  mapping (auto-loading `.continuum/budgets.json` by default), evaluate ceilings for
+  every relevant external dependency and uncertain action, and escalate only exhausted
+  dependencies to `REQUEST_HUMAN` while letting untouched, healthy dependencies recover
+  automatically (`REPAIR_AND_RESUME` or `RESUME`).
+  `plan_repairs` flags repair steps as `requires_human` when the target dependency or
+  action has exhausted its recovery budget.
+  `build_contract` withholds automatic machine-executable steps as `next_allowed_action`
+  under `REQUIRES_HUMAN`, ensuring automation cannot proceed until human intervention
+  clears the gate.
+  `GenericAgentAdapter` exposes `ledger` configuration and forwards scoping and
+  per-dependency budgets to `resume()`, `record_attempt()`, and `requires_human()`.
+
+- **`RecoveryLedger` now evaluates the human gate per external dependency, not
+  only for the run as a whole (#1428).** A single flaky upstream (a
+  rate-limited sandbox, a weather API) failed repeatedly and drained the run's
+  one global attempt budget, and once that pool was empty every later recovery,
+  including unrelated and highly reliable core tasks, escalated to a person.
+  `record_attempt` accepts a `dependency` and tags the attempt with it;
+  `requires_human` accepts the same `dependency` and counts only that
+  dependency's attempts against its own ceiling. Escalation writes a
+  namespaced, anchored `human_required:<dependency>` gate entry rather than the
+  run-wide marker, so exhausting one dependency escalates only that dependency,
+  and the marker survives compaction the same way the global one does.
+  Dependency ceilings come from an optional `dependency_budgets` section in
+  `.continuum/budgets.json` (`{"dependency_budgets": {"ext:weather-api": 2}}`),
+  validated on load like every other integer in the registry: a positive
+  integer, with a boolean or a float rejected rather than silently read as a cap
+  of 1. A dependency the section does not name falls back to
+  `default_max_attempts`, then to the caller's own threshold, so a registry
+  never has to list every dependency to govern all of them. The change is
+  additive: entries written before the field existed load with no dependency tag
+  and behave exactly as before.
+
 ### Fixed
 
 - **Compaction no longer mints an environment-blind anchor checkpoint (#1049).**
@@ -22,6 +61,32 @@ All notable changes to this project are documented here. The format follows
   checkpoint already recorded, because compaction observes the world rather
   than changing it. A run with no recorded checkpoint still anchors with
   `None` rather than inventing a snapshot.
+
+- **Agent adapters now check archived history so compaction does not inject a duplicate `RUN_STARTED` (#1453).**
+  `LangChainAgentAdapter.start_run`, `LangGraphAgentAdapter.start_run`, and `OpenAIAgentAdapter._ensure_run_exists`
+  checked `read_events(run_id, upto=1)` to decide whether a run needed its genesis event recorded. On a compacted run,
+  events up to the anchor sequence reside in `events_archive`, so the live query returned an empty list, causing
+  the adapters to append a second `RUN_STARTED` event into the live tail. The duplicate event wiped initial goal
+  constraints, reset progress counters, and corrupted projected state. All three adapters now inspect archived
+  events first, recognizing that a compacted run was already started properly.
+
+- **ActionLedger.compensate() now enforces a completed status precondition (#1387).**
+  The method accepted any existing record and transitioned it to `COMPENSATED`
+  while clearing `side_effect_uncertain`, mirroring the gap #366 and #733 fixed
+  for `complete()` and `fail()`. Because `claim()` deliberately treats a
+  compensated action as re-fireable, compensating an interrupted or uncertain
+  (`UNKNOWN`) action laundered the recovery blocker away and allowed duplicate
+  execution of an external effect that may have already run. `compensate()` now
+  verifies the action is in `(ActionStatus.COMPLETED, ActionStatus.COMPENSATED)`,
+  raising `LedgerError` for any in-flight or un-reconciled record.
+
+- **`record-plan` now succeeds on compacted runs (#1438).** `cmd_record_plan`
+  queried `read_events` for its preflight projection check and post-write
+  emission, which on a compacted run reads only the post-anchor live tail.
+  Because `RUN_STARTED` lives in `events_archive`, projecting the candidate
+  against that truncated history raised `ProjectionError` and refused valid
+  plans with exit code 1. The command now queries `read_all_events` so the
+  preflight fold and state emission see the full merged event history.
 
 - **The MCP candidate fold now reads the full history, so `continuum_record_progress`
   and `continuum_record_plan` keep working on a compacted run (#1133).**
@@ -71,8 +136,6 @@ All notable changes to this project are documented here. The format follows
   since declaring such fields `volatile` at every call site is not a fix: a
   caller that wants around the cap simply forgets to declare them.
 
-### Changed
-
 - **The `__all__` guard now walks the installed package instead of five
   hand-listed modules (#1228).** `tests/test_module_all_exports.py` asserted
   that names in `__all__` resolve by importing five modules by name, so a
@@ -103,6 +166,23 @@ All notable changes to this project are documented here. The format follows
   The neighbouring views (`checkpoint_rows`, `action_rows`, `event_rows`,
   `budget_rows`) already fetched the row exactly once for the same guard
   purpose, so this removes the outlier.
+
+### Changed
+
+- **Recovery anchors are now produced by a product path (#1097).**
+  `CheckpointManager.checkpoint_on_recovery` and `last_recovery_anchor` had no
+  caller in `src/` (only tests) so the `RECOVERY` trigger, the `keep_anchors`
+  guard in `prune`, and the anchor branch in `cleanup_ephemeral_artifacts` all
+  protected a set that could never be populated. `continuum resume <run>
+  --repair` now records an anchor after a non-RESUME verdict, before the
+  `RECOVERY_STARTED` event so the pin covers the state the verdict judged rather
+  than the state after the repair bookkeeping landed, and `continuum restore
+  <run> --reason ... --to-recovery-anchor` rolls back to it (refusing with an
+  error when no anchor exists, and refusing a `--to`/`--anchor` given alongside).
+  A plain `resume` stays read-only and records nothing: judging is still
+  separate from acting, so the write lives in the CLI caller, never in
+  `RecoveryEngine.assess`. An anchor failure is reported on stderr and never
+  changes the verdict or its exit code.
 
 - **The advisory verdict contract is now stated where a reader can find it (#1031).**
   `RecoveryDecision` and its `permits()` method describe themselves as
@@ -139,6 +219,15 @@ All notable changes to this project are documented here. The format follows
   settles against. Callers passing an explicit `key` are unaffected: no drift is
   possible and the derived key is the stored key.
 
+### Added
+
+- **Wired ActionLedger.compensate to MCP and sidecar transports (#1096).**
+  `ActionLedger.compensate` records compensating transactions and emits
+  `EventType.ACTION_COMPENSATED`, but had no transport. The verb is now
+  exposed as `continuum_compensate_action` over MCP and `compensate_action`
+  over the sidecar RPC server. Both mark the action `COMPENSATED`, append
+  the compensating event to the log, and surface in recovery summary briefings.
+
 ### Removed
 
 - **Dead `backoff_delay` export (#1095).** The exponential-with-cap pacing
@@ -168,6 +257,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`PostgresStorage.rebuild_action_index` returns corrected row count (#1267).**
+  `rebuild_action_index` on Postgres ended in an unconditional `return 0`,
+  so `continuum verify --index --repair-index` always reported 0 rows corrected
+  even after rewriting drifted rows. It now queries the stored index before
+  rebuilding, compares against the canonical fold, and returns the count of
+  missing, stale, and spurious rows corrected, matching `SQLiteStorage` and the
+  base `Storage` contract.
 - **CITATION.cff states the released version, and the bump sites are documented
   (#1120).** The citation file pinned `0.1.0` while the package was `0.1.2`, so
   anyone citing the project recorded a version two releases stale, and
@@ -176,7 +272,8 @@ All notable changes to this project are documented here. The format follows
   four sites. The file now says `0.1.2`, the paragraph names all five sites a
   bump touches (pyproject, `__init__.py`, both README pins, CITATION.cff, the
   release tag), and `tests/test_version_drift.py` checks the citation file
-  alongside the README pins so the drift cannot recur- **The Postgres backend now stores and returns a fork's `parent_run_id`
+  alongside the README pins so the drift cannot recur.
+- **The Postgres backend now stores and returns a fork's `parent_run_id`
   (#1079).** Both `create_run` and `create_run_started` inserted only the six
   columns the schema had before lineage existed, and `_row_to_run` never read
   the column back, so `runs.parent_run_id` was declared with a foreign key to
@@ -1168,7 +1265,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,501 collected, ~2,423 passed, ~28 skipped on a minimal env).
+  (~2,533 collected, ~2,423 passed, ~28 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
