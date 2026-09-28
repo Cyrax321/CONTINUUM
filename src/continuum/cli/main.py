@@ -455,7 +455,14 @@ def cmd_record_plan(args: argparse.Namespace, storage: Storage, out: Any, err: A
         print(f"error: {exc}", file=err)
         return ExitCode.NOT_FOUND
     payload = {"plan_id": plan_id, "units": sorted_units}
-    history = list(storage.read_events(args.run_id))
+    # Full history (read_all_events) so compaction cannot leave the run
+    # unprojectable (issue #1438): after compaction the live log holds only
+    # the anchor and tail, with RUN_STARTED in the archive. Reading live events
+    # alone would raise ProjectionError for any valid compacted run.
+    try:
+        history = list(storage.read_all_events(args.run_id))
+    except Exception:
+        history = list(storage.read_events(args.run_id))
     head = history[-1].sequence if history else 0
     candidate = Event(
         run_id=args.run_id,
@@ -470,7 +477,11 @@ def cmd_record_plan(args: argparse.Namespace, storage: Storage, out: Any, err: A
         print(f"error: plan would leave run unprojectable and was not recorded: {exc}", file=err)
         return ExitCode.ERROR
     event = storage.append_event(args.run_id, EventType.PLAN_UPSERT, payload, source=Origin.HUMAN)
-    state = project(args.run_id, storage.read_events(args.run_id))
+    try:
+        current_events = storage.read_all_events(args.run_id)
+    except Exception:
+        current_events = storage.read_events(args.run_id)
+    state = project(args.run_id, current_events)
     _emit(
         {
             "run_id": args.run_id,
