@@ -526,7 +526,7 @@ def scenario_risk_fail_open_resilience(ctx: ScenarioContext) -> None:
         ('{"trigger": "latency_anomaly"}', True),  # annotate-only, still recorded
         ("null", False),  # valid JSON, not an object
         ("[1, 2, 3]", False),  # array, not an object
-        ('{"trigger": 42}', False),  # non-string trigger
+        ('{"trigger": null}', False),  # absent trigger
         (torn_a, False),  # torn read, first half
         (torn_b, False),  # torn read, second half
         (torn_a + torn_b, True),  # reassembled and retried
@@ -577,7 +577,9 @@ def scenario_risk_side_effect_abort(ctx: ScenarioContext) -> None:
         {
             "trigger": "side_effect_duplicate",
             "score": 1.0,
-            "detail": "notify.slack observed firing twice",
+            # Structured diagnostics, the shape the risk schema expects: the
+            # feed describes what it saw, and ingestion is fail-open either way.
+            "detail": {"action": "notify.slack", "observed": 2},
         },
     )
 
