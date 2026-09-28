@@ -44,6 +44,8 @@ __all__ = [
     "SemanticPolicy",
     "HybridPolicy",
     "default_policy",
+    "PolicyContext",
+    "ContextPressurePolicy",
     "SIDE_EFFECT_EVENTS",
     "MILESTONE_EVENTS",
 ]

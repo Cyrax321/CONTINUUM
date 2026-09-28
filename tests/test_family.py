@@ -212,3 +212,44 @@ def test_clean_children_do_not_block_the_parent(db: str) -> None:
     code, out, _ = run("--db", db, "--json", "resume", "par")
     payload = json.loads(out)
     assert payload["safe"] is True
+
+
+def test_a_legacy_child_still_blocks_the_parent_resume(db: str) -> None:
+    """A child recorded only in metadata, predating the parent_run_id column,
+    is still a child: an uncertain one must block the family the same way a
+    column-recorded child does, and the tree must list it.
+
+    The column and the metadata convention were resolved by different helpers,
+    so a legacy child appeared in the tree but never reached the roll-up, and
+    `resume` called a family holding an unreconciled side effect safe.
+    """
+    run("--db", db, "start", "par", "--goal", "supervise")
+    run("--db", db, "start", "kid", "--goal", "work", "--parent", "par")
+    ActionLedger(SQLiteStorage(db), "kid").claim("send_invoice", {}, key="invoice:I-9")
+    # erase the column so only the pre-column metadata convention carries the link
+    store = SQLiteStorage(db)
+    store._connection.execute(
+        "UPDATE runs SET parent_run_id = NULL, metadata = ? WHERE run_id = ?",
+        ('{"parent_run_id": "par"}', "kid"),
+    )
+    store._connection.commit()
+
+    code, out, _ = run("--db", db, "--json", "resume", "par")
+    payload = json.loads(out)
+    assert payload["mode"] == "request_human"
+    assert payload["safe"] is False
+    assert code == ExitCode.REQUIRES_HUMAN
+    assert any("kid" in r for r in payload.get("family_rationale", []))
+
+    # the tree still finds it, so the operator can see what is blocking
+    code, out, _ = run("--db", db, "--json", "tree", "par")
+    assert code == ExitCode.OK
+    listed = {c["run_id"] for c in json.loads(out)["children"]}
+    assert "kid" in listed
+
+    # settling it unblocks the family, same as a column-recorded child
+    key = idempotency_key("send_invoice", None, scope="kid", key="invoice:I-9")
+    ActionLedger(SQLiteStorage(db), "kid").reconcile(str(key), occurred=True)
+    code, out, _ = run("--db", db, "--json", "resume", "par")
+    payload = json.loads(out)
+    assert payload["safe"] is True

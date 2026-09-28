@@ -20,7 +20,8 @@ from typing import Any
 
 from continuum.events import EventType
 from continuum.models import Origin, Run
-from continuum.recovery.gate import EditPreconditionError, check_preconditions
+from continuum.recovery.gate import RestorePreconditionError as _GateRestoreError
+from continuum.recovery.gate import check_preconditions
 from continuum.storage.base import CheckpointNotFound, CorruptedRecord, Storage
 
 __all__ = [
@@ -30,10 +31,10 @@ __all__ = [
 ]
 
 
-class RestorePreconditionError(EditPreconditionError):
-    """Alias for :class:`EditPreconditionError` with ``edit_type == "restore"``."""
-
-    pass
+# The gate raises this subclass for ``edit_type == "restore"``; re-exported
+# here so ``continuum.recovery.restore.RestorePreconditionError`` keeps
+# resolving.
+RestorePreconditionError = _GateRestoreError
 
 
 def _anchor_for(
