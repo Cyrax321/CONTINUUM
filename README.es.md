@@ -96,7 +96,7 @@ Verifica:
 ```bash
 continuum --help                 # punto de entrada CLI
 continuum-mcp --help             # punto de entrada servidor MCP (necesita [mcp] o [dev])
-pytest -q                        # ~2,452 recogidos, ~2,361 pasando, ~41 saltados en un entorno mínimo (los recuentos exactos varían)
+pytest -q                        # ~2,501 recogidos, ~2,361 pasando, ~41 saltados en un entorno mínimo (los recuentos exactos varían)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # las tres puertas que CI exige
 ```
@@ -229,7 +229,7 @@ CONTINUUM se verifica contra agentes LLM reales, límites de protocolo en vivo y
 - **Clientes de terceros**: Gemini CLI y Kilo Code conectados vía stdio JSON-RPC contra el almacén SQLite en vivo, validando coexistencia multiagente y aislamiento de autorización.
 - **Cumplimiento de protocolo**: conducido de extremo a extremo con `@modelcontextprotocol/inspector --cli` a través de muertes de proceso, las herramientas mutantes deniegan por defecto tras `CONTINUUM_MCP_MUTATING_CLIENTS`, los reclamos externos degradan a `REQUIRES_REVIEW` (`safe: false`).
 - **Auto reparación**: servidores matados de forma brusca se recuperan de sidecars huérfanos `-wal`/`-shm` de SQLite mediante limpieza de un solo reintento al arrancar.
-- **Escala**: cerca de 2,452 tests recogidos (~2,361 pasando, el resto se salta sin servicios opcionales) en Python 3.11, 3.12 y 3.13 (unitarios, basados en propiedades con `hypothesis`, concurrencia, adversariales). CONTINUUM-Bench ejecuta cinco escenarios de caída más un escenario dedicado de deriva de argumentos, midiendo 0 trabajo duplicado y 0 efectos secundarios duplicados para CONTINUUM frente a duplicación total para la reproducción ingenua, más una suite separada de 14 escenarios de corrección de recuperación (`continuum.benchmark.phase6`) que codifica los puntos de caída del estudio de ejecución durable como aserciones ejecutables.
+- **Escala**: cerca de 2,501 tests recogidos (~2,361 pasando, el resto se salta sin servicios opcionales) en Python 3.11, 3.12 y 3.13 (unitarios, basados en propiedades con `hypothesis`, concurrencia, adversariales). CONTINUUM-Bench ejecuta cinco escenarios de caída más un escenario dedicado de deriva de argumentos, midiendo 0 trabajo duplicado y 0 efectos secundarios duplicados para CONTINUUM frente a duplicación total para la reproducción ingenua, más una suite separada de 14 escenarios de corrección de recuperación (`continuum.benchmark.phase6`) que codifica los puntos de caída del estudio de ejecución durable como aserciones ejecutables.
 - **Auditoría adversarial**: la superficie MCP completa fue auditada sobre el protocolo en vivo, se encontraron y corrigieron tres defectos. Método y pasos de reproducción en [test.md](test.md).
 
 ## Integración MCP
@@ -395,7 +395,7 @@ Esquema v6. SQLite es primario, Postgres verificado por CI. Un registro, muchas 
 
 ### Mapa de módulos, una librería, muchas superficies
 
-CONTINUUM es una librería (`src/continuum`, 124 módulos) más una suite de tests grande (161 archivos de test, ~2,452 tests). Todos los módulos añaden y reproducen un registro de eventos encadenado:
+CONTINUUM es una librería (`src/continuum`, 124 módulos) más una suite de tests grande (161 archivos de test, ~2,501 tests). Todos los módulos añaden y reproducen un registro de eventos encadenado:
 
 | Módulo | Rol |
 |:--|:--|
@@ -513,7 +513,7 @@ CONTINUUM se sitúa en la intersección de ejecución durable, seguimiento idemp
 
 A principios de 2026 vi agentes de larga duración fallar en la recuperación, no en el razonamiento. Los checkpoints se trataban como prueba para continuar, no como evidencia a verificar. Estudiando Temporal, LangGraph, ACRFence 2603.20625 y self conditioning 2509.09677, encontré que el hueco era un sustrato de verificación portable que pregunta, dado el estado en el tiempo T y el mundo tal como está ahora, sigue siendo seguro continuar.
 
-En tres semanas construí CONTINUUM desde un invariante, cada hecho lleva su origen. El resultado es un registro encadenado con `verify()`, un libro mayor con deduplicación por clave estable, una puerta y un gateway que bloquean efectos no reclamados, y un motor de recuperación que sella un contrato. Cinco costuras exponen el mismo registro a Claude Code, LangGraph, LangChain, OpenAI, HTTP y OpenTelemetry. Validado con muertes reales y ~2,452 tests, imprime `0 duplicados` donde la reproducción ingenua imprime `50`.
+En tres semanas construí CONTINUUM desde un invariante, cada hecho lleva su origen. El resultado es un registro encadenado con `verify()`, un libro mayor con deduplicación por clave estable, una puerta y un gateway que bloquean efectos no reclamados, y un motor de recuperación que sella un contrato. Cinco costuras exponen el mismo registro a Claude Code, LangGraph, LangChain, OpenAI, HTTP y OpenTelemetry. Validado con muertes reales y ~2,501 tests, imprime `0 duplicados` donde la reproducción ingenua imprime `50`.
 
 CONTINUUM fue creado por **Anandhu P Shaji** ([@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/)) y es mantenido por el creador original. Es de código abierto bajo [Apache-2.0](LICENSE). Las contribuciones de la comunidad son bienvenidas vía [CONTRIBUTING.md](CONTRIBUTING.md) y se acreditan en [AUTHORS.md](AUTHORS.md) y [graphs/contributors](https://github.com/Cyrax321/CONTINUUM/graphs/contributors).
 

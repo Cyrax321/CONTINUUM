@@ -145,10 +145,10 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Ruff - lint
-        run: ruff check src/ tests/ examples/
+        run: ruff check src/ tests/ examples/ _bugaudit/
 
       - name: Ruff - format check
-        run: ruff format --check src/ tests/ examples/
+        run: ruff format --check src/ tests/ examples/ _bugaudit/
 
       - name: mypy, strict type-check
         run: mypy src/continuum

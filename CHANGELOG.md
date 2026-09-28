@@ -8,6 +8,38 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The MCP candidate fold now reads the full history, so `continuum_record_progress`
+  and `continuum_record_plan` keep working on a compacted run (#1133).**
+  `_project_candidate` folded only the live tail; once compaction moved
+  `RUN_STARTED` into `events_archive`, the goal no longer projected and both
+  write tools refused every payload as "unprojectable" -- exactly the
+  long-running runs they exist for. It now folds `read_all_events`, so the goal
+  still projects and the head sequence it validates against is unchanged. The
+  original fix (PR #1219) was dropped in a merge-of-main and never landed.
+
+- **`DependencyGraph.impacted_by` now cascades taint along finding-to-finding
+  citation edges to a fixpoint (#1475).** Findings may cite other findings
+  (blessed by `SemanticState.dangling_evidence`), and `StateValidator._propagate`
+  iterated to a fixpoint so stale findings cascade down the derivation graph.
+  `impacted_by` previously only checked citations against the initial evidence
+  set in a single pass, missing findings and decisions that depended on tainted
+  findings. `DependencyGraph.impacted_by` now repeats until no new findings are
+  tainted, restoring parity with the validator and preventing stale downstream
+  findings and decisions from surviving localized repair plans.
+
+- **The edit-precondition gate now raises the exception subclass matching the
+  edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
+  forks but the plain `EditPreconditionError` for every other edit type, so
+  `MergePreconditionError` and `RestorePreconditionError` -- both exported
+  through `recovery/__init__.py` -- were never raised anywhere and a caller
+  could not distinguish a merge refusal from a restore refusal by exception
+  type. `check_preconditions` now maps `edit_type` to its subclass, and the
+  two-sided `check_merge_preconditions` path raises `MergePreconditionError`
+  as well. The three subclasses are defined once in `gate.py` and re-exported
+  by `fork.py`, `merge.py` and `restore.py` as before, so existing imports and
+  `except EditPreconditionError` handlers are unaffected; only `type(exc)`
+  becomes observable.
+
 - **A padded argument token can no longer reset the authorization-bound retry
   budget (#1052).** The bucket was derived from every argument token, and the
   arguments are caller-controlled noise plus the real resource, so keeping the
@@ -95,6 +127,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Removed
 
+- **Dead `backoff_delay` export (#1095).** The exponential-with-cap pacing
+  helper in `src/continuum/budgets.py` was the only member of
+  `budgets.__all__` with no consumer anywhere in the repo. Every refusal site
+  (`cli/main.py`, `mcp/server.py`, `actions/ledger.py`) refuses and returns;
+  none computes or applies a delay, and the module's own docstring states
+  CONTINUUM never retries anything itself; it counts and gates. The helper
+  shipped speculatively with #240 ("ships as a pure exponential+cap helper;
+  CONTINUUM never retries itself") and no caller arrived in the year since.
+  Removed with its tests. Recoverable from history (6217a65) if a real
+  retry-pacing surface ever needs it.
+
 - **Dead `DuplicateAction` and `LeaseError` exception classes (#1115).**
   `DuplicateAction` (`continuum.actions.ledger`) and `LeaseError`
   (`continuum.concurrency.lease`) were exported exceptions that no code path
@@ -160,6 +203,38 @@ All notable changes to this project are documented here. The format follows
   both non-projecting, so folding the archived prefix from genesis reaches the
   same state the anchored path already produced. The guard is unchanged and
   still fires when a window genuinely excludes `RUN_STARTED`.
+- **The gateway now enforces a route's `prefix` instead of only parsing it
+  (#1051).** `match_route` narrowed candidates by host and method and never
+  compared the request path against the route, so every path on a registered
+  host was the route's scope: a live claim for `/v1/invoices` spent itself on
+  `/v1/refunds` or `/internal/admin/purge`, the gateway forwarded the request,
+  settled the claim as completed, and wrote `TOOL_COMPLETED` evidence whose
+  `path` recorded the off-prefix URL: the run's log said the invoice was sent
+  while the upstream saw something else entirely. The prefix is the only
+  per-path scope a route has and nothing else narrowed what a claim could
+  reach, so there was no workaround. `match_route` now takes the request path
+  and requires it to fall within the prefix on a whole-segment boundary
+  (`/v1/invoices` admits `/v1/invoices/49`, not `/v1/invoices-archived` or
+  `/v1/refunds`); the path is normalised first (query stripped, percent-decoded,
+  `..` collapsed) because the upstream rewrites `/v1/invoices/../refunds` and
+  decodes `/v1/invoices/%2e%2e/refunds` to the same thing before it dispatches,
+  and the refusal has to be about the path actually served. A
+  request on a registered host but under none of its prefixes is refused with
+  `403` naming the prefixes, before the key is rendered and before anything is
+  forwarded or settled. A route written without a `prefix` keeps the whole
+  host, which is what the default `/` has always meant. `match_route`'s new
+  `path` argument is required rather than defaulted: a caller cannot ask for a
+  routing verdict without saying what it is routing, and a silent default
+  would reintroduce the hole as an omission rather than a design. The path is
+  normalised exactly once, because `urllib.parse.unquote` is not idempotent:
+  `/v1%252finvoices/49` decodes to `/v1%2finvoices/49` on the first pass and to
+  `/v1/invoices/49` on the second, and the gateway was normalising in
+  `match_route` and again in `_path_under_prefix`, so a doubly-encoded
+  separator made the boundary see the invoice path, spend the claim, and write
+  evidence that the invoice was sent while the upstream, which decodes once,
+  served one literal segment that never reached the invoice endpoint. The
+  verdict is now taken on the raw request line, which is what the upstream
+  decodes.
 - **`resume --pinning` compares against the archived pinning, so a compacted
   run stops reporting every key as newly pinned (#1126).** The drift display
   folded the live event tail alone, and compaction moves the pinning-carrying
@@ -176,6 +251,21 @@ All notable changes to this project are documented here. The format follows
   but it was wrong in the direction of hiding drift, which is the opposite of
   what a drift report is for. `latest_pinning` now folds `read_all_events`, the
   same history the assess (#1050) and watch (#1072) folds already read.
+- **The Postgres action index no longer reads as permanently dirty on an
+  ordinary store (#1321).** `action_index_drift` compares the projection
+  against a canonical fold of the log, and the two sides numbered each row on
+  different scales: `_maintain_action_index` takes `nextval` on a sequence
+  that advances once per action event, while the fold numbered a row by its
+  position in the merged row stream, which counts `RUN_STARTED`,
+  `TOOL_CALLED`, `EVIDENCE_ADDED` and every other non-action row too. A
+  normal run has those between its actions, so the two disagreed by one per
+  intervening row and `continuum verify --index` reported a corrupted
+  projection on a store nothing had tampered with, with `--repair-index` no
+  help because a rebuild rewrote the rows with the fold's numbers and the
+  next appended action put them straight back out of step. The fold now
+  counts action events only, 1-based, which is exactly the number the
+  sequence assigned. SQLite was immune -- both sides there use the writing
+  event's `rowid` -- and a regression test now pins that agreement.
 
 - **Webhook dedup now survives a compaction inside the re-notify window
   (#1186).** `_within_dedup_window` scanned only the live event tail for the
@@ -1072,7 +1162,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,452 collected, ~2,423 passed, ~28 skipped on a minimal env).
+  (~2,501 collected, ~2,423 passed, ~28 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

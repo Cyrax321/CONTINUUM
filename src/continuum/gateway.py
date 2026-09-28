@@ -28,12 +28,16 @@ Configuration lives in `.continuum/gateway.json`::
 
 Key templates substitute top-level JSON body fields, identical to `gate`.
 Unknown hosts are refused (fail-closed): a proxy silently forwarding
-anywhere would be an open relay wearing CONTINUUM's name.
+anywhere would be an open relay wearing CONTINUUM's name. The route prefix is
+enforced the same way -- a live claim for ``/v1/invoices`` does not authorise
+``/v1/refunds`` on the same host, because the prefix is the only per-path
+scope a route has (issue #1051).
 """
 
 from __future__ import annotations
 
 import json
+import posixpath
 import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -169,11 +173,60 @@ def render_key(template: str, body: dict[str, Any]) -> str:
     return template.format(**{f: normalize_key_value(body[f]) for f in fields})
 
 
+def _normalize_path(raw: str) -> str:
+    """The path the upstream will route on, as the gateway sees ``raw``.
+
+    Strips the query and fragment (a prefix is a path scope, not a query
+    scope) and collapses ``.``/``..`` segments, because the upstream rewrites
+    ``/v1/invoices/../refunds`` into ``/v1/refunds`` before it dispatches and
+    the gateway's refusal has to be about the path that is actually served
+    (issue #1051). Percent-encoding is decoded first for the same reason: the
+    upstream decodes before it routes, so ``/v1/invoices/%2e%2e/refunds``
+    reaches ``/v1/refunds`` and has to be judged as that path. Decoding can
+    only make the comparison see more of the path, so it fails closed. A
+    request line without a leading slash is made absolute so the comparison is
+    always between two absolute paths.
+    """
+    from urllib.parse import unquote, urlsplit
+
+    path = unquote(urlsplit(raw).path)
+    if not path.startswith("/"):
+        path = f"/{path}"
+    # normpath keeps the root and drops a trailing slash, so both sides of the
+    # comparison land on one canonical spelling per path.
+    collapsed = posixpath.normpath(path)
+    return collapsed or "/"
+
+
+def _path_under_prefix(path: str, prefix: str) -> bool:
+    """Whether ``path`` is within the route's ``prefix``.
+
+    ``prefix`` is the only per-path scope a route has, so the boundary is a
+    whole segment, not a string prefix: ``/v1/invoices`` admits
+    ``/v1/invoices/49`` but not ``/v1/invoices-archived``, which is a
+    different resource the claim says nothing about (issue #1051). A route
+    registered without a prefix keeps the whole host, which is what the
+    default ``"/"`` has always meant. Both sides are normalised here so a
+    caller cannot hand in an uncollapsed path and slip past the boundary.
+    Callers pass the raw request line, not an already-normalised path, since
+    ``unquote`` is not idempotent: a second pass decodes a doubly-encoded
+    separator into a real one and judges a path the upstream never serves.
+    """
+    normalized = _normalize_path(prefix)
+    if normalized == "/":
+        return True
+    requested = _normalize_path(path)
+    if requested == normalized:
+        return True
+    return requested.startswith(f"{normalized}/")
+
+
 def match_route(
     routes: list[Route],
     *,
     host: str,
     method: str,
+    path: str,
     body: dict[str, Any],
     actions_by_key: dict[str, Any],
     run_id: str,
@@ -201,12 +254,30 @@ def match_route(
     if not candidates:
         return Decision(False, f"no upstream registered for host {host!r}")
 
-    route = next((r for r in candidates if method.upper() in r.methods), None)
+    # The prefix is the only per-path scope a route has, so it narrows before
+    # the key is even rendered: without it, one claim for /v1/invoices spends
+    # itself on every path the host serves, and the recorded evidence says the
+    # invoice was sent while the upstream saw something else (issue #1051).
+    # The raw request line goes in, not a pre-normalised one: ``unquote`` is
+    # not idempotent, so normalising here and again inside
+    # ``_path_under_prefix`` would decode a doubly-encoded separator twice and
+    # see a path the upstream, which decodes once, never serves. The claim
+    # would then be spent on a request the prefix never really admitted.
+    requested = _normalize_path(path)
+    scoped = [r for r in candidates if _path_under_prefix(path, r.prefix)]
+    if not scoped:
+        return Decision(
+            False,
+            f"host {host!r} is registered but {requested!r} is not under any of "
+            f"its prefixes {sorted(r.prefix for r in candidates)}",
+        )
+
+    route = next((r for r in scoped if method.upper() in r.methods), None)
     if route is None:
         return Decision(
             False,
             f"host {host!r} is registered but {method} is not among its allowed "
-            f"methods {[m.lower() for m in candidates[0].methods]}",
+            f"methods {[m.lower() for m in scoped[0].methods]}",
         )
 
     try:
@@ -458,6 +529,7 @@ class GatewayServer:
                         server._routes,
                         host=host.split(":")[0],
                         method=method,
+                        path=self.path,
                         body=body,
                         actions_by_key=actions,
                         run_id=run_id,

@@ -14,11 +14,11 @@ ruff format --check src/ tests/ examples/
 mypy src/continuum                     # strict type check
 ```
 
-On the current main branch, collection reports approximately 2,452 tests; the
+On the current main branch, collection reports approximately 2,501 tests; the
 exact count and pass/skip totals vary with Python version, platform, optional
 dependencies, and external services.
 
-What those ~2,452 tests cover without any SDK or network: event-chain
+What those ~2,501 tests cover without any SDK or network: event-chain
 integrity and tamper detection, semantic projection, checkpoint policy and
 restore, ledger claim/dedup/fail/reconcile (including cross-run unscoped
 claims through the action index), validator staleness propagation, recovery
