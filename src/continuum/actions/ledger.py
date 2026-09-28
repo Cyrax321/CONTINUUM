@@ -1377,8 +1377,21 @@ class ActionLedger:
 
     @_single_writer
     def compensate(self, key: str, *, note: str = "", by: str | None = None) -> Action:
-        """Record that a completed effect was deliberately undone."""
+        """Record that a completed effect was deliberately undone.
+
+        Only completed effects can be compensated (issue #1387). Re-reporting a
+        COMPENSATED action is allowed, matching the idempotency of complete()
+        and fail(). Interrupted or uncertain actions (STARTED, UNKNOWN) cannot
+        be compensated, because there is no verified outcome to undo; resolving
+        them belongs to reconcile().
+        """
         key, existing = self._require(key)
+        if existing.status not in (ActionStatus.COMPLETED, ActionStatus.COMPENSATED):
+            raise LedgerError(
+                f"action {existing.action_type!r} is {existing.status.value}, not a completed "
+                f"effect, so there is nothing verified to undo. Resolve an interrupted or "
+                f"uncertain action with reconcile() before compensating it."
+            )
         action = existing.model_copy(
             update={
                 "status": ActionStatus.COMPENSATED,
