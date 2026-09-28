@@ -125,6 +125,14 @@ All notable changes to this project are documented here. The format follows
   skip-not-crash semantics, allowing `continuum verify --index` to complete
   consistently across backends on partially corrupted stores.
 
+- **GenericAgentAdapter records dependency declarations as deterministic (#1391).**
+  `GenericAgentAdapter._declare_dependencies` previously hardcoded
+  `source=Origin.EXTERNAL_AGENT`, which contradicted its documented contract as
+  a trusted in-process facade writing `Origin.DETERMINISTIC` state. This dropped
+  the advisory prefix trust score on runs with pinned environments. The adapter
+  now stamps `DEPENDENCY_DECLARED` events with `source=Origin.DETERMINISTIC` to
+  match its checkpoint and action ledger writes.
+
 - **`ensure_run` now checks archived history so compaction does not inject a duplicate `RUN_STARTED` (#1436).**
   `ContinuumMCP.ensure_run` and `SidecarServer._ensure_run` checked `read_events(run_id, upto=1)`
   to decide whether a run needed its genesis event backfilled. On a compacted run, events up to
