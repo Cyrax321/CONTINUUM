@@ -8,6 +8,28 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Continuous-monitoring fault-injection scenarios for the recovery-correctness
+  suite (#1426).** Four scenarios in `continuum.benchmark.phase6.scenarios`
+  inject mid-run `RISK_OBSERVED` events into a live trajectory instead of
+  unit-mocking the risk feed: `risk_loop_replan` (a repeating-tool-action signal
+  must drive REPLAN with guidance naming the steps to avoid),
+  `risk_meltdown_rollback` (an error cascade with a meltdown on top must roll
+  back to the verified fact-gathering checkpoint), `risk_fail_open_resilience`
+  (corrupted, blank and torn feed lines must be dropped without disturbing the
+  trajectory), and `risk_side_effect_abort` (a duplicate side-effect signal must
+  abort and settle on the completed record without a second execution). Each
+  records decision accuracy against the policy expectation, duplicate side
+  effects, and ingestion latency per step. The phase6 suite is now 18 scenarios.
+
+- **Risk verdicts now carry located guidance for repeating steps (#1426).** A
+  `loop` trigger previously produced a replan verdict naming only the trigger;
+  the `step_id` the probe supplied was dropped, so a replanning agent had no way
+  to tell which plan units to avoid. The decision rationale and sealed contract
+  reason now append `repeating steps to avoid: <ids>`, deduplicated in
+  first-seen order, collected only from the events that contributed to the
+  winning mode. Triggers carrying no step id, and less severe triggers that lost
+  the severity vote, contribute no guidance.
+
 - **Out-of-band blob store and `CONTINUUM_PAYLOAD_OFFLOAD_BYTES` threshold (#1418).**
   Event payloads exceeding the configurable byte threshold `CONTINUUM_PAYLOAD_OFFLOAD_BYTES`
   (default 0, disabled) are offloaded to content-addressed canonical JSON blob files at
@@ -1155,7 +1177,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,501 collected, ~2,423 passed, ~28 skipped on a minimal env).
+  (~2,532 collected, ~2,423 passed, ~28 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
