@@ -48,6 +48,28 @@ All notable changes to this project are documented here. The format follows
   `PROJECTION_BOOKKEEPING`: folding one mints no state version, while mitigation
   that actually alters the run still bumps it through whatever it changed.
 
+- **Continuous-monitoring fault-injection scenarios for the recovery-correctness
+  suite (#1426).** Four scenarios in `continuum.benchmark.phase6.scenarios`
+  inject mid-run `RISK_OBSERVED` events into a live trajectory instead of
+  unit-mocking the risk feed: `risk_loop_replan` (a repeating-tool-action signal
+  must drive REPLAN with guidance naming the steps to avoid),
+  `risk_meltdown_rollback` (an error cascade with a meltdown on top must roll
+  back to the verified fact-gathering checkpoint), `risk_fail_open_resilience`
+  (corrupted, blank and torn feed lines must be dropped without disturbing the
+  trajectory), and `risk_side_effect_abort` (a duplicate side-effect signal must
+  abort and settle on the completed record without a second execution). Each
+  records decision accuracy against the policy expectation, duplicate side
+  effects, and ingestion latency per step. The phase6 suite is now 18 scenarios.
+
+- **Risk verdicts now carry located guidance for repeating steps (#1426).** A
+  `loop` trigger previously produced a replan verdict naming only the trigger;
+  the `step_id` the probe supplied was dropped, so a replanning agent had no way
+  to tell which plan units to avoid. The decision rationale and sealed contract
+  reason now append `repeating steps to avoid: <ids>`, deduplicated in
+  first-seen order, collected only from the events that contributed to the
+  winning mode. Triggers carrying no step id, and less severe triggers that lost
+  the severity vote, contribute no guidance.
+
 - **The recovery surfaces now name the risk observations that triggered a
   verdict (#1424).** A risk-driven verdict already carried the `RISK_OBSERVED`
   event ids behind it on the sealed contract as `triggering_risks`, and the
@@ -152,7 +174,6 @@ All notable changes to this project are documented here. The format follows
   never has to list every dependency to govern all of them. The change is
   additive: entries written before the field existed load with no dependency tag
   and behave exactly as before.
-
 ### Fixed
 
 - **Re-sync shared counts and repair integration seams opened by the #1400s

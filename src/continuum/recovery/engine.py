@@ -90,6 +90,21 @@ _SAFETY_FOR_MODE: dict[RecoveryMode, RecoverySafety] = {
 }
 
 
+def _collect_repeating_step(steps: list[str], risk_event: Any) -> None:
+    """Append a risk event's ``step_id`` to ``steps`` when it names one.
+
+    A risk observation may locate the problem at a plan step. Only string,
+    non-blank ids count: the feed is fail-open, so a probe that sent a missing
+    or malformed id contributes no location rather than a bogus one. In-place
+    and deduplicated, preserving first-seen order.
+    """
+    step = risk_event.payload.get("step_id")
+    if isinstance(step, str) and step.strip():
+        cleaned = step.strip()
+        if cleaned not in steps:
+            steps.append(cleaned)
+
+
 @dataclass(frozen=True, slots=True)
 class RecoveryDecision:
     """The engine's verdict, with everything needed to justify it.
@@ -487,8 +502,13 @@ class RecoveryEngine:
             except Exception:
                 risk_events = []
             best_mode = None
-            triggering = list[str]()
-            triggers = list[str]()
+            triggering: list[str] = []
+            triggers: list[str] = []
+            # Steps the risk feed flagged as repeating, collected only from the
+            # events that contribute to the winning mode. A replan verdict that
+            # names the trigger but not the steps leaves the replanning agent
+            # no way to avoid the loop it was warned about (#1426).
+            repeating_steps: list[str] = []
             for risk_ev in risk_events:
                 trig = risk_ev.payload.get("trigger")
                 if not isinstance(trig, str):
@@ -504,10 +524,14 @@ class RecoveryEngine:
                     best_mode = candidate
                     triggering = [risk_ev.event_id]
                     triggers = [trig]
+                    repeating_steps = []
                 elif SEVERITY[candidate] == SEVERITY[best_mode]:
                     triggering.append(risk_ev.event_id)
                     if trig not in triggers:
                         triggers.append(trig)
+                else:
+                    continue
+                _collect_repeating_step(repeating_steps, risk_ev)
             if best_mode is not None:
                 risk_mode = best_mode
                 triggering_risks = triggering
@@ -517,6 +541,13 @@ class RecoveryEngine:
                 # Deduplicated by trigger so an equal-severity repeat does not
                 # duplicate the sentence the way #1042's double-append did.
                 risk_rationale = f"risk {', '.join(sorted(triggers))} triggers {best_mode.value}"
+                # Located guidance: the steps the feed named, deduplicated in
+                # first-seen order so a loop observed many times reads as one
+                # set of steps to avoid, not one per observation.
+                if repeating_steps:
+                    risk_rationale = (
+                        f"{risk_rationale}; repeating steps to avoid: {', '.join(repeating_steps)}"
+                    )
         except Exception:
             triggering_risks = []
             risk_mode = None
