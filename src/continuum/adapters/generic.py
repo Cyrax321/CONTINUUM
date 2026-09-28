@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from continuum.models import RecoveryContract
+    from continuum.recovery.ledger import RecoveryLedger
 
 from continuum.actions.ledger import ActionLedger, ActionOutcome
 from continuum.adapters.base import AgentAdapter
@@ -42,12 +46,14 @@ class GenericAgentAdapter(AgentAdapter):
         storage: Storage,
         *,
         engine: RecoveryEngine | None = None,
+        ledger: RecoveryLedger | None = None,
         auto_file: str | None = None,
         auto_total: int | None = None,
     ) -> None:
         self.storage = storage
         self.manager = CheckpointManager(storage)
-        self.engine = engine or RecoveryEngine(storage)
+        self.engine = engine or RecoveryEngine(storage, ledger=ledger)
+        self.ledger = ledger or getattr(self.engine, "ledger", None)
         self.auto_file = auto_file
         self.auto_total = auto_total
 
@@ -104,7 +110,7 @@ class GenericAgentAdapter(AgentAdapter):
 
         Stored as ``DEPENDENCY_DECLARED`` events (not written onto the
         checkpoint state) so the declaration survives projection and restore, is
-        covered by the hash chain, and carries the same external-agent provenance
+        covered by the hash chain, and carries the same deterministic provenance
         as the rest of the adapter's writes. Only new or re-pinned resources are
         appended, so a scheduled checkpoint with an unchanged environment adds
         nothing.
@@ -131,7 +137,7 @@ class GenericAgentAdapter(AgentAdapter):
                 run_id,
                 EventType.DEPENDENCY_DECLARED,
                 {"resource": name, "version": version},
-                source=Origin.EXTERNAL_AGENT,
+                source=Origin.DETERMINISTIC,
             )
 
     def restore_state(
@@ -254,6 +260,9 @@ class GenericAgentAdapter(AgentAdapter):
         current_environment: EnvironmentSnapshot | None = None,
         expected_model: str | None = None,
         replay: bool = True,
+        scope: Iterable[str] | None = None,
+        ledger: RecoveryLedger | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
     ) -> RecoveryDecision:
         """Assess whether a run may safely resume under current conditions."""
         return self.engine.assess(
@@ -261,4 +270,57 @@ class GenericAgentAdapter(AgentAdapter):
             current_environment=current_environment,
             expected_model=expected_model,
             replay=replay,
+            scope=scope,
+            ledger=ledger or self.ledger,
+            dependency_budgets=dependency_budgets,
+        )
+
+    def record_attempt(
+        self,
+        run_id: str,
+        *,
+        note: str = "",
+        max_attempts: int | None = None,
+        dependency: str | None = None,
+        dependencies: Iterable[str] | None = None,
+        contract: RecoveryContract | None = None,
+        action: Any | None = None,
+        scope: Iterable[str] | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
+    ) -> int:
+        """Record one recovery attempt via the underlying RecoveryEngine / RecoveryLedger."""
+        return self.engine.record_attempt(
+            run_id,
+            note=note,
+            max_attempts=max_attempts,
+            dependency=dependency,
+            dependencies=dependencies,
+            contract=contract,
+            action=action,
+            scope=scope,
+            dependency_budgets=dependency_budgets,
+        )
+
+    def requires_human(
+        self,
+        run_id: str,
+        *,
+        max_attempts: int = 3,
+        dependency: str | None = None,
+        dependencies: Iterable[str] | None = None,
+        contract: RecoveryContract | None = None,
+        action: Any | None = None,
+        scope: Iterable[str] | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Check whether human intervention is required via the underlying RecoveryEngine / RecoveryLedger."""
+        return self.engine.requires_human(
+            run_id,
+            max_attempts=max_attempts,
+            dependency=dependency,
+            dependencies=dependencies,
+            contract=contract,
+            action=action,
+            scope=scope,
+            dependency_budgets=dependency_budgets,
         )

@@ -34,6 +34,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from continuum.environment.snapshot import EnvironmentSnapshot
 from continuum.events import CAUSED_BY_TYPES, Event, EventType, IntegrityReport, IntegrityViolation
 from continuum.models import (
     Action,
@@ -634,7 +635,13 @@ class PostgresStorage(Storage):
         row = self._connection.execute("SELECT nextval('action_index_ord_seq') AS v").fetchone()
         return int(row["v"])
 
-    def compact_run(self, run_id: str, *, through_sequence: int | None = None) -> dict[str, int]:
+    def compact_run(
+        self,
+        run_id: str,
+        *,
+        through_sequence: int | None = None,
+        environment: EnvironmentSnapshot | None = None,
+    ) -> dict[str, int]:
         """Archive the pre-anchor prefix of a run's log (issue #239).
 
         A forced anchor checkpoint first records state at the boundary (its
@@ -654,12 +661,28 @@ class PostgresStorage(Storage):
         genesis and fork the hash chain away from the archive. The check is
         shared with the SQLite backend so the two cannot drift apart again
         (issue #1078).
+
+        The anchor carries ``environment`` when supplied, else the environment
+        the run's newest checkpoint already recorded (#1049): an
+        environment-blind anchor makes every pinned dependency UNKNOWN at the
+        next assessment and silently downgrades a clean run.
         """
         from continuum.checkpoint.manager import CheckpointManager
 
         lv = self.latest_version(run_id)
         head = self.last_sequence(run_id)
-        needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
+        # A caller-supplied environment has to land on a checkpoint, so it
+        # forces the fresh-anchor path whatever the log state. In practice the
+        # other terms already cover every reachable state (a version's
+        # STATE_CHECKPOINTED annotation sits one past its source_sequence, so
+        # head always outruns it); this term keeps the caller's request from
+        # depending on that invariant (#1049).
+        needs_fresh_anchor = (
+            lv is None
+            or through_sequence is not None
+            or lv.source_sequence < head
+            or environment is not None
+        )
         if needs_fresh_anchor:
             try:
                 manager = CheckpointManager(self)
@@ -669,7 +692,16 @@ class PostgresStorage(Storage):
                 # never started (issue #648). Per-turn checkpoint evaluation
                 # deliberately keeps the cheaper live-tail read.
                 state = manager.project_current(run_id, full_history=True)
-                manager.checkpoint(run_id, state=state, force_version=True)
+                manager.checkpoint(
+                    run_id,
+                    state=state,
+                    force_version=True,
+                    # The anchor carries the environment the run's newest
+                    # checkpoint already recorded when none is supplied
+                    # (#1049): an environment-blind anchor makes every pinned
+                    # dependency UNKNOWN at the next assessment.
+                    environment=self._anchor_environment(run_id, environment),
+                )
             except Exception as exc:
                 raise ValueError(f"run {run_id!r} could not be anchored: {exc}") from exc
             lv = self.latest_version(run_id)
@@ -743,9 +775,21 @@ class PostgresStorage(Storage):
             ) from exc
 
     def rebuild_action_index(self) -> int:
-        """Recompute the whole index from the log (global key space)."""
+        """Recompute the whole index from the log; returns corrected rows.
+
+        Always global by design: keys live in one store-wide namespace, so a
+        per-run rewrite could collide with another run's legitimate row of
+        the same key. A correction is any key whose stored row was missing,
+        stale or spurious.
+        """
         canonical = self._canonical_index_rows()
         with self._write():
+            before = {
+                r["key"]: (int(r["updated_seq"]), r["status"])
+                for r in self._connection.execute(
+                    "SELECT key, updated_seq, status FROM action_index"
+                ).fetchall()
+            }
             self._connection.execute("DELETE FROM action_index")
             # psycopg's Connection has no executemany; the cursor does.
             with self._connection.cursor() as cur:
@@ -757,7 +801,13 @@ class PostgresStorage(Storage):
                         for key, (entry, seq) in canonical.items()
                     ],
                 )
-        return 0
+        corrections = sum(
+            1
+            for k, val in ((k, (seq, entry[3])) for k, (entry, seq) in canonical.items())
+            if before.get(k) != val
+        )
+        corrections += len(set(before) - set(canonical))
+        return corrections
 
     def action_index_drift(self) -> int:
         """Count index rows that disagree with the log. Read-only.
@@ -815,9 +865,13 @@ class PostgresStorage(Storage):
         canonical: dict[str, tuple[tuple[str, str, str, str, str], int]] = {}
         order = 0
         for row in [*archived, *rows]:
-            payload = (
-                row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
-            )
+            raw = row["payload"]
+            if not isinstance(raw, dict):
+                try:
+                    raw = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            payload = raw
             if is_offload_descriptor(payload):
                 with suppress(Exception):
                     payload = load_blob_payload(self.storage_dir, payload)
