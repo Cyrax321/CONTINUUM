@@ -343,8 +343,10 @@ def test_pg_action_index_covers_the_archive_after_rebuild(
     # is reported dirty until it is rebuilt. That desync is the archive/live
     # ordering gap, #1322, which is separate from #1321 (a healthy store
     # reported dirty with no compaction at all).
-    assert storage.action_index_drift() > 0
-    storage.rebuild_action_index()
+    drift = storage.action_index_drift()
+    assert drift > 0
+    corrected = storage.rebuild_action_index()
+    assert corrected == drift
     assert storage.action_index_drift() == 0
     key = str(idempotency_key("process_doc", None, scope="pg_ki", key="doc:1"))
     foreign = storage.foreign_action(key, exclude_run="some_other_run")

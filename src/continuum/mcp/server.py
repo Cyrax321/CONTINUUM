@@ -283,8 +283,17 @@ def _project_candidate(
     landing between the read and the write of a ``completed=75`` that omits
     ``total``). One run has one owner by design, but the failure being guarded
     here is unrecoverable, so it is worth not relying on that.
+
+    The fold reads the full history, not just the live tail: compaction moves
+    the pre-anchor prefix (``RUN_STARTED`` included) into ``events_archive``,
+    and ``project`` refuses a log with no goal. A live-only read therefore made
+    every ``continuum_record_progress`` and ``continuum_record_plan`` reject its
+    payload as "unprojectable" the moment the run had been compacted -- exactly
+    the long-running runs the write tools exist for. ``head`` stays the true
+    head because the merged history is sequence-ordered (issue #1133; the merged
+    fix in PR #1219 was dropped in a merge-of-main and never landed).
     """
-    history = list(ctx.storage.read_events(run_id))
+    history = list(ctx.storage.read_all_events(run_id))
     head = history[-1].sequence if history else 0
     candidate = Event(
         run_id=run_id,
@@ -1519,6 +1528,38 @@ def build_server(
                 "external_id": action.external_id,
                 "result": dict(action.result) if action.result else None,
                 "side_effect_uncertain": action.side_effect_uncertain,
+            }
+        )
+
+    @server.tool(
+        name="continuum_compensate_action",
+        description=(
+            "Record that a completed side effect was deliberately undone (for "
+            "example a refund or reversion). Call this after executing a compensating "
+            "action. Marks the action as COMPENSATED."
+        ),
+        annotations=mutating,
+    )
+    @guard
+    def continuum_compensate_action(
+        run_id: str,
+        action_key: str,
+        note: str = "",
+        by: str | None = None,
+    ) -> str:
+        """Record that a completed effect was deliberately undone."""
+        action = ctx.ledger(run_id).compensate(
+            action_key,
+            note=note,
+            by=by,
+        )
+        return _json(
+            {
+                "run_id": run_id,
+                "action_id": action.action_id,
+                "action_type": action.action_type,
+                "status": action.status.value,
+                "compensated_by": list(action.compensated_by),
             }
         )
 
