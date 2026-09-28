@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Per-dependency human gate budgets are now wired into the recovery boundary (#1459).**
+  The per-dependency recovery attempt tracking introduced in #1428 is now enforced
+  across the recovery lifecycle:
+  `RecoveryEngine.assess` and `assess_scoped` accept a `ledger` and `dependency_budgets`
+  mapping (auto-loading `.continuum/budgets.json` by default), evaluate ceilings for
+  every relevant external dependency and uncertain action, and escalate only exhausted
+  dependencies to `REQUEST_HUMAN` while letting untouched, healthy dependencies recover
+  automatically (`REPAIR_AND_RESUME` or `RESUME`).
+  `plan_repairs` flags repair steps as `requires_human` when the target dependency or
+  action has exhausted its recovery budget.
+  `build_contract` withholds automatic machine-executable steps as `next_allowed_action`
+  under `REQUIRES_HUMAN`, ensuring automation cannot proceed until human intervention
+  clears the gate.
+  `GenericAgentAdapter` exposes `ledger` configuration and forwards scoping and
+  per-dependency budgets to `resume()`, `record_attempt()`, and `requires_human()`.
+
 - **`RecoveryLedger` now evaluates the human gate per external dependency, not
   only for the run as a whole (#1428).** A single flaky upstream (a
   rate-limited sandbox, a weather API) failed repeatedly and drained the run's
