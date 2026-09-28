@@ -699,13 +699,16 @@ checkpoint history bounded.
 
 - `RecoveryEngine.assess` and `assess_scoped` remain read-only. Auto-checkpointing
   is an explicit, opt-in call (`checkpoint_on_recovery`), not a hidden mutation
-  inside judgment.
+  inside judgment. The CLI wires it into the acting caller, not into the engine:
+  `continuum resume <run> --repair` takes the anchor after a non-RESUME verdict
+  (#1097), so a plain `resume` stays an inquiry and the engine keeps its
+  no-side-effects promise.
 - The existing `maybe_checkpoint`/policy timing is untouched; Phase 4 adds the
   recovery-specific anchor on top of it.
 - No adapter internals were modified to auto-checkpoint; the hook is provided
-  and documented so the agent loop can call it. Wiring it into each adapter's
-  `resume`/action loop is a small follow-up (would change behavior, so kept
-  separate).
+  and documented so an agent loop can call it. Adapters remain read-only
+  wrappers over `assess`; a loop that wants anchors takes them the same way the
+  CLI does, after deciding to act on a verdict.
 
 ### 15.3 Tests
 
@@ -729,9 +732,13 @@ checkpoint history bounded.
   honor a sealed `RecoveryContract` dependency (Phase 5 ledger linkage). A
   contract sealed against a checkpoint version should also be preserved; that
   cross-reference arrives with the contract ledger.
-- The auto-checkpoint hook is not yet invoked automatically by the adapter loop;
-  callers must call `checkpoint_on_recovery` after a non-RESUME decision. Wiring
-  is a small, well-isolated change left for the next step.
+- The auto-checkpoint hook is invoked by the CLI (`continuum resume --repair`),
+  not by the adapter loops. An adapter that resumes in-process still has to call
+  `checkpoint_on_recovery` itself after a non-RESUME decision: wiring it into
+  each framework's action loop would change behaviour in a way that belongs in
+  its own change. `prune` and the anchor guards in
+  `cleanup_ephemeral_artifacts` now protect anchors that a product path really
+  produces, instead of a set that was always empty.
 
 ## 16. Phase 5 - Recovery ledger (append-only, tamper-evident, reconcilable)
 
