@@ -20,7 +20,9 @@ from continuum.models import (
 )
 from continuum.recovery import (
     SEVERITY,
+    MemoryLedgerBackend,
     RecoveryEngine,
+    RecoveryLedger,
     RepairKind,
     render_contract,
     verify_contract,
@@ -319,6 +321,46 @@ def test_the_contract_refuses_out_of_order_work(store: SQLiteStorage) -> None:
     assert decision.permits(decision.contract.next_allowed_action or "")
 
 
+def test_an_aborted_contract_advertises_no_next_action(store: SQLiteStorage) -> None:
+    """Issue #1058: a run the engine declared unsafe must not simultaneously
+    name a permitted action, even though a repair plan still exists."""
+    seed(store)
+    store.append_event(
+        "run_1",
+        EventType.RISK_OBSERVED,
+        {"trigger": "side_effect_duplicate", "score": 1.0},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v4"))
+
+    assert decision.mode is RecoveryMode.ABORT
+    assert decision.contract.recovery_status is RecoverySafety.UNSAFE
+    # The plan is real -- the drift did produce repair steps -- but under
+    # ABORT none of them is permitted.
+    assert decision.plan.first is not None
+    assert decision.contract.next_allowed_action is None
+    assert decision.permits("revalidate_dependency:dataset") is False
+    # An auditor still sees the work that exists; only the permission is gone.
+    assert decision.contract.required_actions
+
+
+def test_a_rollback_contract_advertises_no_next_action(store: SQLiteStorage) -> None:
+    """The same rule as ABORT holds for risk-driven ROLLBACK (issue #1058)."""
+    seed(store)
+    store.append_event(
+        "run_1",
+        EventType.RISK_OBSERVED,
+        {"trigger": "meltdown", "score": 1.0},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+    decision = RecoveryEngine(store).assess("run_1", current_environment=env("v4"))
+
+    assert decision.mode is RecoveryMode.ROLLBACK
+    assert decision.contract.recovery_status is RecoverySafety.BLOCKED
+    assert decision.contract.next_allowed_action is None
+    assert decision.permits("revalidate_dependency:dataset") is False
+
+
 def test_contracts_are_deterministic(store: SQLiteStorage) -> None:
     seed(store)
     engine = RecoveryEngine(store)
@@ -537,6 +579,98 @@ def test_confirmation_survives_compaction(store: SQLiteStorage) -> None:
     assert after.safe
 
 
+def test_risk_trigger_survives_compaction(store: SQLiteStorage) -> None:
+    """A risk observed before the anchor must keep driving the verdict once the
+    compaction archives it out of the live tail. The risk scan folds the
+    archived prefix, so ``triggering_risks`` cannot empty and a policy-mapped
+    rollback cannot silently downgrade to something less cautious (#1050)."""
+    store.create_run(Run(run_id="r1", goal="do X"))
+    store.append_event("r1", EventType.RUN_STARTED, {"goal": "do X"}, source=Origin.EXTERNAL_AGENT)
+    store.append_event(
+        "r1", EventType.TASK_UPDATED, {"completed": 1, "failed": 0}, source=Origin.EXTERNAL_AGENT
+    )
+    store.append_event(
+        "r1",
+        EventType.RISK_OBSERVED,
+        {"risk_id": "r1", "trigger": "meltdown"},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+
+    before = RecoveryEngine(store).assess("r1")
+    assert before.mode is RecoveryMode.ROLLBACK
+    assert before.contract.triggering_risks
+
+    store.compact_run("r1")
+    # The risk event is archived out of the live tail by the compaction.
+    assert not any(e.type is EventType.RISK_OBSERVED for e in store.read_events("r1")), (
+        "precondition failed: risk event still live"
+    )
+
+    after = RecoveryEngine(store).assess("r1")
+    assert after.contract.triggering_risks == before.contract.triggering_risks
+    assert after.mode is RecoveryMode.ROLLBACK
+
+
+def test_liveness_breach_count_survives_compaction(store: SQLiteStorage) -> None:
+    """A silence detected before the anchor must still count as a breach once
+    the compaction archives it. The breach count folds the archived prefix, so
+    it cannot reset to zero and understate how often the run went quiet
+    (#1050)."""
+    store.create_run(Run(run_id="r1", goal="do X"))
+    store.append_event("r1", EventType.RUN_STARTED, {"goal": "do X"}, source=Origin.EXTERNAL_AGENT)
+    store.append_event(
+        "r1", EventType.TASK_UPDATED, {"completed": 1, "failed": 0}, source=Origin.EXTERNAL_AGENT
+    )
+    store.append_event(
+        "r1",
+        EventType.LIVENESS_SILENCE_DETECTED,
+        {"silence_seconds": 300},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+
+    before = RecoveryEngine(store).assess("r1")
+    assert before.contract.liveness["breaches"] == 1
+
+    store.compact_run("r1")
+    assert not any(
+        e.type is EventType.LIVENESS_SILENCE_DETECTED for e in store.read_events("r1")
+    ), "precondition failed: silence event still live"
+
+    after = RecoveryEngine(store).assess("r1")
+    assert after.contract.liveness["breaches"] == 1
+
+
+def test_consumed_authority_survives_compaction(store: SQLiteStorage) -> None:
+    """An authority consumed before the anchor must still block resume once the
+    compaction archives it. The authority scan folds the archived prefix, so
+    the block cannot drop out of the rationale and leave ``resume`` reporting
+    safe when the gate would still deny (#1050)."""
+    store.create_run(Run(run_id="r1", goal="do X"))
+    store.append_event("r1", EventType.RUN_STARTED, {"goal": "do X"}, source=Origin.EXTERNAL_AGENT)
+    store.append_event(
+        "r1", EventType.TASK_UPDATED, {"completed": 1, "failed": 0}, source=Origin.EXTERNAL_AGENT
+    )
+    store.append_event(
+        "r1",
+        EventType.AUTHORITY_CONSUMED,
+        {"authority_id": "cred-1", "resource": "dataset"},
+        source=Origin.EXTERNAL_AGENT,
+    )
+
+    before = RecoveryEngine(store).assess("r1")
+    assert before.mode is RecoveryMode.REQUEST_HUMAN
+    assert "consumed authority blocks resume" in "; ".join(before.rationale)
+
+    store.compact_run("r1")
+    assert not any(e.type is EventType.AUTHORITY_CONSUMED for e in store.read_events("r1")), (
+        "precondition failed: authority event still live"
+    )
+
+    after = RecoveryEngine(store).assess("r1")
+    assert after.mode is RecoveryMode.REQUEST_HUMAN
+    assert "consumed authority blocks resume" in "; ".join(after.rationale)
+
+
 def test_assess_degrades_when_the_archive_read_fails(store: SQLiteStorage) -> None:
     """A failing archive read must not fail assess(): the shared fetch falls
     back to the live log, so a broken archive view degrades to the live-only
@@ -665,3 +799,135 @@ def test_a_healthy_log_still_resumes_with_degrade_wired_in(store: SQLiteStorage)
     assert decision.contract.verified == ["external_dependency:dataset", "goal", "progress"]
     assert decision.contract.invalidated == []
     assert "next_allowed:      continue" in render_contract(decision.contract)
+
+
+# --- per-dependency recovery budgets (#1428, #1459) ------------------------ #
+
+
+def test_flaky_dependency_exhausting_budget_escalates_to_request_human(
+    store: SQLiteStorage,
+) -> None:
+    """A dependency exceeding its recovery budget requests human intervention
+    while an untouched core dependency recovers automatically (#1428, #1459)."""
+    seed(store)
+    store.append_event(
+        "run_1",
+        EventType.DEPENDENCY_DECLARED,
+        {"resource": "ext:weather-api", "version": "v1"},
+    )
+    CheckpointManager(store).checkpoint(
+        "run_1",
+        environment=capture(
+            "run_1",
+            StaticProvider(dataset="v3", **{"ext:weather-api": "v1"}),
+        ),
+    )
+
+    ledger = RecoveryLedger(MemoryLedgerBackend())
+    budgets = {"dependency_budgets": {"ext:weather-api": 2}}
+
+    # Record 2 failed attempts for ext:weather-api, exhausting its ceiling of 2.
+    ledger.record_attempt("run_1", dependency="ext:weather-api", dependency_budgets=budgets)
+    ledger.record_attempt("run_1", dependency="ext:weather-api", dependency_budgets=budgets)
+
+    engine = RecoveryEngine(store, ledger=ledger, dependency_budgets=budgets)
+
+    # 1. Global assessment when both dataset and weather-api changed:
+    # ext:weather-api is exhausted, so the whole decision escalates to REQUEST_HUMAN.
+    curr_env = capture(
+        "run_1",
+        StaticProvider(dataset="v4", **{"ext:weather-api": "v2"}),
+    )
+    decision_global = engine.assess("run_1", current_environment=curr_env)
+    assert decision_global.mode is RecoveryMode.REQUEST_HUMAN
+    assert any("ext:weather-api" in r for r in decision_global.rationale)
+    # The step for ext:weather-api requires human.
+    step_weather = next(s for s in decision_global.plan.steps if s.target == "ext:weather-api")
+    assert step_weather.requires_human is True
+
+    # 2. Localized scoped assessment on the healthy/reliable core dependency 'dataset':
+    # dataset is not exhausted and was not affected by weather-api's failure, so it recovers
+    # automatically with REPAIR_AND_RESUME.
+    decision_scoped = engine.assess_scoped(
+        "run_1",
+        ["dataset"],
+        current_environment=capture("run_1", StaticProvider(dataset="v4")),
+    )
+    assert decision_scoped.mode is RecoveryMode.REPAIR_AND_RESUME
+    assert decision_scoped.contract.recovery_status is RecoverySafety.REQUIRES_REPAIR
+    assert decision_scoped.contract.next_allowed_action == "revalidate_dependency:dataset"
+    assert decision_scoped.plan.first is not None
+    assert decision_scoped.plan.first.target == "dataset"
+    assert decision_scoped.plan.first.requires_human is False
+
+
+def test_engine_record_attempt_and_requires_human_delegates(
+    store: SQLiteStorage,
+) -> None:
+    """RecoveryEngine provides helper methods to record attempts and query the human gate."""
+    seed(store)
+    ledger = RecoveryLedger(MemoryLedgerBackend())
+    budgets = {"dependency_budgets": {"ext:weather-api": 1}}
+    engine = RecoveryEngine(store, ledger=ledger, dependency_budgets=budgets)
+
+    assert engine.requires_human("run_1", dependency="ext:weather-api") is False
+    count = engine.record_attempt("run_1", dependency="ext:weather-api")
+    assert count == 1
+    assert engine.requires_human("run_1", dependency="ext:weather-api") is True
+    # The run as a whole and unrelated dependencies remain unblocked.
+    assert engine.requires_human("run_1") is False
+    assert engine.requires_human("run_1", dependency="dataset") is False
+
+
+def test_generic_agent_adapter_per_dependency_budget_and_scoping(
+    store: SQLiteStorage,
+) -> None:
+    """GenericAgentAdapter wires ledger and scoping into resume (#1459)."""
+    from continuum.adapters import GenericAgentAdapter
+
+    seed(store)
+    store.append_event(
+        "run_1",
+        EventType.DEPENDENCY_DECLARED,
+        {"resource": "ext:sandbox", "version": "v1"},
+    )
+    CheckpointManager(store).checkpoint(
+        "run_1",
+        environment=capture(
+            "run_1",
+            StaticProvider(dataset="v3", **{"ext:sandbox": "v1"}),
+        ),
+    )
+
+    ledger = RecoveryLedger(MemoryLedgerBackend())
+    budgets = {"dependency_budgets": {"ext:sandbox": 1}}
+    adapter = GenericAgentAdapter(store, ledger=ledger)
+
+    # Before exhausting budget, resume needs repair.
+    curr_env = capture(
+        "run_1",
+        StaticProvider(dataset="v4", **{"ext:sandbox": "v2"}),
+    )
+    d1 = adapter.resume("run_1", current_environment=curr_env, dependency_budgets=budgets)
+    assert d1.mode is RecoveryMode.REPAIR_AND_RESUME
+
+    # Exhaust ext:sandbox via adapter.record_attempt.
+    adapter.record_attempt("run_1", dependency="ext:sandbox", dependency_budgets=budgets)
+    assert (
+        adapter.requires_human("run_1", dependency="ext:sandbox", dependency_budgets=budgets)
+        is True
+    )
+
+    # Global resume now escalates to REQUEST_HUMAN.
+    d2 = adapter.resume("run_1", current_environment=curr_env, dependency_budgets=budgets)
+    assert d2.mode is RecoveryMode.REQUEST_HUMAN
+
+    # Scoped resume on dataset succeeds automatically.
+    d3 = adapter.resume(
+        "run_1",
+        scope=["dataset"],
+        current_environment=capture("run_1", StaticProvider(dataset="v4")),
+        dependency_budgets=budgets,
+    )
+    assert d3.mode is RecoveryMode.REPAIR_AND_RESUME
+    assert d3.contract.next_allowed_action == "revalidate_dependency:dataset"

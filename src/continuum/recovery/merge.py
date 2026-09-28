@@ -17,7 +17,9 @@ from typing import Any
 from continuum.events import EventType
 from continuum.models import Origin, Run
 from continuum.recovery.gate import (
-    MergePreconditionError,
+    MergePreconditionError as _GateMergeError,
+)
+from continuum.recovery.gate import (
     check_merge_preconditions,
     check_preconditions,
 )
@@ -28,6 +30,10 @@ __all__ = [
     "approve_merge",
     "merge_to_anchor",
 ]
+
+# The gate raises this subclass for ``edit_type == "merge"``; re-exported here
+# so ``continuum.recovery.merge.MergePreconditionError`` keeps resolving.
+MergePreconditionError = _GateMergeError
 
 
 def merge_to_anchor(

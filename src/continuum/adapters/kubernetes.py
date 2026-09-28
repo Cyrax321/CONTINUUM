@@ -16,6 +16,10 @@ from continuum.adapters.generic import GenericAgentAdapter
 from continuum.recovery.engine import RecoveryEngine
 from continuum.storage.base import Storage
 
+__all__ = [
+    "KubernetesAdapter",
+]
+
 
 class KubernetesAdapter(GenericAgentAdapter):
     """Runs a one-shot job on a Kubernetes cluster, recorded as an action."""

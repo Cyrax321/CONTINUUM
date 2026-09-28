@@ -145,7 +145,20 @@ def build_contract(
             f"projection (invalid: log stops folding at sequence {state.unprojectable_at_sequence})"
         )
 
-    next_action = plan.first.action_name if plan.first else None
+    # A repair step is only "the next allowed action" under a mode that
+    # permits repair. A risk-driven ROLLBACK or ABORT can coexist with a
+    # non-empty plan, and advertising the plan's first step there would hand
+    # any caller gating on permits() a green light on a run the engine has
+    # declared must not proceed (issue #1058). Under REQUIRES_HUMAN, only a step
+    # requiring human intervention may be named (issue #1388); automatic
+    # machine steps are withheld. required_actions still lists the work for an
+    # auditor; nothing is permitted until the mode changes or a human intervenes.
+    if safety in (RecoverySafety.BLOCKED, RecoverySafety.UNSAFE):
+        next_action = None
+    elif safety is RecoverySafety.REQUIRES_HUMAN:
+        next_action = plan.first.action_name if (plan.first and plan.first.requires_human) else None
+    else:
+        next_action = plan.first.action_name if plan.first else None
 
     if reason is None:
         reason = validation.report.reason

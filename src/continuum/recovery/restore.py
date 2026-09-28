@@ -20,17 +20,21 @@ from typing import Any
 
 from continuum.events import EventType
 from continuum.models import Origin, Run
-from continuum.recovery.gate import (
-    RestorePreconditionError,
-    check_preconditions,
-)
-from continuum.storage.base import Storage
+from continuum.recovery.gate import RestorePreconditionError as _GateRestoreError
+from continuum.recovery.gate import check_preconditions
+from continuum.storage.base import CheckpointNotFound, CorruptedRecord, Storage
 
 __all__ = [
     "RestorePreconditionError",
     "approve_restore",
     "restore_to_anchor",
 ]
+
+
+# The gate raises this subclass for ``edit_type == "restore"``; re-exported
+# here so ``continuum.recovery.restore.RestorePreconditionError`` keeps
+# resolving.
+RestorePreconditionError = _GateRestoreError
 
 
 def _anchor_for(
@@ -59,7 +63,11 @@ def _anchor_for(
         cp = storage.get_checkpoint(text)
         if cp.run_id == run_id:
             return cp.state.source_sequence
-    except Exception:
+    except CorruptedRecord as exc:
+        raise ValueError(
+            f"checkpoint {text!r} for run {run_id!r} is corrupted and cannot be trusted: {exc}"
+        ) from exc
+    except CheckpointNotFound:
         pass
     try:
         version = int(text)

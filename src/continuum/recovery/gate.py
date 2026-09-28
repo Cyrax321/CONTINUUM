@@ -53,8 +53,8 @@ from continuum.storage.base import Storage
 __all__ = [
     "EditPreconditionError",
     "ForkPreconditionError",
-    "RestorePreconditionError",
     "MergePreconditionError",
+    "RestorePreconditionError",
     "EditType",
     "check_preconditions",
     "check_merge_preconditions",
@@ -87,67 +87,57 @@ class EditPreconditionError(ValueError):
         self.rationale = rationale
 
 
-class ForkPreconditionError(EditPreconditionError):
+class _TypedPreconditionError(EditPreconditionError):
+    """Base class for the per-edit-type aliases of :class:`EditPreconditionError`.
+
+    Subclasses pin ``edit_type`` to the value the gate raises them for, so a
+    caller can tell a merge refusal from a restore refusal by exception type.
+    """
+
+    _edit_type: EditType
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        derivation: Any,
+        unaccounted: Any,
+        rationale: dict[str, Any],
+        edit_type: EditType | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            edit_type=self._edit_type if edit_type is None else edit_type,
+            derivation=derivation,
+            unaccounted=unaccounted,
+            rationale=rationale,
+        )
+
+
+class ForkPreconditionError(_TypedPreconditionError):
     """Alias for :class:`EditPreconditionError` when ``edit_type`` is ``fork``."""
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        derivation: Any,
-        unaccounted: Any,
-        rationale: dict[str, Any],
-        edit_type: EditType = "fork",
-    ) -> None:
-        super().__init__(
-            message,
-            edit_type=edit_type,
-            derivation=derivation,
-            unaccounted=unaccounted,
-            rationale=rationale,
-        )
+    _edit_type = "fork"
 
 
-class RestorePreconditionError(EditPreconditionError):
-    """Alias for :class:`EditPreconditionError` when ``edit_type`` is ``restore``."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        derivation: Any,
-        unaccounted: Any,
-        rationale: dict[str, Any],
-        edit_type: EditType = "restore",
-    ) -> None:
-        super().__init__(
-            message,
-            edit_type=edit_type,
-            derivation=derivation,
-            unaccounted=unaccounted,
-            rationale=rationale,
-        )
-
-
-class MergePreconditionError(EditPreconditionError):
+class MergePreconditionError(_TypedPreconditionError):
     """Alias for :class:`EditPreconditionError` when ``edit_type`` is ``merge``."""
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        derivation: Any,
-        unaccounted: Any,
-        rationale: dict[str, Any],
-        edit_type: EditType = "merge",
-    ) -> None:
-        super().__init__(
-            message,
-            edit_type=edit_type,
-            derivation=derivation,
-            unaccounted=unaccounted,
-            rationale=rationale,
-        )
+    _edit_type = "merge"
+
+
+class RestorePreconditionError(_TypedPreconditionError):
+    """Alias for :class:`EditPreconditionError` when ``edit_type`` is ``restore``."""
+
+    _edit_type = "restore"
+
+
+# The gate raises the subclass matching the edit type it was asked to check.
+_PRECONDITION_ERRORS: dict[EditType, type[EditPreconditionError]] = {
+    "fork": ForkPreconditionError,
+    "merge": MergePreconditionError,
+    "restore": RestorePreconditionError,
+}
 
 
 def summary_payload(derivation: Any) -> dict[str, Any]:
@@ -610,7 +600,7 @@ def check_merge_preconditions(
             + "; ".join(parts)
             + ". Pass carry_forward with the identifiers you intend to carry, or reconcile first."
         )
-        raise EditPreconditionError(
+        raise MergePreconditionError(
             message,
             edit_type="merge",
             derivation=union,
@@ -727,11 +717,7 @@ def check_preconditions(
             + "; ".join(parts)
             + ". Pass carry_forward with the identifiers you intend to carry, or reconcile first."
         )
-        err_cls: type[EditPreconditionError] = {
-            "fork": ForkPreconditionError,
-            "restore": RestorePreconditionError,
-            "merge": MergePreconditionError,
-        }.get(edit_type, EditPreconditionError)
+        err_cls = _PRECONDITION_ERRORS[edit_type]
         raise err_cls(
             message,
             edit_type=edit_type,

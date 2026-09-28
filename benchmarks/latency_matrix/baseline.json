@@ -1,0 +1,42 @@
+{
+  "benchmark": "latency-matrix",
+  "schema_version": 1,
+  "note": "Expected recovery-assessment medians. Regenerate with 'python -m benchmarks.latency_matrix --update-baseline'; a normal run never rewrites this file, so every change appears in review.",
+  "tolerance": {
+    "regression_factor": 3.0,
+    "absolute_floor_ms": 25.0,
+    "policy": "regression iff median > factor * baseline_median AND median - baseline_median > absolute_floor_ms; soft-budget misses are informational and never fail CI"
+  },
+  "points": [
+    {
+      "files": 50,
+      "decisions": 10,
+      "median_ms": 3.528
+    },
+    {
+      "files": 50,
+      "decisions": 100,
+      "median_ms": 28.311
+    },
+    {
+      "files": 100,
+      "decisions": 10,
+      "median_ms": 3.327
+    },
+    {
+      "files": 100,
+      "decisions": 100,
+      "median_ms": 28.365
+    },
+    {
+      "files": 200,
+      "decisions": 10,
+      "median_ms": 3.382
+    },
+    {
+      "files": 200,
+      "decisions": 100,
+      "median_ms": 28.65
+    }
+  ]
+}

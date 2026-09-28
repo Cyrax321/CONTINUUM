@@ -149,10 +149,16 @@ def ingest_risk(
             event_payload["episode_id"] = str(episode_id)[:128]
         if step_id is not None:
             event_payload["step_id"] = str(step_id)[:128]
-        if "ts" not in event_payload and "timestamp" not in payload:
-            event_payload["ts"] = _now_iso()
-        elif "ts" in payload:
+        # Prefer the caller's observation time over the ingestion clock: a
+        # probe reporting when it saw the anomaly must not have its timestamp
+        # replaced by server now, and neither spelling should be dropped
+        # (issue #1075).
+        if payload.get("ts") is not None:
             event_payload["ts"] = str(payload["ts"])[:64]
+        elif payload.get("timestamp") is not None:
+            event_payload["ts"] = str(payload["timestamp"])[:64]
+        else:
+            event_payload["ts"] = _now_iso()
         storage.append_event(
             run_id, EventType.RISK_OBSERVED, event_payload, source=Origin.EXTERNAL_MONITOR
         )

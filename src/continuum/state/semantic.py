@@ -765,6 +765,32 @@ _NON_PROJECTING = frozenset(
         EventType.LIVENESS_RECOVERED,
         # risk (issue #303): real-time risk signal, never state
         EventType.RISK_OBSERVED,
+        # lineage (issue #259): restore/merge markers recording that an edit
+        # happened, sibling to RUN_FORKED above. The fold reads their effect
+        # off the log boundary itself, not out of these events.
+        EventType.RUN_RESTORED,
+        EventType.RUN_MERGED,
+        # human-in-the-loop: a confirmation receipt, never state
+        EventType.REVIEW_CONFIRMED,
+        # agent cognition (issue #235): the briefing surface reads this
+        # straight off the log; the projection does not fold it into state
+        EventType.REASONING_SUMMARY,
+        # perception and planning (security extension): the perception/branch
+        # ledger is consulted by its own readers, not by the state fold
+        EventType.PERCEPTION_OBSERVED,
+        EventType.BRANCH_RESOLVED,
+        # authority lifecycle (issue #289/#555): consumption and reconciliation
+        # are audit facts -- the enforcement reads them from the log
+        EventType.AUTHORITY_CONSUMED,
+        EventType.AUTHORITY_RECONCILED,
+        # memory governance (issue #304, #567): tombstone an operator finds
+        # by polling the log, never a projected field
+        EventType.MEMORY_TOMBSTONED,
+        # delivery receipts: best-effort and never gates a verdict. FAILED is
+        # the dead-letter row found by polling the log when the bell did not
+        # ring (see the enum's own note).
+        EventType.NOTIFICATION_SENT,
+        EventType.NOTIFICATION_FAILED,
     }
 )
 

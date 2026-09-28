@@ -34,9 +34,12 @@ against a live database.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from continuum.recovery.ledger import RecoveryLedger
 
 from continuum.actions.ledger import ActionLedger
 from continuum.analysis.depends import DependencyGraph as SourceDependencyGraph
@@ -213,10 +216,14 @@ class RecoveryEngine:
         *,
         validator: StateValidator | None = None,
         strict_unknown: bool = True,
+        ledger: RecoveryLedger | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
     ) -> None:
         self.storage = storage
         self.validator = validator or StateValidator(strict_unknown=strict_unknown)
         self.strict_unknown = strict_unknown
+        self.ledger = ledger
+        self.dependency_budgets = dependency_budgets
         self._manager = CheckpointManager(storage)
 
     def assess(
@@ -228,6 +235,8 @@ class RecoveryEngine:
         replay: bool = True,
         scope: Iterable[str] | None = None,
         source_graph: SourceDependencyGraph | None = None,
+        ledger: RecoveryLedger | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
     ) -> RecoveryDecision:
         """Decide how ``run_id`` may resume, without changing anything.
 
@@ -310,10 +319,10 @@ class RecoveryEngine:
             events=archive_aware_events,
         )
 
-        ledger = ActionLedger(self.storage, run_id)
+        action_ledger = ActionLedger(self.storage, run_id)
         all_uncertain = tuple(
             a
-            for a in ledger.all()
+            for a in action_ledger.all()
             if a.status
             in (ActionStatus.UNKNOWN, ActionStatus.STARTED, ActionStatus.REQUIRES_REVIEW)
         )
@@ -349,7 +358,7 @@ class RecoveryEngine:
             if broken.status is StateStatus.INVALID and broken.unprojectable_at_sequence is not None
             else None
         )
-        admissibility = check_admissibility(restored.checkpoint, ledger.all())
+        admissibility = check_admissibility(restored.checkpoint, action_ledger.all())
         if not admissibility.admissible:
             has_action_ref = any(d["consumed_inputs"]["action_ids"] for d in admissibility.details)
             status = StateStatus.REQUIRES_REVIEW if has_action_ref else StateStatus.STALE
@@ -381,11 +390,52 @@ class RecoveryEngine:
                 report=new_report,
                 environment_diff=validation.environment_diff,
             )
+        active_ledger = ledger if ledger is not None else self.ledger
+        active_budgets = (
+            dependency_budgets if dependency_budgets is not None else self.dependency_budgets
+        )
+        if active_budgets is None and active_ledger is not None:
+            try:
+                from pathlib import Path
+
+                from continuum.budgets import DEFAULT_BUDGETS_PATH, load_budgets
+
+                active_budgets = load_budgets(Path(DEFAULT_BUDGETS_PATH))
+            except Exception:
+                active_budgets = None
+
+        exhausted_dependencies: set[str] = set()
+        run_budget_exhausted = False
+        if active_ledger is not None:
+            run_budget_exhausted = active_ledger.requires_human(
+                run_id, dependency_budgets=active_budgets
+            )
+            candidate_deps: set[str] = set()
+            if scope is not None:
+                candidate_deps.update(scope)
+            else:
+                from continuum.models import Component
+
+                for entry in validation.report.statuses:
+                    if entry.component == Component.EXTERNAL_DEPENDENCY and entry.component_id:
+                        candidate_deps.add(entry.component_id)
+                for a in uncertain:
+                    if a.dep_scope:
+                        candidate_deps.add(a.dep_scope)
+
+            for dep in candidate_deps:
+                if active_ledger.requires_human(
+                    run_id, dependency=dep, dependency_budgets=active_budgets
+                ):
+                    exhausted_dependencies.add(dep)
+
         plan = plan_repairs(
             validation.report.statuses,
             uncertain_actions=uncertain,
             strict_unknown=self.validator.strict_unknown,
             unprojectable=unprojectable,
+            exhausted_dependencies=exhausted_dependencies,
+            run_budget_exhausted=run_budget_exhausted,
         )
         # Liveness: silence as WAIT, never auto-rollback (issue #302)
         liveness_advisory = None
@@ -394,11 +444,13 @@ class RecoveryEngine:
             from continuum.recovery.health import advisory_for_storage
 
             liveness_advisory = advisory_for_storage(self.storage, run_id)
-            # Count prior breaches as DETECTED events
+            # Count prior breaches as DETECTED events. The archived prefix
+            # folds in via the shared fetch, so a silence detected before a
+            # compaction still counts: the live tail alone would reset the
+            # breach count to zero (same archive-blindness family as #553).
             try:
-                evs = self.storage.read_events(run_id)
                 liveness_breaches = sum(
-                    1 for e in evs if e.type == EventType.LIVENESS_SILENCE_DETECTED
+                    1 for e in archive_aware_events if e.type == EventType.LIVENESS_SILENCE_DETECTED
                 )
             except Exception:
                 liveness_breaches = 0
@@ -414,15 +466,16 @@ class RecoveryEngine:
             from continuum.recovery.risk import evaluate_risk, load_risk_policy
 
             policy = load_risk_policy()
+            # Archive-aware: the shared fetch walks the archived prefix too, so
+            # compaction cannot empty triggering_risks by sealing the only
+            # RISK_OBSERVED events away from this scan.
             try:
-                risk_events = [
-                    e for e in self.storage.read_events(run_id) if e.type == EventType.RISK_OBSERVED
-                ]
+                risk_events = [e for e in archive_aware_events if e.type == EventType.RISK_OBSERVED]
             except Exception:
                 risk_events = []
             best_mode = None
-            best_trigger = None
-            triggering: list[str] = []
+            triggering = list[str]()
+            triggers = list[str]()
             for risk_ev in risk_events:
                 trig = risk_ev.payload.get("trigger")
                 if not isinstance(trig, str):
@@ -436,14 +489,21 @@ class RecoveryEngine:
                     continue
                 if best_mode is None or SEVERITY[candidate] > SEVERITY[best_mode]:
                     best_mode = candidate
-                    best_trigger = trig
                     triggering = [risk_ev.event_id]
+                    triggers = [trig]
                 elif SEVERITY[candidate] == SEVERITY[best_mode]:
                     triggering.append(risk_ev.event_id)
+                    if trig not in triggers:
+                        triggers.append(trig)
             if best_mode is not None:
                 risk_mode = best_mode
                 triggering_risks = triggering
-                risk_rationale = f"risk {best_trigger} triggers {best_mode.value}"
+                # Name every trigger that proposed the winning mode, not just
+                # the first: the ids in triggering_risks are all contributors
+                # to the verdict the sealed reason justifies (issue #1057).
+                # Deduplicated by trigger so an equal-severity repeat does not
+                # duplicate the sentence the way #1042's double-append did.
+                risk_rationale = f"risk {', '.join(sorted(triggers))} triggers {best_mode.value}"
         except Exception:
             triggering_risks = []
             risk_mode = None
@@ -458,6 +518,8 @@ class RecoveryEngine:
             liveness_advisory=liveness_advisory,
             risk_mode=risk_mode,
             risk_rationale=risk_rationale,
+            exhausted_dependencies=exhausted_dependencies,
+            run_budget_exhausted=run_budget_exhausted,
         )
 
         # Authority lifecycle (issue #289c): consumed authorities block resume
@@ -467,14 +529,32 @@ class RecoveryEngine:
         # still deny. A later AUTHORITY_RECONCILED with valid true clears the
         # map inside collect_consumed_authorities.
         try:
-            consumed_authorities = collect_consumed_authorities(self.storage.read_events(run_id))
+            # Archive-aware: an authority consumed before a compaction still
+            # blocks resume, and the AUTHORITY_RECONCILED that clears it may
+            # live in the archived prefix too.
+            consumed_authorities = collect_consumed_authorities(archive_aware_events)
         except Exception:
-            consumed_authorities = {}
+            # An empty map is the *unblocked* answer, and this block exists to
+            # be the check that survives a degraded log: when the ledger
+            # cannot be read, degrade to the most cautious verdict instead of
+            # asserting a safety conclusion the engine could not compute
+            # (issue #1066).
+            consumed_authorities = None
         if consumed_authorities:
-            mode = RecoveryMode.REQUEST_HUMAN
+            # Escalate, never downgrade: REQUEST_HUMAN is the floor a consumed
+            # authority imposes, but a risk policy that already proposed
+            # ROLLBACK or ABORT is strictly more cautious and must survive
+            # (SEVERITY is ascending caution, so the max wins).
+            mode = max((mode, RecoveryMode.REQUEST_HUMAN), key=lambda m: SEVERITY[m])
             rationale = (
                 *rationale,
                 f"consumed authority blocks resume: {sorted(consumed_authorities)}",
+            )
+        elif consumed_authorities is None:
+            mode = RecoveryMode.REQUEST_HUMAN
+            rationale = (
+                *rationale,
+                "consumed authority ledger unreadable: cannot clear the resume block",
             )
 
         reason = "; ".join(rationale) if rationale else validation.report.reason
@@ -566,6 +646,8 @@ class RecoveryEngine:
         expected_model: str | None = None,
         replay: bool = True,
         source_graph: SourceDependencyGraph | None = None,
+        ledger: RecoveryLedger | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
     ) -> RecoveryDecision:
         """Assess ``run_id`` confined to the derivation subtree of ``resources``.
 
@@ -581,6 +663,64 @@ class RecoveryEngine:
             replay=replay,
             scope=resources,
             source_graph=source_graph,
+            ledger=ledger,
+            dependency_budgets=dependency_budgets,
+        )
+
+    def record_attempt(
+        self,
+        run_id: str,
+        *,
+        note: str = "",
+        max_attempts: int | None = None,
+        dependency: str | None = None,
+        dependencies: Iterable[str] | None = None,
+        contract: RecoveryContract | None = None,
+        action: Any | None = None,
+        scope: Iterable[str] | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
+    ) -> int:
+        """Record one recovery attempt in the configured RecoveryLedger."""
+        if self.ledger is None:
+            raise RuntimeError("RecoveryEngine was initialized without a RecoveryLedger")
+        budgets = dependency_budgets if dependency_budgets is not None else self.dependency_budgets
+        return self.ledger.record_attempt(
+            run_id,
+            note=note,
+            max_attempts=max_attempts,
+            dependency=dependency,
+            dependencies=dependencies,
+            contract=contract,
+            action=action,
+            scope=scope,
+            dependency_budgets=budgets,
+        )
+
+    def requires_human(
+        self,
+        run_id: str,
+        *,
+        max_attempts: int = 3,
+        dependency: str | None = None,
+        dependencies: Iterable[str] | None = None,
+        contract: RecoveryContract | None = None,
+        action: Any | None = None,
+        scope: Iterable[str] | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Check whether human intervention is required under the configured RecoveryLedger."""
+        if self.ledger is None:
+            return False
+        budgets = dependency_budgets if dependency_budgets is not None else self.dependency_budgets
+        return self.ledger.requires_human(
+            run_id,
+            max_attempts=max_attempts,
+            dependency=dependency,
+            dependencies=dependencies,
+            contract=contract,
+            action=action,
+            scope=scope,
+            dependency_budgets=budgets,
         )
 
     def _decide(
@@ -594,6 +734,8 @@ class RecoveryEngine:
         liveness_advisory: dict[str, object] | None = None,
         risk_mode: RecoveryMode | None = None,
         risk_rationale: str | None = None,
+        exhausted_dependencies: Collection[str] = (),
+        run_budget_exhausted: bool = False,
     ) -> tuple[RecoveryMode, tuple[str, ...]]:
         """Collect a proposal per signal and return the most cautious."""
         proposals: list[tuple[RecoveryMode, str]] = []
@@ -668,6 +810,23 @@ class RecoveryEngine:
         if plan.requires_human:
             proposals.append((RecoveryMode.REQUEST_HUMAN, "at least one repair needs a person"))
 
+        if exhausted_dependencies:
+            deps_str = ", ".join(sorted(exhausted_dependencies))
+            proposals.append(
+                (
+                    RecoveryMode.REQUEST_HUMAN,
+                    f"recovery budget exhausted for dependency: {deps_str}",
+                )
+            )
+
+        if run_budget_exhausted:
+            proposals.append(
+                (
+                    RecoveryMode.REQUEST_HUMAN,
+                    "recovery budget exhausted for run",
+                )
+            )
+
         # Liveness breach maps to WAIT, never auto-rollback (issue #302)
         # Silence tells us nothing about what to roll back, only that a human
         # or lease-recovery decision is needed. WAIT is the most cautious
@@ -687,21 +846,6 @@ class RecoveryEngine:
         if risk_mode is not None:
             rationale_text = risk_rationale or f"risk triggers {risk_mode.value}"
             proposals.append((risk_mode, rationale_text))
-
-        # Liveness breach maps to WAIT, never auto-rollback (issue #302)
-        # Silence tells us nothing about what to roll back, only that a human
-        # or lease-recovery decision is needed. WAIT is the most cautious
-        # signal that still allows a lease to be recovered without human.
-        if liveness_advisory is not None and bool(liveness_advisory.get("breached")):
-            silence = liveness_advisory.get("silence_seconds")
-            threshold = liveness_advisory.get("threshold_seconds")
-            phase = liveness_advisory.get("phase") or "otherwise"
-            proposals.append(
-                (
-                    RecoveryMode.WAIT,
-                    f"liveness breach: silence {silence:.1f}s exceeds threshold {threshold}s (phase {phase})",
-                )
-            )
 
         # A goal that is no longer valid cannot be repaired by re-running work.
         if any(
@@ -726,5 +870,11 @@ class RecoveryEngine:
         # entry. Both facts are asserted by tests rather than defended by dead
         # branches here.
         mode = max(proposals, key=lambda p: SEVERITY[p[0]])[0]
-        rationale = tuple(reason for proposed, reason in proposals if proposed is mode)
+        # dict.fromkeys dedups while preserving order: two proposals of the
+        # winning mode that carry the same sentence (the pasted-twice
+        # liveness block of #1042 did exactly that) must read as one reason,
+        # not as two observations that never happened.
+        rationale = tuple(
+            dict.fromkeys(reason for proposed, reason in proposals if proposed is mode)
+        )
         return mode, rationale

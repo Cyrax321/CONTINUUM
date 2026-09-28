@@ -15,6 +15,17 @@ from continuum.checkpoint import CheckpointManager
 from continuum.events import EventType
 from continuum.storage import SQLiteStorage
 
+__all__ = [
+    "BASELINES",
+    "Baseline",
+    "ContinuumSemanticCheckpoint",
+    "FullTranscriptReplay",
+    "NaiveCheckpointing",
+    "SimpleConversationSummarization",
+    "StructuredTaskSummary",
+    "baseline_by_name",
+]
+
 
 class Baseline(Protocol):
     """Protocol defining the interface for benchmark baseline drivers."""

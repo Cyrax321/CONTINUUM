@@ -18,6 +18,7 @@ import pytest
 
 from continuum.actions import ActionLedger
 from continuum.budgets import (
+    DEPENDENCY_BUDGETS_KEY,
     BudgetConfigError,
     _max_for,
     _process_umask,
@@ -26,11 +27,11 @@ from continuum.budgets import (
     _StagedAttributes,
     attempts_by_key,
     attempts_for_type,
-    backoff_delay,
     evaluate_budget,
     get_remaining,
     increment,
     load_budgets,
+    max_attempts_for_dependency,
     save_budgets,
     would_refuse,
 )
@@ -927,20 +928,6 @@ def test_budget_evaluation_math() -> None:
     assert (allowed, used, maximum) == (True, 0, 3)
 
 
-def test_backoff_delay_is_exponential_with_cap() -> None:
-    assert backoff_delay(1) == 1.0
-    assert backoff_delay(2) == 2.0
-    assert backoff_delay(3) == 4.0
-    assert backoff_delay(10) == 60.0  # capped
-    with pytest.raises(ValueError):
-        backoff_delay(0)
-
-
-def test_backoff_delay_rejects_zero() -> None:
-    with pytest.raises(ValueError, match="got 0"):
-        backoff_delay(0)
-
-
 # --- enforcement through the real ledger path --------------------------------------- #
 
 
@@ -1133,3 +1120,155 @@ def test_hand_built_action_type_object_int_is_used() -> None:
     }
 
     assert _max_for("send_invoice", raw) == 5
+
+
+def test_budgets_public_surface_has_no_dead_exports() -> None:
+    """Every exported name has a wired consumer (issue #1095).
+
+    ``backoff_delay`` shipped in ``__all__`` with no caller for the whole life
+    of the module: the refusal sites refuse and return, and the module's own
+    docstring states CONTINUUM never retries anything itself, it counts and
+    gates. A pacing helper with nothing to pace is a promise the API does not
+    keep, so this fails if a name lands in ``__all__`` that nothing outside
+    budgets imports.
+    """
+    import ast
+    import pathlib
+
+    import continuum.budgets as budgets
+
+    tree = ast.parse(pathlib.Path(budgets.__file__).read_text(encoding="utf-8"))
+    public_defs = set()
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            if not node.name.startswith("_"):
+                public_defs.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and not target.id.startswith("_"):
+                    public_defs.add(target.id)
+
+    assert set(budgets.__all__) <= public_defs, "an __all__ entry is not defined in budgets"
+
+    # The consumers named in the module docstring: the claim sites and the CLI.
+    # budgets.py itself is excluded, otherwise a name only ever mentioned in its
+    # own definition would read as consumed -- that is exactly how
+    # backoff_delay went undetected.
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    consumers = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in repo.glob("src/continuum/**/*.py")
+        if p.resolve() != pathlib.Path(budgets.__file__).resolve()
+    )
+    for name in budgets.__all__:
+        if name == "AUTHORIZATION_BOUND_KEY":
+            # Re-exported under that exact name only inside budgets itself.
+            continue
+        assert name in consumers, f"{name} is exported but nothing outside budgets imports it"
+
+
+# --- per-dependency budgets (issue #1428) ----------------------------------------- #
+
+
+def dependency_registry() -> dict[str, Any]:
+    """Hand-built registry shape with per-dependency ceilings, so the pure
+    resolver needs no filesystem."""
+    return {
+        "default_max_attempts": 3,
+        "action_types": {"send_invoice": {"max_attempts": 5}},
+        "dependency_budgets": {"ext:weather-api": 2, "ext:sandbox": 4},
+    }
+
+
+def test_dependency_budgets_section_round_trips(tmp_path: Path) -> None:
+    """save then load reproduces the registry with the section intact."""
+    reg = dependency_registry()
+    p = tmp_path / "budgets.json"
+    save_budgets(p, reg)
+    assert load_budgets(p) == reg
+
+
+def test_registry_without_the_dependency_section_loads_unchanged(tmp_path: Path) -> None:
+    """Old configs gain and lose nothing on load."""
+    body: dict[str, Any] = {"default_max_attempts": 3, "action_types": {"x": 2}}
+    p = tmp_path / "budgets.json"
+    save_budgets(p, body)
+    loaded = load_budgets(p)
+    assert loaded == body
+    assert DEPENDENCY_BUDGETS_KEY not in loaded
+
+
+@pytest.mark.parametrize(
+    ("section", "fragment"),
+    [
+        pytest.param([], "must be an object", id="section-not-an-object"),
+        pytest.param({"ext:weather-api": 0}, "needs a positive integer", id="zero-limit"),
+        pytest.param({"ext:weather-api": -1}, "needs a positive integer", id="negative-limit"),
+        pytest.param({"ext:weather-api": "2"}, "needs a positive integer", id="string-limit"),
+        pytest.param({"ext:weather-api": None}, "needs a positive integer", id="missing-limit"),
+    ],
+)
+def test_malformed_dependency_budgets_raise(tmp_path: Path, section: object, fragment: str) -> None:
+    """A bad per-dependency entry is a malformed registry, same contract as the
+    rest of the file, and for the same reason: a limit that is not a positive
+    integer either means nothing or silently means 1."""
+    p = tmp_path / "budgets.json"
+    p.write_text(json.dumps({"default_max_attempts": 3, "dependency_budgets": section}))
+    with pytest.raises(BudgetConfigError, match=fragment):
+        load_budgets(p)
+
+
+def test_dependency_budget_error_names_the_file_and_the_dependency(tmp_path: Path) -> None:
+    """Messages point at an absolute path and at the dependency to fix."""
+    p = tmp_path / "budgets.json"
+    p.write_text(json.dumps({"dependency_budgets": {"ext:weather-api": True}}))
+    with pytest.raises(BudgetConfigError) as excinfo:
+        load_budgets(p)
+    assert str(excinfo.value) == (
+        f"{p.resolve()}: dependency budget for 'ext:weather-api' needs a positive "
+        "integer, got True (bool)"
+    )
+
+
+def test_max_attempts_for_dependency_prefers_the_named_entry() -> None:
+    """An explicit entry wins over every fallback."""
+    assert max_attempts_for_dependency(dependency_registry(), "ext:weather-api") == 2
+    assert max_attempts_for_dependency(dependency_registry(), "ext:sandbox") == 4
+
+
+def test_max_attempts_for_dependency_falls_back_to_the_global_default() -> None:
+    """A dependency the section never named is governed by the global default,
+    not by nothing."""
+    raw: dict[str, Any] = {"default_max_attempts": 5, "dependency_budgets": {"ext:other": 1}}
+    assert max_attempts_for_dependency(raw, "ext:unnamed") == 5
+
+
+def test_max_attempts_for_dependency_falls_back_to_the_caller() -> None:
+    """With no registry knowledge at all, the caller's own threshold applies."""
+    assert max_attempts_for_dependency(None, "ext:weather-api", fallback=7) == 7
+    assert max_attempts_for_dependency({}, "ext:weather-api", fallback=7) == 7
+    # And nothing is known at all when nothing was offered.
+    assert max_attempts_for_dependency(None, "ext:weather-api") is None
+
+
+def test_max_attempts_for_dependency_reads_a_bare_mapping() -> None:
+    """A caller with only dependencies in hand passes ``{dependency: limit}``.
+
+    A registry carrying the section is authoritative: a dependency absent from
+    it takes the global default rather than a key the registry never meant. A
+    mapping without the section has no such authority, so its own keys are read.
+    """
+    bare: dict[str, Any] = {"ext:weather-api": 2}
+    assert max_attempts_for_dependency(bare, "ext:weather-api", fallback=9) == 2
+    assert max_attempts_for_dependency(bare, "ext:other", fallback=9) == 9
+
+    with_section: dict[str, Any] = {"dependency_budgets": {"ext:weather-api": 2}}
+    assert max_attempts_for_dependency(with_section, "ext:other", fallback=9) == 9
+
+
+def test_hand_built_dependency_limit_bool_is_not_silently_a_cap_of_one() -> None:
+    """``isinstance(True, int)`` must not turn ``true`` into a limit of 1 here
+    either (#429); the loader rejects it, but the resolver is reachable from a
+    hand-built mapping."""
+    raw: dict[str, Any] = {"dependency_budgets": {"ext:weather-api": True}}
+    assert max_attempts_for_dependency(raw, "ext:weather-api", fallback=9) == 9

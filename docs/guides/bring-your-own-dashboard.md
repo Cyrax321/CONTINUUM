@@ -24,6 +24,7 @@ Python:
 
 ```python
 from continuum.recovery import RecoveryEngine
+from continuum.recovery.guidance import human_steps_for
 from continuum.storage import SQLiteStorage
 
 store = SQLiteStorage("continuum.db")
@@ -31,7 +32,7 @@ decision = RecoveryEngine(store).assess("my-task", current_environment=None)
 print(decision.mode)      # RecoveryMode.RESUME, REQUEST_HUMAN, ...
 print(decision.safe)      # bool, also exit code 0 means safe
 print(decision.contract.model_dump(mode="json"))
-print(decision.human_steps)  # executable next steps
+print(human_steps_for(decision, run_id="my-task"))  # executable next steps
 ```
 
 JSON shape (abridged):
@@ -155,6 +156,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template_string
 from continuum.storage import SQLiteStorage
 from continuum.recovery import RecoveryEngine
+from continuum.recovery.guidance import human_steps_for
 from continuum.interchange.evidence import export_evidence
 
 DB = "continuum.db"
@@ -193,7 +195,7 @@ def run_page(run_id: str):
         completed=decision.state.progress.completed,
         total=decision.state.progress.total,
         contract_text=json.dumps(decision.contract.model_dump(mode="json"), indent=2),
-        human_steps=decision.human_steps,
+        human_steps=human_steps_for(decision, run_id=run_id),
         evidence_text=json.dumps([e.model_dump(mode="json") for e in evidence], indent=2))
 
 @app.get("/api/run/<run_id>/resume")
@@ -204,7 +206,7 @@ def api_resume(run_id: str):
         "run_id": decision.run_id, "mode": decision.mode.value, "safe": decision.safe,
         "next_allowed_action": decision.next_allowed_action,
         "contract": decision.contract.model_dump(mode="json"),
-        "human_steps": decision.human_steps,
+        "human_steps": human_steps_for(decision, run_id=run_id),
         "progress": {"completed": decision.state.progress.completed, "pending": decision.state.progress.pending}
     }
     return jsonify(payload)

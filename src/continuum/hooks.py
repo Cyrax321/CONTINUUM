@@ -21,6 +21,17 @@ from continuum.events import EventType
 from continuum.models import EnvironmentSnapshot, Origin
 from continuum.state.semantic import ProjectionError, project
 
+__all__ = [
+    "count_sections",
+    "get_tail_section",
+    "make_async_auto_checkpoint_hook",
+    "make_async_file_derived_progress_hook",
+    "make_auto_checkpoint_hook",
+    "make_file_derived_progress_hook",
+    "record_file_progress",
+    "submit_auto_checkpoint",
+]
+
 #: One shared background executor for every asynchronous checkpoint write.
 #: A per-hook executor leaked a thread each time a hook was constructed and
 #: never shut down; a module-global pool with an atexit shutdown cannot leak,

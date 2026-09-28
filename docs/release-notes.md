@@ -25,7 +25,7 @@ behind a deny-by-default MCP server.
 
 - **Idempotent side effects, reconciled from reality** - claim-before-fire ledger, `UnknownSideEffect` never guessed, reconciled by probes (`src/continuum/actions/ledger.py`, `src/continuum/gate.py`, `src/continuum/gateway.py`, `src/continuum/replayguard.py`).
 
-- **Recovery as a sealed contract** - `RecoveryEngine.assess` reduces three signals to one `RecoveryMode` (max-severity, `RESUME < ... < ABORT`) and returns a hash-sealed `RecoveryContract` with `evidence` / `reason` / `next_allowed_action` / `human_steps` (`src/continuum/recovery/`).
+- **Recovery as a sealed contract** - `RecoveryEngine.assess` reduces three signals to one `RecoveryMode` (max-severity, `RESUME < ... < ABORT`) and returns a hash-sealed `RecoveryContract` with `evidence` / `reason` / `next_allowed_action` (executable `human_steps` are computed via `human_steps_for`, not a contract field) (`src/continuum/recovery/`).
 
 - **Deny-by-default surfaces** - MCP server (12 tools, read-only/mutating split, allowlist + token auth in `src/continuum/mcp/authz.py`), CLI with exit-code contract (`src/continuum/cli/main.py`), enforcing HTTP gateway (`src/continuum/gateway.py`), OTel bridge (`src/continuum/otel.py`), observation hooks + briefing (`src/continuum/hooks.py`, `src/continuum/clienthooks.py`).
 

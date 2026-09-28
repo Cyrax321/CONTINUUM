@@ -17,6 +17,10 @@ from continuum.adapters.generic import GenericAgentAdapter
 from continuum.recovery.engine import RecoveryEngine
 from continuum.storage.base import Storage
 
+__all__ = [
+    "PythonInProcAdapter",
+]
+
 
 class PythonInProcAdapter(GenericAgentAdapter):
     """Executes Python code in a local work directory, recorded as an action."""

@@ -30,6 +30,10 @@ import sys
 from collections.abc import Iterable
 from pathlib import Path
 
+__all__ = [
+    "DependencyGraph",
+]
+
 _STDLIB = set(sys.stdlib_module_names)
 
 _EXCLUDE_DIRS = (".venv", "venv", "node_modules", "__pycache__", ".git", "build", "dist")

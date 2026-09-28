@@ -1,4 +1,11 @@
 from continuum.benchmark.controlled_failures import SCENARIOS, by_name
+from continuum.models import RecoveryMode
+
+# The ground-truth table is graded against the recovery engine, so every
+# declared expectation has to be a mode the engine can actually propose.
+# Asserting against the enum rather than a literal is what stops an
+# impossible value from being blessed by the very test meant to catch it.
+_VALID_MODES = {mode.name for mode in RecoveryMode}
 
 
 def test_all_eleven_scenarios_declared() -> None:
@@ -28,11 +35,11 @@ def test_dataset_change_ground_truth() -> None:
 
 def test_each_scenario_has_ground_truth() -> None:
     for scenario in SCENARIOS:
-        assert scenario.expected in {
-            "RESUME",
-            "RETRY",
-            "REPAIR_AND_RESUME",
-            "REQUEST_HUMAN",
-            "REPLAN",
-        }
+        assert scenario.expected in _VALID_MODES, (
+            f"{scenario.scenario!r} declares expected={scenario.expected!r}, "
+            f"which is not a RecoveryMode member"
+        )
+        # A name the enum resolves too, so the harness can compare ground
+        # truth straight against a RecoveryDecision.mode.
+        RecoveryMode[scenario.expected]
         assert scenario.description
