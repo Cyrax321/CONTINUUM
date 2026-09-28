@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Typed `RiskObservedPayload` schema and projection of observed risks into
+  `SemanticState` (#1421).** `RISK_OBSERVED` existed as an event type with
+  `EXTERNAL_MONITOR` provenance (#303), but its payload had no typed schema and
+  the fold skipped it entirely, so a projection never reported what a run had
+  been seen doing. `RiskObservedPayload` in `src/continuum/models.py` now types
+  the wire payload (`trigger`, `score`, `episode_id`, `step_id`, `detail`,
+  `ts`), normalising what monitors send rather than refusing it: scores clamp
+  to `[0.0, 1.0]`, `detail` accepts a structured dict or a legacy plain string
+  (wrapped as `{"message": ...}`) bounded to 32 keys and 512 chars, and `ts`
+  accepts an epoch number or ISO 8601. `ingest_risk` validates and normalises
+  through the schema, so what lands on the log is always schema-shaped.
+  `project()` folds each event into `SemanticState.observed_risks` carrying its
+  provenance forward, and `RISK_OBSERVED` left `_NON_PROJECTING`. An observation
+  is knowledge rather than a change, so `observed_risks` joins
+  `PROJECTION_BOOKKEEPING`: folding one mints no state version, while mitigation
+  that actually alters the run still bumps it through whatever it changed.
+
 ### Fixed
 
 - **`DependencyGraph.impacted_by` now cascades taint along finding-to-finding
@@ -1145,7 +1164,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,501 collected, ~2,423 passed, ~28 skipped on a minimal env).
+  (~2,537 collected, ~2,423 passed, ~28 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
