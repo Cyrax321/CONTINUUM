@@ -68,7 +68,6 @@ __all__ = [
     "load_budgets",
     "save_budgets",
     "evaluate_budget",
-    "backoff_delay",
     "get_remaining",
     "increment",
     "would_refuse",
@@ -237,18 +236,6 @@ def evaluate_budget(
     cfg = raw_config or {}
     maximum = _max_for(action_type, cfg)
     return attempts_so_far < maximum, attempts_so_far, maximum
-
-
-def backoff_delay(
-    attempt: int,
-    *,
-    base: float = 1.0,
-    cap: float = 60.0,
-) -> float:
-    """Exponential backoff with a ceiling. Pure; jitter is the caller's job."""
-    if attempt < 1:
-        raise ValueError(f"attempt must be >= 1, got {attempt}")
-    return float(min(base * (2 ** (attempt - 1)), cap))
 
 
 # --- authorization-bound budgets (issue #411) --------------------------------------- #

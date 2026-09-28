@@ -9,6 +9,8 @@ real via a Postgres 16 service container.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from itertools import count
 
 import pytest
 
@@ -20,6 +22,9 @@ from continuum.storage.base import ConcurrentWriteError, RunNotFound
 from continuum.storage.postgres import PostgresStorage
 
 DSN = os.environ.get("CONTINUUM_TEST_POSTGRES_DSN")
+
+#: Unique throwaway database names for tests that need a store they own.
+_iso_counter = count()
 
 
 def _psycopg_available() -> bool:
@@ -307,8 +312,12 @@ def test_pg_deleted_boundary_event_fails_verify(storage: PostgresStorage) -> Non
     CheckpointManager(storage).checkpoint("pg_kb")
     storage.compact_run("pg_kb")
 
+    # The run_id restriction is load-bearing, not decorative: sequence is
+    # per-run, so an unscoped ``WHERE sequence =`` deletes that row number
+    # from every run in the shared suite database and silently corrupts
+    # whichever action event happened to land on it.
     storage._connection.execute(
-        "DELETE FROM events WHERE sequence ="
+        "DELETE FROM events WHERE run_id = 'pg_kb' AND sequence ="
         " (SELECT MIN(sequence) FROM events WHERE run_id = 'pg_kb')"
     )
     report = storage.verify_events("pg_kb")
@@ -328,6 +337,11 @@ def test_pg_action_index_covers_the_archive_after_rebuild(
     ledger.complete(outcome.key, external_id="doc:1")
     storage.compact_run("pg_ki")
 
+    # Compaction moves the rows the index describes into events_archive, and
+    # the fold merges that table ahead of every live row, so the projection
+    # is reported dirty until it is rebuilt. That desync is the archive/live
+    # ordering gap, #1322, which is separate from #1321 (a healthy store
+    # reported dirty with no compaction at all).
     assert storage.action_index_drift() > 0
     storage.rebuild_action_index()
     assert storage.action_index_drift() == 0
@@ -335,6 +349,105 @@ def test_pg_action_index_covers_the_archive_after_rebuild(
     foreign = storage.foreign_action(key, exclude_run="some_other_run")
     assert foreign is not None
     assert foreign.status is ActionStatus.COMPLETED
+
+
+@pytest.fixture
+def isolated_storage() -> Iterator[PostgresStorage]:
+    """A database the test owns exclusively.
+
+    ``action_index_drift`` compares a store-wide count of action events
+    against a store-wide sequence value, so the comparison is only meaningful
+    in a database whose entire history the test controls. The shared suite
+    database accumulates every test's runs, and once one run is compacted the
+    fold's merged order stops tracking the sequence (the archive/live ordering
+    gap, #1322, tracked separately from #1321), which would make a clean store
+    read as dirty for reasons this test does not exercise.
+    """
+    import psycopg
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    name = f"iso_{os.getpid()}_{next(_iso_counter)}"
+    admin = psycopg.connect(DSN, autocommit=True)
+    try:
+        admin.execute(f'CREATE DATABASE "{name}"')
+    finally:
+        admin.close()
+    params = conninfo_to_dict(DSN)
+    params["dbname"] = name
+    store = PostgresStorage(make_conninfo(**params))
+    yield store
+    store.close()
+    admin = psycopg.connect(DSN, autocommit=True)
+    try:
+        admin.execute(f'DROP DATABASE IF EXISTS "{name}"')
+    finally:
+        admin.close()
+
+
+def test_pg_action_index_drift_stays_zero_with_non_action_events_between_actions(
+    isolated_storage: PostgresStorage,
+) -> None:
+    """A healthy store must not report drift because of how it counts rows (#1321).
+
+    ``_maintain_action_index`` numbers a row with ``nextval``, which advances
+    once per action event, while the canonical fold numbered it by its
+    position in the merged row stream, which counts RUN_STARTED, TOOL_CALLED,
+    EVIDENCE_ADDED and every other non-action row too. An ordinary run has
+    those between its actions, so the two figures disagreed by one per
+    intervening row and ``verify`` reported a permanently dirty index on a
+    store nothing had tampered with. The fold now counts action events only,
+    1-based, which is the number the sequence actually assigned.
+    """
+    storage = isolated_storage
+    make_run(storage, "pg_1321", "healthy run")
+    # A non-action event between the two action events: the row population the
+    # two numbering schemes disagreed over.
+    storage.append_event("pg_1321", EventType.EVIDENCE_ADDED, {"evidence_id": "e1", "summary": "s"})
+    ledger = ActionLedger(storage, "pg_1321")
+    outcome = ledger.claim("process_doc", {}, key="doc:1321")
+    ledger.complete(outcome.key, external_id="doc:1321")
+
+    assert storage.action_index_drift() == 0
+    # The fold and the incremental writer agree on the number itself, not just
+    # on the absence of drift.
+    canonical = storage._canonical_index_rows()
+    stored = {
+        r["key"]: int(r["updated_seq"])
+        for r in storage._connection.execute("SELECT key, updated_seq FROM action_index")
+    }
+    assert {k: v for k, (_, v) in canonical.items()} == stored
+
+
+def test_pg_action_index_stays_clean_after_a_rebuild_and_further_appends(
+    isolated_storage: PostgresStorage,
+) -> None:
+    """A rebuild must not renumber the past in a way the next append breaks (#1321).
+
+    Before the fix, the fold numbered a row by its position in the merged row
+    stream, so a rebuild rewrote ``updated_seq`` on one scale while the next
+    appended action took the next ``nextval`` on the other; the two diverged
+    again immediately. ``foreign_action`` ranks with
+    ``ORDER BY updated_seq DESC``, so a fresh event that landed below the
+    rewritten rows would rank as the older write.
+    """
+    storage = isolated_storage
+    make_run(storage, "pg_rb", "rebuild then append")
+    storage.append_event("pg_rb", EventType.EVIDENCE_ADDED, {"evidence_id": "e1", "summary": "s"})
+    ledger = ActionLedger(storage, "pg_rb")
+    outcome = ledger.claim("process_doc", {}, key="doc:rb")
+    ledger.complete(outcome.key, external_id="doc:rb")
+
+    storage.rebuild_action_index()
+    assert storage.action_index_drift() == 0
+
+    # The appended action is newer than every row the rebuild numbered, so it
+    # ranks newest and the index is still consistent.
+    later = ledger.claim("process_doc", {}, key="doc:rb2")
+    ledger.complete(later.key, external_id="doc:rb2")
+    assert storage.action_index_drift() == 0
+    newest = storage.foreign_action(later.key, exclude_run="no_such_run")
+    assert newest is not None
+    assert newest.run_id == "pg_rb"
 
 
 def test_pg_run_without_a_parent_round_trips_null(storage: PostgresStorage) -> None:

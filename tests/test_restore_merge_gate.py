@@ -17,8 +17,8 @@ from continuum.events import EventType
 from continuum.models import Run
 from continuum.recovery.fork import ForkPreconditionError, approve_fork
 from continuum.recovery.gate import EditPreconditionError, check_preconditions
-from continuum.recovery.merge import approve_merge
-from continuum.recovery.restore import approve_restore
+from continuum.recovery.merge import MergePreconditionError, approve_merge
+from continuum.recovery.restore import RestorePreconditionError, approve_restore
 from continuum.storage import SQLiteStorage
 
 
@@ -67,6 +67,13 @@ def _edit_callables():
 
 EDIT_TYPES = ["fork", "restore", "merge"]
 EDIT_CALLS = _edit_callables()
+# Each edit type must raise its own subclass, not the shared base class, so a
+# caller can tell a merge refusal from a restore refusal by exception type.
+EDIT_ERRORS = {
+    "fork": ForkPreconditionError,
+    "restore": RestorePreconditionError,
+    "merge": MergePreconditionError,
+}
 
 
 @pytest.mark.parametrize("edit_type", EDIT_TYPES)
@@ -77,8 +84,9 @@ def test_uncertain_slot_refused_symmetrically(edit_type: str) -> None:
         outcome = ledger.claim("slack.notify", {"channel": "#ops"}, key="k1")
         claimed_seq = storage.last_sequence("run_1")
 
-        # All three edits over (0, head] must refuse the open slot
-        with pytest.raises((ForkPreconditionError, EditPreconditionError)) as exc:
+        # All three edits over (0, head] must refuse the open slot, each with
+        # its own exception type.
+        with pytest.raises(EDIT_ERRORS[edit_type]) as exc:
             EDIT_CALLS[edit_type](storage, "run_1", reason=f"try {edit_type}")
 
         err = exc.value
@@ -144,7 +152,7 @@ def test_unsettled_authorization_refused_symmetrically(edit_type: str) -> None:
             EventType.APPROVAL_GRANTED,
             {"approval_id": "ap-1", "subject": "ship it"},
         )
-        with pytest.raises((ForkPreconditionError, EditPreconditionError)) as exc:
+        with pytest.raises(EDIT_ERRORS[edit_type]) as exc:
             EDIT_CALLS[edit_type](storage, "run_1", reason="try branch")
         err = exc.value
         assert err.rationale["unsettled_authorizations"][0]["approval_id"] == "ap-1"
@@ -231,9 +239,9 @@ def test_gate_is_deterministic_and_pure(edit_type: str) -> None:
         try:
             ledger2 = ActionLedger(storage2, "run_2")
             ledger2.claim("slack.notify", {"channel": "#ops"}, key="k1")
-            with pytest.raises((ForkPreconditionError, EditPreconditionError)) as e1:
+            with pytest.raises(EDIT_ERRORS[edit_type]) as e1:
                 check_preconditions(storage2, "run_2", 0, edit_type=edit_type)
-            with pytest.raises((ForkPreconditionError, EditPreconditionError)) as e2:
+            with pytest.raises(EDIT_ERRORS[edit_type]) as e2:
                 check_preconditions(storage2, "run_2", 0, edit_type=edit_type)
             assert e1.value.rationale == e2.value.rationale
             assert e1.value.unaccounted == e2.value.unaccounted
@@ -273,7 +281,7 @@ def test_restore_reactivates_history_depended_differs_from_fork() -> None:
         # This should not raise for restore
         gate_check(storage, "run_1", 0, edit_type="restore")
         # And a merge (fork semantics) should still refuse
-        with pytest.raises(EditPreconditionError):
+        with pytest.raises(MergePreconditionError):
             gate_check(storage, "run_1", 0, edit_type="merge")
 
         # Now create a survivor reference: a WORK_ADDED before the completion
@@ -299,7 +307,7 @@ def test_restore_reactivates_history_depended_differs_from_fork() -> None:
             # Span (2, head] contains the completion but survivor prefix at 2
             # references the hashed key, so restore must now refuse as well.
             anchor = 2
-            with pytest.raises(EditPreconditionError) as exc:
+            with pytest.raises(RestorePreconditionError) as exc:
                 gate_check(storage2, "run_2", anchor, edit_type="restore")
             assert exc.value.rationale["depended_results"]
             assert exc.value.rationale["depended_results"][0]["key"] == expected_key
@@ -337,7 +345,7 @@ def test_falsifiable_restore_skipping_unsettled_claim_refuses_like_fork() -> Non
         assert fe.value.rationale["uncertain_slots"][0]["sequence"] == claimed_seq
 
         # Restore to the same anchor must refuse symmetrically, naming the same id
-        with pytest.raises(EditPreconditionError) as re:
+        with pytest.raises(RestorePreconditionError) as re:
             approve_restore(
                 storage, "run_1", reason="restore over open slot", anchor_sequence=anchor
             )
@@ -347,7 +355,7 @@ def test_falsifiable_restore_skipping_unsettled_claim_refuses_like_fork() -> Non
         assert re.value.rationale["uncertain_slots"][0]["sequence"] == claimed_seq
 
         # Merge must also refuse symmetrically
-        with pytest.raises(EditPreconditionError) as me:
+        with pytest.raises(MergePreconditionError) as me:
             approve_merge(storage, "run_1", reason="merge over open slot", anchor_sequence=anchor)
         assert me.value.rationale["uncertain_slots"][0]["action_id"] == outcome.action.action_id
 
@@ -367,5 +375,33 @@ def test_falsifiable_restore_skipping_unsettled_claim_refuses_like_fork() -> Non
         merged = approve_merge(storage, "run_1", reason="after settle", anchor_sequence=anchor)
         assert merged.run_id == "run_1"
         assert any(e.type is EventType.RUN_MERGED for e in storage.read_events("run_1"))
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("edit_type", EDIT_TYPES)
+def test_refusal_raises_edit_type_specific_subclass(edit_type: str) -> None:
+    """The gate raises the subclass matching ``edit_type``, never the base (#1114).
+
+    A caller must be able to tell a merge refusal from a restore refusal by
+    exception type -- that is the whole point of the per-edit-type subclasses
+    -- so the raised exception is exactly ``EDIT_ERRORS[edit_type]``, not the
+    shared ``EditPreconditionError``.
+    """
+    storage = _make_storage()
+    try:
+        ledger = ActionLedger(storage, "run_1")
+        ledger.claim("slack.notify", {"channel": "#ops"}, key="k1")
+
+        expected = EDIT_ERRORS[edit_type]
+        with pytest.raises(expected) as exc:
+            check_preconditions(storage, "run_1", 0, edit_type=edit_type)  # type: ignore[arg-type]
+
+        err = exc.value
+        # Exactly the subclass, not the base class: the types are distinguishable.
+        assert type(err) is expected
+        assert err.edit_type == edit_type
+        # ...while remaining a base-class instance for callers that catch broadly.
+        assert isinstance(err, EditPreconditionError)
     finally:
         storage.close()

@@ -23,6 +23,7 @@ from continuum.gateway import (
     GatewayServer,
     Route,
     load_gateway_config,
+    match_route,
     render_key,
 )
 from continuum.models import ActionStatus, Run
@@ -447,3 +448,257 @@ def test_malformed_length_smuggled_body_is_never_dispatched(
     assert b"400 Bad Request" in response
     assert b"Connection: close" in response
     assert b"malformed Content-Length" in response
+
+
+@pytest.mark.parametrize(
+    ("requested", "prefix", "expected"),
+    [
+        # The boundary is a whole segment, not a string prefix.
+        ("/v1/invoices", "/v1/invoices", True),
+        ("/v1/invoices/49", "/v1/invoices", True),
+        ("/v1/invoices/49/lines", "/v1/invoices", True),
+        ("/v1/invoices", "/v1/invoices/", True),
+        ("/v1/invoices-archived", "/v1/invoices", False),
+        ("/v1/invoicesX", "/v1/invoices", False),
+        ("/v1/refunds", "/v1/invoices", False),
+        ("/v1/invoice", "/v1/invoices", False),
+        ("/", "/v1/invoices", False),
+        # A route without a prefix keeps the whole host, as it always has.
+        ("/anything", "/", True),
+        ("/anything/at/all", "", True),
+        # The upstream rewrites these before dispatching, so the refusal has to
+        # be about the path actually served.
+        ("/v1/invoices/../refunds", "/v1/invoices", False),
+        ("/v1/invoices/./49", "/v1/invoices", True),
+        ("/v1/invoices/../../refunds", "/v1/invoices", False),
+        # Percent-encoded traversal: the upstream decodes before it routes, so
+        # %2e is a ".." the upstream honours even though the bytes differ.
+        ("/v1/invoices/%2e%2e/refunds", "/v1/invoices", False),
+        ("/v1/invoices/%2E%2E/refunds", "/v1/invoices", False),
+        ("/v1/invoices/%2e/49", "/v1/invoices", True),
+        # An encoded character in the prefix's own segment still matches.
+        ("/files/a%2Bb/49", "/files/a+b", True),
+        # A query is not part of the path scope.
+        ("/v1/invoices/49?dry_run=1", "/v1/invoices", True),
+        ("/v1/refunds?x=1", "/v1/invoices", False),
+        # A request line that is not absolute is still compared absolutely.
+        ("v1/invoices", "/v1/invoices", True),
+        ("v1/refunds", "/v1/invoices", False),
+    ],
+)
+def test_prefix_boundary_is_a_whole_segment(requested: str, prefix: str, expected: bool) -> None:
+    """The prefix is the only per-path scope a route has (issue #1051).
+
+    Without a segment boundary the check is decorative: ``/v1/invoices`` as a
+    string prefix admits ``/v1/invoices-archived``, a different resource the
+    claim says nothing about.
+    """
+    from continuum.gateway import _path_under_prefix
+
+    assert _path_under_prefix(requested, prefix) is expected
+
+
+def test_a_live_claim_cannot_reach_another_path(db: str, gateway: str) -> None:
+    """A claim for /v1/invoices does not authorise /v1/refunds (#1051).
+
+    Before the fix the prefix was parsed onto the Route record and never
+    compared, so the whole host was the route's scope: this request would have
+    been forwarded, settled as completed, and recorded as evidence that the
+    invoice was sent while the upstream saw a refund.
+    """
+    key = claim(db, "invoice:I-5")
+    status, body = post(gateway, "/v1/refunds", {"id": "I-5"})
+    assert status == 403
+    assert "not under any of its prefixes" in body["reason"]
+
+    # Nothing was forwarded, so nothing was settled and nothing recorded.
+    with SQLiteStorage(db) as store:
+        from continuum.actions.ledger import fold_action_events
+
+        folded = fold_action_events(store.read_events("run_1"))
+        assert folded[key].status is ActionStatus.STARTED
+        events = [e for e in store.read_events("run_1") if e.type is EventType.TOOL_COMPLETED]
+    assert events == []
+
+
+def test_the_prefix_is_enforced_through_match_route(tmp_path: Path) -> None:
+    """The prefix narrows before the key is rendered (#1051)."""
+    from continuum.actions.ledger import fold_action_events
+
+    route = Route(
+        host="api.example.com",
+        methods=("POST",),
+        prefix="/v1/invoices",
+        action_type="send_invoice",
+        key_template="invoice:{id}",
+    )
+    store = SQLiteStorage(":memory:")
+    store.create_run(Run(run_id="run_1", goal="g"))
+    store.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    ledger = ActionLedger(store, "run_1")
+    ledger.claim("send_invoice", {"id": "I-6"}, key="invoice:I-6")
+    actions = fold_action_events(store.read_events("run_1"))
+
+    def decide(path: str) -> Decision:
+        return match_route(
+            [route],
+            host="api.example.com",
+            method="POST",
+            path=path,
+            body={"id": "I-6"},
+            actions_by_key=actions,
+            run_id="run_1",
+        )
+
+    # The claimed path is still allowed; a sibling path is refused even though
+    # the same key has a live claim behind it.
+    assert decide("/v1/invoices").allow is True
+    off_prefix = decide("/v1/refunds")
+    assert off_prefix.allow is False
+    assert "/v1/refunds" in off_prefix.reason
+    assert decide("/v1/invoices/49").allow is True
+    assert decide("/v1/invoices/../refunds").allow is False
+
+
+def test_a_doubly_encoded_separator_does_not_buy_the_prefix(tmp_path: Path) -> None:
+    """The path is decoded once, as the upstream does, not twice (#1051).
+
+    ``unquote`` is not idempotent: ``/v1%252finvoices/49`` decodes to
+    ``/v1%2finvoices/49`` once and to ``/v1/invoices/49`` twice. The second
+    pass made the gateway see the invoice path, spend the claim, and record
+    evidence that the invoice was sent, while the upstream decoded once and
+    served one literal segment that never reached the invoice endpoint. The
+    recorded path is the raw request line, so the verdict also has to be about
+    the raw line and not a pre-normalised stand-in.
+    """
+    from continuum.actions.ledger import fold_action_events
+
+    route = Route(
+        host="api.example.com",
+        methods=("POST",),
+        prefix="/v1/invoices",
+        action_type="send_invoice",
+        key_template="invoice:{id}",
+    )
+    store = SQLiteStorage(":memory:")
+    store.create_run(Run(run_id="run_1", goal="g"))
+    store.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    ledger = ActionLedger(store, "run_1")
+    outcome = ledger.claim("send_invoice", {"id": "I-6"}, key="invoice:I-6")
+    actions = fold_action_events(store.read_events("run_1"))
+
+    decision = match_route(
+        [route],
+        host="api.example.com",
+        method="POST",
+        path="/v1%252finvoices/49",
+        body={"id": "I-6"},
+        actions_by_key=actions,
+        run_id="run_1",
+    )
+    assert decision.allow is False
+    assert "not under any of its prefixes" in decision.reason
+    # The refusal names what the upstream actually serves, not the
+    # twice-decoded path the old double normalisation invented.
+    assert "/v1%2finvoices/49" in decision.reason
+
+    # Nothing was forwarded, so the claim is still live and unspent.
+    folded = fold_action_events(store.read_events("run_1"))
+    assert folded[outcome.key].status is ActionStatus.STARTED
+
+    # The same raw line, genuinely encoded once, is the invoice path and is
+    # admitted: decoding exactly once does not tighten the boundary.
+    once = match_route(
+        [route],
+        host="api.example.com",
+        method="POST",
+        path="/v1/invoices/%34%39",
+        body={"id": "I-6"},
+        actions_by_key=actions,
+        run_id="run_1",
+    )
+    assert once.allow is True
+
+
+def test_two_prefixes_on_one_host_route_to_the_right_claim(tmp_path: Path) -> None:
+    """A host can carry more than one operation; the path picks the route."""
+    from continuum.actions.ledger import fold_action_events
+
+    routes = [
+        Route(
+            host="api.example.com",
+            methods=("POST",),
+            prefix="/v1/invoices",
+            action_type="send_invoice",
+            key_template="invoice:{id}",
+        ),
+        Route(
+            host="api.example.com",
+            methods=("POST",),
+            prefix="/v1/refunds",
+            action_type="refund_invoice",
+            key_template="refund:{id}",
+        ),
+    ]
+    store = SQLiteStorage(":memory:")
+    store.create_run(Run(run_id="run_1", goal="g"))
+    store.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    ledger = ActionLedger(store, "run_1")
+    ledger.claim("refund_invoice", {"id": "I-7"}, key="refund:I-7")
+    actions = fold_action_events(store.read_events("run_1"))
+
+    # A live refund claim does not authorise the invoice path, and the refusal
+    # names the prefixes the host does serve rather than the unclaimed key.
+    decision = match_route(
+        routes,
+        host="api.example.com",
+        method="POST",
+        path="/v1/invoices",
+        body={"id": "I-7"},
+        actions_by_key=actions,
+        run_id="run_1",
+    )
+    assert decision.allow is False
+    assert "no ledger claim" in decision.reason
+    assert "send_invoice" in decision.reason
+
+    claimed = match_route(
+        routes,
+        host="api.example.com",
+        method="POST",
+        path="/v1/refunds",
+        body={"id": "I-7"},
+        actions_by_key=actions,
+        run_id="run_1",
+    )
+    assert claimed.allow is True
+    assert claimed.route is not None
+    assert claimed.route.action_type == "refund_invoice"
+
+
+def test_a_route_without_a_prefix_keeps_the_whole_host(tmp_path: Path) -> None:
+    """Omitting ``prefix`` has always meant the host, not a broken route."""
+    from continuum.actions.ledger import fold_action_events
+
+    route = Route(
+        host="api.example.com",
+        methods=("POST",),
+        prefix="/",
+        action_type="send_invoice",
+        key_template="invoice:{id}",
+    )
+    store = SQLiteStorage(":memory:")
+    store.create_run(Run(run_id="run_1", goal="g"))
+    store.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    ActionLedger(store, "run_1").claim("send_invoice", {"id": "I-8"}, key="invoice:I-8")
+    actions = fold_action_events(store.read_events("run_1"))
+    decision = match_route(
+        [route],
+        host="api.example.com",
+        method="POST",
+        path="/v1/anything-at-all",
+        body={"id": "I-8"},
+        actions_by_key=actions,
+        run_id="run_1",
+    )
+    assert decision.allow is True

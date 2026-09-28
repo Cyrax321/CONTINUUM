@@ -175,6 +175,28 @@ def test_spurious_rows_count_as_drift_and_are_removed(store: SQLiteStorage) -> N
     assert store.action_index_drift() == 0
 
 
+def test_a_healthy_store_with_non_action_rows_between_actions_reports_no_drift(
+    store: SQLiteStorage,
+) -> None:
+    """The canonical fold must number a row as the incremental writer numbered it.
+
+    A run records plenty of non-action events between its actions -- tool
+    calls, evidence, findings. SQLite is immune to #1321 because both the
+    incremental maintenance and the fold use the writing event's ``rowid``,
+    so intervening rows move both figures together. This pins that agreement
+    so a refactor that switches the SQLite fold to counting action events
+    only -- which is what the Postgres engine needs -- is caught here rather
+    than than silently desynchronising the two numbering scales.
+    """
+    ledger = make_run(store, "run_1")
+    store.append_event("run_1", EventType.EVIDENCE_ADDED, {"evidence_id": "e1", "summary": "s"})
+    store.append_event("run_1", EventType.TOOL_COMPLETED, {"tool": "t", "status": 200})
+    outcome = ledger.claim("send_invoice", {}, key="invoice:9")
+    ledger.complete(outcome.key, external_id="invoice:9")
+
+    assert store.action_index_drift() == 0
+
+
 # --- engines without an index ---------------------------------------------------- #
 
 
