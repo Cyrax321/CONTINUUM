@@ -32,6 +32,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from heapq import merge
+from pathlib import Path
 from types import TracebackType
 from typing import Any, ClassVar
 
@@ -112,6 +113,23 @@ class Storage(ABC):
     #: :meth:`compact_run` (issue #239). Callers gate on this flag rather than
     #: catching NotImplementedError, mirroring :attr:`supports_action_index`.
     supports_compaction: ClassVar[bool] = False
+
+    @property
+    def storage_dir(self) -> Path:
+        """Directory used for auxiliary files (such as blobs)."""
+        return Path(".continuum")
+
+    @property
+    def blob_dir(self) -> Path:
+        """Directory used for content-addressed blob storage."""
+        return self.storage_dir / "blobs"
+
+    @property
+    def payload_offload_bytes(self) -> int:
+        """Configured payload offload threshold in bytes (0 = disabled)."""
+        from continuum.storage.blob import get_payload_offload_threshold
+
+        return get_payload_offload_threshold()
 
     def compact_run(
         self,

@@ -25,6 +25,14 @@ All notable changes to this project are documented here. The format follows
   event ids, deduplicated by trigger (#1057), so existing sealed contracts and
   every machine-readable consumer are unaffected.
 
+- **Out-of-band blob store and `CONTINUUM_PAYLOAD_OFFLOAD_BYTES` threshold (#1418).**
+  Event payloads exceeding the configurable byte threshold `CONTINUUM_PAYLOAD_OFFLOAD_BYTES`
+  (default 0, disabled) are offloaded to content-addressed canonical JSON blob files at
+  `<storage_dir>/blobs/<sha256>.blob`. Stored event records replace inline payloads with an
+  offload descriptor `{"__offloaded": sha256_hex, "size_bytes": length, "keys": list(payload.keys())}`.
+  The event hash chain calculation covers the offload descriptor, maintaining full cryptographic
+  tamper evidence while preventing row bloat and scan degradation across SQLite and Postgres.
+
 - **The gateway now enforces tenant-scoped namespace boundaries on external memory claims (#1415).**
   External memory mutation claims now support the standardized structured key convention
   `memory:<store_id>:<tenant_id>:<namespace>:<record_key>` alongside `mem:<store_id>:<tenant>:<record_key>`.
@@ -106,6 +114,15 @@ All notable changes to this project are documented here. The format follows
   and behave exactly as before.
 
 ### Fixed
+
+- **`ensure_run` now checks archived history so compaction does not inject a duplicate `RUN_STARTED` (#1436).**
+  `ContinuumMCP.ensure_run` and `SidecarServer._ensure_run` checked `read_events(run_id, upto=1)`
+  to decide whether a run needed its genesis event backfilled. On a compacted run, events up to
+  the anchor sequence reside in `events_archive`, so the live query returned an empty list,
+  causing both servers to append a second `RUN_STARTED` event into the live tail. The duplicate
+  event wiped initial goal constraints, reset progress counters, and corrupted projected state.
+  Both entry points now inspect archived events first, recognizing that a compacted run was
+  already started properly.
 
 - **Compaction no longer mints an environment-blind anchor checkpoint (#1049).**
   `compact_run` took its forced anchor checkpoint without an `environment`

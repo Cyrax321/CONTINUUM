@@ -27,9 +27,11 @@ so it runs for real in CI against a Postgres service.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 from continuum.environment.snapshot import EnvironmentSnapshot
@@ -52,6 +54,12 @@ from continuum.storage.base import (
     CorruptedRecord,
     RunNotFound,
     Storage,
+)
+from continuum.storage.blob import (
+    get_payload_offload_threshold,
+    is_offload_descriptor,
+    load_blob_payload,
+    maybe_offload_payload,
 )
 
 __all__ = [
@@ -186,7 +194,14 @@ class PostgresStorage(Storage):
     supports_action_index = True
     supports_compaction = True
 
-    def __init__(self, url: str | Any, *, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        url: str | Any,
+        *,
+        timeout: float = 30.0,
+        storage_dir: str | Path | None = None,
+        payload_offload_bytes: int | None = None,
+    ) -> None:
         psycopg = _require_psycopg()
         self._psycopg = psycopg
         from psycopg.rows import dict_row
@@ -198,9 +213,29 @@ class PostgresStorage(Storage):
             )
         except Exception as exc:  # connection refused, auth, missing driver, etc.
             raise RuntimeError(f"could not connect to PostgreSQL at {dsn!r}: {exc}") from exc
+        self._storage_dir = Path(storage_dir) if storage_dir is not None else None
+        self._payload_offload_bytes = (
+            max(int(payload_offload_bytes), 0) if payload_offload_bytes is not None else None
+        )
         self._lock = threading.RLock()
         self._configure()
         self._create_schema()
+
+    @property
+    def storage_dir(self) -> Path:
+        """Directory used for auxiliary files (such as blobs)."""
+        if self._storage_dir is not None:
+            return self._storage_dir
+        if os.environ.get("CONTINUUM_STORAGE_DIR"):
+            return Path(os.environ["CONTINUUM_STORAGE_DIR"])
+        return Path(".continuum")
+
+    @property
+    def payload_offload_bytes(self) -> int:
+        """Payload offload threshold in bytes (0 = disabled)."""
+        if self._payload_offload_bytes is not None:
+            return self._payload_offload_bytes
+        return get_payload_offload_threshold()
 
     @staticmethod
     def _normalize_dsn(url: str) -> str:
@@ -472,18 +507,27 @@ class PostgresStorage(Storage):
                 f"run {run_id!r} is at sequence {current}, caller expected {expected_sequence}"
             )
 
+        raw_payload = payload
+        effective_payload: Mapping[str, Any] = dict(payload or {})
+        if self.payload_offload_bytes > 0:
+            effective_payload, _ = maybe_offload_payload(
+                effective_payload,
+                storage_dir=self.storage_dir,
+                threshold=self.payload_offload_bytes,
+            )
+
         event = Event(
             event_id=make_id("event"),
             run_id=run_id,
             sequence=current + 1,
             type=type,
             timestamp=utcnow(),
-            payload=dict(payload or {}),
+            payload=effective_payload,
             causer_event_id=causer_event_id,
             source=source,
             prev_hash=head["hash"] if head else None,
         ).sealed()
-        self._insert_event(event)
+        self._insert_event(event, raw_payload=raw_payload)
         return event
 
     def append_sealed(self, event: Event) -> Event:
@@ -535,7 +579,7 @@ class PostgresStorage(Storage):
             self._insert_event(event)
         return event
 
-    def _insert_event(self, event: Event) -> None:
+    def _insert_event(self, event: Event, raw_payload: Mapping[str, Any] | None = None) -> None:
         try:
             self._connection.execute(
                 "INSERT INTO events(run_id, sequence, event_id, type, timestamp, payload, "
@@ -558,15 +602,18 @@ class PostgresStorage(Storage):
             raise ConcurrentWriteError(
                 f"run {event.run_id!r} sequence {event.sequence} was taken by another writer"
             ) from exc
-        self._maintain_action_index(event)
+        self._maintain_action_index(event, payload=raw_payload)
 
-    def _maintain_action_index(self, event: Event) -> None:
+    def _maintain_action_index(
+        self, event: Event, payload: Mapping[str, Any] | None = None
+    ) -> None:
         """Upsert the projection row for an ACTION_* event, same txn (#216).
 
         updated_seq comes from a sequence so recency is global insertion
         order, matching the global last-write-per-key fold.
         """
-        entry = index_entry_from_payload(event.type, dict(event.payload))
+        target_payload = dict(payload if payload is not None else event.payload)
+        entry = index_entry_from_payload(event.type, target_payload)
         if entry is None:
             return
         key, run_id, action_id, status, action_json = entry
@@ -821,6 +868,9 @@ class PostgresStorage(Storage):
             payload = (
                 row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
             )
+            if is_offload_descriptor(payload):
+                with suppress(Exception):
+                    payload = load_blob_payload(self.storage_dir, payload)
             entry = index_entry_from_payload(EventType(row["type"]), payload)
             if entry is None:
                 continue  # consumed no nextval, so it advances no position
