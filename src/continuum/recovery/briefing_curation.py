@@ -74,8 +74,17 @@ def _latest_agent_summary(
     Unpinned summaries carry no world to contradict, so they pass.
 
     Returns ``(summary, pins_hold)`` or ``None`` when the run has no summary.
+
+    Folds the full history, not just the live tail: compaction moves the
+    pre-anchor prefix (summaries included) into ``events_archive``, so a
+    live-only read would miss the newest summary on a compacted run and the
+    agent section would silently vanish from the briefing - exactly when the
+    long-running session it exists for has run long enough to be compacted
+    (issue #1128).
     """
-    summaries = [e for e in storage.read_events(run_id) if e.type is EventType.REASONING_SUMMARY]
+    summaries = [
+        e for e in storage.read_all_events(run_id) if e.type is EventType.REASONING_SUMMARY
+    ]
     if not summaries:
         return None
     payload = dict(summaries[-1].payload)

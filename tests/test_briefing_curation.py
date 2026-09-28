@@ -162,3 +162,48 @@ def test_briefing_names_the_risks_behind_the_verdict(db: str) -> None:
     assert code == ExitCode.OK, err
     assert "recovery verdict:" in out
     assert "triggering risks:" in out
+
+
+def _archive_summary_prefix(db: str, summary_line: str) -> None:
+    """Record a summary, give the run a live tail, then compact the prefix
+    (summary included) into the archive so it lives only in events_archive."""
+    with SQLiteStorage(db) as store:
+        store.append_event(
+            "run_1",
+            EventType.REASONING_SUMMARY,
+            {"summary": {"plan_stack": [summary_line]}},
+            source=Origin.EXTERNAL_AGENT,
+        )
+        store.append_event("run_1", EventType.TASK_UPDATED, {"completed": 1, "total": 3})
+        store.append_event("run_1", EventType.TASK_UPDATED, {"completed": 2, "total": 3})
+        # The summary is at sequence 2 (RUN_STARTED is 1); archiving through 2
+        # moves it out of the live tail while the run stays resumable.
+        store.compact_run("run_1", through_sequence=2)
+        assert not any(e.type is EventType.REASONING_SUMMARY for e in store.read_events("run_1")), (
+            "precondition: summary must be out of the live tail"
+        )
+        assert any(e.type is EventType.REASONING_SUMMARY for e in store.read_all_events("run_1")), (
+            "precondition: summary must survive in the archive"
+        )
+
+
+def test_briefing_surfaces_agent_summary_after_compaction(db: str) -> None:
+    """Regression (#1128): a summary the run compacted into the archive must
+    still reach the curated briefing. Curation folds full history, not just the
+    live tail, so the agent section does not vanish exactly when the long run it
+    exists for has run long enough to be compacted."""
+    _archive_summary_prefix(db, "reconcile INV-004 against the vendor list")
+    code, out, err = run("--db", db, "briefing")
+    assert code == ExitCode.OK, err
+    assert "where the last session left off (self-authored, unverified)" in out
+    assert "reconcile INV-004 against the vendor list" in out
+
+
+def test_raw_summary_diagnostic_reads_the_archive_after_compaction(db: str) -> None:
+    """Regression (#1128): --raw-summary reads full history too, so a compacted
+    run reports its archived summary instead of 'none recorded'."""
+    _archive_summary_prefix(db, "settle outstanding amount for INV-001")
+    code, out, err = run("--db", db, "briefing", "--raw-summary")
+    assert code == ExitCode.OK, err
+    assert "No reasoning summary recorded" not in out
+    assert json.loads(out)["summary"]["plan_stack"] == ["settle outstanding amount for INV-001"]
