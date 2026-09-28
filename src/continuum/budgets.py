@@ -36,6 +36,26 @@ which is exactly today's behaviour. ``get_remaining``, ``increment`` and
 ``would_refuse`` read and maintain entries purely; ``save_budgets`` persists
 them. Nothing gates on the section yet (that wiring lands with issue #413).
 
+Per-dependency budgets (issue #1428) cap automated recovery attempts against
+one *external dependency*, not one action type. The action-type budget above is
+the wrong unit for the failure it is guarding: a rate-limited sandbox or weather
+API that fails on every call drains the run's shared allowance, and once that
+global pool is empty every later recovery, including unrelated core tasks,
+escalates to a person. Naming the dependency gives the noisy upstream its own
+smaller ceiling while the run keeps recovering everything else on its own:
+
+    {"default_max_attempts": 3,
+     "dependency_budgets": {"ext:weather-api": 2, "ext:sandbox": 4}}
+
+``max_attempts_for_dependency`` resolves the ceiling for one dependency: an
+explicit entry wins, then the registry's ``default_max_attempts``, then a
+caller-supplied fallback, so a dependency without its own entry is governed by
+the global default rather than by nothing. It also accepts a bare
+``{dependency: limit}`` mapping, whose keys simply never collide with the two
+registry keys, so callers tracking only dependencies need no registry in hand.
+The counting itself lives in the recovery ledger, which tags each attempt with
+the dependency it went through.
+
 Where the registry asks for an integer it means one: JSON ``true`` is refused
 rather than read as a silent cap of 1 (issue #429), and a rejection names the
 offending value and its type (issue #326). ``save_budgets`` stages and renames
@@ -72,12 +92,18 @@ __all__ = [
     "increment",
     "would_refuse",
     "ensure_authorization_entry",
+    "max_attempts_for_dependency",
 ]
 
 DEFAULT_BUDGETS_PATH = ".continuum/budgets.json"
 
 #: Registry key of the optional section keyed by (action_type, authorization_id).
 AUTHORIZATION_BOUND_KEY = "authorization_bound"
+
+#: Registry key of the optional section capping attempts per external dependency
+#: (issue #1428). Not exported in ``__all__``: nothing outside this module names
+#: the section, it is read through :func:`max_attempts_for_dependency`.
+DEPENDENCY_BUDGETS_KEY = "dependency_budgets"
 
 #: Fallback when neither the action type nor the registry sets a limit.
 FALLBACK_MAX_ATTEMPTS = 3
@@ -150,6 +176,7 @@ def load_budgets(path: Path) -> dict[str, Any]:
             f"{location}: 'default_max_attempts' must be >= 1{_offending(default_max)}"
         )
     _validate_authorization_bound(raw, location)
+    _validate_dependency_budgets(raw, location)
     return raw
 
 
@@ -271,6 +298,69 @@ def _validate_authorization_bound(raw: Mapping[str, Any], location: Path) -> Non
                 raise BudgetConfigError(
                     f"{label} needs a positive integer 'max_attempts'{_offending(max_attempts)}"
                 )
+
+
+# --- per-dependency budgets (issue #1428) ------------------------------------------ #
+
+
+def _validate_dependency_budgets(raw: Mapping[str, Any], location: Path) -> None:
+    """Shape-check the optional per-dependency section of a loaded registry.
+
+    Absent means "governed by the global default", which is valid: a registry
+    that never heard of per-dependency budgets must keep loading exactly as it
+    always did. The ceiling is a plain integer rather than an object, because
+    there is no counter to keep alongside it: the recovery ledger holds the
+    count, and the registry only states the limit.
+    """
+    section = raw.get(DEPENDENCY_BUDGETS_KEY)
+    if section is None:
+        return
+    if not isinstance(section, dict):
+        raise BudgetConfigError(f"{location}: '{DEPENDENCY_BUDGETS_KEY}' must be an object")
+    for dependency_id, limit in section.items():
+        if not _is_int(limit) or limit < 1:
+            raise BudgetConfigError(
+                f"{location}: dependency budget for {dependency_id!r} needs a positive "
+                f"integer{_offending(limit)}"
+            )
+
+
+def max_attempts_for_dependency(
+    raw: Mapping[str, Any] | None,
+    dependency: str,
+    *,
+    fallback: int | None = None,
+) -> int | None:
+    """The attempt ceiling for one external dependency (issue #1428).
+
+    Resolution order is the section entry, then the registry's
+    ``default_max_attempts``, then ``fallback``: a dependency the operator did
+    not name individually still lands under the global default, and a caller
+    with no registry at all supplies the ceiling it already computed.
+
+    ``None`` means no ceiling is configured anywhere and the caller should fall
+    back to whatever limit it applies globally, which for a caller that passed
+    ``fallback`` is itself ``None``: nothing is known, so nothing is enforced.
+
+    ``raw`` may also be a bare ``{dependency: limit}`` mapping. A registry that
+    carries the section has said the section is the authority, so a dependency
+    absent from it takes the global default rather than some unrelated key;
+    without a section the mapping's own keys are read directly, which is what a
+    caller tracking only dependencies wants without building a registry-shaped
+    object.
+    """
+    cfg = raw or {}
+    section = cfg.get(DEPENDENCY_BUDGETS_KEY)
+    limit = section.get(dependency) if isinstance(section, dict) else cfg.get(dependency)
+    if _is_int(limit):
+        # int(), not the value itself: :func:`load_budgets` refuses booleans,
+        # but a hand-built mapping reaches here too, and a bool leaking out
+        # renders as JSON ``true`` in a report.
+        return int(limit)
+    default_max = cfg.get("default_max_attempts")
+    if _is_int(default_max):
+        return int(default_max)
+    return fallback
 
 
 def _process_umask() -> int | None:

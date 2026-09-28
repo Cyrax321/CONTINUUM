@@ -273,7 +273,13 @@ def test_reconcile_remains_the_route_for_a_settled_unknown(ledger: ActionLedger)
     ("settle", "expected_status"),
     [
         (lambda led, key: led.fail(key, "rejected before sending", certain=True), "failed"),
-        (lambda led, key: led.compensate(key, note="refunded"), "compensated"),
+        (
+            lambda led, key: (
+                led.complete(key, external_id="txn-prep"),
+                led.compensate(key, note="refunded"),
+            ),
+            "compensated",
+        ),
         (lambda led, key: led.flag_for_review(key, "amount looks wrong"), "requires_review"),
     ],
 )
@@ -299,7 +305,13 @@ def test_complete_refuses_every_status_that_is_not_in_flight(
     ("settle", "expected_status"),
     [
         (lambda led, key: led.complete(key, external_id="txn-1"), "completed"),
-        (lambda led, key: led.compensate(key, note="refunded"), "compensated"),
+        (
+            lambda led, key: (
+                led.complete(key, external_id="txn-prep"),
+                led.compensate(key, note="refunded"),
+            ),
+            "compensated",
+        ),
         (lambda led, key: led.flag_for_review(key, "amount looks wrong"), "requires_review"),
     ],
 )
@@ -342,6 +354,61 @@ def test_a_refused_fail_leaves_the_completed_outcome_settled(ledger: ActionLedge
 
     retry = ledger.claim("payment.charge", {"amount": 100})
     assert retry.fresh is False, "a refused fail must not reopen the key"
+
+
+@pytest.mark.parametrize(
+    ("setup_status", "expected_status"),
+    [
+        (lambda led, key: None, "started"),
+        (lambda led, key: led.fail(key, "timeout", certain=False), "unknown"),
+        (lambda led, key: led.fail(key, "rejected", certain=True), "failed"),
+        (lambda led, key: led.flag_for_review(key, "check manually"), "requires_review"),
+    ],
+)
+def test_compensate_refuses_every_status_that_is_not_completed(
+    ledger: ActionLedger,
+    setup_status: Any,
+    expected_status: str,
+) -> None:
+    """Only a completed effect can be undone (issue #1387).
+
+    A STARTED or UNKNOWN action has no verified outcome to undo. Compensating
+    an UNKNOWN action would clear side_effect_uncertain and allow the next
+    claim to re-fire a side effect that may have already occurred.
+    """
+    outcome = ledger.claim("payment.charge", {"amount": 100})
+    setup_status(ledger, outcome.key)
+
+    with pytest.raises(LedgerError, match=expected_status):
+        ledger.compensate(outcome.key, note="refund")
+
+
+def test_compensating_an_unknown_action_is_refused_and_does_not_launder_dedup(
+    ledger: ActionLedger,
+) -> None:
+    """Compensating an UNKNOWN action must fail and not allow duplicate execution (#1387)."""
+    outcome = ledger.claim("payment.charge", {"amount": 100})
+    ledger.fail(outcome.key, "timeout", certain=False)
+
+    with pytest.raises(LedgerError, match="unknown"):
+        ledger.compensate(outcome.key, note="undo")
+
+    # The action remains uncertain, so claiming again raises UnknownSideEffect
+    with pytest.raises(UnknownSideEffect):
+        ledger.claim("payment.charge", {"amount": 100})
+
+
+def test_compensate_idempotent_on_already_compensated_action(
+    ledger: ActionLedger,
+) -> None:
+    """Calling compensate again on an already COMPENSATED action is idempotent."""
+    outcome = ledger.claim("payment.charge", {"amount": 100})
+    ledger.complete(outcome.key, external_id="ch_1")
+    first = ledger.compensate(outcome.key, note="refund 1")
+    second = ledger.compensate(outcome.key, note="refund 2")
+    assert first.status is ActionStatus.COMPENSATED
+    assert second.status is ActionStatus.COMPENSATED
+    assert second.last_error == "refund 2"
 
 
 def test_failing_an_already_failed_action_is_still_allowed(ledger: ActionLedger) -> None:
@@ -732,6 +799,51 @@ def test_path_canonicalization_does_not_collapse_distinct_paths() -> None:
     a = arguments_hash({"target": "/tmp/e2e-outbox/INV-001.sent"})
     b = arguments_hash({"target": "/tmp/e2e-outbox/INV-002.sent"})
     assert a != b
+
+
+def test_path_canonicalization_is_platform_independent() -> None:
+    """Paths with forward and backward slashes hash identically to POSIX form (#1437)."""
+    from continuum.actions.idempotency import _canonicalize_paths
+    from continuum.security.hashing import stable_hash
+
+    assert _canonicalize_paths("data/output/report.txt") == "data/output/report.txt"
+    assert _canonicalize_paths("data\\output\\report.txt") == "data/output/report.txt"
+    assert _canonicalize_paths("C:\\foo\\bar") == "C:/foo/bar"
+    assert _canonicalize_paths("\\\\server\\share\\report.txt") == "//server/share/report.txt"
+
+    expected_hash = stable_hash({"path": "data/output/report.txt"})
+    assert arguments_hash({"path": "data/output/report.txt"}) == expected_hash
+    assert arguments_hash({"path": "data\\output\\report.txt"}) == expected_hash
+    assert idempotency_key("file_write", {"path": "data\\output\\report.txt"}) == idempotency_key(
+        "file_write", {"path": "data/output/report.txt"}
+    )
+
+
+def test_path_canonicalization_preserves_posix_backslashes() -> None:
+    """Backslashes in POSIX filenames are preserved and do not collapse into slash paths (#1437)."""
+    from continuum.actions.idempotency import _canonicalize_paths
+
+    assert _canonicalize_paths("foo\\bar") == "foo\\bar"
+    assert _canonicalize_paths("foo/bar") == "foo/bar"
+    assert arguments_hash({"path": "foo\\bar"}) != arguments_hash({"path": "foo/bar"})
+
+    assert _canonicalize_paths("foo/bar\\baz") == "foo/bar\\baz"
+    assert _canonicalize_paths("foo/bar/baz") == "foo/bar/baz"
+    assert arguments_hash({"path": "foo/bar\\baz"}) != arguments_hash({"path": "foo/bar/baz"})
+
+
+def test_path_canonicalization_preserves_regex_patterns() -> None:
+    """Regex-like escape sequences and metacharacters are not rewritten as paths (#1437)."""
+    from continuum.actions.idempotency import _canonicalize_paths
+
+    regex_val = r"\d\..\w"
+    assert _canonicalize_paths(regex_val) == regex_val
+    assert _canonicalize_paths(regex_val) != "/w"
+    assert arguments_hash({"pattern": regex_val}) != arguments_hash({"pattern": "/w"})
+    assert arguments_hash({"pattern": regex_val}) == arguments_hash({"pattern": regex_val})
+
+    assert _canonicalize_paths(r"\d+") == r"\d+"
+    assert _canonicalize_paths(r"\s*") == r"\s*"
 
 
 def test_identity_match_recognises_a_completed_action_across_field_renames(
