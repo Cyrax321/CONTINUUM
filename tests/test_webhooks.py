@@ -275,6 +275,70 @@ def test_new_verdict_and_expired_window_ring_again(store: SQLiteStorage) -> None
         server.shutdown()
 
 
+def test_dedup_survives_compaction_of_the_notification_row(
+    store: SQLiteStorage,
+) -> None:
+    """A compaction inside the window must not re-ring the bell (issue #1186).
+
+    The dedup state lives in the event log itself, and compacting a long
+    blocked run is exactly what the docs prescribe for it. The scan has to
+    walk the archived prefix too, or an operator who compacted the run gets
+    paged again for the same standing blockage, and again on every
+    subsequent assessment until the window expires.
+    """
+    captured: dict = {}
+    server = _receiver(captured)
+    try:
+        endpoint = WebhookEndpoint(
+            url=f"http://127.0.0.1:{server.server_port}/hook", re_notify_seconds=3600
+        )
+        registry = WebhookRegistry(endpoints=(endpoint,))
+        payload = {"run_id": "run_1", "mode": "request_human", "safe": False}
+        notify_blocked(
+            store,
+            "run_1",
+            mode=EVENT_REQUEST_HUMAN,
+            payload=payload,
+            contract=_contract(),
+            registry=registry,
+        )
+        assert len(captured["hits"]) == 1
+
+        # The operator compacts the run to shrink the log. The SENT row leaves
+        # the live tail verbatim, timestamp intact.
+        store.compact_run("run_1")
+        assert _events(store, EventType.NOTIFICATION_SENT) == [], "row is archived now"
+        assert len(store.read_all_events("run_1")) > len(store.read_events("run_1"))
+
+        records = notify_blocked(
+            store,
+            "run_1",
+            mode=EVENT_REQUEST_HUMAN,
+            payload=payload,
+            contract=_contract(),
+            registry=registry,
+            now=utcnow() + timedelta(minutes=20),
+        )
+        assert [r.status for r in records] == ["skipped"]
+        assert len(captured["hits"]) == 1, "the archived SENT row still holds the window"
+        # A skipped round still writes nothing.
+        assert len(_events(store, EventType.NOTIFICATION_SENT)) == 0
+
+        # The archived timestamp still governs the window: past it, ring again.
+        notify_blocked(
+            store,
+            "run_1",
+            mode=EVENT_REQUEST_HUMAN,
+            payload=payload,
+            contract=_contract(),
+            registry=registry,
+            now=utcnow() + timedelta(hours=2),
+        )
+        assert len(captured["hits"]) == 2
+    finally:
+        server.shutdown()
+
+
 def test_event_filter_subscribes_per_endpoint(store: SQLiteStorage) -> None:
     captured: dict = {}
     server = _receiver(captured)

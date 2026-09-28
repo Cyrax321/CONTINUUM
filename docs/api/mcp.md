@@ -121,6 +121,15 @@ always names exactly where a grant came from.
 : The database path the server opens when `--db` is not passed on the command
 line (default `./continuum.db`).
 
+`CONTINUUM_MCP_SLIM`
+: Set to `1` to ship a read-only server. The tool table above lists twelve tools
+-- nine mutating, three read-only -- and slim removes the nine mutating ones,
+leaving `continuum_resume`, `continuum_validate` and `continuum_list_actions`.
+The variable is checked inside `build_server`, so every caller path that
+constructs a server honours it, not just the CLI entry point. It is off by
+default and is not a security boundary on its own: it shrinks what a caller can
+ask for, but the allowlist above is still what decides who may ask.
+
 ## build_server
 
 `continuum.mcp.server.build_server(database=None, *, policy=None, auth=None) -> tuple[Server, Storage]`

@@ -38,3 +38,32 @@ jobs:
           git add README.md references/bench.md
           git diff --cached --quiet || git commit -m "bench: nightly refresh of published tables"
           git push
+
+  latency-matrix:
+    name: Recovery latency SLO matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dev dependencies
+        run: pip install -e ".[dev]"
+
+      # Observational only: compares medians against the checked-in baseline in
+      # benchmarks/latency_matrix/baseline.json and fails on a regression. A
+      # soft-budget miss is reported here and never fails the job; see
+      # docs/research/latency_budget.md for how to read the result.
+      - name: Run the latency matrix and compare against the baseline
+        run: python -m benchmarks.latency_matrix
+
+      - name: Upload the matrix report
+        if: always()
+        uses: actions/upload-artifact@v4.6.0
+        with:
+          name: latency-matrix-report
+          path: benchmarks/out/latency_matrix_report.*

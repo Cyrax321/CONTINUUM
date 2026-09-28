@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
+from typing import Any
+
+import pytest
 
 from continuum.actions.authority import record_authority_consumed
 from continuum.events import EventType
 from continuum.gate import collect_consumed_authorities, decide
-from continuum.models import Run
+from continuum.models import RecoveryMode, Run
 from continuum.reconcilers import load_reconcilers, settle_authority
 from continuum.recovery.engine import RecoveryEngine
 from continuum.storage import SQLiteStorage
@@ -267,6 +270,39 @@ def test_probe_payload_keeps_consumption_context_after_compaction(
         storage.close()
 
 
+def test_consumed_authority_does_not_downgrade_a_stricter_verdict() -> None:
+    """A consumed authority escalates to REQUEST_HUMAN, never past it (issue #1146).
+
+    The module documents that "the engine always returns the maximum proposed
+    mode" (SEVERITY is ascending caution). The consumed-authority block used to
+    *overwrite* the mode unconditionally, so a risk policy that had already
+    proposed ABORT or ROLLBACK — strictly more cautious — was silently
+    downgraded to REQUEST_HUMAN, and the rationale still named the abort while
+    the verdict no longer delivered it.
+    """
+    from continuum.models import Origin
+    from continuum.recovery.engine import SEVERITY
+
+    storage = _storage()
+    try:
+        record_authority_consumed(storage, "run_1", "authz:stripe-1")
+        # The default risk policy maps side_effect_duplicate -> abort.
+        storage.append_event(
+            "run_1",
+            EventType.RISK_OBSERVED,
+            {"trigger": "side_effect_duplicate", "score": 0.9, "detail": "dup"},
+            source=Origin.EXTERNAL_MONITOR,
+        )
+
+        decision = RecoveryEngine(storage).assess("run_1")
+        assert decision.mode == RecoveryMode.ABORT
+        assert SEVERITY[decision.mode] >= SEVERITY[RecoveryMode.REQUEST_HUMAN]
+        assert "consumed authority blocks resume" in " ".join(decision.rationale)
+        assert "side_effect_duplicate" in " ".join(decision.rationale)
+    finally:
+        storage.close()
+
+
 def test_probe_for_an_authority_that_was_never_consumed_settles_with_a_bare_id(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -297,3 +333,41 @@ def test_probe_for_an_authority_that_was_never_consumed_settles_with_a_bare_id(
         assert report.settled is True
     finally:
         storage.close()
+
+
+def test_unreadable_authority_ledger_degrades_to_request_human(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #1066: a failed ledger read must not clear the resume block.
+
+    The consumed-authority block used to substitute an empty map when the
+    event read failed, and an empty map is the *unblocked* answer: a run
+    holding an unreconciled consumed credential got a resume verdict the
+    moment the log became unreadable mid-assessment.
+    """
+    import continuum.recovery.engine as engine_mod
+    from continuum.storage.base import CorruptedRecord
+
+    db = str(tmp_path / "auth_unreadable.db")
+    with SQLiteStorage(db) as storage:
+        storage.create_run(Run(run_id="run_1", goal="g"))
+        storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+        record_authority_consumed(storage, "run_1", "auth-123")
+
+    # Baseline: a readable ledger blocks the run, as designed.
+    with SQLiteStorage(db) as storage:
+        baseline = RecoveryEngine(storage).assess("run_1", replay=False)
+    assert baseline.mode.value == "request_human"
+
+    def unreadable(events: object) -> dict[str, Any]:
+        raise CorruptedRecord("events table: unreadable page (transient)")
+
+    monkeypatch.setattr(engine_mod, "collect_consumed_authorities", unreadable)
+    with SQLiteStorage(db) as storage:
+        decision = RecoveryEngine(storage).assess("run_1", replay=False)
+
+    # Degrade to the most cautious verdict, not the unblocked one.
+    assert decision.mode.value == "request_human"
+    assert decision.contract.recovery_status.value == "requires_human"
+    assert decision.permits("anything") is False
+    assert any("unreadable" in line for line in decision.rationale)
