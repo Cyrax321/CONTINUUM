@@ -77,13 +77,13 @@ Thin wrappers that translate a framework's native loop into CONTINUUM calls.
 These are optional. An agent can also call the SDK or MCP server directly.
 
 ### 3.3 MCP server (stdio, deny by default)
-A Model Context Protocol server exposing 12 tools. It is read-only by default.
+A Model Context Protocol server exposing 13 tools. It is read-only by default.
 - Read-only tools (3): continuum_validate, continuum_resume,
   continuum_list_actions.
-- Mutating tools (9): continuum_record_progress, continuum_checkpoint,
+- Mutating tools (10): continuum_record_progress, continuum_checkpoint,
   continuum_record_summary, continuum_record_plan, continuum_confirm,
   continuum_intercept_action, continuum_complete_action, continuum_fail_action,
-  continuum_reconcile_action.
+  continuum_reconcile_action, continuum_compensate_action.
 (Every MCP tool name is prefixed with "continuum_" so it never collides
 with a host tool's own tool names.)
 An auth gate restricts mutating tools to an allowlist. The primary
@@ -103,15 +103,24 @@ Turn agent output into structured state deltas.
 - Append-only, hash-chained: each event stores the digest of the prior event,
   so tampering is detectable.
 - verify() re-walks the chain and localizes the first corrupted event.
-- 29 event types span the full lifecycle. The complete set:
-  RUN_STARTED, RUN_COMPLETED, RUN_ABORTED, TASK_UPDATED, TOOL_CALLED,
-  TOOL_COMPLETED, TOOL_FAILED, DECISION_CREATED, DECISION_INVALIDATED,
-  EVIDENCE_ADDED, FINDING_ADDED, FINDING_INVALIDATED, WORK_ADDED,
-  WORK_COMPLETED, DEPENDENCY_DECLARED, APPROVAL_REQUESTED, APPROVAL_GRANTED,
-  APPROVAL_REVOKED, MODEL_CHANGED, MODEL_ASSUMPTION_RECORDED,
-  STATE_CHECKPOINTED, STATE_VALIDATED, ENVIRONMENT_CHANGED, RECOVERY_STARTED,
-  RECOVERY_COMPLETED, RECOVERY_BLOCKED, ACTION_RECORDED, ACTION_RECONCILED,
-  ACTION_COMPENSATED.
+- 51 event types span the full lifecycle. The complete set:
+  RUN_STARTED, RUN_COMPLETED, RUN_ABORTED, TASK_UPDATED,
+  RUN_FORKED, RUN_RESTORED, RUN_MERGED, TOOL_CALLED,
+  TOOL_COMPLETED, TOOL_FAILED, DECISION_CREATED,
+  DECISION_INVALIDATED, EVIDENCE_ADDED, FINDING_ADDED,
+  FINDING_INVALIDATED, WORK_ADDED, WORK_COMPLETED,
+  DEPENDENCY_DECLARED, CONSTRAINT_PINNED, CONSTRAINT_RETRACTED,
+  APPROVAL_REQUESTED, APPROVAL_GRANTED, APPROVAL_REVOKED,
+  MODEL_CHANGED, MODEL_ASSUMPTION_RECORDED, STATE_CHECKPOINTED,
+  STATE_VALIDATED, ENVIRONMENT_CHANGED, RECOVERY_STARTED,
+  RECOVERY_COMPLETED, RECOVERY_BLOCKED, REVIEW_CONFIRMED,
+  REASONING_SUMMARY, EVENT_LOG_ANCHORED, PERCEPTION_OBSERVED,
+  BRANCH_RESOLVED, ACTION_RECORDED, ACTION_RECONCILED,
+  ACTION_COMPENSATED, GRANT_DENIED, LIVENESS_SILENCE_DETECTED,
+  LIVENESS_RECOVERED, RISK_OBSERVED, AUTHORITY_CONSUMED,
+  AUTHORITY_RECONCILED, ATTEMPT_LESSON, TRAJECTORY_REPORT,
+  PLAN_UPSERT, MEMORY_TOMBSTONED, NOTIFICATION_SENT,
+  NOTIFICATION_FAILED.
 - Every state component traces to its origin event (provenance).
 
 ### 3.6 State Engine (semantic projection)
@@ -265,7 +274,7 @@ Third tier: one large container labeled "CONTINUUM SDK". Inside it, a 3x3 grid:
   Row 2: State Engine, Checkpoint Manager, Environment
   Row 3: Validator, Recovery Engine, Security
   Place a pill at the top-right of the SDK container: "MCP server: deny by
-  default, 12 tools (3 read-only, 9 mutating)".
+  default, 13 tools (3 read-only, 10 mutating)".
 Fourth tier: two boxes side by side: "Durable Storage (SQLite, WAL)" and
   "External Systems (GitHub, email, APIs)".
 Bottom tier: one centered box "Resume (bounded recovery context)".

@@ -191,3 +191,36 @@ class TestLangChainArchitecture:
             {"continuum_run_id": run_id, "order_id": "O-3", "notified": False, "recovered": True}
         )
         assert calls["notify"] == 1
+
+    def test_start_run_does_not_duplicate_run_started_after_compaction(
+        self, store: Storage
+    ) -> None:
+        """start_run must not append duplicate RUN_STARTED or wipe constraints after compaction (#1453)."""
+        from continuum.models import Origin, Run
+        from continuum.state.semantic import project
+
+        run_id = "lc_compact_1"
+        store.create_run(Run(run_id=run_id, goal="ship release"))
+        store.append_event(
+            run_id,
+            EventType.RUN_STARTED,
+            {"goal": "ship release", "constraints": ["no-network", "read-only"], "total": 10},
+            source=Origin.HUMAN,
+        )
+        store.append_event(
+            run_id,
+            EventType.WORK_ADDED,
+            {"task_id": "w1", "description": "prepare artifacts"},
+            source=Origin.HUMAN,
+        )
+        store.compact_run(run_id)
+
+        adapter = LangChainAgentAdapter(store)
+        adapter.start_run(goal="ship release", run_id=run_id)
+
+        events = store.read_all_events(run_id)
+        run_started_events = [e for e in events if e.type is EventType.RUN_STARTED]
+        assert len(run_started_events) == 1
+
+        state = project(run_id, events)
+        assert state.goal.constraints == ["no-network", "read-only"]
