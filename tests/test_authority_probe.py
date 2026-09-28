@@ -12,7 +12,7 @@ import pytest
 from continuum.actions.authority import record_authority_consumed
 from continuum.events import EventType
 from continuum.gate import collect_consumed_authorities, decide
-from continuum.models import Run
+from continuum.models import RecoveryMode, Run
 from continuum.reconcilers import load_reconcilers, settle_authority
 from continuum.recovery.engine import RecoveryEngine
 from continuum.storage import SQLiteStorage
@@ -266,6 +266,39 @@ def test_probe_payload_keeps_consumption_context_after_compaction(
         assert received["via_action_id"] == "act-1"
         assert isinstance(received["sequence"], int)
         assert received["consumed_at"]
+    finally:
+        storage.close()
+
+
+def test_consumed_authority_does_not_downgrade_a_stricter_verdict() -> None:
+    """A consumed authority escalates to REQUEST_HUMAN, never past it (issue #1146).
+
+    The module documents that "the engine always returns the maximum proposed
+    mode" (SEVERITY is ascending caution). The consumed-authority block used to
+    *overwrite* the mode unconditionally, so a risk policy that had already
+    proposed ABORT or ROLLBACK — strictly more cautious — was silently
+    downgraded to REQUEST_HUMAN, and the rationale still named the abort while
+    the verdict no longer delivered it.
+    """
+    from continuum.models import Origin
+    from continuum.recovery.engine import SEVERITY
+
+    storage = _storage()
+    try:
+        record_authority_consumed(storage, "run_1", "authz:stripe-1")
+        # The default risk policy maps side_effect_duplicate -> abort.
+        storage.append_event(
+            "run_1",
+            EventType.RISK_OBSERVED,
+            {"trigger": "side_effect_duplicate", "score": 0.9, "detail": "dup"},
+            source=Origin.EXTERNAL_MONITOR,
+        )
+
+        decision = RecoveryEngine(storage).assess("run_1")
+        assert decision.mode == RecoveryMode.ABORT
+        assert SEVERITY[decision.mode] >= SEVERITY[RecoveryMode.REQUEST_HUMAN]
+        assert "consumed authority blocks resume" in " ".join(decision.rationale)
+        assert "side_effect_duplicate" in " ".join(decision.rationale)
     finally:
         storage.close()
 

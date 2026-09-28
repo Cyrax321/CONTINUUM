@@ -96,7 +96,7 @@ For HTTP stores, the enforcing gateway derives the same key from the request bod
 }
 ```
 
-The gateway and the pre-tool gate share `normalize_key_value`, so one identity rule governs both seams.
+The gateway and the pre-tool gate share `normalize_key_value`, so one identity rule governs both seams. The route's `prefix` is enforced too: a request whose path is not under it is refused with `403` before the key is rendered, so one claim for `/upsert` cannot spend itself on the host's other paths.
 
 ## pgvector walkthrough
 

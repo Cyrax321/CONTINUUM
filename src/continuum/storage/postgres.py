@@ -278,8 +278,8 @@ class PostgresStorage(Storage):
         with self._write():
             try:
                 self._connection.execute(
-                    "INSERT INTO runs(run_id, goal, status, created_at, updated_at, metadata) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    "INSERT INTO runs(run_id, goal, status, created_at, updated_at, metadata, parent_run_id) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
                     (
                         run.run_id,
                         run.goal,
@@ -287,6 +287,7 @@ class PostgresStorage(Storage):
                         run.created_at.isoformat(),
                         run.updated_at.isoformat(),
                         json.dumps(dict(run.metadata), sort_keys=True),
+                        run.parent_run_id,
                     ),
                 )
             except self._psycopg.IntegrityError as exc:
@@ -303,8 +304,8 @@ class PostgresStorage(Storage):
         with self._write(), self._connection.transaction():
             try:
                 self._connection.execute(
-                    "INSERT INTO runs(run_id, goal, status, created_at, updated_at, metadata) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    "INSERT INTO runs(run_id, goal, status, created_at, updated_at, metadata, parent_run_id) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
                     (
                         run.run_id,
                         run.goal,
@@ -312,6 +313,7 @@ class PostgresStorage(Storage):
                         run.created_at.isoformat(),
                         run.updated_at.isoformat(),
                         json.dumps(dict(run.metadata), sort_keys=True),
+                        run.parent_run_id,
                     ),
                 )
             except self._psycopg.IntegrityError as exc:
@@ -395,6 +397,7 @@ class PostgresStorage(Storage):
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
                 metadata=json.loads(row["metadata"]),
+                parent_run_id=row["parent_run_id"],
             )
         except (ValueError, json.JSONDecodeError, TypeError) as exc:
             raise CorruptedRecord(f"run {row['run_id']!r} failed to load: {exc}") from exc
@@ -612,7 +615,14 @@ class PostgresStorage(Storage):
         needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
         if needs_fresh_anchor:
             try:
-                CheckpointManager(self).checkpoint(run_id, force_version=True)
+                manager = CheckpointManager(self)
+                # The anchor must project over full history: after an earlier
+                # compaction the live tail begins at the anchor markers with
+                # no RUN_STARTED, so a live-only fold would conclude the run
+                # never started (issue #648). Per-turn checkpoint evaluation
+                # deliberately keeps the cheaper live-tail read.
+                state = manager.project_current(run_id, full_history=True)
+                manager.checkpoint(run_id, state=state, force_version=True)
             except Exception as exc:
                 raise ValueError(f"run {run_id!r} could not be anchored: {exc}") from exc
             lv = self.latest_version(run_id)
@@ -726,13 +736,27 @@ class PostgresStorage(Storage):
     def _canonical_index_rows(self) -> dict[str, tuple[tuple[str, str, str, str, str], int]]:
         """Fold every run's action events; global last-write-per-key wins.
 
-        Compacted history (#239) folds too, archive first and live second:
-        everything in ``events_archive`` predates every live row of its run,
-        so folding the two tables in one shared stream would let an archived
-        action claimed long ago outrank a newer live write of the same key
-        (they number their rows independently). Archived rows receive
-        negative order positions below every possible live value, oldest
-        first, so last-write-per-key stays true after compaction.
+        The order value is not a position in the row stream -- it has to be
+        the same number :meth:`_maintain_action_index` stored, or
+        :meth:`action_index_drift` compares two unrelated figures and reports
+        a dirty index on a healthy store (#1321). That number comes from
+        ``action_index_ord_seq``, which advances once per action event and
+        nothing else, so the fold reaches it by counting action events only,
+        1-based: a non-action row consumes no ``nextval`` and moves no
+        position. Counting every row instead -- RUN_STARTED, TOOL_CALLED,
+        EVIDENCE_ADDED all sit between actions in an ordinary run -- made the
+        fold read one higher per intervening non-action event than the
+        incremental writer ever wrote.
+
+        Compacted history (#239) folds too, archive first and live second.
+        Within a run the archived prefix genuinely predates the live tail, so
+        a key written in both places keeps its live value, and because the
+        count is now the true global action-event number an archived write
+        can no longer outrank the same run's later live one. Across runs the
+        archive-first merge is still not insertion order -- that is #1322,
+        which makes a store read dirty after one run is compacted while
+        another holds actions. It was not reachable before only because the
+        dense scheme was already wrong on every store.
         """
         with self._read():
             archived = self._connection.execute(
@@ -742,14 +766,16 @@ class PostgresStorage(Storage):
                 "SELECT type, payload FROM events ORDER BY ctid"
             ).fetchall()
         canonical: dict[str, tuple[tuple[str, str, str, str, str], int]] = {}
-        offset = len(archived)
-        for i, row in enumerate([*archived, *rows]):
+        order = 0
+        for row in [*archived, *rows]:
             payload = (
                 row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
             )
             entry = index_entry_from_payload(EventType(row["type"]), payload)
-            if entry is not None:
-                canonical[entry[0]] = (entry, i if i >= offset else i - offset)
+            if entry is None:
+                continue  # consumed no nextval, so it advances no position
+            order += 1
+            canonical[entry[0]] = (entry, order)
         return canonical
 
     @staticmethod
