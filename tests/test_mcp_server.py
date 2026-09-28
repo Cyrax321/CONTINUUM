@@ -2666,3 +2666,59 @@ def test_ensure_run_recognises_archived_run_started_after_compaction(tmp_path: A
 
     state = project("run_c", events)
     assert state.goal.constraints == ["refrigerated", "priority"]
+
+
+async def _compact_out_run_started(ctx: Any, run_id: str = "run_1") -> None:
+    """Archive the pre-anchor prefix so ``RUN_STARTED`` leaves the live tail.
+
+    Mirrors a long run that has been compacted: the goal-bearing genesis event
+    lives only in ``events_archive`` afterwards, which is precisely the state a
+    live-tail read cannot project (issue #1133).
+    """
+    live = list(ctx.storage.read_events(run_id))
+    # Bound below the anchor the next append would mint; seq 1 (RUN_STARTED) and
+    # the first update move to the archive, the tail keeps a valid anchor.
+    ctx.storage.compact_run(run_id, through_sequence=live[1].sequence)
+    assert not any(e.type is EventType.RUN_STARTED for e in ctx.storage.read_events(run_id)), (
+        "precondition: RUN_STARTED must be out of the live tail"
+    )
+    assert any(e.type is EventType.RUN_STARTED for e in ctx.storage.read_all_events(run_id)), (
+        "precondition: RUN_STARTED must survive in the archive"
+    )
+
+
+@pytest.mark.asyncio
+async def test_record_progress_survives_compaction(server_ctx: tuple[Any, Any]) -> None:
+    """Regression (#1133): record_progress folds full history, not the live tail.
+
+    PR #1219 fixed this and was dropped in a merge-of-main, so a compacted run
+    (``RUN_STARTED`` archived) again refused every progress update as
+    "unprojectable" -- exactly the long runs the tool exists for. The candidate
+    fold must read the archive too so the goal still projects.
+    """
+    server, ctx = server_ctx
+    await call(server, "continuum_record_progress", run_id="run_1", completed=1, total=10, goal="G")
+    await call(server, "continuum_record_progress", run_id="run_1", completed=2, total=10)
+    await _compact_out_run_started(ctx)
+    payload = await call(server, "continuum_record_progress", run_id="run_1", completed=4, total=10)
+    assert payload["completed"] == 4
+    assert payload["pending"] == 6
+
+
+@pytest.mark.asyncio
+async def test_record_plan_survives_compaction(server_ctx: tuple[Any, Any]) -> None:
+    """Regression (#1133): record_plan shares the same candidate fold as progress,
+    so a compacted run must accept a plan upsert instead of rejecting it."""
+    server, ctx = server_ctx
+    await call(server, "continuum_record_progress", run_id="run_1", completed=1, total=10, goal="G")
+    await call(server, "continuum_record_progress", run_id="run_1", completed=2, total=10)
+    await _compact_out_run_started(ctx)
+    payload = await call(
+        server,
+        "continuum_record_plan",
+        run_id="run_1",
+        plan_id="p1",
+        units=[{"id": "u1", "title": "do the thing", "status": "working"}],
+    )
+    assert payload["plan_id"] == "p1"
+    assert payload["units"] == 1

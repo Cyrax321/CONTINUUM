@@ -283,8 +283,17 @@ def _project_candidate(
     landing between the read and the write of a ``completed=75`` that omits
     ``total``). One run has one owner by design, but the failure being guarded
     here is unrecoverable, so it is worth not relying on that.
+
+    The fold reads the full history, not just the live tail: compaction moves
+    the pre-anchor prefix (``RUN_STARTED`` included) into ``events_archive``,
+    and ``project`` refuses a log with no goal. A live-only read therefore made
+    every ``continuum_record_progress`` and ``continuum_record_plan`` reject its
+    payload as "unprojectable" the moment the run had been compacted -- exactly
+    the long-running runs the write tools exist for. ``head`` stays the true
+    head because the merged history is sequence-ordered (issue #1133; the merged
+    fix in PR #1219 was dropped in a merge-of-main and never landed).
     """
-    history = list(ctx.storage.read_events(run_id))
+    history = list(ctx.storage.read_all_events(run_id))
     head = history[-1].sequence if history else 0
     candidate = Event(
         run_id=run_id,
