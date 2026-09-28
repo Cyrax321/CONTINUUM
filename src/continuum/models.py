@@ -74,6 +74,8 @@ __all__ = [
     "Origin",
     "Provenance",
     "TrajectoryReport",
+    "RiskObservedPayload",
+    "ObservedRisk",
     "validate_caused_by",
     "PROJECTION_BOOKKEEPING",
 ]
@@ -722,6 +724,229 @@ class TrajectoryReport(BaseModel):
         return trimmed
 
 
+# --------------------------------------------------------------------------- #
+# Risk observation (issue #303, #1421)
+# --------------------------------------------------------------------------- #
+
+#: Bounds on a monitor's diagnostic detail. Monitors vary wildly in what they
+#: report, so the field is free-form but bounded, the same trade every other
+#: generously-shaped surface in this file makes.
+_RISK_DETAIL_MAX_KEYS = 32
+_RISK_DETAIL_MAX_STR = 512
+_RISK_DETAIL_MAX_DEPTH = 4
+
+_EPOCH_TEXT = re.compile(r"-?\d+(?:\.\d+)?$")
+
+
+def _risk_trigger(value: Any) -> str:
+    """Normalise a risk class name: non-empty, lowercase, bounded."""
+    if value is None:
+        raise ValueError("trigger must name a risk class")
+    cleaned = str(value).strip().lower()
+    if not cleaned:
+        raise ValueError("trigger must name a risk class")
+    return cleaned[:128]
+
+
+def _risk_score(value: Any) -> float:
+    """Clamp a monitor's confidence into [0, 1] rather than reject it.
+
+    A monitor reporting 1.4 or -0.1 is reporting nonsense, but the observation
+    behind it is still a signal worth keeping, and ingestion is fail-open.
+    """
+    try:
+        score = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("score must be a number") from exc
+    if score < 0.0:
+        return 0.0
+    if score > 1.0:
+        return 1.0
+    return score
+
+
+def _risk_optional_id(value: Any) -> str | None:
+    """Tolerate a monitor that sends an identifier as something other than text."""
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    return cleaned[:128] or None
+
+
+def _risk_detail(value: Any) -> dict[str, Any]:
+    """Bound a monitor's structured diagnostics, tolerating a legacy string.
+
+    Pre-#1421 ingestion truncated ``detail`` to a plain string, and those
+    events are still on the wire, so a scalar is wrapped rather than dropped.
+    """
+    if value is None or value == "":
+        return {}
+    if not isinstance(value, Mapping):
+        return {"message": str(value)[:_RISK_DETAIL_MAX_STR]}
+
+    def clamp(node: Any, depth: int) -> Any:
+        if isinstance(node, Mapping):
+            if depth >= _RISK_DETAIL_MAX_DEPTH:
+                return {}
+            clamped: dict[str, Any] = {}
+            for key, item in node.items():
+                if len(clamped) >= _RISK_DETAIL_MAX_KEYS:
+                    break
+                clamped[str(key)[:128]] = clamp(item, depth + 1)
+            return clamped
+        if isinstance(node, (list, tuple)):
+            if depth >= _RISK_DETAIL_MAX_DEPTH:
+                return []
+            return [clamp(item, depth + 1) for item in node[:_RISK_DETAIL_MAX_KEYS]]
+        if isinstance(node, str):
+            return node[:_RISK_DETAIL_MAX_STR]
+        if node is None or isinstance(node, (int, float, bool)):
+            return node
+        return str(node)[:_RISK_DETAIL_MAX_STR]
+
+    clamped_root = clamp(value, 0)
+    return dict(clamped_root) if isinstance(clamped_root, Mapping) else {}
+
+
+def _risk_ts(value: Any) -> datetime | None:
+    """Parse an epoch number or an ISO 8601 string, or ``None`` if neither.
+
+    Pre-#1421 ingestion copied the caller's ``ts`` onto the wire verbatim, so
+    arbitrary strings are already sitting in logs. Returning ``None`` lets each
+    caller pick its own fallback instead of forcing one on it: the writer dates
+    the observation at ingestion time, the fold dates it at the event's own
+    hash-chained timestamp so a re-projection still reproduces bit for bit.
+    """
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, tz=UTC)
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        return None
+    if _EPOCH_TEXT.match(text):
+        return datetime.fromtimestamp(float(text), tz=UTC)
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+class RiskObservedPayload(BaseModel):
+    """Typed payload schema for ``RISK_OBSERVED`` (issue #1421).
+
+    A witness report from a real-time behavioural monitor: SNAGLINE, a
+    watchdog sidecar, a runtime anomaly detector. It is not a state mutation
+    and not a side effect, it is an observation, which is exactly why the event
+    is stamped ``Origin.EXTERNAL_MONITOR`` at write time and can never be
+    self-certified by the agent it describes (issue #303).
+
+    The schema is tolerant by design: it normalises what monitors send rather
+    than refusing it, so payloads written before it existed still validate.
+    """
+
+    model_config = Frozen
+
+    trigger: str = Field(min_length=1, max_length=128)
+    """Risk class the monitor detected: ``loop``, ``error_cascade``,
+    ``latency_anomaly``, ``token_runaway``, ``silent_abort``, ``meltdown``,
+    ``side_effect_duplicate`` or ``governance_decay`` under the default policy.
+    Not restricted to that set: a monitor may name a class the installed policy
+    has not mapped yet, and the signal is recorded and ignored until it does."""
+    score: float = Field(default=0.0, ge=0.0, le=1.0)
+    """Confidence the monitor assigns to the observation, clamped to [0, 1]."""
+    episode_id: str | None = Field(default=None, max_length=128)
+    """Execution episode the risk was seen in, when the monitor reports one."""
+    step_id: str | None = Field(default=None, max_length=128)
+    """Action or tool call where the risk was detected, when known."""
+    detail: dict[str, Any] = Field(default_factory=dict)
+    """Structured diagnostic metadata. Free-form by design: monitors vary."""
+    ts: datetime = Field(default_factory=utcnow)
+    """When the monitor made the observation, on the monitor's own clock.
+    Accepts an epoch number or an ISO 8601 string (issue #1075)."""
+
+    @field_validator("trigger", mode="before")
+    @classmethod
+    def _trigger(cls, value: Any) -> str:
+        return _risk_trigger(value)
+
+    @field_validator("score", mode="before")
+    @classmethod
+    def _score(cls, value: Any) -> float:
+        return _risk_score(value)
+
+    @field_validator("episode_id", "step_id", mode="before")
+    @classmethod
+    def _optional_id(cls, value: Any) -> str | None:
+        return _risk_optional_id(value)
+
+    @field_validator("detail", mode="before")
+    @classmethod
+    def _detail(cls, value: Any) -> dict[str, Any]:
+        return _risk_detail(value)
+
+    @field_validator("ts", mode="before")
+    @classmethod
+    def _ts(cls, value: Any) -> datetime:
+        # An uninterpretable timestamp falls back to now rather than refusing
+        # the observation: a monitor that reports "yesterday" has still
+        # reported something. The fold pre-parses and passes a datetime, so
+        # this fallback is a write-path convenience that never touches it.
+        return _risk_ts(value) or utcnow()
+
+
+class ObservedRisk(BaseModel):
+    """A risk observation folded into :class:`SemanticState` (issue #1421).
+
+    The projected view of one ``RISK_OBSERVED`` event: what an external monitor
+    said it saw, when it said it saw it, and with what provenance. Provenance
+    is carried forward because the whole point of the event is that an
+    observation is a witness report, never a certificate: the projection must
+    still say who asserted it after the event itself has scrolled out of view.
+    """
+
+    model_config = Frozen
+
+    trigger: str = Field(min_length=1, max_length=128)
+    score: float = Field(default=0.0, ge=0.0, le=1.0)
+    episode_id: str | None = Field(default=None, max_length=128)
+    step_id: str | None = Field(default=None, max_length=128)
+    detail: dict[str, Any] = Field(default_factory=dict)
+    ts: datetime = Field(default_factory=utcnow)
+    provenance: Provenance = Field(default_factory=Provenance)
+
+    @field_validator("trigger", mode="before")
+    @classmethod
+    def _trigger(cls, value: Any) -> str:
+        return _risk_trigger(value)
+
+    @field_validator("score", mode="before")
+    @classmethod
+    def _score(cls, value: Any) -> float:
+        return _risk_score(value)
+
+    @field_validator("episode_id", "step_id", mode="before")
+    @classmethod
+    def _optional_id(cls, value: Any) -> str | None:
+        return _risk_optional_id(value)
+
+    @field_validator("detail", mode="before")
+    @classmethod
+    def _detail(cls, value: Any) -> dict[str, Any]:
+        return _risk_detail(value)
+
+    @field_validator("ts", mode="before")
+    @classmethod
+    def _ts(cls, value: Any) -> datetime:
+        # An uninterpretable timestamp falls back to now rather than refusing
+        # the observation: a monitor that reports "yesterday" has still
+        # reported something. The fold pre-parses and passes a datetime, so
+        # this fallback is a write-path convenience that never touches it.
+        return _risk_ts(value) or utcnow()
+
+
 class ModelSpecificState(BaseModel):
     """An assumption tied to a specific model; switching models must revalidate."""
 
@@ -783,6 +1008,15 @@ class SemanticState(BaseModel):
     """Structured lessons from failed attempts (issue #313), sorted by created_at."""
     trajectory_reports: list[TrajectoryReport] = Field(default_factory=list)
     """Sleep-time trajectory reports distilled from archived history (issue #393), sorted by window."""
+    observed_risks: list[ObservedRisk] = Field(default_factory=list)
+    """Risk observations folded from ``RISK_OBSERVED`` events (issue #1421).
+
+    Witness reports from external monitors, so the projection states what the
+    run was seen doing. An observation changes what is known, not what the run
+    is, so this field is excluded from the state fingerprint: folding one must
+    not mint a semantic version. Mitigation that actually alters the run still
+    bumps the version through whatever it changed. Re-derivable from the log,
+    hence omitted from persisted bodies alongside the other bookkeeping."""
     model: ModelState | None = None
     version: int = 0
     source_sequence: int = 0
@@ -1196,11 +1430,17 @@ class Run(BaseModel):
 #: (both predate #383; hashing them would brand every existing record as
 #: tampered), and omitted from persisted bodies so readers built before #383,
 #: whose SemanticState forbids extra inputs, can still load newer databases.
+#: ``observed_risks`` joins them for a second reason (issue #1421): a risk
+#: observation changes what the projection knows, not what the run is, so
+#: folding one must not mint a semantic version. It is re-derivable from the
+#: log, so omitting it from a persisted body costs nothing a re-projection
+#: cannot restore.
 PROJECTION_BOOKKEEPING: set[str] = {
     "status",
     "unprojectable_at_sequence",
     "unprojectable_event_type",
     "unprojectable_reason",
+    "observed_risks",
 }
 
 
