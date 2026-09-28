@@ -491,6 +491,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`benchmarks/` is now included in CI and pre-commit ruff gates (#1064).**
+  `benchmarks/` is imported by the test suite but sat outside the lint scope
+  in both CI and pre-commit configuration. The five ruff lint and format
+  findings in `benchmarks/fault_injection/runner.py` (SIM115, I001, SIM102,
+  SIM105, and formatting drift) are resolved, and CI `ruff check` and
+  `ruff format --check` as well as `.pre-commit-config.yaml` now cover
+  `benchmarks/` alongside the existing `src/`, `tests/`, `examples/`,
+  `_bugaudit/`, `scripts/` and `demo-run/` scopes. Contributor verification
+  guides across the documentation are synchronized to match.
+
 - **`PostgresStorage.rebuild_action_index` returns corrected row count (#1267).**
   `rebuild_action_index` on Postgres ended in an unconditional `return 0`,
   so `continuum verify --index --repair-index` always reported 0 rows corrected
@@ -498,6 +508,7 @@ All notable changes to this project are documented here. The format follows
   rebuilding, compares against the canonical fold, and returns the count of
   missing, stale, and spurious rows corrected, matching `SQLiteStorage` and the
   base `Storage` contract.
+
 - **CITATION.cff states the released version, and the bump sites are documented
   (#1120).** The citation file pinned `0.1.0` while the package was `0.1.2`, so
   anyone citing the project recorded a version two releases stale, and
@@ -507,6 +518,7 @@ All notable changes to this project are documented here. The format follows
   bump touches (pyproject, `__init__.py`, both README pins, CITATION.cff, the
   release tag), and `tests/test_version_drift.py` checks the citation file
   alongside the README pins so the drift cannot recur.
+
 - **The Postgres backend now stores and returns a fork's `parent_run_id`
   (#1079).** Both `create_run` and `create_run_started` inserted only the six
   columns the schema had before lineage existed, and `_row_to_run` never read
@@ -603,7 +615,6 @@ All notable changes to this project are documented here. The format follows
   counts action events only, 1-based, which is exactly the number the
   sequence assigned. SQLite was immune -- both sides there use the writing
   event's `rowid` -- and a regression test now pins that agreement.
-
 - **Webhook dedup now survives a compaction inside the re-notify window
   (#1186).** `_within_dedup_window` scanned only the live event tail for the
   `NOTIFICATION_SENT` / `NOTIFICATION_FAILED` rows the dedup state lives in,

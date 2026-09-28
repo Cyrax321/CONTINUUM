@@ -103,8 +103,8 @@ pytest --no-cov --tb=short -q    # faster, no coverage
 pytest tests/test_events.py -v   # single file
 
 # Lint and type-check (must pass for PRs)
-ruff check src/ tests/ examples/ scripts/ demo-run/
-ruff format --check src/ tests/ examples/ scripts/ demo-run/
+ruff check src/ tests/ examples/ benchmarks/ scripts/ demo-run/
+ruff format --check src/ tests/ examples/ benchmarks/ scripts/ demo-run/
 mypy src/continuum
 ```
 
