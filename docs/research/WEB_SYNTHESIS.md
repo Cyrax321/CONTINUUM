@@ -90,7 +90,7 @@ The six layers below are additive, backward compatible, and each has a falsifiab
 
 ### Layer 3: Instant detection plus scoped confirm plus token floor (P2)
 
-* `SessionStart` hook runs `continuum resume --json` out of band, injects banner when an interrupted run exists, else silent. `.continuum/resume.json` precomputed on every checkpoint for instant reads. `continuum_resume_check` slim subset plus scoped `confirm --scope self` that only clears `EXTERNAL_AGENT` self-cert. System prompt trim per `token_floor.md`.
+* `SessionStart` hook runs `continuum --json resume` out of band, injects banner when an interrupted run exists, else silent. `.continuum/resume.json` precomputed on every checkpoint for instant reads. `continuum_resume_check` slim subset plus scoped `confirm --scope self` that only clears `EXTERNAL_AGENT` self-cert. System prompt trim per `token_floor.md`.
 * Falsifiable: cold-start banner latency under 100ms, `request_human` rate on self-cert only artifacts drops, token floor measured via `tools/list` size.
 
 ### Layer 4: Dual-state rewind (P2) - Issue 292

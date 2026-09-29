@@ -134,7 +134,7 @@ resume contract reflects checkpoints at all.
 | B. Ledger | 5 completed actions, 0 unresolved/uncertain |
 | C. Progress | projected `completed == 5` |
 | D. Chain | `continuum verify` reports the event chain verified |
-| E. Resume | informational: exit 20 (`request_human`) is CORRECT for MCP-written state |
+| E. Resume | informational: exit 21 (`request_human`) is CORRECT for MCP-written state |
 
 Mechanics passing is necessary but **not sufficient**. A true issue-#6 PASS also
 requires the two transcript facts (autonomous tool use in session 1; resume-before-

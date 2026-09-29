@@ -93,19 +93,22 @@ def collect_observations(
     events = storage.read_events(run_id, after_sequence=after_sequence)
     base = root or Path.cwd()
     entries: list[dict[str, Any]] = []
+    omitted = 0
     for event in reversed(list(events)):
         if event.type is not EventType.TOOL_COMPLETED:
             continue
         entry = _entry_from_event(event, base)
         if entry is None:
             continue
-        entries.append(entry)
-        if len(entries) >= MAX_CONTRACT_OBSERVATIONS:
-            omitted = sum(
-                1
-                for e in events
-                if e.type is EventType.TOOL_COMPLETED and e.sequence < entry["sequence"]
-            )
-            entries.append({"truncated": True, "omitted": omitted})
-            break
+        if len(entries) < MAX_CONTRACT_OBSERVATIONS:
+            entries.append(entry)
+        else:
+            # Every qualifying event past the cap is a genuine omission. Count
+            # them rather than appending the marker the moment the cap is
+            # reached: at exactly MAX_CONTRACT_OBSERVATIONS nothing has been
+            # dropped, so a marker there would be a spurious ``omitted: 0`` row
+            # and a cap+1-length result (issue #1363).
+            omitted += 1
+    if omitted:
+        entries.append({"truncated": True, "omitted": omitted})
     return entries

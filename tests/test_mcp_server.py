@@ -2782,3 +2782,46 @@ async def test_record_plan_survives_compaction(server_ctx: tuple[Any, Any]) -> N
     )
     assert payload["plan_id"] == "p1"
     assert payload["units"] == 1
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_survives_compaction(server_ctx: tuple[Any, Any]) -> None:
+    """Regression: the checkpoint tool folds full history, not the live tail.
+
+    ``ensure_run`` already accepts a compacted run (#1452), but the checkpoint's
+    own projection -- and the two declare helpers it calls -- read the live tail
+    alone. Once ``RUN_STARTED`` moved into the archive the fold saw no goal and
+    every ``continuum_checkpoint`` raised, precisely on the long-running runs the
+    tool exists for. The declare helpers also have to see the archived model and
+    dependencies to de-duplicate an unchanged declaration instead of re-recording
+    it over the compacted prefix.
+    """
+    server, ctx = server_ctx
+    await call(server, "continuum_record_progress", run_id="run_1", completed=1, total=10, goal="G")
+    await call(
+        server,
+        "continuum_checkpoint",
+        run_id="run_1",
+        model_id="sonnet-5",
+        provider="anthropic",
+        env={"dataset": "v3"},
+    )
+    await _compact_out_run_started(ctx)
+
+    # Must not raise: the goal lives in the archive now, and the fold must read it.
+    payload = await call(
+        server,
+        "continuum_checkpoint",
+        run_id="run_1",
+        model_id="sonnet-5",
+        provider="anthropic",
+        env={"dataset": "v3"},
+    )
+    assert payload["run_id"] == "run_1"
+    assert payload["model"] == "sonnet-5"
+
+    # The archived model and dependency are still visible, so the unchanged
+    # declaration is de-duplicated rather than appended a second time.
+    history = list(ctx.storage.read_all_events("run_1"))
+    assert sum(1 for e in history if e.type is EventType.MODEL_CHANGED) == 1
+    assert sum(1 for e in history if e.type is EventType.DEPENDENCY_DECLARED) == 1

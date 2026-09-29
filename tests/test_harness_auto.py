@@ -2,7 +2,9 @@ import time
 from pathlib import Path
 
 from continuum.adapters.generic import GenericAgentAdapter
+from continuum.checkpoint import CheckpointManager
 from continuum.events import EventType
+from continuum.hooks import record_file_progress
 from continuum.models import Run
 from continuum.state.semantic import project
 from continuum.storage import SQLiteStorage
@@ -58,6 +60,54 @@ def test_repeated_capture_over_unchanged_file_does_not_bloat_log(
         1 for e in storage.read_events("run_1") if e.type == EventType.TASK_UPDATED
     )
     assert updates_after_second == 1
+
+
+def test_record_file_progress_still_dedupes_after_compaction(tmp_path: Path) -> None:
+    """Regression: the change-gate folded the live tail alone.
+
+    Compaction moves the goal-bearing prefix (``RUN_STARTED`` included) into
+    ``events_archive``, so the fold raised ``ProjectionError`` and the except
+    branch fell through to "changed", appending a redundant ``TASK_UPDATED`` and
+    a duplicate-evidence tail on every call over an unchanged file.
+    """
+    file = tmp_path / "guide.md"
+    file.write_text("## A\n\n## B\n\n", encoding="utf-8")
+    storage = _seed_run()
+    manager = CheckpointManager(storage=storage)
+
+    assert record_file_progress(manager, "run_1", file, total=5) == 2
+    storage.compact_run("run_1")
+    assert not any(e.type is EventType.RUN_STARTED for e in storage.read_events("run_1"))
+
+    # An unchanged file on a compacted run must still be a no-op returning -1.
+    assert record_file_progress(manager, "run_1", file, total=5) == -1
+
+    history = list(storage.read_all_events("run_1"))
+    assert sum(1 for e in history if e.type is EventType.TASK_UPDATED) == 1
+    assert sum(1 for e in history if e.type is EventType.EVIDENCE_ADDED) == 1
+
+
+def test_auto_file_capture_survives_compaction(tmp_path: Path) -> None:
+    """Regression: ``capture_state``'s post-mirror reproject read the live tail.
+
+    On a compacted run the tail holds no ``RUN_STARTED``, so the fold rejected
+    the checkpoint with "TASK_UPDATED before the run was started" -- the mirror's
+    own appended event could not fold against the archived start.
+    """
+    file = tmp_path / "guide.md"
+    file.write_text("## A\n\n## B\n\n", encoding="utf-8")
+    storage = _seed_run()
+    adapter = GenericAgentAdapter(storage, auto_file=str(file), auto_total=5)
+    adapter.capture_state("run_1", project("run_1", storage.read_events("run_1")))
+    storage.compact_run("run_1")
+    assert not any(e.type is EventType.RUN_STARTED for e in storage.read_events("run_1"))
+
+    # A compacted run is still live; the capture must not raise.
+    adapter.capture_state("run_1", project("run_1", storage.read_all_events("run_1")))
+
+    history = list(storage.read_all_events("run_1"))
+    assert sum(1 for e in history if e.type is EventType.TASK_UPDATED) == 1
+    assert sum(1 for e in history if e.type is EventType.EVIDENCE_ADDED) == 1
 
 
 def test_intercept_action_fires_auto_progress_without_blocking(

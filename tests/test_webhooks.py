@@ -23,7 +23,7 @@ from continuum.checkpoint import CheckpointManager
 from continuum.cli import ExitCode, main
 from continuum.environment import StaticProvider, capture
 from continuum.events import EventType
-from continuum.models import RecoveryContract, RecoverySafety, Run, utcnow
+from continuum.models import Origin, RecoveryContract, RecoverySafety, Run, utcnow
 from continuum.recovery.notify import SIGNATURE_HEADER, verify_signature
 from continuum.recovery.webhooks import (
     EVENT_REQUEST_HUMAN,
@@ -418,12 +418,16 @@ def _run_cli(*argv: str) -> tuple[int, str, str]:
     return code, out.getvalue(), err.getvalue()
 
 
-def _write_registry(root: Path, url: str, *, secret: str | None = None) -> Path:
+def _write_registry(
+    root: Path, url: str, *, secret: str | None = None, events: list[str] | None = None
+) -> Path:
     (root / ".continuum").mkdir(exist_ok=True)
     path = root / ".continuum" / "webhooks.json"
-    entry = {"url": url}
+    entry: dict = {"url": url}
     if secret:
         entry["secret"] = secret
+    if events:
+        entry["events"] = events
     path.write_text(json.dumps({"endpoints": [entry]}), encoding="utf-8")
     return path
 
@@ -501,6 +505,30 @@ def _seed_blocked_run(db: str) -> None:
         ActionLedger(storage, "run_1").claim("github.create_issue", {"title": "Anomaly"})
 
 
+def _seed_self_certified_blocked_run(db: str) -> None:
+    """A request_human run whose state was written by a self-certified origin.
+
+    The unreconciled side effect makes the verdict ``request_human``; the
+    ``EXTERNAL_AGENT`` origins downgrade goal and progress to
+    ``requires_review``. Both conditions at once is what the
+    ``requires_review`` event filter exists to signal (issue #1180).
+    """
+    with SQLiteStorage(db) as storage:
+        storage.create_run(Run(run_id="run_1", goal="g"))
+        storage.append_event(
+            "run_1", EventType.RUN_STARTED, {"goal": "g"}, source=Origin.EXTERNAL_AGENT
+        )
+        storage.append_event(
+            "run_1",
+            EventType.TASK_UPDATED,
+            {"completed": 1, "pending": 0, "failed": 0, "total": 1},
+            source=Origin.EXTERNAL_AGENT,
+        )
+        from continuum.actions import ActionLedger
+
+        ActionLedger(storage, "run_1").claim("github.create_issue", {"title": "Anomaly"})
+
+
 def test_resume_notifies_on_request_human(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     captured: dict = {}
@@ -526,6 +554,94 @@ def test_resume_notifies_on_request_human(tmp_path: Path, monkeypatch: pytest.Mo
         # Dedup state is the event log, so a fresh process does not re-ring.
         assert len(captured["hits"]) == 1, err2
         assert "notification sent" not in err2
+    finally:
+        server.shutdown()
+
+
+def test_resume_fires_the_requires_review_filter_for_self_certified_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The documented requires_review filter must ring, not silently no-op (#1180).
+
+    A self-certified blocked run carries both signals at once: the verdict is
+    request_human and its components were downgraded to requires_review. An
+    endpoint opted into the review filter hears about it, alongside, not
+    instead of, the human-gate endpoint.
+    """
+    monkeypatch.chdir(tmp_path)
+    captured: dict = {}
+    server = _receiver(captured)
+    try:
+        db = str(tmp_path / "demo.db")
+        _seed_self_certified_blocked_run(db)
+        (tmp_path / ".continuum").mkdir(exist_ok=True)
+        (tmp_path / ".continuum" / "webhooks.json").write_text(
+            json.dumps(
+                {
+                    "endpoints": [
+                        {"url": f"http://127.0.0.1:{server.server_port}/human"},
+                        {
+                            "url": f"http://127.0.0.1:{server.server_port}/review",
+                            "events": ["requires_review"],
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        code, _, err = _run_cli("--db", db, "resume", "run_1")
+        assert code == ExitCode.REQUIRES_HUMAN
+        paths = [hit["body"] for hit in captured["hits"]]
+        assert len(paths) == 2, err
+
+        human = json.loads(captured["hits"][0]["body"])
+        assert human["event"] == "request_human"
+        assert human["mode"] == "request_human"
+        review = json.loads(captured["hits"][1]["body"])
+        assert review["event"] == "requires_review"
+        # The review payload reports its own mode, so an operator reading it
+        # knows which bell rang.
+        assert review["mode"] == "requires_review"
+        assert review["run_id"] == "run_1"
+        # The two rounds share a contract but not a verdict key, so both ring.
+        with SQLiteStorage(db) as storage:
+            sent = [
+                e for e in storage.read_all_events("run_1") if e.type is EventType.NOTIFICATION_SENT
+            ]
+        assert len(sent) == 2
+    finally:
+        server.shutdown()
+
+
+def test_requires_review_filter_stays_silent_on_a_plain_human_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blocked run with nothing to review must not fire the review filter.
+
+    The derivation is the validation report, not the mode: request_human alone
+    is the human gate's signal and nothing more.
+    """
+    monkeypatch.chdir(tmp_path)
+    captured: dict = {}
+    server = _receiver(captured)
+    try:
+        db = str(tmp_path / "demo.db")
+        _seed_blocked_run(db)
+        _write_registry(
+            tmp_path,
+            f"http://127.0.0.1:{server.server_port}/review",
+            events=["requires_review"],
+        )
+
+        code, _, err = _run_cli("--db", db, "resume", "run_1", "--env", "dataset=v3")
+        assert code == ExitCode.REQUIRES_HUMAN
+        assert "hits" not in captured, err
+        with SQLiteStorage(db) as storage:
+            sent = [
+                e for e in storage.read_all_events("run_1") if e.type is EventType.NOTIFICATION_SENT
+            ]
+        assert sent == [], "no review-worthy state, so no notification rows"
     finally:
         server.shutdown()
 

@@ -14,9 +14,50 @@ from continuum.events import EventType
 from continuum.models import Origin, Run, StateStatus
 from continuum.provenance_map import provenance_for_run
 from continuum.recovery.summary import build_informed_retry
-from continuum.state.semantic import project
+from continuum.state.semantic import _weakest_from_state, project, project_incremental
 from continuum.state.validator import validate_state
 from continuum.storage import SQLiteStorage
+
+
+def test_weakest_seed_includes_external_dependencies_no_upward_laundering() -> None:
+    """Resume-from-checkpoint must clamp exactly like a full re-projection when
+    the base's weakest origin came from an external dependency (issue #1373).
+
+    ``_weakest_from_state`` seeds ``_weakest_seen`` from a checkpoint's per-fact
+    origins, but it used to skip ``external_dependencies``. A run that declared
+    a dependency from a weak source (EXTERNAL_AGENT), checkpointed, then folded a
+    later derived fact on resume would stamp that fact at *higher* trust than a
+    full re-projection of the same prefix -- breaking the incremental==full
+    invariant and the #294 trust-monotonicity guarantee.
+    """
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="r", goal="g"))
+    storage.append_event("r", EventType.RUN_STARTED, {"goal": "g"}, source=Origin.DETERMINISTIC)
+    storage.append_event(
+        "r",
+        EventType.DEPENDENCY_DECLARED,
+        {"resource": "api", "version": "1"},
+        source=Origin.EXTERNAL_AGENT,
+    )
+    storage.append_event(
+        "r",
+        EventType.DECISION_CREATED,
+        {"decision_id": "d1", "decision": "ship it", "derived_origin": Origin.DETERMINISTIC.value},
+        source=Origin.DETERMINISTIC,
+    )
+    events = list(storage.read_all_events("r"))
+
+    state_full = project("r", events)
+    base = project("r", events[:2])  # checkpoint state after the weak dependency
+    state_incr, _ = project_incremental("r", events[2:], base=base)
+
+    # The dependency's EXTERNAL_AGENT origin must be part of the seed.
+    assert _weakest_from_state(base) is Origin.EXTERNAL_AGENT
+    # Same log prefix -> same trust stamp on the later decision.
+    assert state_full.decisions[0].provenance.origin is Origin.EXTERNAL_AGENT
+    assert state_incr.decisions[0].provenance.origin is state_full.decisions[0].provenance.origin
+
+    storage.close()
 
 
 def test_untrusted_fact_survives_compaction_still_requires_review() -> None:

@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`continuum policy-review` reports recovery history by action type (#743).**
+  A read-only, deterministic aggregate of repair attempts, human-gate
+  outcomes, compaction survival and reconciliation outcomes per action type,
+  over live and archived history alike, for periodic maintainer review. The
+  report is evidence for a human decision and never a policy engine: nothing
+  it computes feeds `plan_repairs` or changes a recovery verdict, and a high
+  human-required rate means the probes or the workflow deserve investigation,
+  not a lower safety bar. Without a `run_id` it spans every run.
+
 - **The escalation policy that budgets human attention (#1409).** Every action
   the ledger cannot settle on its own becomes `REQUIRES_REVIEW` and interrupts
   a human at once, and on a weeks-long run that floods the reviewer into
@@ -206,7 +215,35 @@ All notable changes to this project are documented here. The format follows
   and behave exactly as before.
 ### Fixed
 
-- **Re-sync shared counts and repair integration seams opened by the #1400s
+- **`policy-review` no longer reports an uncertain side effect as absent.**
+  The `side_effect_actions` rows folded every `ACTION_RECONCILED` event that was
+  not `completed` into `reconciled_absent`, but only `reconcile(occurred=False)`
+  is a confirmation of absence. `ActionLedger.claim` also writes that event type
+  for whatever a caller-supplied `on_unknown` resolver returns, and such a
+  resolver can legitimately resolve to `UNKNOWN` ("the probe could not tell") or
+  `REQUIRES_REVIEW` ("a human has to judge"). Both were counted as confirmed
+  absence, so the report answered "was the effect absent?" with "yes" when the
+  truth was "nobody knows", which is the one claim a maintainer reading it must
+  not be able to make by mistake. Only `failed` counts as absent now; the other
+  two land in a new `reconciled_uncertain` bucket that the text render shows
+  alongside the other two, so the open question stays visible instead of being
+  reported as a finding.
+
+- **File-derived progress no longer bloats the log on a compacted run.**
+  `record_file_progress` gates its mirror on a projection of the log, but folded
+  the live tail (`read_events`) alone. Once a run has been compacted the
+  goal-bearing prefix, `RUN_STARTED` included, lives in `events_archive`, so the
+  fold raised `ProjectionError` and the except branch fell through to "changed",
+  appending a redundant `TASK_UPDATED` and a duplicate-evidence tail on every call
+  over an unchanged file — the documented no-op contract was silently void. The
+  fold now reads the full history (`read_all_events`); a run with no goal yet
+  still raises against the merged history, so the "not yet projectable" behaviour
+  is unchanged. The reproject inside `GenericAgentAdapter.capture_state`'s auto
+  branch had the same live-tail read and rejected the checkpoint outright with
+  `TASK_UPDATED before the run was started` — the mirror's own appended event
+  could not fold against the archived start. It now reads the archive too.
+
+
   merges.** Several branches each synced the documented collected total on its
   own base, so once merged the tree collected more tests than every doc stated
   and the docs-count guard failed; README, the translated READMEs, CHANGELOG,
@@ -516,6 +553,22 @@ All notable changes to this project are documented here. The format follows
   flows through it. No callers, not exported through `__all__`; recoverable
   from history (355ba76) if a future surface needs that exact rendering.
 
+- **Dead `restore_to_anchor` and `merge_to_anchor` wrappers (#1094).** Both
+  were exported in their modules' `__all__` from the #408 precondition-gate
+  work and neither ever gained a caller in `src/`, a script, or the CLI: the
+  live paths (`approve_restore` and `approve_merge`, reached from the restore
+  and merge commands) call the shared `check_preconditions` /
+  `check_merge_preconditions` gate directly, and `recovery/__init__.py`
+  re-exports only the `approve_*` entry points. `restore_to_anchor` was
+  additionally dishonest about its own signature: it declared a keyword-only
+  `reason` and never read it, so a caller passing an audit reason would have
+  it silently dropped rather than recorded on the `RUN_RESTORED` event the way
+  `approve_restore` records it. Both wrappers removed with their `__all__`
+  entries; the three merge tests that exercised the wrapper now call
+  `check_merge_preconditions` directly, so the gate's union behaviour stays
+  covered. Recoverable from history if a one-call "check then approve"
+  convenience ever earns a caller.
+
 ### Fixed
 
 - **The pin-marker surface no longer contradicts itself (#1099).** The docs
@@ -575,6 +628,8 @@ All notable changes to this project are documented here. The format follows
   error anywhere. Both inserts now carry `run.parent_run_id` and the row maps
   it into the `Run`, matching SQLite; the contract suite gained a case that
   forks on the engine and asserts `children_of` resolves the child.
+- **The translated docs no longer tell users to pass `--json` after the subcommand, where argparse rejects it (#1144).**
+  `--json` is a global flag on the top-level parser, so `continuum resume RUN --json` exits 2 with "unrecognized arguments": the trailing position is not a valid invocation anywhere. Five translated READMEs still claimed every command accepts it there, and `docs/guides/memory_governance.md` built two shell pipelines on the failing form, so the whole tenant-enumeration section it belongs to produced nothing: the command never ran and `python -m json.tool` read an empty pipe. The guides now state the placement and the failure, matching `docs/api/cli.md`, which already documented the rule correctly. The translated READMEs also picked up the webhook caveat the English README gained when read-only-ness was qualified, so they describe the same CLI the canonical docs do rather than a stale version of it.
 - **`replay --upto` works on a compacted run instead of failing for every value
   of `N` and blaming the operator for it (#1172).** `cmd_replay` read only the
   live event tail, where `RUN_STARTED` no longer lives once a run is compacted,
@@ -642,6 +697,26 @@ All notable changes to this project are documented here. The format follows
   but it was wrong in the direction of hiding drift, which is the opposite of
   what a drift report is for. `latest_pinning` now folds `read_all_events`, the
   same history the assess (#1050) and watch (#1072) folds already read.
+- **The content-addressed snapshot store now rejects a key that is not a digest
+  before it is joined into a path, so a traversal string cannot turn `rewind`
+  into a file-read primitive (#1268).** `snapshot_path` built its storage
+  location by pure concatenation, so a `sha256` containing `../` escaped
+  `.continuum/file-snapshots` and landed anywhere the process could reach;
+  `restore_file` then copied whatever that path pointed at over a workspace
+  file, and `snapshot_path(key).exists()` was an existence oracle for the same
+  range. The write side of this store was hardened in #1110 (issue #1077), which
+  closed filing content under a digest it does not have without touching the
+  read side -- the worse direction, reached through `continuum rewind`, the
+  command whose purpose is to restore trusted content. A key is now only a name
+  here when it is a 64-char lowercase hex digest: `snapshot_path` raises
+  `ValueError`, `snapshot_file` and `restore_file` fail closed to their existing
+  `None`/`False` contracts so a caller that does not catch still cannot reach
+  `copyfile`, and `rewind` reports the poisoned key as unrecoverable rather than
+  following it. Stated honestly, no shipped CLI or MCP path lets an agent plant
+  such a string today -- every `TOOL_COMPLETED` writer computes its own digest
+  -- so this is a defect in the sink, not a complete exploit chain; it is worth
+  closing because the content-addressed contract the store relies on was
+  enforced nowhere on the side that copies bytes into the workspace.
 - **The Postgres action index no longer reads as permanently dirty on an
   ordinary store (#1321).** `action_index_drift` compares the projection
   against a canonical fold of the log, and the two sides numbered each row on
@@ -1552,7 +1627,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,809 collected, ~2,773 passed, ~36 skipped on a minimal env).
+  (~2,898 collected, ~2,862 passed, ~36 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

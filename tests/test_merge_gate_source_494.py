@@ -16,7 +16,7 @@ from continuum.actions.idempotency import idempotency_key
 from continuum.events import EventType
 from continuum.models import Run
 from continuum.recovery.gate import EditPreconditionError, check_merge_preconditions
-from continuum.recovery.merge import approve_merge, merge_to_anchor
+from continuum.recovery.merge import approve_merge
 from continuum.storage import SQLiteStorage
 
 
@@ -116,6 +116,97 @@ def test_source_depended_with_carry_forward_passes_and_lineage_stamps() -> None:
         storage.close()
 
 
+def test_source_completion_reconciled_away_does_not_strand_merge() -> None:
+    """A source completion reconciled to absent is not a live depended result (#1505).
+
+    ``reconcile(occurred=False)`` folds an already-COMPLETED action to FAILED and
+    clears its receipt, so the effect no longer exists. Stranding it is then
+    impossible and the merge must pass. The cross-run fold has to follow the
+    newest status, as ``derive()`` does, instead of keeping the first COMPLETED
+    entry for the key.
+    """
+    storage = SQLiteStorage(":memory:")
+    try:
+        _make_run(storage, "target")
+        _make_run(storage, "source")
+        ledger_src = ActionLedger(storage, "source")
+        outcome = ledger_src.claim("github.create_issue", {"title": "t"}, key="k1")
+        ledger_src.complete(outcome.key, external_id="42")
+        expected_key = idempotency_key(
+            "github.create_issue", {"title": "t"}, scope="source", key="k1"
+        )
+        storage.append_event(
+            "target",
+            EventType.WORK_ADDED,
+            {"task_id": "w1", "prerequisite": [expected_key]},
+        )
+        # Control: with the completion still live, the merge is refused.
+        with pytest.raises(EditPreconditionError):
+            approve_merge(
+                storage,
+                "target",
+                source_run_id="source",
+                anchor_sequence=0,
+                reason="cross",
+            )
+        # The probe contradicts the optimistic complete(): no external effect.
+        ledger_src.reconcile(outcome.key, occurred=False)
+        # Nothing is stranded now, so the same merge succeeds.
+        merged = approve_merge(
+            storage,
+            "target",
+            source_run_id="source",
+            anchor_sequence=0,
+            reason="cross",
+        )
+        assert merged.run_id == "target"
+    finally:
+        storage.close()
+
+
+def test_source_completion_compensated_away_does_not_strand_merge() -> None:
+    """A compensated source completion is not a live depended result either (#1505).
+
+    Compensation undoes the effect deliberately, so a target step referencing it
+    cannot be stranded by the merge. Same newest-status-wins rule, reached
+    through the compensate path rather than reconcile.
+    """
+    storage = SQLiteStorage(":memory:")
+    try:
+        _make_run(storage, "target")
+        _make_run(storage, "source")
+        ledger_src = ActionLedger(storage, "source")
+        outcome = ledger_src.claim("github.create_issue", {"title": "t"}, key="k1")
+        ledger_src.complete(outcome.key, external_id="42")
+        expected_key = idempotency_key(
+            "github.create_issue", {"title": "t"}, scope="source", key="k1"
+        )
+        storage.append_event(
+            "target",
+            EventType.WORK_ADDED,
+            {"task_id": "w1", "prerequisite": [expected_key]},
+        )
+        with pytest.raises(EditPreconditionError):
+            approve_merge(
+                storage,
+                "target",
+                source_run_id="source",
+                anchor_sequence=0,
+                reason="cross",
+            )
+        ledger_src.compensate(outcome.key)
+        merged = approve_merge(
+            storage,
+            "target",
+            source_run_id="source",
+            anchor_sequence=0,
+            reason="cross",
+        )
+        assert merged.run_id == "target"
+    finally:
+        storage.close()
+
+
 def test_clean_merge_of_two_branches_passes_and_stamps_both_summaries() -> None:
     storage = SQLiteStorage(":memory:")
     try:
@@ -137,13 +228,13 @@ def test_clean_merge_of_two_branches_passes_and_stamps_both_summaries() -> None:
         assert lineage.payload["preconditions"]["depended_results"] == []
         assert lineage.payload["preconditions"]["uncertain_slots"] == []
         assert lineage.payload["source_run_id"] == "source"
-        # Also check merge_to_anchor stamps similarly when source given
+        # Also check the merge gate stamps similarly when source given
         storage2 = SQLiteStorage(":memory:")
         try:
             _make_run(storage2, "t2")
             _make_run(storage2, "s2")
-            derivation, carry_set, summary = merge_to_anchor(
-                storage2, "t2", 0, reason="clean2", source_run_id="s2"
+            derivation, carry_set, summary, _t2, _s2 = check_merge_preconditions(
+                storage2, target_run_id="t2", target_anchor=0, source_run_id="s2"
             )
             assert summary["unsettled_authorizations"] == []
             assert summary["depended_results"] == []
@@ -327,7 +418,7 @@ def test_source_side_each_kind_blocks_and_carry_by_key_action_sequence(kind: str
         storage.close()
 
 
-def test_merge_to_anchor_with_source_union() -> None:
+def test_merge_gate_with_source_union() -> None:
     storage = SQLiteStorage(":memory:")
     try:
         _make_run(storage, "target")
@@ -335,10 +426,16 @@ def test_merge_to_anchor_with_source_union() -> None:
         ledger = ActionLedger(storage, "source")
         out = ledger.claim("slack.notify", {"channel": "#ops"}, key="k1")
         with pytest.raises(EditPreconditionError):
-            merge_to_anchor(storage, "target", 0, reason="block", source_run_id="source")
+            check_merge_preconditions(
+                storage, target_run_id="target", target_anchor=0, source_run_id="source"
+            )
         # carry by source key passes
-        _, _, summary = merge_to_anchor(
-            storage, "target", 0, reason="carry", source_run_id="source", carry_forward=[out.key]
+        _, _, summary, _t, _s = check_merge_preconditions(
+            storage,
+            target_run_id="target",
+            target_anchor=0,
+            source_run_id="source",
+            carry_forward=[out.key],
         )
         assert summary is not None
     finally:

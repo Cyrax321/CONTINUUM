@@ -9,7 +9,7 @@ appends its audit events, it never rolls state back or rewrites a checkpoint.
 But the reading is not inert. ``RecoveryEngine.assess`` feeds it into
 ``_decide``, where a breach proposes ``RecoveryMode.WAIT`` (never
 ``ROLLBACK``, per #302), and when WAIT is the most cautious proposal it wins.
-Through ``exit_code_for`` that lands as ``ExitCode.REQUIRES_HUMAN`` (20), so
+Through ``exit_code_for`` that lands as ``ExitCode.WAIT`` (20), so
 ``continuum resume`` exits non-zero and a chained
 ``continuum resume "$RUN" && ./start-agent.sh`` short-circuits.
 

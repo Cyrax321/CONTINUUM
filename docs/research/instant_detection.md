@@ -6,7 +6,7 @@ A Claude Code session only acts after the user sends a message, so detection cos
 
 ## Proposal
 
-- **SessionStart hook.** Add a `SessionStart` hook that runs `continuum resume --json` out of band before the first model turn. The hook is a small shell script, not a model call, so it adds tens of milliseconds, not seconds. If the resume reports an interrupted run, the hook injects a pre rendered prompt of the form: `Interrupted run run_123 found. Recovery decision is REQUEST_HUMAN with next action reconcile_action:xyz. Should I reconcile or show the contract`.
+- **SessionStart hook.** Add a `SessionStart` hook that runs `continuum --json resume` out of band before the first model turn. The hook is a small shell script, not a model call, so it adds tens of milliseconds, not seconds. If the resume reports an interrupted run, the hook injects a pre rendered prompt of the form: `Interrupted run run_123 found. Recovery decision is REQUEST_HUMAN with next action reconcile_action:xyz. Should I reconcile or show the contract`.
 
 - **Wrapper script.** For clients without hooks, provide `continuum-resume-banner` that prints the same banner to stdout. The user aliases `claude` to run the banner first, so the information is visible before the first message.
 
@@ -14,7 +14,7 @@ A Claude Code session only acts after the user sends a message, so detection cos
 
 No implementation is done here. This is a design note for issue 83, with no external claims.
 
-Reproduce the cost by timing a fresh session: user message, model inference, `continuum_resume` tool call, and the formatted question, versus the hook path which is a single `continuum resume --json` subprocess.
+Reproduce the cost by timing a fresh session: user message, model inference, `continuum_resume` tool call, and the formatted question, versus the hook path which is a single `continuum --json resume` subprocess.
 
 ## Risks
 

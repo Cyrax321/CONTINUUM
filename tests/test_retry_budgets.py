@@ -892,6 +892,27 @@ def test_completed_attempts_do_not_count(db: str) -> None:
     assert evaluate_budget({"default_max_attempts": 3}, "send_invoice", 0)[0] is True
 
 
+def test_reconciled_completions_do_not_count(db: str) -> None:
+    """A confirmed-by-probe success is excluded too, not only a complete() one (#309).
+
+    ``complete()`` records COMPLETED as an ACTION_RECORDED, which the fold sees and
+    drops. ``reconcile(occurred=True)`` settles an UNKNOWN action a probe confirmed
+    and records COMPLETED as an ACTION_RECONCILED, which the fold skipped: the key's
+    final status stayed UNKNOWN, so a succeeded operation kept consuming its retry
+    allowance and a later repeat could be refused instead of returning its result.
+    """
+    ledger = ActionLedger(SQLiteStorage(db), "run_1")
+    for n in range(3):
+        outcome = ledger.claim("charge_card", {}, key=f"charge:{n}")
+        ledger.fail(outcome.key, "timeout, effect uncertain", certain=False)  # -> UNKNOWN
+        ledger.reconcile(outcome.key, occurred=True, external_id=f"ext-{n}")  # probe confirms
+
+    events = SQLiteStorage(db).read_events("run_1")
+    assert attempts_by_key(events, "charge_card") == {}
+    assert attempts_for_type(events, "charge_card") == 0
+    assert evaluate_budget({"default_max_attempts": 3}, "charge_card", 0)[0] is True
+
+
 def test_only_the_unsettled_attempts_of_a_retried_key_count(db: str) -> None:
     """The amplification guard must survive the fix: failures still count."""
     ledger = ActionLedger(SQLiteStorage(db), "run_1")

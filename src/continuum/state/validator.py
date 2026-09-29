@@ -302,7 +302,16 @@ class StateValidator:
             # re-checked and only their derivation subtree is allowed to go
             # stale. Everything else keeps the status it already had, so a
             # localized recovery does not re-taint components it is not
-            # responsible for.
+            # responsible for. The self-certification checks (goal, progress,
+            # plan, approvals, model, evidence, and derived-amplification) are
+            # therefore all omitted here: they inspect recorded status rather
+            # than the environment, so running them would re-flag components
+            # unrelated to the scoped resources and contradict the promise
+            # above. _check_derived is a self-certification check too (a
+            # self-reported finding cannot key on any environment resource, so
+            # it can never belong to the scoped subtree), so it is omitted for
+            # the same reason the sibling checks are; the full scope=None path
+            # still enforces issue #392 on every ordinary resume.
             scope_set = set(scope)
             broken = {r: c for r, c in broken.items() if r in scope_set}
             state = self._apply_dependency_status(
@@ -311,7 +320,6 @@ class StateValidator:
             state = self._propagate(state, broken, entries)
             if events is not None:
                 state = self._propagate_caused_by(state, events, entries)
-            self._check_derived(state, entries)
 
         blocking = [
             e

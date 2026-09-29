@@ -96,8 +96,12 @@ class GenericAgentAdapter(AgentAdapter):
             from continuum.hooks import record_file_progress
 
             record_file_progress(self.manager, run_id, self.auto_file, self.auto_total)
-            # Reproject so the checkpoint captures the derived progress
-            state = project(run_id, self.storage.read_events(run_id))
+            # Reproject so the checkpoint captures the derived progress. The fold
+            # needs the archive too: on a compacted run the live tail holds no
+            # RUN_STARTED, so a live-only read here would reject the checkpoint
+            # (and the appended TASK_UPDATED would not fold against the archived
+            # start).
+            state = project(run_id, self.storage.read_all_events(run_id))
         return self.manager.checkpoint(
             run_id,
             state=state,
@@ -121,11 +125,15 @@ class GenericAgentAdapter(AgentAdapter):
         # Projecting prior declarations is an optimization (skip re-pinning the
         # same version). If the run has no goal yet, projection is impossible, so
         # fall back to declaring everything; project folds duplicates later.
+        # The fold reads the full history: once a run has been compacted the
+        # goal-bearing prefix (and with it any earlier declaration) lives only in
+        # the archive, so a live-tail read raises ProjectionError and the fallback
+        # below would re-pin every resource on every checkpoint.
         try:
             declared = {
                 dependency.resource: dependency.version
                 for dependency in project(
-                    run_id, self.storage.read_events(run_id)
+                    run_id, self.storage.read_all_events(run_id)
                 ).external_dependencies
             }
         except ProjectionError:

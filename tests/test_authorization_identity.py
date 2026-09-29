@@ -159,6 +159,41 @@ def test_ledger_anchored_identity_uses_unique_match() -> None:
     )
 
 
+def test_ledger_anchored_volatile_is_stripped_from_the_stored_side() -> None:
+    """The ledger-anchored path must strip volatile on both sides too.
+
+    A declared-volatile strong token left on the stored action alone made it a
+    spurious superset of the drifted re-claim, so the anchor was lost and the
+    budget bound to a fresh bucket instead of the prior one (issue #1346).
+    """
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_v", goal="g"))
+    ledger = ActionLedger(storage, "run_v")
+
+    first = ledger.claim(
+        "send_email",
+        {"to": "/outbox/alice.txt", "trace_id": "REQ-99999"},
+        volatile=["trace_id"],
+    )
+    ledger.complete(first.key, result={"ok": True})
+
+    anchored = resolve_authorization_id(
+        "send_email",
+        None,
+        {"target": "/outbox/alice.txt", "trace_id": "REQ-88888"},
+        volatile=["trace_id"],
+        ledger=ledger,
+    )
+    pure = resolve_authorization_id(
+        "send_email",
+        None,
+        {"target": "/outbox/alice.txt", "trace_id": "REQ-88888"},
+        volatile=["trace_id"],
+    )
+    assert anchored is not None
+    assert anchored == pure
+
+
 def test_ledger_ambiguous_returns_none() -> None:
     """Multiple completed actions sharing tokens is ambiguous, return None."""
     storage = SQLiteStorage(":memory:")

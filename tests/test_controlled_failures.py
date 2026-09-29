@@ -43,3 +43,22 @@ def test_each_scenario_has_ground_truth() -> None:
         # truth straight against a RecoveryDecision.mode.
         RecoveryMode[scenario.expected]
         assert scenario.description
+
+
+def test_recovered_rows_declare_real_modes() -> None:
+    # Regression pin for the two rows that used to declare "RETRY", a name the
+    # enum has never defined. Enum membership alone would still accept a
+    # wrong-but-valid mode such as ABORT, so the values are named explicitly.
+    assert by_name("tool_failure").expected == "RESUME"
+    assert by_name("api_timeout").expected == "REQUEST_HUMAN"
+
+
+def test_uncertain_side_effect_scenarios_agree() -> None:
+    # Two rows describe the same shape, an effect that may have landed, so they
+    # must ask for the same recovery. A drift between them would read as a
+    # recovery regression once the table is graded against the engine.
+    uncertain = {
+        by_name("api_timeout").expected,
+        by_name("external_side_effect").expected,
+    }
+    assert uncertain == {"REQUEST_HUMAN"}

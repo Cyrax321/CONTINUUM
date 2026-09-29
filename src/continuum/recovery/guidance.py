@@ -145,6 +145,8 @@ def human_steps_for(
             RepairKind.REDERIVE_FINDING,
         ):
             steps.append(f"re-derive {step.target} from its source, then re-validate")
+        elif step.kind is RepairKind.REVIEW_DECISION:
+            steps.append(f"review decision {step.target}: confirm it still holds, then re-validate")
         elif step.kind is RepairKind.RENEW_APPROVAL:
             steps.append(f"obtain a fresh approval for {step.target}, then record it via MCP")
         elif step.kind is RepairKind.REVALIDATE_MODEL_STATE:

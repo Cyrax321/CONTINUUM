@@ -166,6 +166,28 @@ def test_an_unhashable_value_becomes_unknown() -> None:
     assert "error" in resource.metadata
 
 
+def test_a_self_referential_value_becomes_unknown_not_a_recursion_crash() -> None:
+    """A cyclic value makes stable_hash raise RecursionError, which is neither a
+    TypeError nor a ValueError. The narrow guard let it abort the whole snapshot;
+    the value must degrade to UNKNOWN_VERSION like any other unhashable input,
+    matching the CallableProvider sibling and the capture() contract (#1374)."""
+    cyclic: list[object] = []
+    cyclic.append(cyclic)
+    resource = capture("run_1", ValueProvider(loop=cyclic)).resources["loop"]
+    assert resource.version == UNKNOWN_VERSION
+    assert "RecursionError" in resource.metadata["error"]
+
+
+def test_one_bad_value_does_not_sink_its_neighbours() -> None:
+    """Isolation is per-resource: a single unhashable value degrades to unknown
+    without taking a well-formed sibling captured in the same provider with it."""
+    cyclic: list[object] = []
+    cyclic.append(cyclic)
+    resources = capture("run_1", ValueProvider(loop=cyclic, good="v1")).resources
+    assert resources["loop"].version == UNKNOWN_VERSION
+    assert resources["good"].checksum is not None
+
+
 def test_a_probe_that_fails_becomes_unknown_not_an_exception() -> None:
     def unreachable() -> str:
         raise ConnectionError("api down")

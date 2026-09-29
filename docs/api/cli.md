@@ -59,6 +59,7 @@ continuum --json <command>                    # machine-readable output
 | `health` | Advisory prefix-trust health check. Read-only. |
 | `impact` | Show downstream impact of an evidence item. Read-only. |
 | `merge` | Merge into a run at an anchor. Mutates storage. |
+| `policy-review [run_id]` | Advisory per-action-type report over recovery history (attempts, human gates, compaction survival, reconciliation outcomes). Read-only. See [policy learning](../research/policy_learning.md). |
 | `precompact` | Checkpoint before context compaction (PreCompact hook). Mutates the run. |
 | `provenance` | Show provenance DAG. Read-only. |
 | `report --trajectory <run_id>` | Distil claims, uncertain side effects, scar rate and stall sites from the archive and the active log, and audit the stored reports. Read-only. |
@@ -82,7 +83,7 @@ continuum verify run_42
 continuum attest run_42 --key signer.pem --out run_42.attest.json
 continuum attest-verify run_42 --attest run_42.attest.json
 
-# Same data, machine-readable: --json goes before the command, not after it
+# Same data, machine-readable: --json works before or after the command
 continuum --json runs | jq '.runs[] | {run_id, status}'
 continuum --json resume run_42 | jq '{safe, mode}'
 
@@ -98,10 +99,12 @@ With `--json`, `children_total` and `children_hidden` report the full count
 alongside the truncated `children` list. A `--limit` below `1` is refused rather
 than clamped (issue #321).
 
-`--db` (storage URL or path, default `continuum.db`) and `--json`
-(machine-readable output) are global flags, so they go before the command:
-`continuum --json runs`, not `continuum runs --json`, which is rejected as an
-unrecognised argument. Most commands emit JSON with it, and
+`--db` (storage URL or path, default `continuum.db`) is a global flag and goes
+before the command: `continuum --db other.db runs`. `--json` (machine-readable
+output) is also global but is accepted on either side, so `continuum --json
+runs` and `continuum runs --json` are equivalent, and it now appears in every
+`continuum <command> --help` so scripting-friendly output is discoverable
+per command (issue #328). Most commands emit JSON with it, and
 `continuum <command> --help` lists that command's own flags. Colour is
 TTY-aware and respects `NO_COLOR`; piped output is byte-identical to uncoloured
 output.

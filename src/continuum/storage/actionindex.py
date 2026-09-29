@@ -21,8 +21,6 @@ from continuum.events import EventType
 
 __all__ = [
     "ACTION_EVENT_TYPES",
-    "INDEX_DDL_SQLITE",
-    "INDEX_DDL_POSTGRES",
     "index_entry_from_payload",
 ]
 
@@ -31,21 +29,6 @@ ACTION_EVENT_TYPES = (
     EventType.ACTION_RECORDED,
     EventType.ACTION_RECONCILED,
     EventType.ACTION_COMPENSATED,
-)
-
-INDEX_DDL_POSTGRES = """
-CREATE TABLE IF NOT EXISTS action_index (
-    key TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL,
-    action_id TEXT NOT NULL,
-    status TEXT NOT NULL,
-    updated_seq INTEGER NOT NULL,
-    action_json TEXT NOT NULL
-)
-"""
-
-INDEX_DDL_SQLITE = INDEX_DDL_POSTGRES.replace("TEXT PRIMARY KEY", "TEXT PRIMARY KEY") + (
-    "\nCREATE INDEX IF NOT EXISTS action_index_run ON action_index(run_id)\n"
 )
 
 

@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI エントリーポイント
 continuum-mcp --help             # MCP サーバーエントリーポイント（[mcp] または [dev] が必要）
-pytest -q                        # 最小環境で約 2,809 件収集、約 2,773 件通過、約 36 件スキップ（正確な数は異なる）
+pytest -q                        # 最小環境で約 2,898 件収集、約 2,363 件通過、約 41 件スキップ（正確な数は異なる）
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI が強制する三つのゲート
 ```
@@ -166,7 +166,7 @@ CONTINUUM は **LLM コンテキスト**（一時的）と **永続的なタス�
 
 ### クラッシュリカバリ、実際に
 
-下の画像はモックではない。`python demo-run/generate_crash_visual.py` の出力であり、`demo-run/worker.py` をドキュメント 399 で `os._exit(9)` まで実行し、`continuum resume --env dataset=v4` を呼び出して拒否パス（`REQUEST_HUMAN`、`safe:false`、exit 20）を示し、不確かな副作用を探査で調停し、同じデータベースから再開して重複作業なしで完了する。トランスクリプトは監査用に `docs/assets/crash-recovery.txt` としても保存される。
+下の画像はモックではない。`python demo-run/generate_crash_visual.py` の出力であり、`demo-run/worker.py` をドキュメント 399 で `os._exit(9)` まで実行し、`continuum resume --env dataset=v4` を呼び出して拒否パス（`REQUEST_HUMAN`、`safe:false`、exit 21）を示し、不確かな副作用を探査で調停し、同じデータベースから再開して重複作業なしで完了する。トランスクリプトは監査用に `docs/assets/crash-recovery.txt` としても保存される。
 
 再生成：
 
@@ -228,7 +228,7 @@ CONTINUUM はモックの単体テストだけでなく、実際の LLM エー�
 - **サードパーティクライアント**：Gemini CLI と Kilo Code が stdio JSON-RPC でライブ SQLite ストアに対して接続し、マルチエージェント共存と認可の分離を検証。
 - **プロトコル準拠**：`@modelcontextprotocol/inspector --cli` でプロセス死を跨いで端から端まで駆動。変更ツールはデフォルトで `CONTINUUM_MCP_MUTATING_CLIENTS` の背後で拒否され、外部クレームは `REQUIRES_REVIEW`（`safe: false`）に降格する。
 - **自己修復**：ハードキルされたサーバーは起動時に一度だけのリトライで孤立した SQLite `-wal`/`-shm` サイドカーをクリーンアップして回復する。
-- **スケール**：約 2,809 件のテストが収集され（約 2,361 が通過、残りはオプションサービスなしでスキップ）、Python 3.11、3.12、3.13 で実行（unit、`hypothesis` によるプロパティベース、並行性、敵対的）。CONTINUUM-Bench は五つのクラッシュシナリオに加え専用の argument-drift シナリオを実行し、CONTINUUM について 0 の重複作業と 0 の重複副作用を、単純な再生については完全な重複を測定する。さらに 14 シナリオのリカバリ正確性スイート（`continuum.benchmark.phase6`）が耐久実行サーベイのクラッシュポイントを実行可能なアサーションとして符号化する。
+- **スケール**：約 2,784 件のテストが収集され（約 2,363 が通過、残りはオプションサービスなしでスキップ）、Python 3.11、3.12、3.13 で実行（unit、`hypothesis` によるプロパティベース、並行性、敵対的）。CONTINUUM-Bench は五つのクラッシュシナリオに加え専用の argument-drift シナリオを実行し、CONTINUUM について 0 の重複作業と 0 の重複副作用を、単純な再生については完全な重複を測定する。さらに 14 シナリオのリカバリ正確性スイート（`continuum.benchmark.phase6`）が耐久実行サーベイのクラッシュポイントを実行可能なアサーションとして符号化する。
 - **敵対的監査**：完全な MCP 面がライブプロトコル上で監査され、三つの欠陥が見つかり修正された。手法と再現手順は [test.md](test.md) にある。
 
 ## MCP 統合
@@ -394,7 +394,7 @@ RESUME < REPAIR_AND_RESUME < REPLAN < WAIT < REQUEST_HUMAN < ROLLBACK < ABORT
 
 ### モジュールマップ、一つのライブラリ、多くの面
 
-CONTINUUM は一つのライブラリ（`src/continuum`、124 モジュール）に加え大規模なテストスイート（185 テストファイル、約 2,809 テスト）である。すべてのモジュールは一つのハッシュチェーンイベントログに追記し再生する。
+CONTINUUM は一つのライブラリ（`src/continuum`、124 モジュール）に加え大規模なテストスイート（161 テストファイル、約 2,784 テスト）である。すべてのモジュールは一つのハッシュチェーンイベントログに追記し再生する。
 
 | モジュール | 役割 |
 |:--|:--|
@@ -465,7 +465,7 @@ continuum tree <parent_run_id>                   # マルチエージェント�
 
 オプションのレジストリはコードの傍らに存在し、データでありコードではない。`.continuum/gate.json`（副作用ツール + 安定キーテンプレート）、`.continuum/reconcilers.json`（外部システムをチェックするプローブ）、`.continuum/gateway.json`（上流ルート）。
 
-各コマンドは `--json` を受け付け、読み取り専用コマンドは決して書き込まない。したがってエージェントが実行中でもライブデータベースに対して安全である。終了コードは安全性契約である（検証済みで安全な実行のみが 0 で終了する）。完全なコマンドリスト、終了コード表、状態差分出力は [references/cli.md](references/cli.md) にある。
+ほとんどのコマンドはサブコマンドの **前** に置くグローバル修飾子 `--json` を受け付ける（例: `continuum --json resume RUN`）。サブコマンドの後に置くと拒否される。読み取り専用コマンドは実行状態を変更しない。`--repair` のない `resume` は、`.continuum/webhooks.json` が設定されていると `NOTIFICATION_SENT` / `NOTIFICATION_FAILED` イベントを追記することがある。終了コードは安全性契約である（検証済みで安全な実行のみが 0 で終了する）。完全なコマンドリスト、終了コード表、状態差分出力は [references/cli.md](references/cli.md) にある。
 
 ## ロードマップ
 
@@ -512,7 +512,7 @@ CONTINUUM は耐久実行、冪等な副作用追跡、LLM エージェントの
 
 2026 年初頭、長時間実行されるエージェントが推論ではなくリカバリで失敗するのを見た。チェックポイントは検証すべき証拠ではなく、継続するための証明として扱われていた。Temporal、LangGraph、ACRFence 2603.20625、self conditioning 2509.09677 を調査し、ギャップが移植可能な検証基盤であることを見つけた。それは、時刻 T の状態と今の世界が与えられたとき、継続しても安全かを問うものである。
 
-三週間で私は一つの不変条件から CONTINUUM を構築した。すべての事実はその起源を持つ。結果は `verify()` を持つハッシュチェーンログ、安定したキー重複排除を持つ台帳、未請求の効果をブロックするゲートとゲートウェイ、そして契約を封印するリカバリエンジンである。五つの継ぎ目が同じログを Claude Code、LangGraph、LangChain、OpenAI、HTTP、OpenTelemetry に公開する。実際のキルと約 2,809 のテストで検証され、単純な再生が `50` と印字するところで `0 重複` と印字する。
+三週間で私は一つの不変条件から CONTINUUM を構築した。すべての事実はその起源を持つ。結果は `verify()` を持つハッシュチェーンログ、安定したキー重複排除を持つ台帳、未請求の効果をブロックするゲートとゲートウェイ、そして契約を封印するリカバリエンジンである。五つの継ぎ目が同じログを Claude Code、LangGraph、LangChain、OpenAI、HTTP、OpenTelemetry に公開する。実際のキルと約 2,784 のテストで検証され、単純な再生が `50` と印字するところで `0 重複` と印字する。
 
 CONTINUUM は **Anandhu P Shaji**（[@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/)）によって作成され、原作者によって保守されている。オープンソースであり [Apache-2.0](LICENSE) の下にある。コミュニティの貢献は [CONTRIBUTING.md](CONTRIBUTING.md) 経由で歓迎され、[AUTHORS.md](AUTHORS.md) と [graphs/contributors](https://github.com/Cyrax321/CONTINUUM/graphs/contributors) でクレジットされる。
 

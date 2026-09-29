@@ -262,7 +262,9 @@ class PostgresStorage(Storage):
         The table is a derived projection: an empty index over existing
         ACTION_* events means the database predates the index or lost its
         rows, and rebuilding from events is always safe. Payload is stored as
-        TEXT, so JSON functions apply directly.
+        TEXT, so it is cast to ``jsonb`` before the ``->``/``->>`` accessors
+        apply (Postgres has no ``json_extract``; that is the SQLite spelling in
+        ``migrations.py``).
         """
         has_events = self._connection.execute(
             "SELECT 1 FROM events WHERE type IN "
@@ -275,18 +277,36 @@ class PostgresStorage(Storage):
             return
         self._connection.execute(
             """
+            WITH numbered AS (
+                SELECT e.payload::jsonb->>'key' AS key,
+                       e.payload::jsonb->'action' AS action,
+                       row_number() OVER (ORDER BY e.ctid) AS ord
+                FROM events e
+                WHERE e.type IN ('ACTION_RECORDED', 'ACTION_RECONCILED', 'ACTION_COMPENSATED')
+            ), latest AS (
+                SELECT DISTINCT ON (key) key, action, ord
+                FROM numbered
+                WHERE key IS NOT NULL AND action IS NOT NULL
+                ORDER BY key, ord DESC
+            )
             INSERT INTO action_index(key, run_id, action_id, status, updated_seq, action_json)
-            SELECT e.payload::jsonb->>'key',
-                   e.payload::jsonb->'action'->>'run_id',
-                   e.payload::jsonb->'action'->>'action_id',
-                   e.payload::jsonb->'action'->>'status',
-                   nextval('action_index_ord_seq'),
-                   (e.payload::jsonb->'action')::text
-            FROM events e
-            WHERE e.type IN ('ACTION_RECORDED', 'ACTION_RECONCILED', 'ACTION_COMPENSATED')
-              AND json_extract(e.payload, '$.key') IS NOT NULL
-              AND json_extract(e.payload, '$.action') IS NOT NULL
-            ORDER BY ctid
+            SELECT key,
+                   action->>'run_id',
+                   action->>'action_id',
+                   action->>'status',
+                   ord,
+                   action::text
+            FROM latest
+            ON CONFLICT (key) DO NOTHING
+            """
+        )
+        self._connection.execute(
+            """
+            SELECT setval(
+                'action_index_ord_seq',
+                (SELECT COUNT(*) FROM events
+                 WHERE type IN ('ACTION_RECORDED', 'ACTION_RECONCILED', 'ACTION_COMPENSATED'))
+            )
             """
         )
 
@@ -790,11 +810,16 @@ class PostgresStorage(Storage):
 
         Always global by design: keys live in one store-wide namespace, so a
         per-run rewrite could collide with another run's legitimate row of
-        the same key. A correction is any key whose stored row was missing,
-        stale or spurious.
+        the same key. Mirrors the SQLite engine's count so ``verify --repair-index``
+        reports the same number from either backend (#1267). A correction is any
+        key whose stored row was missing, stale, or spurious: changed-or-added
+        rows plus rows the rebuild removed.
         """
         canonical = self._canonical_index_rows()
         with self._write():
+            # Snapshot the stored rows under the write lock and ahead of the
+            # DELETE, so the count measures the index the rebuild replaced
+            # rather than one a concurrent writer shifted underneath it.
             before = {
                 r["key"]: (int(r["updated_seq"]), r["status"])
                 for r in self._connection.execute(

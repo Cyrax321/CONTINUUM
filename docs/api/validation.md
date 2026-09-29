@@ -8,7 +8,9 @@ evidence resting on it, to the finding, to the final decision.
 from continuum.state.validator import StateValidator, validate_state
 
 outcome = validate_state(state, current_environment=env, expected_model="gpt-4o")
-print(outcome.report.status)   # VALID | STALE | CONFLICTED | UNKNOWN
+print(outcome.report.safe_to_resume)            # overall verdict: True only when every component is VALID
+for entry in outcome.report.statuses:           # per-component StateStatus
+    print(entry.component, entry.status)        # VALID | STALE | CONFLICTED | UNKNOWN | INVALID
 ```
 
 ## StateValidator
@@ -33,9 +35,9 @@ Module-level convenience that builds a default `StateValidator` and validates.
 
 ### `report`
 
-The `StateValidationResult`: per-component statuses, the overall `status`, and any
-findings. A component whose status is not `VALID` is what makes the run unsafe to
-resume. External dependencies that have drifted report `CONFLICTED`.
+The `StateValidationResult`: per-component `statuses`, the overall `safe_to_resume`
+verdict, and any findings. A component whose status is not `VALID` is what makes the
+run unsafe to resume. External dependencies that have drifted report `CONFLICTED`.
 
 ### `environment_diff`
 

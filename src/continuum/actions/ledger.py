@@ -762,7 +762,12 @@ class ActionLedger:
             # is never present on the incoming claim, so folding it into ``known``
             # would make the stored set a systematic superset of every sparser
             # re-claim. It is therefore excluded from the comparison (issue #64).
-            known_all = identity_tokens(action.arguments)
+            # ``volatile`` is applied here too: a field the caller declares
+            # volatile must be stripped from *both* sides, or a volatile strong
+            # token surviving only on the stored side makes ``known`` a spurious
+            # superset, ``_identity_match`` returns None, and the side effect
+            # fires a second time (issue #1346).
+            known_all = identity_tokens(action.arguments, volatile=volatile)
             known = leaf_tokens(known_all) - plumbing
             # An empty ``known`` is contained in everything; treat a stored
             # action with no identity of its own as unrecognisable, not as a
@@ -1240,15 +1245,20 @@ class ActionLedger:
             }
         )
         recorded = self._record(key, action)
-        self._count_complete()
-        # Settlement drawdown (issue #413): same per-authorization bucket as the
-        # claim that opened this slot. The claim pinned the id onto the record
+        # Both the completion counter and the settlement drawdown belong to a
+        # genuine settlement of an in-flight claim, so both are gated on the
+        # pre-call status being STARTED. Re-reporting an already ``COMPLETED``
+        # action asserts nothing new (see the docstring), so it must move
+        # neither: the sibling ``claim`` counter is likewise skipped when a
+        # claim defers to a COMPLETED record rather than opening a new one
+        # (issue #1032). The claim pinned the settlement id onto the record
         # (issue #1052), so read it back rather than re-deriving: token
         # derivation reads the caller's ``volatile`` declaration, and a claim
         # that declared one while this method always derives with none would put
         # the confirmation in a different bucket from the attempt it settles.
         # Records written before the field existed are re-derived as before.
         if existing.status is ActionStatus.STARTED:
+            self._count_complete()
             auth_settle = self._settlement_authorization_id(existing)
             if auth_settle is not None:
                 self._budget_consume_settlement(existing.action_type, auth_settle)
@@ -1369,10 +1379,25 @@ class ActionLedger:
             )
         recorded = self._record(key, action, EventType.ACTION_RECONCILED)
         # Settlement drawdown (issue #413): the claim pinned the bucket onto
-        # this record, so settle against the same one (issue #1052).
-        auth_settle = self._settlement_authorization_id(existing)
-        if auth_settle is not None:
-            self._budget_consume_settlement(existing.action_type, auth_settle)
+        # this record, so settle against the same one (issue #1052). Two guards
+        # narrow it to the one case that actually settles a landed effect:
+        #  - Draw only when the effect is confirmed present. occurred=False
+        #    resolves the record to FAILED -- the same terminal state fail()
+        #    produces, and fail() draws no settlement -- so charging the bucket
+        #    for an effect a check proved absent mis-bills the cap for a landing
+        #    that never happened, starving later claims for no reason.
+        #  - Guard on the *pre-call* status exactly as complete() does
+        #    (issue #1370): the drawdown fires once, on the transition out of an
+        #    in-flight state (STARTED or the uncertain UNKNOWN that only reconcile
+        #    can settle). Reconciling an already-terminal record -- the
+        #    deliberately-permitted complete->reconcile correction, or an
+        #    idempotent reconcile retry after a dropped MCP response -- must not
+        #    re-consume the bucket, or one logical effect would draw the cap
+        #    twice.
+        if occurred and existing.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
+            auth_settle = self._settlement_authorization_id(existing)
+            if auth_settle is not None:
+                self._budget_consume_settlement(existing.action_type, auth_settle)
         return recorded
 
     @_single_writer

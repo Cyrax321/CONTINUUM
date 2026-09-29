@@ -320,6 +320,49 @@ def test_restore_reactivates_history_depended_differs_from_fork() -> None:
         storage.close()
 
 
+@pytest.mark.parametrize("undo", ["compensate", "reconcile"])
+def test_completion_undone_in_span_does_not_strand_restore(undo: str) -> None:
+    """An undone completion is not a live depended result for restore (#1505).
+
+    The restore branch of ``_filtered_depended_for_edit`` kept the first
+    COMPLETED entry for a key, so a later compensate, or a reconcile that
+    confirmed the effect never happened, left a phantom depended result behind
+    and a safe restore was refused. Newest status must win, as in ``derive()``.
+    """
+    from continuum.actions.idempotency import idempotency_key
+
+    storage = _make_storage(run_id="run_undone")
+    try:
+        expected_key = idempotency_key(
+            "github.create_issue", {"title": "t"}, scope="run_undone", key="k1"
+        )
+        # Surviving prefix: a step at sequence 2 already needs the result.
+        storage.append_event(
+            "run_undone",
+            EventType.WORK_ADDED,
+            {"task_id": "w0", "description": "early need", "prerequisite": [expected_key]},
+        )
+        # Span (2, head]: the completion the survivor depends on, then its undo.
+        ledger = ActionLedger(storage, "run_undone")
+        outcome = ledger.claim("github.create_issue", {"title": "t"}, key="k1")
+        ledger.complete(outcome.key, external_id="42")
+        anchor = 2
+        # Control: the live completion still strands the restore.
+        with pytest.raises(RestorePreconditionError) as exc:
+            check_preconditions(storage, "run_undone", anchor, edit_type="restore")
+        assert exc.value.rationale["depended_results"]
+        assert exc.value.rationale["depended_results"][0]["key"] == expected_key
+
+        if undo == "compensate":
+            ledger.compensate(outcome.key)
+        else:
+            ledger.reconcile(outcome.key, occurred=False)
+        # The effect is gone, so reactivating history strands nothing.
+        check_preconditions(storage, "run_undone", anchor, edit_type="restore")
+    finally:
+        storage.close()
+
+
 def test_falsifiable_restore_skipping_unsettled_claim_refuses_like_fork() -> None:
     """Falsifiable from #389/#408: checkpoint mid-run after intercept.
 

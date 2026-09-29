@@ -93,6 +93,7 @@ If the outcome of a side effect is uncertain, CONTINUUM raises `UNKNOWN_SIDE_EFF
 | `ROLLBACK`         | Critical state corrupted          |
 | `WAIT`             | Dependency temporarily unavailable|
 | `REQUEST_HUMAN`    | Side effect outcome uncertain     |
+| `REPLAN`           | Re-run recovery from a recorded plan |
 | `ABORT`            | Unrecoverable conflict            |
 
 ### Commitment Graph and Restore-Point Admissibility

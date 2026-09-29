@@ -315,6 +315,14 @@ def cmd_runs(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> 
     The text table truncates long goals to keep one run per line; the JSON
     payload carries each goal in full, so scripts never read a clipped goal.
     """
+    # Refuse a sub-1 --limit rather than pass it through: SQLite reads LIMIT 0
+    # as an empty listing (a populated store misreports as empty) and LIMIT -1
+    # as unlimited (the flag is silently ignored). The paging siblings (tree /
+    # provenance / impact) all refuse limit < 1 via _page_bounds; mirror that
+    # contract here (issue #1354).
+    if args.limit is not None and args.limit < 1:
+        print(f"--limit must be 1 or more (got {args.limit})", file=err)
+        return ExitCode.ERROR
     runs = storage.list_runs(limit=args.limit)
     if not runs:
         _emit(
@@ -1203,10 +1211,12 @@ def cmd_watch(args: argparse.Namespace, storage: Storage, out: Any, err: Any) ->
         stream=out,
         palette=getattr(args, "_palette", None),
     )
-    # Exit code: breached maps to WAIT which is REQUIRES_HUMAN (20), otherwise OK
+    # Exit code: a breach proposes WAIT (never ROLLBACK, per #302), which is
+    # its own code (20) so a script can tell "hold and retry" apart from
+    # REQUEST_HUMAN; a clean read exits OK (issue #1170).
     if breached:
-        return 20
-    return 0
+        return ExitCode.WAIT
+    return ExitCode.OK
 
 
 def cmd_health(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
@@ -1372,6 +1382,26 @@ def cmd_notify_test(args: argparse.Namespace, storage: None, out: Any, err: Any)
     return ExitCode.OK
 
 
+def cmd_policy_review(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Advisory per-action-type report over recovery history (issue #743).
+
+    Aggregates repair attempts, human-gate outcomes, compaction survival and
+    reconciliation outcomes by action type, for periodic maintainer review.
+    Read-only, deterministic, live and archived history. The report is
+    evidence for a human decision, never a policy engine: nothing here feeds
+    ``plan_repairs`` or changes a recovery verdict, and a high human-required
+    rate means the probes or the workflow deserve investigation - not a
+    lower safety bar.
+    """
+    from continuum.recovery.policy_review import build_policy_review, render_policy_review
+
+    run_id = getattr(args, "run_id", None)
+    report = build_policy_review(storage, run_id)
+    text = "\n".join(render_policy_review(report))
+    _emit(report, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
+    return ExitCode.OK
+
+
 def _anchor_on_recovery(
     storage: Storage, run_id: str, decision: RecoveryDecision, err: Any
 ) -> None:
@@ -1429,7 +1459,7 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         }
         # Machine JSON on stdout (same as every other resume _emit); text stays human-readable.
         _emit(payload, msg, as_json=args.json, stream=out)
-        # UNSAFE (30): run exists but resuming is not safe (distinct from NOT_FOUND / 2).
+        # UNSAFE (31): run exists but resuming is not safe (distinct from NOT_FOUND / 2).
         return ExitCode.UNSAFE
     engine = RecoveryEngine(storage, strict_unknown=not args.tolerate_unknown)
     decision = engine.assess(
@@ -1565,7 +1595,27 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     # spamming, and delivery failure is dead-lettered, never raised - the
     # verdict above is already final.
     if presented_mode == RecoveryMode.REQUEST_HUMAN.value:
+        from continuum.recovery.webhooks import EVENT_REQUIRES_REVIEW
+
         _notify_blocked_run(storage, run_id, presented_mode, payload, decision, args, err)
+        # A run parked on self-certified state is a distinct signal from a
+        # plain human gate, and the requires_review filter exists to carry it
+        # (issue #1180). RecoveryMode has no such member by design: the mode
+        # is derived from the validation report, which is the only place that
+        # knows a component was downgraded for a self-certified origin.
+        if any(
+            entry.status is StateStatus.REQUIRES_REVIEW
+            for entry in decision.validation.report.statuses
+        ):
+            _notify_blocked_run(
+                storage,
+                run_id,
+                EVENT_REQUIRES_REVIEW,
+                {**payload, "mode": EVENT_REQUIRES_REVIEW},
+                decision,
+                args,
+                err,
+            )
 
     if effective_mode is not RecoveryMode.RESUME and not args.repair:
         print(
@@ -2519,10 +2569,12 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
 
     # Diagnostic path (issue #742): the raw agent summary stays reachable,
     # verbatim, for an operator debugging the curation. Explicit opt-in, so
-    # the default briefing is the curated one.
+    # the default briefing is the curated one. Reads full history so a summary
+    # archived by compaction is still recoverable here, not just when the run
+    # is small enough to keep it in the live tail (issue #1128).
     if getattr(args, "raw_summary", False):
         summaries = [
-            e for e in storage.read_events(run_id) if e.type is EventType.REASONING_SUMMARY
+            e for e in storage.read_all_events(run_id) if e.type is EventType.REASONING_SUMMARY
         ]
         if not summaries:
             print(f"No reasoning summary recorded for {run_id}.", file=out)
@@ -2629,25 +2681,48 @@ def cmd_report(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
     # The quiet-time path persists its own TRAJECTORY_REPORT events. Each is
     # auditable on its own terms: its id must be the prefix of the digest its
-    # stored fields recompute. One that is not was edited after it was built, or
-    # written by a version that hashed different fields; either way it cannot be
-    # traced back to the events it summarises, which is an integrity failure
-    # rather than a stylistic difference. The fresh fold is checked the same way.
+    # stored fields recompute. One that is not was edited after it was built,
+    # or written by a version that hashed different fields. The two are not the
+    # same thing: a tampered report cannot be traced to anything, while a
+    # pre-#1461 report still hashes to its own id under the older basis. That
+    # basis is reproducible here because the run id is the one input the stored
+    # payload does not carry and the auditor knows it, so an existing database
+    # reads as authentic instead of corrupt (#1462). The fresh fold is checked
+    # the same way.
     stored_reports = _stored_trajectory_reports(storage, args.run_id)
-    unverified = [r for r in stored_reports if not r.digest_matches()]
+    verified: list[TrajectoryReport] = []
+    legacy: list[TrajectoryReport] = []
+    unverified: list[TrajectoryReport] = []
+    for stored in stored_reports:
+        if stored.digest_matches():
+            verified.append(stored)
+        elif stored.legacy_digest_matches(args.run_id):
+            legacy.append(stored)
+        else:
+            unverified.append(stored)
 
     lines = render_trajectory_report(report)
     if not stored_reports:
         lines.append(f"  digest {report.digest()} (no stored report to audit)")
     elif not unverified:
-        lines.append(
-            f"  digest {report.digest()} ({len(stored_reports)} stored report(s) all verify)"
-        )
+        if legacy:
+            lines.append(
+                f"  digest {report.digest()} ({len(verified)} stored report(s) verify, "
+                f"{len(legacy)} written before #1461 carry the older id: authentic, "
+                "but not auditable against this digest)"
+            )
+        else:
+            lines.append(
+                f"  digest {report.digest()} ({len(stored_reports)} stored report(s) all verify)"
+            )
     else:
-        lines.append(
-            f"  digest {report.digest()} ({len(unverified)} of {len(stored_reports)} stored "
-            "report(s) fail their own digest check)"
+        detail = (
+            f"{len(unverified)} of {len(stored_reports)} stored "
+            "report(s) fail their own digest check"
         )
+        if legacy:
+            detail += f", {len(legacy)} older report(s) verify against the pre-#1461 id"
+        lines.append(f"  digest {report.digest()} ({detail})")
 
     _emit(
         {
@@ -2655,6 +2730,7 @@ def cmd_report(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             "digest": report.digest(),
             "stored_report_ids": [r.report_id for r in stored_reports],
             "unverified_stored_report_ids": [r.report_id for r in unverified],
+            "legacy_stored_report_ids": [r.report_id for r in legacy],
         },
         "\n".join(lines),
         as_json=args.json,
@@ -4064,9 +4140,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
+    # `--json` is a global flag, but newcomers check `continuum <cmd> --help` and
+    # never saw it there, so they missed JSON output entirely (#328). Hang it off
+    # a parent parser every subcommand inherits, so it shows in every subcommand's
+    # help. ``default=argparse.SUPPRESS`` keeps a subcommand-position ``--json``
+    # from shadowing the global flag back to False when omitted (the #677 pattern).
+    json_parent = argparse.ArgumentParser(add_help=False)
+    json_parent.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="emit machine-readable JSON (same as the global flag).",
+    )
+
     def add(name: str, func: Any, help_text: str) -> argparse.ArgumentParser:
         """Register a subcommand bound to ``func``, returning it for more arguments."""
-        p = sub.add_parser(name, help=help_text, description=help_text)
+        p = sub.add_parser(name, help=help_text, description=help_text, parents=[json_parent])
         p.set_defaults(func=func)
         return p
 
@@ -4158,13 +4247,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--dashboard", action="store_true", help="render the Phase 14 recovery dashboard."
     )
 
-    health = with_run(add("health", cmd_health, "Advisory prefix-trust health check. Read-only."))
-    # Subparser default SUPPRESS: accepts trailing --json without shadowing the global flag (#677).
-    health.add_argument(
-        "--json",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="emit machine-readable JSON (same as the global flag).",
+    with_run(add("health", cmd_health, "Advisory prefix-trust health check. Read-only."))
+    policy_review = add(
+        "policy-review",
+        cmd_policy_review,
+        "Advisory per-action-type report over recovery history. Read-only.",
+    )
+    policy_review.add_argument(
+        "run_id",
+        nargs="?",
+        default=None,
+        help="limit the report to one run; omit to review every run.",
     )
     # health is advisory only; it never gates, never moves mode, never changes exit code
     # (issue #401). It reports trust_score with per-dimension breakdown.
@@ -4178,15 +4271,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="distil claims, uncertain side effects, scar rate and stall sites "
         "from the archive and the active log.",
     )
-    # Subparser default SUPPRESS: accepts a trailing --json without shadowing
-    # the global flag (#677), so `continuum report --trajectory RUN --json`
-    # parses the way the synopsis reads.
-    report.add_argument(
-        "--json",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="emit machine-readable JSON (same as the global flag).",
-    )
+    # ``--json`` reaches this subparser through ``json_parent`` like every
+    # other one; the #677 SUPPRESS default it needed already lives there, so
+    # re-adding it here raised a conflicting-option error.
 
     resume = with_env(add("resume", cmd_resume, "Decide how a run may resume."))
     resume.add_argument(
@@ -4678,13 +4765,6 @@ def build_parser() -> argparse.ArgumentParser:
         dest="webhook_url",
         default=None,
         help="webhook URL for --on-breach webhook",
-    )
-    # Subparser default SUPPRESS: accepts trailing --json without shadowing the global flag (#677).
-    watch.add_argument(
-        "--json",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="emit machine-readable JSON (same as the global flag).",
     )
 
     return parser

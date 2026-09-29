@@ -97,14 +97,14 @@ continuum-mcp --help             # needs [mcp] or [dev]
 # powershell -ExecutionPolicy Bypass -File .\try-it.ps1
 # powershell -ExecutionPolicy Bypass -File .\try-it.ps1 cli --help
 
-# Full test suite (~2,809 tests; exact skips vary by environment)
+# Full test suite (~2,898 tests; exact skips vary by environment)
 pytest -q                        # or: ./try-it.sh test
 pytest --no-cov --tb=short -q    # faster, no coverage
 pytest tests/test_events.py -v   # single file
 
 # Lint and type-check (must pass for PRs)
-ruff check src/ tests/ examples/ scripts/ demo-run/
-ruff format --check src/ tests/ examples/ scripts/ demo-run/
+ruff check src/ tests/ examples/ benchmarks/ scripts/ demo-run/
+ruff format --check src/ tests/ examples/ benchmarks/ scripts/ demo-run/
 mypy src/continuum
 ```
 

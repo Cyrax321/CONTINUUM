@@ -10,6 +10,7 @@ import tempfile
 from typing import Any
 
 from continuum.analysis.trajectory_report import (
+    TRAJECTORY_REPORT_CAP_BYTES,
     analyze_trajectory,
     build_trajectory_report,
     health_maybe_generate_trajectory_report,
@@ -643,6 +644,82 @@ def test_digest_is_stable_across_folds_of_the_same_window() -> None:
     assert first.report_id == second.report_id
 
 
+def test_a_pre_1462_report_id_is_rerecognised_not_treated_as_tampering() -> None:
+    """A report written before the model computed its own digest still names itself.
+
+    #1461 changed the id's basis, so every stored report written before it fails
+    ``digest_matches``. That is not corruption: the older basis hashed the run id
+    alongside the analytical fields, and it is reproducible from the payload plus
+    the run the audit is already scoped to (#1462).
+    """
+    legacy = TrajectoryReport(
+        report_id="4ddbba1cb8b0144c",
+        window_start=0,
+        window_end=8,
+        compaction_seq=8,
+        attempts=3,
+        scar_rate=0.2,
+        stall_sites=["x"],
+        top_failure_action_types=["x"],
+        derived_origin="deterministic",
+    )
+    # The id the older derivation actually produced for these fields.
+    assert legacy.legacy_digest("run_1")[: len(legacy.report_id)] == legacy.report_id
+    assert legacy.digest_matches() is False
+    assert legacy.legacy_digest_matches("run_1") is True
+
+    # The older basis hashed the lists sorted, so their fold order does not
+    # change the id a stored report carries.
+    reordered = legacy.model_copy(
+        update={"stall_sites": ["a", "b"], "top_failure_action_types": ["d", "c"]}
+    )
+    canonical_order = reordered.model_copy(
+        update={"stall_sites": ["b", "a"], "top_failure_action_types": ["c", "d"]}
+    )
+    assert reordered.legacy_digest("run_1") == canonical_order.legacy_digest("run_1")
+
+    # A report whose fields were edited after the fact matches neither basis.
+    tampered = legacy.model_copy(update={"scar_rate": 0.0})
+    assert tampered.legacy_digest_matches("run_1") is False
+    assert tampered.digest_matches() is False
+
+
+def test_the_byte_cap_cannot_strip_the_lists_the_legacy_id_was_derived_from() -> None:
+    """The pre-#1461 cap loop cannot change what a stored report's id names.
+
+    That writer derived the id, then shed trailing list entries in a 2048-byte
+    budget loop without recomputing it. The loop is unreachable: the model's own
+    field validators bound both lists to five 128-character entries *before* the
+    id is computed, so a maximally-sized report still fits the budget with room
+    to spare, and the stored lists are always the ones the id was derived from.
+    A report at that ceiling still verifies against the older basis.
+    """
+    biggest = "x" * 128
+    ceiling = TrajectoryReport(
+        report_id="pending",
+        window_start=0,
+        window_end=999_999,
+        compaction_seq=999_999,
+        attempts=1000,
+        scar_rate=0.9999,
+        stall_sites=[biggest] * 5,
+        top_failure_action_types=[biggest] * 5,
+        derived_origin="deterministic",
+    )
+    # The budget the pre-#1461 writer measured, over the fields it carried.
+    legacy_payload = {
+        k: v
+        for k, v in ceiling.model_dump(mode="json").items()
+        if k not in ("total_attempts", "uncertain_count")
+    }
+    assert len(json.dumps(legacy_payload, sort_keys=True).encode()) < TRAJECTORY_REPORT_CAP_BYTES
+
+    # The lists the id was derived from are the lists the report stores.
+    expected_id = ceiling.legacy_digest("run_1")[:16]
+    ceiling = ceiling.model_copy(update={"report_id": expected_id})
+    assert ceiling.legacy_digest_matches("run_1") is True
+
+
 def test_old_report_payload_without_the_new_counts_still_loads() -> None:
     """A report written before #1427 has no total_attempts, and must still parse.
 
@@ -765,6 +842,69 @@ def test_cli_report_audits_the_stored_reports_the_run_persisted() -> None:
         assert "fail their own digest check" in text
         payload = json.loads(_run_cli(path, ["report", "--trajectory", run_id, "--json"])[1])
         assert "tampered00000" in payload["unverified_stored_report_ids"]
+    finally:
+        pathlib.Path(path).unlink(missing_ok=True)
+
+
+def test_cli_report_reads_a_pre_1462_database_as_legacy_not_corrupt() -> None:
+    """A stored report written before #1461 exits OK, not CORRUPTED (#1462).
+
+    The audit used to treat an id that failed the current digest as tampering,
+    which reported a corruption that was not there on every database holding a
+    report written before the digest became self-computable. Such a report is
+    now recognised as older and named separately, and only a report matching
+    neither basis still fails the run.
+    """
+    path, run_id = _populated_db()
+    try:
+        # A report as the pre-#1461 writer would have persisted it: the fields
+        # the older basis hashed, with the id that basis produced for them.
+        legacy = TrajectoryReport(
+            report_id="4ddbba1cb8b0144c",
+            window_start=0,
+            window_end=8,
+            compaction_seq=8,
+            attempts=3,
+            scar_rate=0.2,
+            stall_sites=["x"],
+            top_failure_action_types=["x"],
+        )
+        storage = SQLiteStorage(path)
+        try:
+            storage.append_event(
+                run_id,
+                EventType.TRAJECTORY_REPORT,
+                legacy.model_dump(mode="json"),
+                source=Origin.HUMAN,
+            )
+        finally:
+            storage.close()
+
+        code, text, _err = _run_cli(path, ["report", "--trajectory", run_id])
+        assert code == 0, "an older report is authentic, not an integrity failure"
+        assert "fail their own digest check" not in text
+        assert "written before #1461" in text
+
+        payload = json.loads(_run_cli(path, ["report", "--trajectory", run_id, "--json"])[1])
+        assert payload["unverified_stored_report_ids"] == []
+        assert payload["legacy_stored_report_ids"] == ["4ddbba1cb8b0144c"]
+        assert payload["stored_report_ids"] == ["4ddbba1cb8b0144c"]
+
+        # A report matching neither basis still fails, so the audit keeps its teeth.
+        storage = SQLiteStorage(path)
+        try:
+            payload = dict(legacy.model_dump(mode="json"))
+            payload["report_id"] = "tampered00000"
+            storage.append_event(run_id, EventType.TRAJECTORY_REPORT, payload, source=Origin.HUMAN)
+        finally:
+            storage.close()
+
+        code, text, _err = _run_cli(path, ["report", "--trajectory", run_id])
+        assert code == 3
+        assert "fail their own digest check" in text
+        payload = json.loads(_run_cli(path, ["report", "--trajectory", run_id, "--json"])[1])
+        assert payload["unverified_stored_report_ids"] == ["tampered00000"]
+        assert payload["legacy_stored_report_ids"] == ["4ddbba1cb8b0144c"]
     finally:
         pathlib.Path(path).unlink(missing_ok=True)
 

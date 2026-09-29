@@ -92,9 +92,9 @@ if echo "$verify_out" | grep -qi "verified"; then ok "event chain verified, no v
 echo
 echo "--- E. Post-completion resume contract (informational) ----------"
 cont resume "$E2E_RUN_ID" >/dev/null 2>&1; rc=$?
-echo "  resume exit code = $rc  (0=safe/resume, 10=repair, 20=human, 30=unsafe, 2=missing)"
+echo "  resume exit code = $rc  (0=safe/resume, 10=repair, 11=replan, 20=wait, 21=human, 30=rollback, 31=unsafe, 2=missing)"
 echo "  NOTE: for a batch whose progress was written THROUGH MCP, request_human"
-echo "        (exit 20) is the DESIGNED, correct outcome (self-certified state)."
+echo "        (exit 21) is the DESIGNED, correct outcome (self-certified state)."
 echo "        A trusted-writer run would be exit 0. Judge behaviour, not just code."
 
 # --- Verdict -------------------------------------------------------------- #

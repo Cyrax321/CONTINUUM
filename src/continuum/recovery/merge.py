@@ -28,54 +28,11 @@ from continuum.storage.base import Storage
 __all__ = [
     "MergePreconditionError",
     "approve_merge",
-    "merge_to_anchor",
 ]
 
 # The gate raises this subclass for ``edit_type == "merge"``; re-exported here
 # so ``continuum.recovery.merge.MergePreconditionError`` keeps resolving.
 MergePreconditionError = _GateMergeError
-
-
-def merge_to_anchor(
-    storage: Storage,
-    run_id: str,
-    anchor: int,
-    *,
-    reason: str,
-    carry_forward: Collection[str] | None = None,
-    source_run_id: str | None = None,
-    source_anchor: int | None = None,
-    source_anchor_sequence: int | None = None,
-) -> tuple[Any, set[str], dict[str, Any]]:
-    """Check preconditions for merging into ``run_id`` at ``anchor``.
-
-    When ``source_run_id`` is given both sides are derived: target
-    ``(anchor, target_head]`` and source
-    ``(source_anchor, source_head]`` where ``source_anchor`` is the explicit
-    ancestor or ``storage.latest_version(source_run_id).source_sequence`` when
-    absent. Merge refuses if either side has unaccounted preconditions (union).
-    ``carry_forward`` may name items from either side (key, action_id or
-    sequence). Per-edit filtering keeps fork semantics for depended_results.
-    """
-    if source_anchor is None and source_anchor_sequence is not None:
-        source_anchor = int(source_anchor_sequence)
-    if source_run_id is None:
-        return check_preconditions(
-            storage,
-            run_id,
-            anchor,
-            edit_type="merge",
-            carry_forward=carry_forward,
-        )
-    union, carry_set, union_summary, _t, _s = check_merge_preconditions(
-        storage,
-        target_run_id=run_id,
-        target_anchor=anchor,
-        source_run_id=source_run_id,
-        source_anchor=source_anchor,
-        carry_forward=carry_forward,
-    )
-    return union, carry_set, union_summary
 
 
 def approve_merge(

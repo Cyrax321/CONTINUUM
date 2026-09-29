@@ -27,7 +27,6 @@ from continuum.storage.base import CheckpointNotFound, CorruptedRecord, Storage
 __all__ = [
     "RestorePreconditionError",
     "approve_restore",
-    "restore_to_anchor",
 ]
 
 
@@ -80,24 +79,6 @@ def _anchor_for(
     except ValueError:
         pass
     raise ValueError(f"no checkpoint {text!r} for run {run_id!r}")
-
-
-def restore_to_anchor(
-    storage: Storage,
-    run_id: str,
-    anchor: int,
-    *,
-    reason: str,
-    carry_forward: Collection[str] | None = None,
-) -> tuple[Any, set[str], dict[str, Any]]:
-    """Check preconditions for restoring ``run_id`` to ``anchor``."""
-    return check_preconditions(
-        storage,
-        run_id,
-        anchor,
-        edit_type="restore",
-        carry_forward=carry_forward,
-    )
 
 
 def approve_restore(

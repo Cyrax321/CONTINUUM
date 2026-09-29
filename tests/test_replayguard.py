@@ -17,13 +17,13 @@ import pytest
 
 pytest.importorskip("langgraph.checkpoint.base")
 
-from langgraph.graph import StateGraph  # noqa: E402
+from langgraph.graph import StateGraph
 
-from continuum.actions import ActionLedger  # noqa: E402
-from continuum.cli import ExitCode, main  # noqa: E402
-from continuum.events import EventType  # noqa: E402
-from continuum.models import ActionStatus, Run  # noqa: E402
-from continuum.replayguard import (  # noqa: E402
+from continuum.actions import ActionLedger
+from continuum.cli import ExitCode, main
+from continuum.events import EventType
+from continuum.models import ActionStatus, Run
+from continuum.replayguard import (
     GuardKind,
     ReplayBlocked,
     evaluate,
@@ -294,6 +294,29 @@ def test_langgraph_node_fires_once_across_resume(db: str) -> None:
     app2 = _graph_with_protected_node(db, counter)
     app2.invoke({"value": "start"}, cfg)
     assert len(counter) == 1, "protected node re-fired on resume"
+
+
+def test_langgraph_node_distinguishes_nonscalar_state(db: str) -> None:
+    """Two states differing only in a list/dict field are distinct identities.
+
+    The default identity basis used to filter the state to its scalar fields
+    (``str``/``int``/``float``/``bool``), silently dropping every ``list``/``dict``
+    value. A LangGraph state like ``{"messages": [...]}`` has no scalar fields at
+    all, so the basis was ``{}`` for every invocation: the first node call
+    executed and journalled, and every later call -- regardless of content -- was
+    skipped as a duplicate and handed the first call's memoised output. The
+    identity has to cover the non-scalar state, or genuinely different inputs
+    collide onto one execution.
+    """
+    counter: list[int] = []
+    node = langgraph_protected_node(SQLiteStorage(db), "run_1")(
+        lambda state: (counter.append(1), {"value": len(counter)})[1]
+    )
+
+    node({"messages": ["a"]})  # first identity -> executes
+    node({"messages": ["a", "b"]})  # different content -> must also execute
+
+    assert len(counter) == 2, "distinct non-scalar states collided onto one identity"
 
 
 def test_chaos_matrix_crash_points(db: str) -> None:

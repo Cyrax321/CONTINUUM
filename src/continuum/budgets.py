@@ -213,14 +213,29 @@ def attempts_by_key(events: Any, action_type: str) -> dict[str, int]:
     attempt. Settlement events are updates, not new attempts, so retries count but
     their bookkeeping does not. Keys whose action went on to COMPLETE are omitted:
     an operation that succeeded was never retried (issue #309).
+
+    A completion can settle through either surface. :meth:`ActionLedger.complete`
+    records COMPLETED as an ``ACTION_RECORDED``, but :meth:`ActionLedger.reconcile`
+    settles an UNKNOWN action a probe later confirmed and records COMPLETED as an
+    ``ACTION_RECONCILED`` (:meth:`compensate` likewise writes ``ACTION_COMPENSATED``).
+    Folding only ``ACTION_RECORDED`` for the final status left those settlements
+    invisible, so an operation confirmed complete by reconciliation kept counting
+    against its allowance and could be refused a repeat that should have returned
+    its stored result. The claim slot itself only ever appears on an
+    ``ACTION_RECORDED``, so those still define how many attempts a key used.
     """
     from continuum.events import EventType
     from continuum.models import ActionStatus
 
+    settling_types = (
+        EventType.ACTION_RECORDED,
+        EventType.ACTION_RECONCILED,
+        EventType.ACTION_COMPENSATED,
+    )
     slots: dict[str, int] = {}
     final: dict[str, str] = {}
     for event in events:
-        if event.type is not EventType.ACTION_RECORDED:
+        if event.type not in settling_types:
             continue
         action = event.payload.get("action")
         if not isinstance(action, Mapping) or action.get("action_type") != action_type:
@@ -229,7 +244,7 @@ def attempts_by_key(events: Any, action_type: str) -> dict[str, int]:
         if not key:
             continue
         status = str(action.get("status"))
-        if status == ActionStatus.STARTED.value:
+        if event.type is EventType.ACTION_RECORDED and status == ActionStatus.STARTED.value:
             slots[key] = slots.get(key, 0) + 1
         final[key] = status
 

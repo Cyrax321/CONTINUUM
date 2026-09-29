@@ -14,7 +14,9 @@ from continuum.models import (
     Goal,
     ModelSpecificState,
     ModelState,
+    Origin,
     Progress,
+    Provenance,
     SemanticState,
     StateStatus,
     utcnow,
@@ -591,3 +593,56 @@ def test_validation_records_when_it_happened() -> None:
     outcome = validate_state(state())
     assert outcome.report.validated_at <= utcnow()
     assert outcome.report.run_id == "run_4821"
+
+
+def _self_certified_finding() -> Finding:
+    # A finding a model reported about itself: valid on record, but self
+    # certified, so the full validator flags it for review (issue #392).
+    return Finding(
+        finding_id="f_llm",
+        claim="model asserts X",
+        status=StateStatus.VALID,
+        provenance=Provenance(origin=Origin.LLM, source_sequence=10),
+    )
+
+
+def test_full_validation_flags_a_self_certified_finding() -> None:
+    """Baseline: on an ordinary resume the derived-amplification guard fires."""
+    outcome = validate_state(
+        state(
+            external_dependencies=[ExternalDependency(resource="dataset", version="v3")],
+            findings=[_self_certified_finding()],
+        ),
+        checkpoint_environment=capture("run_4821", StaticProvider(dataset="v3")),
+        current_environment=capture("run_4821", StaticProvider(dataset="v3")),
+    )
+    assert status_for(outcome, Component.FINDING, "f_llm") is StateStatus.REQUIRES_REVIEW
+    assert not outcome.safe
+
+
+def test_scoped_revalidation_spares_an_out_of_scope_self_certified_finding() -> None:
+    """A scoped repair of ``dataset`` must not re-taint a self-certified finding
+    that has nothing to do with ``dataset``.
+
+    ``_check_derived`` inspects recorded status, not the environment, so like
+    the goal/progress/plan/approval/model self-certification checks it belongs
+    only to the full ``scope=None`` path. A localized recovery keeps everything
+    it is not responsible for at the status it already had, so the finding stays
+    VALID and does not block the scoped resume.
+    """
+    outcome = validate_state(
+        state(
+            external_dependencies=[ExternalDependency(resource="dataset", version="v3")],
+            findings=[_self_certified_finding()],
+        ),
+        checkpoint_environment=capture("run_4821", StaticProvider(dataset="v3")),
+        current_environment=capture("run_4821", StaticProvider(dataset="v3")),
+        scope=["dataset"],
+    )
+    # The finding keeps its recorded status; the scoped pass never re-flags it.
+    assert not any(
+        e.component is Component.FINDING and e.component_id == "f_llm"
+        for e in outcome.report.statuses
+    )
+    assert outcome.state.findings[0].status is StateStatus.VALID
+    assert outcome.safe

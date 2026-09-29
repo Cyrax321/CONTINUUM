@@ -766,8 +766,53 @@ class TrajectoryReport(BaseModel):
         hand-edited after the fact, fails this check. Reports written before
         the model computed its own digest also fail: their id came from a hash
         that included the run id, which the stored payload no longer carries.
+        Those are recognised by :meth:`legacy_digest_matches` instead, so an
+        auditor can tell an older report apart from a tampered one.
         """
         return self.report_id == self.digest()[: len(self.report_id)]
+
+    #: The field set a pre-#1461 id was derived from (issue #1462). Kept only so
+    #: reports written before the model computed its own digest can be told
+    #: apart from tampered ones: the older basis hashed the run id alongside the
+    #: analytical fields, and sorted the two lists rather than keeping fold order.
+    _LEGACY_DIGEST_FIELDS: ClassVar[tuple[str, ...]] = (
+        "window_start",
+        "window_end",
+        "attempts",
+        "scar_rate",
+    )
+
+    def legacy_digest(self, run_id: str) -> str:
+        """Content hash over the field set a pre-#1461 id was derived from.
+
+        The older basis is reproducible because the run id is the one piece the
+        stored payload does not carry, and the caller auditing a run knows it.
+        It is also exact: that writer derived the id before a budget loop that
+        shed trailing list entries to fit 2048 bytes without recomputing it, but
+        the field validators bound both lists to five 128-character entries
+        beforehand, so a maximally-sized report still fits the budget and the
+        stored lists are always the ones the id was hashed from.
+        """
+        return stable_hash(
+            {
+                "run_id": run_id,
+                **{name: getattr(self, name) for name in self._LEGACY_DIGEST_FIELDS},
+                # The old derivation hashed the lists after truncation and sorted
+                # them, so the same entries hash the same in either order.
+                "stalls": sorted(self.stall_sites),
+                "top": sorted(self.top_failure_action_types),
+            }
+        )
+
+    def legacy_digest_matches(self, run_id: str) -> bool:
+        """True if ``report_id`` is the prefix of the older basis' digest.
+
+        A report that satisfies this but not :meth:`digest_matches` was written
+        by a version that hashed different fields, not edited after the fact:
+        its analytical fields still hash to the id it carries, so it is an
+        authentic summary rather than a tampered one.
+        """
+        return self.report_id == self.legacy_digest(run_id)[: len(self.report_id)]
 
 
 # --------------------------------------------------------------------------- #

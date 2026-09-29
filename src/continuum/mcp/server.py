@@ -391,7 +391,10 @@ def _declare_model(
     """
     if not model_id:
         return
-    current = project(run_id, ctx.storage.read_events(run_id)).model
+    # Full history: the recorded model may live in the archived prefix once the
+    # run has been compacted, and a live-only read would raise on a log with no
+    # RUN_STARTED in the tail (see ``continuum_checkpoint``).
+    current = project(run_id, ctx.storage.read_all_events(run_id)).model
     recorded_model = current.model if current else None
     recorded_provider = current.provider if current else None
     settled_provider = provider if provider is not None else recorded_provider
@@ -448,9 +451,12 @@ def _declare_dependencies(ctx: ContinuumMCP, run_id: str, env: Mapping[str, str]
     if not env:
         return
 
+    # Full history: an already-declared dependency may live in the archived
+    # prefix once the run has been compacted, and a live-only read would raise
+    # on a log with no RUN_STARTED in the tail (see ``continuum_checkpoint``).
+    state = project(run_id, ctx.storage.read_all_events(run_id))
     declared = {
-        dependency.resource: dependency.version
-        for dependency in project(run_id, ctx.storage.read_events(run_id)).external_dependencies
+        dependency.resource: dependency.version for dependency in state.external_dependencies
     }
     for name, version in env.items():
         if declared.get(name) == str(version):
@@ -783,7 +789,13 @@ def build_server(
         ctx.ensure_run(run_id)
         _declare_dependencies(ctx, run_id, env)
         _declare_model(ctx, run_id, model_id, provider)
-        state = project(run_id, ctx.storage.read_events(run_id))
+        # Full history (read_all_events) so compaction cannot make the checkpoint
+        # itself unprojectable: after compaction the live log holds only the
+        # anchor and the tail, with RUN_STARTED in the archive, and ``project``
+        # refuses a log with no goal. ensure_run above already accepts a
+        # compacted run, so a live-only read here rejected every checkpoint on
+        # exactly the long-running runs the tool exists for.
+        state = project(run_id, ctx.storage.read_all_events(run_id))
         checkpoint = ctx.adapter.capture_state(
             run_id,
             state,

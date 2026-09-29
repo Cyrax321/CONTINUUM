@@ -160,7 +160,13 @@ def record_file_progress(
     """
     completed = count_sections(file_path)
     try:
-        last = project(run_id, manager.storage.read_events(run_id)).progress
+        # Full history: compaction moves the goal-bearing prefix (RUN_STARTED
+        # included) into events_archive, so a live-tail read raises and the
+        # except below would fall through to "changed", appending a redundant
+        # TASK_UPDATED and a duplicate-evidence tail on every call over an
+        # unchanged file. A run with no goal yet still raises against the merged
+        # history, so the "not yet projectable" behaviour is preserved.
+        last = project(run_id, manager.storage.read_all_events(run_id)).progress
         unchanged = last.completed == completed and last.total == total
     except ProjectionError:
         unchanged = False
