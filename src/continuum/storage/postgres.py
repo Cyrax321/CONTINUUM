@@ -792,11 +792,16 @@ class PostgresStorage(Storage):
 
         Always global by design: keys live in one store-wide namespace, so a
         per-run rewrite could collide with another run's legitimate row of
-        the same key. A correction is any key whose stored row was missing,
-        stale or spurious.
+        the same key. Mirrors the SQLite engine's count so ``verify --repair-index``
+        reports the same number from either backend (#1267). A correction is any
+        key whose stored row was missing, stale, or spurious: changed-or-added
+        rows plus rows the rebuild removed.
         """
         canonical = self._canonical_index_rows()
         with self._write():
+            # Snapshot the stored rows under the write lock and ahead of the
+            # DELETE, so the count measures the index the rebuild replaced
+            # rather than one a concurrent writer shifted underneath it.
             before = {
                 r["key"]: (int(r["updated_seq"]), r["status"])
                 for r in self._connection.execute(
