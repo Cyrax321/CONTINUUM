@@ -289,6 +289,7 @@ class PostgresStorage(Storage):
               AND e.payload::jsonb->>'key' IS NOT NULL
               AND e.payload::jsonb->'action' IS NOT NULL
             ORDER BY ctid
+            ON CONFLICT (key) DO NOTHING
             """
         )
 

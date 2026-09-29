@@ -21,9 +21,12 @@ the mode-to-code map in `src/continuum/cli/exitcodes.py` is:
 | Mode | Exit code | Meaning |
 |:--|:--|:--|
 | `RESUME` | 0 | Verified safe |
-| `REPAIR_AND_RESUME`, `REPLAN` | 10 | Repair first |
-| `WAIT`, `REQUEST_HUMAN` | 20 | A person must decide |
-| `ROLLBACK`, `ABORT` | 30 | Not safe at all |
+| `REPAIR_AND_RESUME` | 10 | Automatic repair first |
+| `REPLAN` | 11 | The plan must change |
+| `WAIT` | 20 | Hold and retry once a condition clears |
+| `REQUEST_HUMAN` | 21 | A person must decide |
+| `ROLLBACK` | 30 | Roll back to a safe point |
+| `ABORT` | 31 | Not safe at all (fail-closed default) |
 
 So a shell pipeline is safe by default:
 
