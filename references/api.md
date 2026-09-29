@@ -19,7 +19,7 @@ diff_states(previous, state)  # what changed, semantically
 
 `SQLiteStorage` doubles as the MCP server adapter; `Run` carries the agent-facing surface. Instead of
 a `run.record_action(type="github.create_issue", ...)` convenience method that does not exist, the
-contract is: the adapter records the side effect with `run.record` or `store.append_event`, using the
+contract is: the adapter records the side effect with `store.append_event`, using the
 event types in `EventType`, and the ledger deduplicates on recovery. There is no
 `runtime.start` / `runtime.resume` object yet; that arrives with the non-MCP runtime binding, which
 is out of scope for 0.1.0.

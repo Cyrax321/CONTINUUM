@@ -389,6 +389,7 @@ def test_ingestion_keeps_a_signal_with_an_out_of_range_timestamp(tmp_path: Path)
         assert len(events) == 3
         assert all(e.type is EventType.RISK_OBSERVED for e in events[1:])
 
+
 # --- the rows survive a checkpoint (#1421 review) ------------------------- #
 
 
@@ -431,9 +432,10 @@ def test_restore_keeps_risks_seen_before_the_checkpoint(tmp_path: Path) -> None:
         # The pre-checkpoint risk is still there, and the restored state agrees
         # with a full projection of the same log.
         assert [r.trigger for r in restored.state.observed_risks] == ["meltdown"]
-        assert restored.state.observed_risks == project(
-            run_id, store.read_events(run_id)
-        ).observed_risks
+        assert (
+            restored.state.observed_risks
+            == project(run_id, store.read_events(run_id)).observed_risks
+        )
 
 
 def test_restore_keeps_risks_seen_before_compaction(tmp_path: Path) -> None:

@@ -237,20 +237,20 @@ they need no import and perform no availability check. `crewai_available()`,
 `autogen_available()` and `pydantic_ai_available()` answer the question with
 `importlib.util.find_spec`, so a probe does not construct anything.
 
-One discrepancy worth knowing before you rely on the human gate: `thin.py`'s
-module docstring says provenance is `EXTERNAL_AGENT`, but `ActionLedger` passes
-no source, so `append_event`'s `Origin.DETERMINISTIC` default is what actually
-lands. Reading the log back after one claim and completion shows it:
+Provenance is honest about who acted: `thin.py` stamps its `ActionLedger` with
+`source=EXTERNAL_AGENT` by default (`thin.py:88`, `:117`; issue #612), so the
+side effects it records land as `source=external_agent`. Reading the log back
+after one claim and completion shows it:
 
 ```text
-1  RUN_STARTED      source=deterministic
-2  ACTION_RECORDED  source=deterministic
-3  ACTION_RECORDED  source=deterministic
+2  ACTION_RECORDED  source=external_agent
+3  ACTION_RECORDED  source=external_agent
 ```
 
-So a thin-adapter run is not held for review the way an OpenAI-adapter or
-MCP-reported run is (see Provenance below). Whether the ledger should stamp
-`EXTERNAL_AGENT` is a code question, not a documentation one.
+So a thin-adapter run is held for review the same way an OpenAI-adapter or
+MCP-reported run is (see Provenance below): its work is treated as agent-reported,
+not trusted-deterministic. Pass `source=Origin.DETERMINISTIC` to the guard only
+when an integration genuinely is deterministic.
 
 ### CrewAI
 

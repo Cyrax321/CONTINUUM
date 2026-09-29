@@ -356,13 +356,13 @@ class _RecordingStorage(SQLiteStorage):
         self._note("get_run")
         return super().get_run(run_id)
 
-    def read_events(self, run_id: str, *, after_sequence: int = 0, upto: int | None = None) -> Any:
+    def read_events(self, *args: Any, **kwargs: Any) -> Any:
         self._note("read_events")
-        return super().read_events(run_id, after_sequence=after_sequence, upto=upto)
+        return super().read_events(*args, **kwargs)
 
-    def read_archived_events(self, run_id: str) -> Any:
+    def read_archived_events(self, *args: Any, **kwargs: Any) -> Any:
         self._note("read_archived_events")
-        return super().read_archived_events(run_id)
+        return super().read_archived_events(*args, **kwargs)
 
     # mutators
     def append_event(self, *args: Any, **kwargs: Any) -> Any:

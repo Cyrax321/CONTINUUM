@@ -172,8 +172,10 @@ With `--with-gate`, every tool call checks `.continuum/gate.json`:
 
 ```json
 {
-  "slack.notify": {
-    "key_template": "notify:{order_id}"
+  "tools": {
+    "slack.notify": {
+      "key_template": "notify:{order_id}"
+    }
   }
 }
 ```

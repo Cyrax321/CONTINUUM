@@ -3343,10 +3343,15 @@ def cmd_verify(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         return ExitCode.ERROR
 
     storage.get_run(args.run_id)
-    report = storage.verify_events(args.run_id)
+    deep = getattr(args, "deep", False)
+    report = storage.verify_events(args.run_id, deep=deep)
     payload = report.model_dump(mode="json")
+    if deep:
+        payload["deep"] = True
     if report.ok:
         text = f"Event chain verified: {report.checked} events, no violations."
+        if deep:
+            text += " Deep blob integrity verified."
     else:
         lines = [f"INTEGRITY FAILURE: {len(report.violations)} violation(s)"]
         lines += [f"  seq {v.sequence}: {v.kind}: {v.detail}" for v in report.violations[:20]]
@@ -4511,6 +4516,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--repair-index",
         action="store_true",
         help="rebuild drifted index rows from the log (requires --index).",
+    )
+    verify.add_argument(
+        "--deep",
+        action="store_true",
+        help="verify all referenced external blobs exist on disk with matching checksums (issue #1419).",
     )
 
     forget = add(

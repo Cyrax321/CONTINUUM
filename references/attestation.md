@@ -1,9 +1,10 @@
 # Event-chain attestation design
 
-Status: design only. The signing/verification primitives exist and are tested
-(`src/continuum/security/attestation.py`, `tests/test_attestation.py`), but the
-`continuum attest` / `continuum verify --sign` CLI surface is not built yet,
-pending review of this design.
+Status: shipped. The signing/verification primitives live in
+`src/continuum/security/attestation.py` (tested in `tests/test_attestation.py`),
+and the CLI surface is built: `continuum attest`, `continuum attest-verify`, and
+`continuum attest-keygen` (`src/continuum/cli/main.py`). The design rationale and
+threat model below are kept for reference.
 
 ## Why
 
@@ -42,20 +43,24 @@ The signer attests a specific, verifiable point in a run's history:
 - The signature covers every field except `signature`, canonicalized with the
   existing `to_json` (sorted keys), so it is byte-stable.
 
-## Commands (proposed)
+## Commands
 
 ```
-continuum attest <run_id> --key signer.pem [--signer ci-bot] [--out attest.json]
-    # resolves the run's head hash + trusted_through_seq from storage, signs,
-    # writes the attestation document.
+continuum attest-keygen [--out signer.pem] [--pub signer.pem.pub]
+    # generates an Ed25519 signer key pair.
 
-continuum verify <run_id> --attest attest.json [--expect-hash <head>]
+continuum attest <run_id> [--key signer.pem] [--signer ci-bot] [--out attest.json]
+    # resolves the run's head hash + trusted_through_seq from storage, signs,
+    # writes the attestation document (stdout when --out is omitted).
+    # --key / --signer fall back to CONTINUUM_SIGNER_KEY / CONTINUUM_SIGNER.
+
+continuum attest-verify <run_id> --attest attest.json
     # 1. verifies the Ed25519 signature against the embedded public key
     # 2. recomputes the run's live head hash and compares to chain_hash
     # 3. reports SIGNED / ALTERED / UNTRUSTED
 ```
 
-`--sign` on `verify` is not needed; verification never requires the private key.
+Verification never requires the private key; there is no `--sign` flag on verify.
 
 ### Environment variables
 
@@ -83,7 +88,7 @@ so a verifier that cares about identity must still check `public_key`.
 - Key management (where the signer key lives, rotation, revocation) is out of
   scope for v1 and must be documented as the operator's responsibility.
 
-## Open questions for review
+## Open questions from design review (resolved as shipped)
 
 1. Should `attest` default `signer` from an env var (e.g. `CONTINUUM_SIGNER`)?
 2. Should attestations be stored alongside the run (in the event store) or as
@@ -91,4 +96,8 @@ so a verifier that cares about identity must still check `public_key`.
 3. Is `trusted_through_seq` enough, or should we also attest a content hash of
    the reconstructed semantic state, not just the event log root?
 
-These should be answered before the CLI surface is implemented.
+The shipped CLI resolved these as: (1) `--signer` falls back to
+`CONTINUUM_SIGNER` (and `--key` to `CONTINUUM_SIGNER_KEY`); (2) attestations are
+standalone documents written by `--out` or emitted to stdout, not stored in the
+event log; (3) it attests the event-log root (`chain_hash` + `trusted_through_seq`),
+not a semantic-state hash.

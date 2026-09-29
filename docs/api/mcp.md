@@ -134,9 +134,11 @@ ask for, but the allowlist above is still what decides who may ask.
 
 ## build_server
 
-`continuum.mcp.server.build_server(database=None, *, policy=None, auth=None) -> tuple[Server, Storage]`
+`continuum.mcp.server.build_server(database=None, *, storage=None, policy=None, auth=None, confirm_auth=None) -> tuple[MCPServer, ContinuumMCP]`
 
-Construct the MCP server and its storage. `policy` defaults to `load_policy()`
+Construct the MCP server and its backing context. The second element is the
+`ContinuumMCP` context, not a `Storage`; callers that need the store reach it
+as `ctx.storage`. `policy` defaults to `load_policy()`
 (allowlist from env or `.continuum/mcp-policy.json`); `auth` defaults to
 `load_auth()` (shared secret or per-client tokens from env). Call `server.run(transport=...)`
 to serve.

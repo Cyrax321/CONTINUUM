@@ -13,7 +13,7 @@ data-beside-code convention as the gate and gateway registries:
 
 ```json
 {
-  "dashboard_base_url": "http://localhost:8765",
+  "dashboard_base_url": "http://localhost:8000",
   "endpoints": [
     {
       "url": "https://hooks.example.com/continuum",

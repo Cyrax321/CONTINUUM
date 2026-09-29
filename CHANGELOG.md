@@ -8,6 +8,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The escalation policy that budgets human attention (#1409).** Every action
+  the ledger cannot settle on its own becomes `REQUIRES_REVIEW` and interrupts
+  a human at once, and on a weeks-long run that floods the reviewer into
+  approving without reading, which is a gate with no gate in it. This ships
+  the schema, the loader and the deterministic scorer for the
+  attention-budgeted human gate: an `hourly_prompt_cap`, a
+  `batch_window_seconds` buffering window, a `blast_radius_threshold` above
+  which an item skips batching and interrupts immediately, and `risk_weights`
+  per action type or resource class. `load_escalation_policy` in
+  `src/continuum/recovery/escalation.py` reads `.continuum/escalation.json`,
+  falling back to a fail-safe default when the file is absent and raising
+  `EscalationPolicyError` when it exists but cannot be honoured, so a broken
+  policy never silently substitutes a risk posture the operator never chose.
+  `evaluate_action_risk` scores an action as the highest applicable weight,
+  because when two classifications disagree the more dangerous one should
+  govern. Nothing consumes the policy yet: the deferred review queue (#1410)
+  and the reviewer fatigue telemetry (#1411) are its wired consumers, so the
+  scorer is shipped and tested on its own rather than arriving with a heuristic
+  that moves while the queue is built.
+
 - **`continuum report --trajectory <run_id>` distils a run's whole history into
   an auditable summary (#1427).** Operators had no high-level view of a
   long-running agent's archived behaviour: replaying the raw log is expensive
@@ -48,6 +68,28 @@ All notable changes to this project are documented here. The format follows
   `PROJECTION_BOOKKEEPING`: folding one mints no state version, while mitigation
   that actually alters the run still bumps it through whatever it changed.
 
+- **Continuous-monitoring fault-injection scenarios for the recovery-correctness
+  suite (#1426).** Four scenarios in `continuum.benchmark.phase6.scenarios`
+  inject mid-run `RISK_OBSERVED` events into a live trajectory instead of
+  unit-mocking the risk feed: `risk_loop_replan` (a repeating-tool-action signal
+  must drive REPLAN with guidance naming the steps to avoid),
+  `risk_meltdown_rollback` (an error cascade with a meltdown on top must roll
+  back to the verified fact-gathering checkpoint), `risk_fail_open_resilience`
+  (corrupted, blank and torn feed lines must be dropped without disturbing the
+  trajectory), and `risk_side_effect_abort` (a duplicate side-effect signal must
+  abort and settle on the completed record without a second execution). Each
+  records decision accuracy against the policy expectation, duplicate side
+  effects, and ingestion latency per step. The phase6 suite is now 18 scenarios.
+
+- **Risk verdicts now carry located guidance for repeating steps (#1426).** A
+  `loop` trigger previously produced a replan verdict naming only the trigger;
+  the `step_id` the probe supplied was dropped, so a replanning agent had no way
+  to tell which plan units to avoid. The decision rationale and sealed contract
+  reason now append `repeating steps to avoid: <ids>`, deduplicated in
+  first-seen order, collected only from the events that contributed to the
+  winning mode. Triggers carrying no step id, and less severe triggers that lost
+  the severity vote, contribute no guidance.
+
 - **The recovery surfaces now name the risk observations that triggered a
   verdict (#1424).** A risk-driven verdict already carried the `RISK_OBSERVED`
   event ids behind it on the sealed contract as `triggering_risks`, and the
@@ -72,6 +114,16 @@ All notable changes to this project are documented here. The format follows
   offload descriptor `{"__offloaded": sha256_hex, "size_bytes": length, "keys": list(payload.keys())}`.
   The event hash chain calculation covers the offload descriptor, maintaining full cryptographic
   tamper evidence while preventing row bloat and scan degradation across SQLite and Postgres.
+
+- **Transparent blob payload rehydration and deep integrity verification (#1419).**
+  Event payloads offloaded to content-addressed blobs are transparently rehydrated during
+  `read_events()`, `read_archived_events()`, and `read_all_events()`, allowing downstream
+  projections, validators, and replays to operate seamlessly over complete payloads without
+  descriptor-awareness. If a referenced blob is missing or tampered with on disk, reads fail
+  closed by raising `CorruptedRecord` identifying the event sequence number and sha256 digest.
+  Extended `continuum verify` and storage engines with `--deep` / `deep=True` verification to
+  audit the existence and content hashes of on-disk blobs across both live and archived events.
+  Compaction preserves content-addressed blobs for archived event records.
 
 - **The gateway now enforces tenant-scoped namespace boundaries on external memory claims (#1415).**
   External memory mutation claims now support the standardized structured key convention
@@ -152,7 +204,6 @@ All notable changes to this project are documented here. The format follows
   never has to list every dependency to govern all of them. The change is
   additive: entries written before the field existed load with no dependency tag
   and behave exactly as before.
-
 ### Fixed
 
 - **Re-sync shared counts and repair integration seams opened by the #1400s
@@ -325,6 +376,27 @@ All notable changes to this project are documented here. The format follows
   since declaring such fields `volatile` at every call site is not a fix: a
   caller that wants around the cap simply forgets to declare them.
 
+- **A human-gated contract no longer advertises a machine-executable step as
+  the next permitted action (#1388).** `build_contract` nulled
+  `next_allowed_action` only for `ROLLBACK` and `ABORT` (the #1058 fix), so
+  `RecoverySafety.REQUIRES_HUMAN` fell through to the `else` and named
+  `plan.first`. That step stays automatic whenever the verdict is imposed
+  *after* the plan is built, which a consumed authority and a risk-policy
+  escalation both do without adding a `RepairStep` of their own, so the engine
+  declared a human must gate while the sealed contract handed out a green
+  light, and `permits()` confirmed it. Under `REQUIRES_HUMAN` a step is now
+  named only when it itself requires a person, so the #42 reconcile step and
+  the unreadable-log repair (#385) keep their action and their permission, and
+  `REQUIRES_REPAIR` / `REQUIRES_REVALIDATION` are untouched. `permits()` also
+  returns `False` when the contract names no action at all: the plain
+  comparison answered `permits(None) is True` on any verdict that deliberately
+  permits nothing, so a caller reading the action back out of the contract was
+  told it may proceed. `required_actions` is unchanged, so an auditor still
+  sees the work; only the single permitted action is held until the gate
+  clears.
+
+### Changed
+
 - **The `__all__` guard now walks the installed package instead of five
   hand-listed modules (#1228).** `tests/test_module_all_exports.py` asserted
   that names in `__all__` resolve by importing five modules by name, so a
@@ -446,6 +518,31 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The pin-marker surface no longer contradicts itself (#1099).** The docs
+  name `pin_markers_for_state` as the emitter of the `[pin:<id>:<hash>]`
+  markers, but the code that actually builds the ACTIVE CONSTRAINTS section
+  (`checkpoint/context.py:_pins_section`) reached across modules for the
+  private twin `_pin_marker` instead, and the public helper had no caller
+  outside its own module. `_pins_section` now builds its markers through
+  `pin_markers_for_state`, so the section and the accounting that reads it
+  cannot spell a pin two different ways, and the two doc sentences are true as
+  written. The four pin helpers (`account_pins_in_context`,
+  `pin_markers_for_state`, `check_pin_accounting`, `constraint_pins_payload`)
+  are added to `state/semantic.py`'s `__all__`, where three test modules and
+  `checkpoint/context.py` already import them by name.
+  `tests/test_module_all_exports.py` now covers that module, so the `__all__`
+  half cannot silently regress. Rendered output is unchanged.
+
+- **`benchmarks/` is now included in CI and pre-commit ruff gates (#1064).**
+  `benchmarks/` is imported by the test suite but sat outside the lint scope
+  in both CI and pre-commit configuration. The five ruff lint and format
+  findings in `benchmarks/fault_injection/runner.py` (SIM115, I001, SIM102,
+  SIM105, and formatting drift) are resolved, and CI `ruff check` and
+  `ruff format --check` as well as `.pre-commit-config.yaml` now cover
+  `benchmarks/` alongside the existing `src/`, `tests/`, `examples/`,
+  `_bugaudit/`, `scripts/` and `demo-run/` scopes. Contributor verification
+  guides across the documentation are synchronized to match.
+
 - **`PostgresStorage.rebuild_action_index` returns corrected row count (#1267).**
   `rebuild_action_index` on Postgres ended in an unconditional `return 0`,
   so `continuum verify --index --repair-index` always reported 0 rows corrected
@@ -453,6 +550,7 @@ All notable changes to this project are documented here. The format follows
   rebuilding, compares against the canonical fold, and returns the count of
   missing, stale, and spurious rows corrected, matching `SQLiteStorage` and the
   base `Storage` contract.
+
 - **CITATION.cff states the released version, and the bump sites are documented
   (#1120).** The citation file pinned `0.1.0` while the package was `0.1.2`, so
   anyone citing the project recorded a version two releases stale, and
@@ -462,6 +560,7 @@ All notable changes to this project are documented here. The format follows
   bump touches (pyproject, `__init__.py`, both README pins, CITATION.cff, the
   release tag), and `tests/test_version_drift.py` checks the citation file
   alongside the README pins so the drift cannot recur.
+
 - **The Postgres backend now stores and returns a fork's `parent_run_id`
   (#1079).** Both `create_run` and `create_run_started` inserted only the six
   columns the schema had before lineage existed, and `_row_to_run` never read
@@ -558,7 +657,6 @@ All notable changes to this project are documented here. The format follows
   counts action events only, 1-based, which is exactly the number the
   sequence assigned. SQLite was immune -- both sides there use the writing
   event's `rowid` -- and a regression test now pins that agreement.
-
 - **Webhook dedup now survives a compaction inside the re-notify window
   (#1186).** `_within_dedup_window` scanned only the live event tail for the
   `NOTIFICATION_SENT` / `NOTIFICATION_FAILED` rows the dedup state lives in,
@@ -1454,7 +1552,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,709 collected, ~2,673 passed, ~36 skipped on a minimal env).
+  (~2,809 collected, ~2,773 passed, ~36 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

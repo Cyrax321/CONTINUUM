@@ -454,7 +454,9 @@ async def test_a_racing_writer_cannot_compose_an_unprojectable_log(
         history = real_read(run_id, **kwargs)
         # Only the unbounded read is the one `_project_candidate` validates
         # against; `ensure_run` reads with `upto=1` earlier in the same call.
-        if not interposed["done"] and not kwargs and run_id == "run_1":
+        # `read_all_events` forwards ``rehydrate`` to this call, so the guard
+        # keys on the absence of a bound rather than on an empty kwargs.
+        if not interposed["done"] and kwargs.get("upto") is None and run_id == "run_1":
             interposed["done"] = True
             # A concurrent writer shrinks the total after we have read it.
             real_append(

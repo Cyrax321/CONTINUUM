@@ -97,13 +97,13 @@ root.
 
 ```bash
 # Lint with ruff
-ruff check src/ tests/ examples/ scripts/ demo-run/
+ruff check src/ tests/ examples/ benchmarks/ scripts/ demo-run/
 
 # Auto-fix safe issues
-ruff check --fix src/ tests/ examples/ scripts/ demo-run/
+ruff check --fix src/ tests/ examples/ benchmarks/ scripts/ demo-run/
 
 # Format check
-ruff format --check src/ tests/ examples/ scripts/ demo-run/
+ruff format --check src/ tests/ examples/ benchmarks/ scripts/ demo-run/
 
 # Type-check with mypy (strict mode)
 mypy src/continuum

@@ -151,6 +151,9 @@ class Storage(ABC):
         environment the run's newest checkpoint already recorded: compaction
         observes the world, it does not change it, so the last verified
         environment is the one the anchor represents.
+
+        Content-addressed blobs referenced by archived events remain preserved
+        in the blob directory without modification (issues #254, #1419).
         """
         raise NotImplementedError
 
@@ -189,7 +192,12 @@ class Storage(ABC):
                 f" at sequence {anchor_sequence}: the live log must retain its anchor"
             )
 
-    def read_archived_events(self, run_id: str) -> Sequence[Event]:
+    def read_archived_events(
+        self,
+        run_id: str,
+        *,
+        rehydrate: bool = True,
+    ) -> Sequence[Event]:
         """Read events moved into ``events_archive``, oldest first.
 
         Engines without an archive return an empty sequence, so a caller that
@@ -198,10 +206,15 @@ class Storage(ABC):
         action claims (and any other fold over history) intact across
         compaction: an archived fact is still a recorded fact.
         """
-        del run_id
+        del run_id, rehydrate
         return []
 
-    def read_all_events(self, run_id: str) -> Sequence[Event]:
+    def read_all_events(
+        self,
+        run_id: str,
+        *,
+        rehydrate: bool = True,
+    ) -> Sequence[Event]:
         """Full history including archived prefix, sorted by sequence.
 
         After compaction the live log holds only the anchor and tail; any
@@ -220,8 +233,14 @@ class Storage(ABC):
         sequence within that operation instead of rescanning the archive.
         Sorted to keep hash chain order stable.
         """
-        archived = list(self.read_archived_events(run_id))
-        live = list(self.read_events(run_id))
+        try:
+            archived = list(self.read_archived_events(run_id, rehydrate=rehydrate))
+        except TypeError:
+            archived = list(self.read_archived_events(run_id))
+        try:
+            live = list(self.read_events(run_id, rehydrate=rehydrate))
+        except TypeError:
+            live = list(self.read_events(run_id))
         if not archived:
             return live
         if not live:
@@ -368,6 +387,7 @@ class Storage(ABC):
         *,
         after_sequence: int = 0,
         upto: int | None = None,
+        rehydrate: bool = True,
     ) -> Sequence[Event]:
         """Live (unarchived) events in sequence order, windowed by ``after_sequence``/``upto``."""
         ...
@@ -378,7 +398,7 @@ class Storage(ABC):
         ...
 
     @abstractmethod
-    def verify_events(self, run_id: str) -> IntegrityReport:
+    def verify_events(self, run_id: str, *, deep: bool = False) -> IntegrityReport:
         """Recompute the hash chain and report whether it is intact."""
         ...
 

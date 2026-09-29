@@ -122,8 +122,10 @@ Register gated types in `.continuum/gate.json`:
 
 ```json
 {
-  "slack.notify": {
-    "key_template": "notify:{order_id}"
+  "tools": {
+    "slack.notify": {
+      "key_template": "notify:{order_id}"
+    }
   }
 }
 ```

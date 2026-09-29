@@ -100,7 +100,7 @@ from continuum.interchange.evidence import export_evidence, verify_export
 
 primitives = export_evidence(store, "my-task")
 for p in primitives:
-    print(p.kind, p.sequence, p.content_hash[:12])
+    print(p["kind"], p["sequence"], p["content_hash"][:12])
 
 # receiver-side tamper check (same logic as verify())
 ok = verify_export(primitives)
@@ -196,7 +196,7 @@ def run_page(run_id: str):
         total=decision.state.progress.total,
         contract_text=json.dumps(decision.contract.model_dump(mode="json"), indent=2),
         human_steps=human_steps_for(decision, run_id=run_id),
-        evidence_text=json.dumps([e.model_dump(mode="json") for e in evidence], indent=2))
+        evidence_text=json.dumps(evidence, indent=2))
 
 @app.get("/api/run/<run_id>/resume")
 def api_resume(run_id: str):
@@ -214,7 +214,7 @@ def api_resume(run_id: str):
 @app.get("/api/run/<run_id>/evidence")
 def api_evidence(run_id: str):
     store = SQLiteStorage(DB)
-    return jsonify([p.model_dump(mode="json") for p in export_evidence(store, run_id)])
+    return jsonify(export_evidence(store, run_id))
 
 if __name__ == "__main__":
     app.run(port=8766)

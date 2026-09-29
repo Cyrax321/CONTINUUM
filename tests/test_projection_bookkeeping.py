@@ -118,7 +118,7 @@ def test_state_checkpoint_canonical_json_excludes_only_bookkeeping() -> None:
     body = json.loads(checkpoint.canonical_json())
     assert set(body["state"].keys()) == all_fields - CHECKPOINT_BODY_OMITTED
     assert "observed_risks" in body["state"]
-    assert CHECKPOINT_BODY_OMITTED == PROJECTION_BOOKKEEPING - {"observed_risks"}
+    assert PROJECTION_BOOKKEEPING - {"observed_risks"} == CHECKPOINT_BODY_OMITTED
 
 
 def test_four_surfaces_agree_on_bookkeeping() -> None:
