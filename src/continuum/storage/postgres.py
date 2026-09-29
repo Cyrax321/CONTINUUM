@@ -277,34 +277,36 @@ class PostgresStorage(Storage):
             return
         self._connection.execute(
             """
-            INSERT INTO action_index(key, run_id, action_id, status, updated_seq, action_json)
-            SELECT latest.key,
-                   latest.run_id,
-                   latest.action_id,
-                   latest.status,
-                   nextval('action_index_ord_seq'),
-                   latest.action_json
-            FROM (
-                SELECT DISTINCT ON (e.payload::jsonb->>'key')
-                       e.payload::jsonb->>'key' AS key,
-                       e.payload::jsonb->'action'->>'run_id' AS run_id,
-                       e.payload::jsonb->'action'->>'action_id' AS action_id,
-                       e.payload::jsonb->'action'->>'status' AS status,
-                       (e.payload::jsonb->'action')::text AS action_json,
-                       e.ctid AS source_ctid
+            WITH numbered AS (
+                SELECT e.payload::jsonb->>'key' AS key,
+                       e.payload::jsonb->'action' AS action,
+                       row_number() OVER (ORDER BY e.ctid) AS ord
                 FROM events e
                 WHERE e.type IN ('ACTION_RECORDED', 'ACTION_RECONCILED', 'ACTION_COMPENSATED')
-                  AND e.payload::jsonb->>'key' IS NOT NULL
-                  AND e.payload::jsonb->'action' IS NOT NULL
-                ORDER BY e.payload::jsonb->>'key', e.ctid DESC
-            ) AS latest
-            ORDER BY latest.source_ctid
-            ON CONFLICT (key) DO UPDATE SET
-                run_id = EXCLUDED.run_id,
-                action_id = EXCLUDED.action_id,
-                status = EXCLUDED.status,
-                updated_seq = EXCLUDED.updated_seq,
-                action_json = EXCLUDED.action_json
+            ), latest AS (
+                SELECT DISTINCT ON (key) key, action, ord
+                FROM numbered
+                WHERE key IS NOT NULL AND action IS NOT NULL
+                ORDER BY key, ord DESC
+            )
+            INSERT INTO action_index(key, run_id, action_id, status, updated_seq, action_json)
+            SELECT key,
+                   action->>'run_id',
+                   action->>'action_id',
+                   action->>'status',
+                   ord,
+                   action::text
+            FROM latest
+            ON CONFLICT (key) DO NOTHING
+            """
+        )
+        self._connection.execute(
+            """
+            SELECT setval(
+                'action_index_ord_seq',
+                (SELECT COUNT(*) FROM events
+                 WHERE type IN ('ACTION_RECORDED', 'ACTION_RECONCILED', 'ACTION_COMPENSATED'))
+            )
             """
         )
 
