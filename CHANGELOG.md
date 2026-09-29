@@ -215,6 +215,20 @@ All notable changes to this project are documented here. The format follows
   and behave exactly as before.
 ### Fixed
 
+- **`policy-review` no longer reports an uncertain side effect as absent.**
+  The `side_effect_actions` rows folded every `ACTION_RECONCILED` event that was
+  not `completed` into `reconciled_absent`, but only `reconcile(occurred=False)`
+  is a confirmation of absence. `ActionLedger.claim` also writes that event type
+  for whatever a caller-supplied `on_unknown` resolver returns, and such a
+  resolver can legitimately resolve to `UNKNOWN` ("the probe could not tell") or
+  `REQUIRES_REVIEW` ("a human has to judge"). Both were counted as confirmed
+  absence, so the report answered "was the effect absent?" with "yes" when the
+  truth was "nobody knows", which is the one claim a maintainer reading it must
+  not be able to make by mistake. Only `failed` counts as absent now; the other
+  two land in a new `reconciled_uncertain` bucket that the text render shows
+  alongside the other two, so the open question stays visible instead of being
+  reported as a finding.
+
 - **File-derived progress no longer bloats the log on a compacted run.**
   `record_file_progress` gates its mirror on a projection of the log, but folded
   the live tail (`read_events`) alone. Once a run has been compacted the

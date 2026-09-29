@@ -165,6 +165,7 @@ def _review_run(storage: Storage, run_id: str, report: dict[str, Any]) -> None:
                 "claims": 0,
                 "reconciled_effect_found": 0,
                 "reconciled_absent": 0,
+                "reconciled_uncertain": 0,
                 "compensated": 0,
                 "unsettled": 0,
                 "compact_survival": {"archived": 0, "live": 0, "survived_compaction": False},
@@ -181,13 +182,21 @@ def _review_run(storage: Storage, run_id: str, report: dict[str, Any]) -> None:
         elif event.type is EventType.ACTION_COMPENSATED:
             row["compensated"] += 1
         elif event.type is EventType.ACTION_RECONCILED:
-            # "completed" means the outside world held the effect: intent
-            # and world had drifted, and the reconciliation found it.
-            # "failed" means absence was confirmed (issue #29).
+            # Only "completed" and "failed" are confirmations, and they point
+            # in opposite directions: "completed" means the outside world held
+            # the effect (intent and world had drifted, and reconciliation
+            # found it), "failed" means absence was confirmed (issue #29).
+            # "unknown" and "requires_review" are not findings, so they must
+            # not be read as absence: counting them as reconciled_absent
+            # answered "was the effect absent?" with "yes" when the truth is
+            # "nobody knows". They get their own bucket, which reads as the
+            # open question it is.
             if status == "completed":
                 row["reconciled_effect_found"] += 1
-            else:
+            elif status == "failed":
                 row["reconciled_absent"] += 1
+            else:
+                row["reconciled_uncertain"] += 1
     # An action whose latest status is still "started" is in flight or was
     # forgotten mid-run: counted once per distinct key and action type,
     # never silently dropped.
@@ -322,7 +331,9 @@ def render_policy_review(report: dict[str, Any]) -> list[str]:
             lines.append(
                 f"  {row['action_type']:<24} claims {row['claims']}  "
                 f"reconciled: {row['reconciled_effect_found']} effect found / "
-                f"{row['reconciled_absent']} absent  compensated {row['compensated']}  "
+                f"{row['reconciled_absent']} absent / "
+                f"{row['reconciled_uncertain']} uncertain  "
+                f"compensated {row['compensated']}  "
                 f"unsettled {row['unsettled']}"
             )
     else:

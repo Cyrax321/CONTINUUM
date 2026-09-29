@@ -18,9 +18,11 @@ from pathlib import Path
 import pytest
 
 from continuum.actions import ActionLedger
+from continuum.actions.idempotency import IdempotencyKey
+from continuum.actions.ledger import ActionOutcome
 from continuum.cli import ExitCode, main
 from continuum.events import EventType, Origin
-from continuum.models import Run
+from continuum.models import Action, ActionStatus, Run
 from continuum.recovery.policy_review import build_policy_review, render_policy_review
 from continuum.storage import SQLiteStorage
 
@@ -139,6 +141,67 @@ def test_side_effects_group_by_action_type(seeded: str) -> None:
     payments = rows["payments.charge"]
     assert payments["claims"] == 1 and payments["compensated"] == 1
     assert rows["slack.post"]["unsettled"] == 1
+
+
+def test_uncertain_reconciliation_is_not_reported_as_absent(db_path: str) -> None:
+    """Only ``failed`` is confirmed absence (#29).
+
+    ``reconcile(occurred=False)`` is the one path that means "a check confirmed
+    the effect did not happen". ``ActionLedger.claim`` also writes an
+    ``ACTION_RECONCILED`` event for whatever a caller-supplied ``on_unknown``
+    resolver returns (it is public through ``adapters/generic.py``), and such
+    a resolver can legitimately resolve to ``UNKNOWN`` ("the probe could not
+    tell") or ``REQUIRES_REVIEW`` ("a human has to judge").
+
+    Those two are not findings. Folding them into ``reconciled_absent`` answers
+    "was the side effect absent?" with "yes" when the truth is "nobody knows",
+    which is the one claim a maintainer reading this report must not be able to
+    make by mistake. So they get their own bucket instead.
+    """
+    with SQLiteStorage(db_path) as store:
+        store.create_run(Run(run_id="run_3", goal="g"))
+        store.append_event("run_3", EventType.RUN_STARTED, {"goal": "g"})
+        ledger = ActionLedger(store, "run_3")
+
+        # The two confirmations, through the public reconcile path.
+        ledger.reconcile(ledger.claim("github.create_issue", {"n": 0}).key, occurred=False)
+        ledger.reconcile(ledger.claim("github.create_issue", {"n": 1}).key, occurred=True)
+
+        # The two non-confirmations, through the real on_unknown path: claim,
+        # become uncertain, then re-claim so the resolver's decision is
+        # persisted as an ACTION_RECONCILED event.
+        for index, status in enumerate(
+            [ActionStatus.UNKNOWN, ActionStatus.REQUIRES_REVIEW], start=2
+        ):
+            args = {"n": index}
+            first = ledger.claim("github.create_issue", args)
+            ledger.fail(first.key, "interrupted", certain=False)
+
+            def resolve(
+                existing: Action,
+                key: IdempotencyKey = first.key,
+                status: ActionStatus = status,
+            ) -> ActionOutcome:
+                return ActionOutcome(
+                    key=key,
+                    action=existing.model_copy(update={"status": status}),
+                    fresh=False,
+                )
+
+            ledger.claim("github.create_issue", args, on_unknown=resolve)
+
+        report = build_policy_review(store, "run_3")
+
+    row = _rows(report, "side_effect_actions")["github.create_issue"]
+    assert row["reconciled_absent"] == 1, "only the confirmed absence counts as absent"
+    assert row["reconciled_effect_found"] == 1
+    assert row["reconciled_uncertain"] == 2, "unknown and requires_review stay open"
+    assert row["claims"] == 4, "the uncertain ones are counted, not dropped"
+
+    # The rendered line must not present uncertainty as absence either.
+    with SQLiteStorage(db_path) as store:
+        text = render_policy_review(build_policy_review(store, "run_3"))
+    assert any("1 effect found / 1 absent / 2 uncertain" in line for line in text), text
 
 
 def test_human_gates_counted(seeded: str) -> None:
