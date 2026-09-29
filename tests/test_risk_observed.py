@@ -8,11 +8,13 @@ knowledge rather than a change: folding one must not mint a semantic version.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from continuum.checkpoint.manager import CheckpointManager
 from continuum.events import EventLog, EventType
 from continuum.models import (
     ObservedRisk,
@@ -315,3 +317,74 @@ def test_now_defaults_to_a_aware_timestamp() -> None:
     schema = RiskObservedPayload(trigger="loop")
     assert schema.ts.tzinfo is not None
     assert abs((utcnow() - schema.ts).total_seconds()) < 5
+
+
+# --- a monitor's clock is not trusted, only tolerated (#1421 review) ------ #
+
+
+def test_schema_reads_a_millisecond_epoch() -> None:
+    # JS Date.now() and its kin stamp milliseconds, which read as year 51970
+    # when treated as seconds. The common spelling is legible, not fatal.
+    assert RiskObservedPayload(trigger="loop", ts=1577880000000).ts.year == 2020
+    assert RiskObservedPayload(trigger="loop", ts="1577880000000").ts.year == 2020
+    # A seconds epoch is still a seconds epoch.
+    assert RiskObservedPayload(trigger="loop", ts=1577880000).ts.year == 2020
+
+
+def test_schema_redates_an_unparseable_timestamp() -> None:
+    # Out of datetime's range either way (microsecond scale, or seconds so far
+    # ahead the year has five digits): the observation is re-dated rather than
+    # refused, because a monitor that reports nonsense has still reported.
+    for bad in (1.6e15, 1e15, -1e15, "yesterday", ""):
+        schema = RiskObservedPayload(trigger="loop", ts=bad)
+        assert schema.ts.tzinfo is not None
+        assert abs((utcnow() - schema.ts).total_seconds()) < 5
+
+
+def test_schema_treats_a_timestamp_without_a_timezone_as_utc() -> None:
+    naive = datetime(2020, 1, 1, 12, 0, 0)
+    parsed = RiskObservedPayload(trigger="loop", ts=naive)
+    assert parsed.ts == naive.replace(tzinfo=UTC)
+    assert RiskObservedPayload(trigger="loop", ts="2020-01-01T12:00:00").ts.tzinfo is UTC
+
+
+def test_projection_survives_an_out_of_range_timestamp() -> None:
+    # Such an event can already be on a log: pre-#1421 ingestion copied ts
+    # verbatim. In raise mode the run must still project. A millisecond epoch
+    # is legible and is read as the date the monitor meant.
+    log = started(EventLog())
+    log.append(
+        "run_1",
+        EventType.RISK_OBSERVED,
+        {"trigger": "loop", "score": 0.5, "ts": 1577880000000},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+    ms_state = project("run_1", log.events("run_1"))
+    assert ms_state.observed_risks[0].ts.year == 2020
+
+    # Genuinely unparseable magnitude: re-dated to the event's own hash-chained
+    # timestamp, so a re-projection reproduces bit for bit.
+    absurd_log = started(EventLog())
+    absurd_log.append(
+        "run_1",
+        EventType.RISK_OBSERVED,
+        {"trigger": "loop", "score": 0.5, "ts": 1e15},
+        source=Origin.EXTERNAL_MONITOR,
+    )
+    absurd_events = absurd_log.events("run_1")
+    absurd_state = project("run_1", absurd_events)
+    assert absurd_state.observed_risks[0].ts == absurd_events[-1].timestamp
+
+
+def test_ingestion_keeps_a_signal_with_an_out_of_range_timestamp(tmp_path: Path) -> None:
+    db = str(tmp_path / "risk_ms_epoch.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_ms_epoch"
+        store.create_run_started(Run(run_id=run_id, goal="ms epoch"))
+        # The write path used to raise past ValidationError and land in the
+        # outer except, returning False and dropping the signal.
+        assert ingest_risk(store, run_id, {"trigger": "loop", "ts": 1577880000000}) is True
+        assert ingest_risk(store, run_id, {"trigger": "loop", "ts": 1e15}) is True
+        events = store.read_events(run_id)
+        assert len(events) == 3
+        assert all(e.type is EventType.RISK_OBSERVED for e in events[1:])

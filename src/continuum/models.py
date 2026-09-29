@@ -782,6 +782,14 @@ _RISK_DETAIL_MAX_DEPTH = 4
 
 _EPOCH_TEXT = re.compile(r"-?\d+(?:\.\d+)?$")
 
+#: Above this magnitude a raw epoch is milliseconds, not seconds. A seconds
+#: epoch of 1e11 is already year 5138, and every monitor clock in practical
+#: use sits far below it, so anything larger is a JS ``Date.now()``-style
+#: millisecond count. The check is deliberately coarse: it exists to keep a
+#: common spelling legible, not to guess at every clock scale a monitor might
+#: use. Whatever still overflows after the adjustment falls through to ``None``.
+_EPOCH_MS_CUTOFF = 1e11
+
 
 def _risk_trigger(value: Any) -> str:
     """Normalise a risk class name: non-empty, lowercase, bounded."""
@@ -853,6 +861,34 @@ def _risk_detail(value: Any) -> dict[str, Any]:
     return dict(clamped_root) if isinstance(clamped_root, Mapping) else {}
 
 
+def _from_epoch(seconds: float) -> datetime | None:
+    """Convert an epoch in seconds, tolerating the millisecond spelling.
+
+    Returns ``None`` for anything ``datetime`` cannot hold rather than raising:
+    a seconds epoch past year 9999, a negative epoch before year 1, and any
+    clock scale the cutoff above did not catch all land here, and the caller's
+    contract is "re-date the observation", not "reject the event".
+    """
+    if abs(seconds) > _EPOCH_MS_CUTOFF:
+        seconds /= 1000.0
+    try:
+        return datetime.fromtimestamp(seconds, tz=UTC)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _aware(dt: datetime) -> datetime:
+    """Treat a timestamp without a timezone as UTC.
+
+    A monitor that serialises without an offset is not claiming a local clock,
+    it is simply being imprecise, and leaving the value naive would make every
+    later comparison against an aware timestamp raise. The fold pre-parses and
+    hands back an aware value, so this matters on the write path and for a
+    hand-edited log.
+    """
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+
+
 def _risk_ts(value: Any) -> datetime | None:
     """Parse an epoch number or an ISO 8601 string, or ``None`` if neither.
 
@@ -861,22 +897,30 @@ def _risk_ts(value: Any) -> datetime | None:
     caller pick its own fallback instead of forcing one on it: the writer dates
     the observation at ingestion time, the fold dates it at the event's own
     hash-chained timestamp so a re-projection still reproduces bit for bit.
+
+    Out-of-range epochs return ``None`` instead of propagating
+    ``ValueError``/``OverflowError``/``OSError``. Millisecond epochs are common
+    (JS ``Date.now()``) and mean year 51970 read as seconds, so a value above
+    :data:`_EPOCH_MS_CUTOFF` is read as milliseconds first. Either way the
+    event survives: in ``project()`` an unparseable ``ts`` re-dates to the
+    event's own timestamp, and on the write path it re-dates to ingestion time.
     """
     if isinstance(value, datetime):
-        return value
+        return _aware(value)
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value, tz=UTC)
+        return _from_epoch(float(value))
     text = str(value).strip() if value is not None else ""
     if not text:
         return None
     if _EPOCH_TEXT.match(text):
-        return datetime.fromtimestamp(float(text), tz=UTC)
+        return _from_epoch(float(text))
     try:
-        return datetime.fromisoformat(text)
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
+    return _aware(parsed)
 
 
 class RiskObservedPayload(BaseModel):
@@ -1489,6 +1533,7 @@ PROJECTION_BOOKKEEPING: set[str] = {
 }
 
 
+
 class StateCheckpoint(BaseModel):
     """Durable, self-verifying snapshot of semantic state and environment."""
 
@@ -1523,9 +1568,9 @@ class StateCheckpoint(BaseModel):
         Omits projection bookkeeping for the same reasons ``content`` does,
         plus one more: readers built before #383 validate ``SemanticState``
         with ``extra="forbid"`` and would refuse a body carrying fields they
-        have never heard of. Omitting them costs nothing, since they are
-        always default in anything persistable.
-        """
+        have never heard of.
+
+"""
         return self.model_dump_json(exclude={"state": PROJECTION_BOOKKEEPING})
 
     def digest(self) -> str:
