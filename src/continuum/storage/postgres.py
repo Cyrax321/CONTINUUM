@@ -289,7 +289,12 @@ class PostgresStorage(Storage):
               AND e.payload::jsonb->>'key' IS NOT NULL
               AND e.payload::jsonb->'action' IS NOT NULL
             ORDER BY ctid
-            ON CONFLICT (key) DO NOTHING
+            ON CONFLICT (key) DO UPDATE SET
+                run_id = EXCLUDED.run_id,
+                action_id = EXCLUDED.action_id,
+                status = EXCLUDED.status,
+                updated_seq = EXCLUDED.updated_seq,
+                action_json = EXCLUDED.action_json
             """
         )
 
