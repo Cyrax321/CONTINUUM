@@ -388,3 +388,67 @@ def test_ingestion_keeps_a_signal_with_an_out_of_range_timestamp(tmp_path: Path)
         events = store.read_events(run_id)
         assert len(events) == 3
         assert all(e.type is EventType.RISK_OBSERVED for e in events[1:])
+
+# --- the rows survive a checkpoint (#1421 review) ------------------------- #
+
+
+def _run_with_a_risk(store: SQLiteStorage, run_id: str, goal: str) -> None:
+    store.create_run_started(Run(run_id=run_id, goal=goal))
+    store.append_event(run_id, EventType.RUN_STARTED, {"goal": goal, "total": 2})
+    ingest_risk(store, run_id, {"trigger": "meltdown", "score": 0.9})
+
+
+def test_a_checkpoint_body_carries_observed_risks(tmp_path: Path) -> None:
+    db = str(tmp_path / "risk_ck_body.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_ck_body"
+        _run_with_a_risk(store, run_id, "checkpointed")
+        CheckpointManager(store).checkpoint(run_id)
+        assert len(project(run_id, store.read_events(run_id)).observed_risks) == 1
+
+    # Read the persisted body raw: the rows must be in it, not only in memory.
+    import json
+    import sqlite3
+
+    with sqlite3.connect(db) as conn:
+        (row,) = conn.execute("SELECT body FROM checkpoints").fetchall()
+    state_body = json.loads(row[0])["state"]
+    assert [r["trigger"] for r in state_body["observed_risks"]] == ["meltdown"]
+
+
+def test_restore_keeps_risks_seen_before_the_checkpoint(tmp_path: Path) -> None:
+    db = str(tmp_path / "risk_restore.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_restore"
+        _run_with_a_risk(store, run_id, "restored")
+        manager = CheckpointManager(store)
+        manager.checkpoint(run_id)
+        # Work after the checkpoint gives restore a live tail to fold.
+        store.append_event(run_id, EventType.WORK_COMPLETED, {})
+
+        restored = manager.restore(run_id)
+        assert restored.replayed is True
+        # The pre-checkpoint risk is still there, and the restored state agrees
+        # with a full projection of the same log.
+        assert [r.trigger for r in restored.state.observed_risks] == ["meltdown"]
+        assert restored.state.observed_risks == project(
+            run_id, store.read_events(run_id)
+        ).observed_risks
+
+
+def test_restore_keeps_risks_seen_before_compaction(tmp_path: Path) -> None:
+    db = str(tmp_path / "risk_compacted.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_compacted"
+        _run_with_a_risk(store, run_id, "compacted")
+        store.append_event(run_id, EventType.WORK_COMPLETED, {})
+        store.compact_run(run_id)
+
+        # The risk event is now archived, and restore reads only the live tail,
+        # so the rows cannot be re-derived from the log at restore time.
+        live = store.read_events(run_id)
+        assert not any(e.type is EventType.RISK_OBSERVED for e in live)
+        assert any(e.type is EventType.RISK_OBSERVED for e in store.read_all_events(run_id))
+
+        restored = CheckpointManager(store).restore(run_id)
+        assert [r.trigger for r in restored.state.observed_risks] == ["meltdown"]

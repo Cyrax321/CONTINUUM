@@ -78,6 +78,7 @@ __all__ = [
     "ObservedRisk",
     "validate_caused_by",
     "PROJECTION_BOOKKEEPING",
+    "CHECKPOINT_BODY_OMITTED",
 ]
 
 Frozen = ConfigDict(frozen=True, extra="forbid")
@@ -1517,13 +1518,11 @@ class Run(BaseModel):
 #: its diagnosis, but they are outside every durable identity of a state:
 #: excluded from the version fingerprint and from checkpoint integrity hashes
 #: (both predate #383; hashing them would brand every existing record as
-#: tampered), and omitted from persisted bodies so readers built before #383,
-#: whose SemanticState forbids extra inputs, can still load newer databases.
-#: ``observed_risks`` joins them for a second reason (issue #1421): a risk
-#: observation changes what the projection knows, not what the run is, so
-#: folding one must not mint a semantic version. It is re-derivable from the
-#: log, so omitting it from a persisted body costs nothing a re-projection
-#: cannot restore.
+#: tampered), and omitted from persisted state bodies so readers built before
+#: #383, whose SemanticState forbids extra inputs, can still load newer
+#: databases. ``observed_risks`` joins them for a second reason (issue #1421):
+#: a risk observation changes what the projection knows, not what the run is,
+#: so folding one must not mint a semantic version.
 PROJECTION_BOOKKEEPING: set[str] = {
     "status",
     "unprojectable_at_sequence",
@@ -1532,6 +1531,20 @@ PROJECTION_BOOKKEEPING: set[str] = {
     "observed_risks",
 }
 
+#: The bookkeeping fields omitted from a persisted *checkpoint body* (issue
+#: #1421). Every field in :data:`PROJECTION_BOOKKEEPING` stays out of the
+#: fingerprint and the integrity digest, but ``observed_risks`` is the one
+#: field in that set that is *not* always default in something persistable:
+#: a checkpoint taken after a monitor reported a risk genuinely carries rows.
+#: ``restore`` rebuilds the live state from that body plus the post-checkpoint
+#: tail alone, and reads only the live tail by design (the archive is not
+#: re-folded, so a compacted run cannot re-derive the rows), so dropping the
+#: field here would silently erase every risk seen before the checkpoint and
+#: the restored state would stop matching a full projection. The other four
+#: stay omitted: a degraded fold is refused at every capture path, so they
+#: really are always default, and keeping them out preserves the
+#: pre-#383 reader guarantee where it still holds.
+CHECKPOINT_BODY_OMITTED: set[str] = PROJECTION_BOOKKEEPING - {"observed_risks"}
 
 
 class StateCheckpoint(BaseModel):
@@ -1570,8 +1583,15 @@ class StateCheckpoint(BaseModel):
         with ``extra="forbid"`` and would refuse a body carrying fields they
         have never heard of.
 
-"""
-        return self.model_dump_json(exclude={"state": PROJECTION_BOOKKEEPING})
+        ``observed_risks`` is the deliberate exception (issue #1421): unlike
+        the other four it is not always default in a checkpoint that can be
+        persisted, and ``restore`` consumes this body as the base it folds the
+        live tail onto. Dropping the rows here would make the restored state
+        forget every risk seen before the checkpoint, with no way to recover
+        them on a compacted run, so the field rides in the body while the
+        digest in ``content`` still ignores it.
+        """
+        return self.model_dump_json(exclude={"state": CHECKPOINT_BODY_OMITTED})
 
     def digest(self) -> str:
         """Compute the stable cryptographic digest of the checkpoint content."""

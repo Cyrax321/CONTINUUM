@@ -12,16 +12,30 @@ build error. The check is dynamic, set(SemanticState.model_fields) minus the
 fingerprint set equals PROJECTION_BOOKKEEPING, so Agents 3 and 4 adding
 attempt_lessons or plan do not need a hardcoded list update.
 
+The one deliberate exception is ``observed_risks`` (issue #1421): it stays out
+of the fingerprint and the integrity digest but rides in a persisted checkpoint
+body, because ``restore`` folds the live tail onto that body and cannot
+re-derive the rows from an archived prefix. So the three persistence surfaces
+split into two exclusion sets, PROJECTION_BOOKKEEPING for the digest and the
+versions audit body, CHECKPOINT_BODY_OMITTED for the checkpoint body, and both
+are asserted exactly rather than remembered.
+
 The fixture subtlety from #385 is preserved in test_checkpoint_compat, both
 halves, stripping plus re-sealing. This file only adds the classification
-invariant and that the four surfaces actually use the same constant.
+invariant and that the surfaces actually use their constants.
 """
 
 from __future__ import annotations
 
 import json
 
-from continuum.models import PROJECTION_BOOKKEEPING, Goal, SemanticState, StateCheckpoint
+from continuum.models import (
+    CHECKPOINT_BODY_OMITTED,
+    PROJECTION_BOOKKEEPING,
+    Goal,
+    SemanticState,
+    StateCheckpoint,
+)
 from continuum.state.versioning import canonical_state_json, state_fingerprint
 
 
@@ -91,24 +105,43 @@ def test_state_checkpoint_content_excludes_only_bookkeeping() -> None:
 
 
 def test_state_checkpoint_canonical_json_excludes_only_bookkeeping() -> None:
+    """The checkpoint body keeps ``observed_risks``, unlike the digest (issue #1421).
+
+    ``restore`` folds the live tail onto this body and cannot re-derive the
+    rows from an archived prefix, so the risks ride in the body. The other four
+    stay out: they are always default in anything persistable, and keeping them
+    out is what lets a pre-#383 reader still load the body.
+    """
     all_fields = set(SemanticState.model_fields)
     base = _base_state()
     checkpoint = StateCheckpoint(run_id=base.run_id, state=base)
     body = json.loads(checkpoint.canonical_json())
-    assert set(body["state"].keys()) == all_fields - PROJECTION_BOOKKEEPING
+    assert set(body["state"].keys()) == all_fields - CHECKPOINT_BODY_OMITTED
+    assert "observed_risks" in body["state"]
+    assert CHECKPOINT_BODY_OMITTED == PROJECTION_BOOKKEEPING - {"observed_risks"}
 
 
 def test_four_surfaces_agree_on_bookkeeping() -> None:
-    """The four exclude lists must be the same constant, not four copies."""
+    """The fingerprint set is one constant, and the digest and versions body use it.
+
+    The checkpoint body is the one deliberate asymmetry (issue #1421): it keeps
+    ``observed_risks`` where the digest and the versions audit body drop it, so
+    the three persistence surfaces split into two exclusion sets rather than
+    one. What must stay true is that each surface excludes *exactly* the set it
+    claims, which is what keeps a new bookkeeping-like field from silently
+    landing in one surface and not the others.
+    """
     all_fields = set(SemanticState.model_fields)
-    base = _base_state()
-    canonical_keys = set(json.loads(canonical_state_json(base)).keys())
+    canonical_keys = set(json.loads(canonical_state_json(base := _base_state())).keys())
     checkpoint = StateCheckpoint(run_id=base.run_id, state=base)
     content_keys = set(checkpoint.content()["state"].keys())
     canonical_checkpoint_keys = set(json.loads(checkpoint.canonical_json())["state"].keys())
-    # All three persistence surfaces must agree.
-    assert canonical_keys == content_keys == canonical_checkpoint_keys
-    assert canonical_keys == all_fields - PROJECTION_BOOKKEEPING
+
+    # The digest and the versions audit body exclude the full bookkeeping set.
+    assert canonical_keys == content_keys == all_fields - PROJECTION_BOOKKEEPING
+    # The checkpoint body keeps observed_risks and drops only the other four.
+    assert canonical_checkpoint_keys == all_fields - CHECKPOINT_BODY_OMITTED
+    assert canonical_checkpoint_keys - canonical_keys == {"observed_risks"}
 
     # Fingerprint agrees plus versioning.
     versioning = {"version", "created_at", "updated_at", "source_sequence"}

@@ -42,7 +42,10 @@ def state_fingerprint(state: SemanticState) -> str:
     mitigation that actually alters the run still bumps it through whatever it
     changed. Two states that differ only in what they were seen doing are the
     same state for versioning purposes, exactly as two states that differ only
-    in where folding stopped are.
+    in where folding stopped are. The rows still ride in a persisted checkpoint
+    body, because ``restore`` consumes that body as its fold base and reads
+    only the live tail; they are simply absent from every identity computed
+    here.
     """
     payload = state.model_dump(
         mode="json",

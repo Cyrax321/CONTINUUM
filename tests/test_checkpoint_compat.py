@@ -27,13 +27,17 @@ from continuum.storage.sqlite import SQLiteStorage
 
 #: Pinned by name, deliberately not imported: these tests freeze the exact
 #: serialised shape that crosses the #383 boundary, so they must not move if
-#: the constant ever does.
+#: the constant ever does. ``observed_risks`` belongs here for the same reason
+#: the other four do (issue #1421): no older writer could have produced the
+#: field, so simulating one faithfully means omitting it too, and the digest
+#: the simulated writer commits is over a state that has none of the five.
 BOOKKEEPING_FIELDS = frozenset(
     {
         "status",
         "unprojectable_at_sequence",
         "unprojectable_event_type",
         "unprojectable_reason",
+        "observed_risks",
     }
 )
 
@@ -126,12 +130,19 @@ def test_a_version_row_written_before_383_still_loads(db: str) -> None:
         storage.close()
 
 
-def test_new_checkpoints_do_not_persist_projection_bookkeeping(tmp_path: Path) -> None:
+def test_new_checkpoints_persist_only_observed_risks(tmp_path: Path) -> None:
     """Readers built before #383 validate SemanticState with extra="forbid".
 
     A body carrying fields they have never heard of would make every database
-    written after the upgrade unreadable by older builds, so the canonical
-    form omits them entirely.
+    written after the upgrade unreadable by older builds, so the four #383
+    fields stay out of the persisted checkpoint body.
+
+    ``observed_risks`` is the one deliberate exception (issue #1421): it is not
+    always default in a checkpoint that can be persisted, and ``restore`` folds
+    the live tail onto this body without re-reading the archived prefix, so
+    dropping it would silently erase every risk seen before the checkpoint.
+    The integrity digest still ignores the field, so a checkpoint written
+    before this change keeps verifying.
     """
     path = str(tmp_path / "forward.db")
     storage = SQLiteStorage(path)
@@ -146,8 +157,9 @@ def test_new_checkpoints_do_not_persist_projection_bookkeeping(tmp_path: Path) -
         conn.row_factory = sqlite3.Row
         (row,) = conn.execute("SELECT body FROM checkpoints").fetchall()
     state_body = json.loads(row["body"])["state"]
-    for field in BOOKKEEPING_FIELDS:
+    for field in BOOKKEEPING_FIELDS - {"observed_risks"}:
         assert field not in state_body, f"{field} must stay out of the persisted body"
+    assert "observed_risks" in state_body
 
 
 def test_new_version_rows_do_not_persist_projection_bookkeeping(tmp_path: Path) -> None:
