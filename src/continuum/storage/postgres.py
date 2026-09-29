@@ -278,17 +278,27 @@ class PostgresStorage(Storage):
         self._connection.execute(
             """
             INSERT INTO action_index(key, run_id, action_id, status, updated_seq, action_json)
-            SELECT e.payload::jsonb->>'key',
-                   e.payload::jsonb->'action'->>'run_id',
-                   e.payload::jsonb->'action'->>'action_id',
-                   e.payload::jsonb->'action'->>'status',
+            SELECT latest.key,
+                   latest.run_id,
+                   latest.action_id,
+                   latest.status,
                    nextval('action_index_ord_seq'),
-                   (e.payload::jsonb->'action')::text
-            FROM events e
-            WHERE e.type IN ('ACTION_RECORDED', 'ACTION_RECONCILED', 'ACTION_COMPENSATED')
-              AND e.payload::jsonb->>'key' IS NOT NULL
-              AND e.payload::jsonb->'action' IS NOT NULL
-            ORDER BY ctid
+                   latest.action_json
+            FROM (
+                SELECT DISTINCT ON (e.payload::jsonb->>'key')
+                       e.payload::jsonb->>'key' AS key,
+                       e.payload::jsonb->'action'->>'run_id' AS run_id,
+                       e.payload::jsonb->'action'->>'action_id' AS action_id,
+                       e.payload::jsonb->'action'->>'status' AS status,
+                       (e.payload::jsonb->'action')::text AS action_json,
+                       e.ctid AS source_ctid
+                FROM events e
+                WHERE e.type IN ('ACTION_RECORDED', 'ACTION_RECONCILED', 'ACTION_COMPENSATED')
+                  AND e.payload::jsonb->>'key' IS NOT NULL
+                  AND e.payload::jsonb->'action' IS NOT NULL
+                ORDER BY e.payload::jsonb->>'key', e.ctid DESC
+            ) AS latest
+            ORDER BY latest.source_ctid
             ON CONFLICT (key) DO UPDATE SET
                 run_id = EXCLUDED.run_id,
                 action_id = EXCLUDED.action_id,
