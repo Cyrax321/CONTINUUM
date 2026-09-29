@@ -1144,7 +1144,7 @@ def test_match_route_rejects_colon_in_body_fields() -> None:
         bound_tenant="acme",
     )
     assert decision.allow is False
-    assert "malformed memory key" in decision.reason
+    assert "must not contain ':'" in decision.reason
 
 
 def test_match_route_supports_flexible_placeholder_order() -> None:
