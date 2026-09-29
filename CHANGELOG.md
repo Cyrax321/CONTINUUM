@@ -8,15 +8,6 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- **`continuum policy-review` reports recovery history by action type (#743).**
-  A read-only, deterministic aggregate of repair attempts, human-gate
-  outcomes, compaction survival and reconciliation outcomes per action type,
-  over live and archived history alike, for periodic maintainer review. The
-  report is evidence for a human decision and never a policy engine: nothing
-  it computes feeds `plan_repairs` or changes a recovery verdict, and a high
-  human-required rate means the probes or the workflow deserve investigation,
-  not a lower safety bar. Without a `run_id` it spans every run.
-
 - **The escalation policy that budgets human attention (#1409).** Every action
   the ledger cannot settle on its own becomes `REQUIRES_REVIEW` and interrupts
   a human at once, and on a weeks-long run that floods the reviewer into
@@ -215,41 +206,12 @@ All notable changes to this project are documented here. The format follows
   and behave exactly as before.
 ### Fixed
 
-- **The Postgres action index backfill uses jsonb accessors instead of
-  SQLite's `json_extract` (#1441).** `PostgresStorage._backfill_action_index`
-  seeds the `action_index` projection from existing `ACTION_*` events when the
-  index is empty, which is the recovery path for a database that predates the
-  index (#216) or one that lost its rows. Its `INSERT ... SELECT` was ported
-  from the SQLite v3 migration, but the two `WHERE` predicates were left as
-  `json_extract(e.payload, '$.key')` while the rest of the statement had been
-  translated to jsonb. Postgres has no `json_extract`, so whenever the backfill
-  actually fired the store failed to open outright with `UndefinedFunction`
-  (SQLSTATE 42883), out of `_create_schema` on connection. No test covered the
-  case, which is why CI saw nothing: the backfill short-circuits unless
-  `ACTION_*` events exist and the index is empty, and every test database
-  starts empty in both senses. The `WHERE` clause now reads
-  `e.payload::jsonb->>'key' IS NOT NULL` and
-  `e.payload::jsonb->'action' IS NOT NULL`, matching the `SELECT` list.
-
-  The same statement had also dropped SQLite's `INSERT OR REPLACE`, so a key
-  that was claimed and later completed, appearing in two `ACTION_*` events,
-  proposed a duplicate primary key. The port now selects
-  `DISTINCT ON (key) ... ORDER BY key, ord DESC`, keeping the last event per
-  key, with `ON CONFLICT (key) DO NOTHING` as a second guard.
-
-- **`policy-review` no longer reports an uncertain side effect as absent.**
-  The `side_effect_actions` rows folded every `ACTION_RECONCILED` event that was
-  not `completed` into `reconciled_absent`, but only `reconcile(occurred=False)`
-  is a confirmation of absence. `ActionLedger.claim` also writes that event type
-  for whatever a caller-supplied `on_unknown` resolver returns, and such a
-  resolver can legitimately resolve to `UNKNOWN` ("the probe could not tell") or
-  `REQUIRES_REVIEW` ("a human has to judge"). Both were counted as confirmed
-  absence, so the report answered "was the effect absent?" with "yes" when the
-  truth was "nobody knows", which is the one claim a maintainer reading it must
-  not be able to make by mistake. Only `failed` counts as absent now; the other
-  two land in a new `reconciled_uncertain` bucket that the text render shows
-  alongside the other two, so the open question stays visible instead of being
-  reported as a finding.
+- **Re-sync the documented collected total to 2,910.** The suite drifted past
+  every stated figure while the docs still read 2,910, so the docs-count guard
+  failed on main: 2,910 collected against 2,910 documented, 78 over the
+  tolerance of 30. README, the five translated READMEs, CHANGELOG,
+  `docs/CONTRIBUTING_ONBOARDING.md`, `references/testing.md` and
+  `references/install.md` now state the live total.
 
 - **File-derived progress no longer bloats the log on a compacted run.**
   `record_file_progress` gates its mirror on a projection of the log, but folded
@@ -428,21 +390,6 @@ All notable changes to this project are documented here. The format follows
   clears.
 
 ### Changed
-
-- **`approve_restore` target resolution and input validation are now covered
-  branch by branch (#1292).** `tests/test_restore_target_resolution.py`
-  previously had one entry point, `approve_restore(..., anchor_sequence=0)`,
-  so every branch of `_anchor_for` and every guard in front of it was
-  uncovered and a change to any of them would have shipped green. The new
-  tests drive each rung directly and pin the exact error messages. Two are
-  load-bearing rather than redundant: the no-target case writes checkpoints
-  out of order so the highest version is not the highest `source_sequence`,
-  which catches a resolver returning the wrong field, and the cross-run case
-  pins that a checkpoint id belonging to another run is not a valid target.
-  `restore.py` is unchanged. Three lines stay uncovered: the `CorruptedRecord`
-  rung is already covered by `tests/test_checkpoint_corruption.py`, and the
-  trailing `checkpoint_id` ladder at `restore.py:76-78` is unreachable,
-  since a real id resolves in `get_checkpoint` before that loop runs.
 
 - **The `__all__` guard now walks the installed package instead of five
   hand-listed modules (#1228).** `tests/test_module_all_exports.py` asserted
@@ -1637,7 +1584,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,906 collected, ~2,870 passed, ~36 skipped on a minimal env).
+  (~2,910 collected, ~2,747 passed, ~36 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

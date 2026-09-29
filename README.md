@@ -64,7 +64,6 @@ Paths that need no clone and no local install:
 | Path | How |
 |:--|:--|
 | Install from PyPI | `pip install continuum-agent==0.1.2`, then `continuum --help` |
-| Install with Homebrew | `brew install wized2/continuum/continuum`, then `continuum --help` |
 | Watch crash recovery happen end to end | `docker run --rm ghcr.io/cyrax321/continuum` |
 | Use the CLI through Docker | `docker run --rm ghcr.io/cyrax321/continuum continuum --help` |
 | Run the CLI without cloning | `uvx --from git+https://github.com/Cyrax321/CONTINUUM.git continuum --help` |
@@ -100,7 +99,7 @@ Verify:
 ```bash
 continuum --help                 # CLI entrypoint
 continuum-mcp --help             # MCP server entrypoint (needs [mcp] or [dev])
-pytest -q                        # ~2,906 collected, ~2,870 passed, ~36 skipped on a minimal env (exact counts vary)
+pytest -q                        # ~2,910 collected, ~2,747 passed, ~36 skipped on a minimal env (exact counts vary)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # the three gates CI enforces
 ```
@@ -171,7 +170,7 @@ Every row above is traceable to a path that exists on `main` at the tagged commi
 
 ### Crash recovery, for real
 
-The image below is not a mock. It is the output of `python demo-run/generate_crash_visual.py`, which runs `demo-run/worker.py` until `os._exit(9)` at document 399, calls `continuum resume --env dataset=v4` and shows the refusal path (`REQUEST_HUMAN`, `safe:false`, exit 21), reconciles the uncertain side effect with a probe, then resumes from the same database and finishes with no duplicate work. The transcript is also saved as `docs/assets/crash-recovery.txt` for audit.
+The image below is not a mock. It is the output of `python demo-run/generate_crash_visual.py`, which runs `demo-run/worker.py` until `os._exit(9)` at document 399, calls `continuum resume --env dataset=v4` and shows the refusal path (`REQUEST_HUMAN`, `safe:false`, exit 20), reconciles the uncertain side effect with a probe, then resumes from the same database and finishes with no duplicate work. The transcript is also saved as `docs/assets/crash-recovery.txt` for audit.
 
 Regenerate it:
 
@@ -235,7 +234,7 @@ CONTINUUM is verified against real LLM agents, live protocol boundaries, and har
 - **Third-party clients**: Gemini CLI and Kilo Code connected over stdio JSON-RPC against the live SQLite store, validating multi-agent co-existence and authorization isolation.
 - **Protocol compliance**: driven end to end with `@modelcontextprotocol/inspector --cli` across process deaths; mutating tools deny by default behind `CONTINUUM_MCP_MUTATING_CLIENTS`; external claims degrade to `REQUIRES_REVIEW` (`safe: false`).
 - **Self-healing**: hard-killed servers recover from orphaned SQLite `-wal`/`-shm` sidecars via single-retry cleanup at startup.
-- **Scale**: roughly 2,906 tests collected (~2,870 passing; ~36 skipped; other outcomes vary by environment) on Python 3.11, 3.12, and 3.13 (unit, `hypothesis` property-based, concurrency, adversarial). CONTINUUM-Bench runs five crash scenarios plus a dedicated argument-drift scenario, measuring 0 duplicate work and 0 duplicate side effects for CONTINUUM against full duplication for naive replay; a separate 14-scenario recovery-correctness suite (`continuum.benchmark.phase6`) encodes the crash points from the durable-execution survey as executable assertions, and a 7-fault risk-injection suite (`benchmarks/fault_injection/`) grades failure handling.
+- **Scale**: roughly 2,910 tests collected (~2,747 passing; ~36 skipped; other outcomes vary by environment) on Python 3.11, 3.12, and 3.13 (unit, `hypothesis` property-based, concurrency, adversarial). CONTINUUM-Bench runs five crash scenarios plus a dedicated argument-drift scenario, measuring 0 duplicate work and 0 duplicate side effects for CONTINUUM against full duplication for naive replay; a separate 14-scenario recovery-correctness suite (`continuum.benchmark.phase6`) encodes the crash points from the durable-execution survey as executable assertions, and an 8-fault risk-injection suite (`benchmarks/fault_injection/`) grades failure handling.
 - **Adversarial audit**: the full MCP surface was audited over the live protocol; three defects were found and fixed. Method and reproduction steps in [test.md](test.md).
 
 <!-- BENCH:START -->
@@ -428,7 +427,7 @@ Schema v6. SQLite is primary, Postgres is CI verified. One log, many projections
 
 ### Module map: one library, many surfaces
 
-CONTINUUM is one library (`src/continuum`, 130 modules) plus a large test suite (182 test files, ~2,906 tests). All modules append to and replay one hash chained event log:
+CONTINUUM is one library (`src/continuum`, 130 modules) plus a large test suite (182 test files, ~2,910 tests). All modules append to and replay one hash chained event log:
 
 | Module | Role |
 |:--|:--|
@@ -450,9 +449,9 @@ CONTINUUM is one library (`src/continuum`, 130 modules) plus a large test suite 
 | `mcp/` | 13 stdio tools plus authz `authz.py` token auth, allowlist, confirmation token |
 | `serve/` | Sidecar stdio JSON wire + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Web dashboard `app.py` `hitl.py` with HITL buttons confirm/reconcile/complete, prefix trust advisory, pins |
-| `cli/` | 48 argparse commands, exit codes as verdict: `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 47 argparse commands, exit codes as verdict: `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | OpenTelemetry span processor bridge |
-| `benchmark/` | CONTINUUM-Bench harness: 5 crash scenarios + argument drift + 14 scenario recovery suite + 7 fault risk injection |
+| `benchmark/` | CONTINUUM-Bench harness: 5 crash scenarios + argument drift + 14 scenario recovery suite + 8 fault risk injection |
 
 ### Honest limitations
 
@@ -564,7 +563,7 @@ CONTINUUM sits at the overlap of durable execution, idempotent side-effect track
 
 In early 2026 I saw long running agents fail on recovery, not reasoning. Checkpoints were treated as proof to continue, not evidence to verify. Surveying Temporal, LangGraph, ACRFence 2603.20625 and self conditioning 2509.09677, I found the gap was a portable verification substrate that asks, given the state at time T and the world as it is now, is it still safe to continue.
 
-Over three weeks I built CONTINUUM from one invariant, every fact carries its origin. The result is a hash chained log with `verify()`, a ledger with stable key deduplication, a gate and gateway that block unclaimed effects, and a recovery engine that seals a contract. Five seams expose the same log to Claude Code, LangGraph, LangChain, OpenAI, HTTP and OpenTelemetry. Validated with real kills and ~2,906 tests, it prints `0 duplicates` where naive replay prints `50`.
+Over three weeks I built CONTINUUM from one invariant, every fact carries its origin. The result is a hash chained log with `verify()`, a ledger with stable key deduplication, a gate and gateway that block unclaimed effects, and a recovery engine that seals a contract. Five seams expose the same log to Claude Code, LangGraph, LangChain, OpenAI, HTTP and OpenTelemetry. Validated with real kills and ~2,910 tests, it prints `0 duplicates` where naive replay prints `50`.
 
 CONTINUUM was created by **Anandhu P Shaji** ([@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/)) and is maintained by the original creator. It is open source under the [Apache-2.0](LICENSE) license. Community contributions are welcome via [CONTRIBUTING.md](CONTRIBUTING.md) and are credited in [AUTHORS.md](AUTHORS.md) and [graphs/contributors](https://github.com/Cyrax321/CONTINUUM/graphs/contributors).
 
