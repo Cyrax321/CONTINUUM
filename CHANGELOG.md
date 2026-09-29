@@ -171,6 +171,33 @@ All notable changes to this project are documented here. The format follows
   errors from the recovery-anchor wiring (`anchor_seq` narrowing and a `payload`
   redefinition in `cmd_actions`) are fixed. No behavior changes.
 
+- **A risk observation with an out-of-range or wrongly scaled timestamp is no
+  longer lost (#1421).** `_risk_ts` handed numeric and epoch-shaped strings
+  straight to `datetime.fromtimestamp`, so a millisecond epoch (JS
+  `Date.now()`, year 51970 read as seconds) or any magnitude outside
+  `datetime`'s range raised. Those events are already on logs, because
+  pre-#1421 ingestion copied `ts` verbatim: in `project()` raise mode the whole
+  run became unprojectable, and on the write side `RiskObservedPayload` raised
+  past `ValidationError`, which `ingest_risk`'s fail-open `except` turned into
+  a dropped signal. Out-of-range values now parse to `None`, which both callers
+  already had a fallback for (the fold re-dates to the event's own timestamp,
+  the writer to ingestion time). A magnitude above `1e11` is read as
+  milliseconds first, and a timestamp that carries no timezone is normalised to
+  UTC instead of staying naive against an aware comparison.
+
+- **`observed_risks` survives a checkpoint round trip (#1421).** The field sat
+  in `PROJECTION_BOOKKEEPING`, so `StateCheckpoint.canonical_json` dropped it
+  from the persisted body, and `restore()` folded the live tail onto a base
+  whose risks were empty: every risk seen before the checkpoint vanished, and
+  the restored state stopped matching a full `project()`. On a compacted run it
+  was unrecoverable, because `restore` reads only the live tail by design and
+  the prefix is archived. The field now rides in the checkpoint body while the
+  integrity digest and the state fingerprint still ignore it, so checkpoints
+  written before this change keep verifying and an observation still mints no
+  version. The other four bookkeeping fields stay omitted: a degraded fold is
+  refused at every capture path, so they really are always default in anything
+  persistable.
+
 - **PostgresStorage action-index fold skips malformed JSON payloads (#1386).**
   `PostgresStorage._canonical_index_rows` decoded raw payload strings without
   guarding against decode errors, so an event with a malformed JSON payload
@@ -1427,7 +1454,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,701 collected, ~2,665 passed, ~36 skipped on a minimal env).
+  (~2,709 collected, ~2,673 passed, ~36 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
