@@ -115,19 +115,32 @@ class _TypedPreconditionError(EditPreconditionError):
 
 
 class ForkPreconditionError(_TypedPreconditionError):
-    """Alias for :class:`EditPreconditionError` when ``edit_type`` is ``fork``."""
+    """Precondition refusal raised for a ``fork`` edit.
+
+    Not an alias: the gate raises this subclass directly so a caller can
+    distinguish a fork refusal from a merge or restore one by exception type.
+    """
 
     _edit_type = "fork"
 
 
 class MergePreconditionError(_TypedPreconditionError):
-    """Alias for :class:`EditPreconditionError` when ``edit_type`` is ``merge``."""
+    """Precondition refusal raised for a ``merge`` edit.
+
+    Not an alias: the gate raises this subclass directly, on both the
+    single-run and the cross-run (``source_run_id`` given) merge arms, so a
+    caller can catch a merge refusal by exception type.
+    """
 
     _edit_type = "merge"
 
 
 class RestorePreconditionError(_TypedPreconditionError):
-    """Alias for :class:`EditPreconditionError` when ``edit_type`` is ``restore``."""
+    """Precondition refusal raised for a ``restore`` edit.
+
+    Not an alias: the gate raises this subclass directly so a caller can
+    distinguish a restore refusal from a fork or merge one by exception type.
+    """
 
     _edit_type = "restore"
 

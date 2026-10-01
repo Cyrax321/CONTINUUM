@@ -5,8 +5,10 @@ its real API:
 
 - CrewAI: global ``before_tool_call`` / ``after_tool_call`` hook registry in
   ``crewai.hooks``; the before hook returns False to block.
-- AutoGen (core): tools expose ``run_json(arguments, cancellation_token)``;
-  wrapping that method intercepts every execution of an existing tool.
+- AutoGen (core): tools expose the coroutine function
+  ``async run_json(arguments, cancellation_token)``; wrapping that method
+  intercepts every execution of an existing tool, and awaiting it keeps the
+  ledger bracket around the real call.
 - Pydantic AI: a Hooks capability object with async ``before_tool_call(ctx,
   tool_name, args)`` / ``after_tool_call(ctx, tool_name, args, result,
   error=None)`` registered via ``Agent(capabilities=[...])``.
@@ -258,13 +260,23 @@ def wrap_autogen_tool(
     """Wrap an AutoGen FunctionTool's ``run_json`` with claim/complete.
 
     The returned object is the same tool instance: its execution entry point
-    is replaced in place, so agent construction code does not change.
+    is replaced in place, so agent construction code does not change. The
+    replacement is an ``async def`` because AutoGen core's ``run_json`` is one,
+    and callers must await it exactly as they did the original.
     """
     guard = ContinuumToolGuard(storage, run_id, key_fn=key_fn)
     original = tool.run_json
 
-    def run_json_wrapped(args: Any, *rest: Any, **kwargs: Any) -> Any:
+    async def run_json_wrapped(args: Any, *rest: Any, **kwargs: Any) -> Any:
         """Replacement ``run_json``: claim before execution, settle after.
+
+        AutoGen core's ``run_json`` is a coroutine function (the ``Tool``
+        protocol and ``BaseTool`` both declare ``async def run_json``), so the
+        replacement is async too: awaiting ``original`` keeps claim and settle
+        bracketing the real execution. A sync wrapper would return the
+        coroutine unawaited, settling the claim with an unrun coroutine before
+        the side effect happens and never seeing the body raise, which inverts
+        the ledger's guarantee (failed effects recorded COMPLETED).
 
         A tool error is recorded as a failed claim and then re-raised, so
         the framework sees the exception exactly as before; a clean return
@@ -274,7 +286,7 @@ def wrap_autogen_tool(
         args_dict = args if isinstance(args, dict) else {"value": args}
         token = guard.claim(getattr(tool, "name", "autogen_tool"), args_dict)
         try:
-            result = original(args, *rest, **kwargs)
+            result = await original(args, *rest, **kwargs)
         except Exception as exc:
             guard.fail(token, str(exc))
             raise

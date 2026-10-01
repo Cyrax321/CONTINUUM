@@ -558,92 +558,59 @@ def test_resume_notifies_on_request_human(tmp_path: Path, monkeypatch: pytest.Mo
         server.shutdown()
 
 
-def test_resume_fires_the_requires_review_filter_for_self_certified_state(
+def test_resume_notification_append_is_audit_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The documented requires_review filter must ring, not silently no-op (#1180).
+    """The delivery outcome appends, but moves no state (issue #1175).
 
-    A self-certified blocked run carries both signals at once: the verdict is
-    request_human and its components were downgraded to requires_review. An
-    endpoint opted into the review filter hears about it, alongside, not
-    instead of, the human-gate endpoint.
+    ``resume`` is documented read-only apart from this one append, so the claim
+    earns a test: the ``NOTIFICATION_FAILED`` a plain ``resume`` leaves behind
+    must not change the projected state or the verdict a later resume returns,
+    or the read-only framing would be false in the part that matters. The
+    projection returns ``False`` for notification events, so folding the log
+    with and without the append has to land on identical state.
     """
+    from continuum.state.semantic import project
+
     monkeypatch.chdir(tmp_path)
-    captured: dict = {}
-    server = _receiver(captured)
-    try:
-        db = str(tmp_path / "demo.db")
-        _seed_self_certified_blocked_run(db)
-        (tmp_path / ".continuum").mkdir(exist_ok=True)
-        (tmp_path / ".continuum" / "webhooks.json").write_text(
-            json.dumps(
-                {
-                    "endpoints": [
-                        {"url": f"http://127.0.0.1:{server.server_port}/human"},
-                        {
-                            "url": f"http://127.0.0.1:{server.server_port}/review",
-                            "events": ["requires_review"],
-                        },
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
+    db = str(tmp_path / "demo.db")
+    _seed_blocked_run(db)
+    # An unreachable endpoint, so the append is the dead-letter variant.
+    _write_registry(tmp_path, "http://127.0.0.1:1/unreachable")
 
-        code, _, err = _run_cli("--db", db, "resume", "run_1")
-        assert code == ExitCode.REQUIRES_HUMAN
-        paths = [hit["body"] for hit in captured["hits"]]
-        assert len(paths) == 2, err
-
-        human = json.loads(captured["hits"][0]["body"])
-        assert human["event"] == "request_human"
-        assert human["mode"] == "request_human"
-        review = json.loads(captured["hits"][1]["body"])
-        assert review["event"] == "requires_review"
-        # The review payload reports its own mode, so an operator reading it
-        # knows which bell rang.
-        assert review["mode"] == "requires_review"
-        assert review["run_id"] == "run_1"
-        # The two rounds share a contract but not a verdict key, so both ring.
+    def projected() -> dict:
         with SQLiteStorage(db) as storage:
-            sent = [
-                e for e in storage.read_all_events("run_1") if e.type is EventType.NOTIFICATION_SENT
-            ]
-        assert len(sent) == 2
-    finally:
-        server.shutdown()
+            # source_sequence is the event high-water mark, not state: it moves
+            # by one with the append and is asserted separately below.
+            state = project("run_1", storage.read_events("run_1")).model_dump(mode="json")
+            state.pop("source_sequence")
+            return state
 
-
-def test_requires_review_filter_stays_silent_on_a_plain_human_gate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A blocked run with nothing to review must not fire the review filter.
-
-    The derivation is the validation report, not the mode: request_human alone
-    is the human gate's signal and nothing more.
-    """
-    monkeypatch.chdir(tmp_path)
-    captured: dict = {}
-    server = _receiver(captured)
-    try:
-        db = str(tmp_path / "demo.db")
-        _seed_blocked_run(db)
-        _write_registry(
-            tmp_path,
-            f"http://127.0.0.1:{server.server_port}/review",
-            events=["requires_review"],
-        )
-
-        code, _, err = _run_cli("--db", db, "resume", "run_1", "--env", "dataset=v3")
-        assert code == ExitCode.REQUIRES_HUMAN
-        assert "hits" not in captured, err
+    def source_sequence() -> int:
         with SQLiteStorage(db) as storage:
-            sent = [
-                e for e in storage.read_all_events("run_1") if e.type is EventType.NOTIFICATION_SENT
-            ]
-        assert sent == [], "no review-worthy state, so no notification rows"
-    finally:
-        server.shutdown()
+            return project("run_1", storage.read_events("run_1")).source_sequence
+
+    def event_types() -> list[str]:
+        with SQLiteStorage(db) as storage:
+            return [event.type.value for event in storage.read_events("run_1")]
+
+    before = projected()
+    seq_before = source_sequence()
+    assert EventType.NOTIFICATION_FAILED.value not in event_types()
+
+    # Plain resume, no --repair: the bell rings and dead-letters exactly once.
+    code, _, err = _run_cli("--db", db, "resume", "run_1", "--env", "dataset=v3")
+    assert code == ExitCode.REQUIRES_HUMAN, err
+    assert "delivery failed" in err
+    assert event_types().count(EventType.NOTIFICATION_FAILED.value) == 1
+
+    # The audit record is the only change in the log: identical projected state,
+    # the cursor advanced by exactly one event, and the next resume still
+    # returns the same verdict.
+    assert projected() == before
+    assert source_sequence() == seq_before + 1
+    code2, _, _ = _run_cli("--db", db, "resume", "run_1", "--env", "dataset=v3")
+    assert code2 == code
 
 
 def test_resume_without_registry_stays_silent(

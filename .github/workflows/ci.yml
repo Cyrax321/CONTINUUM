@@ -159,11 +159,12 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Ruff - lint
-        # Issue #1064: benchmarks/ inside the lint gate; #1118: scripts/ and demo-run/.
-        run: ruff check src/ tests/ examples/ _bugaudit/ benchmarks/ scripts/ demo-run/
+        # Issue #1118: scripts/ and demo-run/ were the last Python
+        # directories outside every lint gate.
+        run: ruff check src/ tests/ examples/ scripts/ demo-run/
 
       - name: Ruff - format check
-        run: ruff format --check src/ tests/ examples/ _bugaudit/ benchmarks/ scripts/ demo-run/
+        run: ruff format --check src/ tests/ examples/ scripts/ demo-run/
 
       - name: mypy, strict type-check
         run: mypy src/continuum
@@ -224,7 +225,7 @@ jobs:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: dist-main
           path: dist/

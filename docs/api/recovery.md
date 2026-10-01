@@ -16,15 +16,25 @@ if decision.permits("resume"):
 
 ## RecoveryEngine
 
-`continuum.recovery.engine.RecoveryEngine(storage, *, validator=None, strict_unknown=True)`
+`continuum.recovery.engine.RecoveryEngine(storage, *, validator=None, strict_unknown=True, validation_rules=None, registry=None)`
 
-### `assess(run_id, *, current_environment=None, expected_model=None, replay=True) -> RecoveryDecision`
+### `assess(run_id, *, current_environment=None, expected_model=None, replay=True, validation_rules=None) -> RecoveryDecision`
 
 Decide how `run_id` may resume, without changing anything. `current_environment`
 is the live environment to compare against the checkpoint's declared dependencies;
 `expected_model` pins the model the run was built for. The engine takes the
 maximum on a severity ordering, so the most cautious signal wins regardless of
 evaluation order.
+
+`validation_rules` are domain staleness rules ([issue #761](../guides/validation-rules.md)):
+they run after built-in validation, over the state it already revised, and their
+findings merge by maximum caution, so a rule can escalate a component's status
+but can never relax one. Rules are read-only and receive only the state and the
+environment. An engine with no rules configured behaves exactly as before, and
+a rule that finds nothing leaves the report and the sealed contract unchanged.
+Per-assessment rules add to the engine's configured set rather than replacing it.
+Nothing is auto-discovered: a rule is executed only because it was handed to the
+engine or registered in a `Registry`.
 
 The MCP `continuum_resume` tool and the `continuum resume` CLI accept an
 *optional* `run_id`: when omitted they resolve the **active run** via

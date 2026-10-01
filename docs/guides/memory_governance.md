@@ -189,8 +189,8 @@ Chain verification keeps hashes, so logical deletion does not break `verify()`. 
 
 ```bash
 pytest tests/test_memory_gate_keys.py -q
-ruff check src/ tests/ examples/ benchmarks/ scripts/ demo-run/
-ruff format --check src/ tests/ examples/ benchmarks/ scripts/ demo-run/
+ruff check src/ tests/ examples/ scripts/ demo-run/
+ruff format --check src/ tests/ examples/ scripts/ demo-run/
 mypy src/continuum --ignore-missing-imports
 # also verify no em dashes in changed files
 rg -n "$(printf '\\u2014')" src/ tests/ docs/ examples/ benchmarks/

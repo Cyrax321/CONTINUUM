@@ -49,7 +49,7 @@ from datetime import timedelta
 from functools import wraps
 from heapq import merge
 from pathlib import Path
-from typing import Any, Concatenate, ParamSpec, TypeVar
+from typing import Any, Concatenate, NamedTuple, ParamSpec, TypeVar
 
 from continuum.actions.grants import GrantDenied, normalize_grant, scan_grants
 from continuum.actions.idempotency import (
@@ -74,7 +74,7 @@ from continuum.budgets import (
 from continuum.concurrency.lease import LeaseCoordinator
 from continuum.events import Event, EventType
 from continuum.models import Action, ActionStatus, ConsumedInputs, Origin, UnknownSideEffect, utcnow
-from continuum.security.hashing import stable_hash
+from continuum.security.hashing import canonical_sanitize, stable_hash
 from continuum.storage.base import Storage
 
 _ACTION_EVENT_TYPES = (
@@ -105,11 +105,46 @@ def fold_action_events(events: Any) -> dict[str, Action]:
 __all__ = [
     "ActionLedger",
     "ActionOutcome",
+    "ClaimResolution",
     "LedgerError",
     "ClaimLockError",
     "fold_action_events",
     "forensic_join_across_runs",
 ]
+
+
+class ClaimResolution(NamedTuple):
+    """How :meth:`ActionLedger.claim` would resolve a claim, without recording.
+
+    The retry-budget gate needs the answer a claim *would* give before it
+    decides whether to allow one, so the two share this read-only resolution
+    rather than each keeping its own (issue #1080).
+    """
+
+    key: IdempotencyKey
+    existing: Action | None
+    foreign: Action | None
+
+    @property
+    def opens_slot(self) -> bool:
+        """Whether ``claim`` would record a new attempt slot for this resolution.
+
+        Nothing is opened when a record already answers (COMPLETED, returned as
+        a stored result) or waits on reconciliation (UNKNOWN, raised as
+        UnknownSideEffect), nor while another run is mid-flight on the same
+        unscoped identity (STARTED, foreign or local). A fresh key, and a
+        settled FAILED or COMPENSATED record whose effect may legitimately be
+        performed again, all open one. That set, and only it, is what a retry
+        budget may gate (issue #309).
+        """
+        # A record held by another run settles an unscoped claim the same way a
+        # local one does, so it gates the same way: only the run-local lookup
+        # having missed is what sent the resolution looking abroad.
+        record = self.existing if self.existing is not None else self.foreign
+        return record is None or record.status in (
+            ActionStatus.FAILED,
+            ActionStatus.COMPENSATED,
+        )
 
 
 def _stem(token: str) -> str:
@@ -241,6 +276,34 @@ def _normalize_consumed_inputs(
     if isinstance(consumed, Mapping):
         return ConsumedInputs.model_validate(dict(consumed))
     raise ValueError("consumed_inputs must be a mapping or ConsumedInputs")
+
+
+def _settle_result(result: Mapping[str, Any]) -> tuple[Mapping[str, Any], str]:
+    """The stored form and hash of a caller-reported action result.
+
+    ``complete`` and ``reconcile`` settle an outcome *after* the side effect
+    has already run, so the write must not hinge on the shape of the value the
+    caller reports back. ``stable_hash`` canonicalizes the result and raises
+    for types it has no rule for, and an ordinary tool return can contain one:
+    a ``Decimal`` amount, a ``set`` of ids, any object without ``model_dump``.
+    Raising there would leave a successful effect recorded as STARTED forever,
+    with a retry on the same key refused as ``UnknownSideEffect``, so the
+    effect happened exactly once but the ledger could neither complete nor
+    repeat it (issue #1394).
+
+    A canonical result is stored and hashed unchanged. A result that cannot be
+    canonicalized is stored sanitized, its non-canonical parts replaced by
+    their repr, which is what the durable record holds either way: the event
+    payload is ``model_dump(mode="json")`` and JSON has no ``Decimal``, so the
+    action read back from the log already carries the JSON-native form.
+    Sanitizing at write time makes the in-memory record agree with it, so a
+    replay returns the same value before and after a reload.
+    """
+    try:
+        return result, stable_hash(result)
+    except (TypeError, ValueError):
+        sanitized = canonical_sanitize(result)
+        return sanitized, stable_hash(sanitized)
 
 
 class LedgerError(RuntimeError):
@@ -460,32 +523,25 @@ class ActionLedger:
         except Exception:
             return None
 
-    def _settlement_authorization_id(self, action: Action) -> str | None:
-        """The bucket a settlement of ``action`` draws from.
-
-        The claim that opened the slot pinned its bucket onto the record
-        (issue #1052), so the settlement reads it back and the two share one
-        counter whatever the caller sends between them. A record written before
-        the field existed carries ``None`` and is re-derived from its stored
-        arguments with no volatile declaration, which is the pre-#1052 rule.
-        """
-        if action.budget_authorization_id is not None:
-            return action.budget_authorization_id
-        return self._budget_authorization_id(action.action_type, None, dict(action.arguments), ())
-
-    def _budget_consume_claim(
+    def _budget_refuse_if_exhausted(
         self,
         action_type: str,
         authorization_id: str,
     ) -> None:
-        """Consume one authorization-bound budget slot for a fresh attempt.
+        """Refuse an over-cap attempt before anything is recorded (issue #413).
 
-        Fail closed: an unreadable or malformed registry refuses the claim
-        rather than letting it proceed with no accounting. All writes go
-        through the pure helpers from ``budgets.py``.
+        The gate half of the claim drawdown, and it must stay ahead of
+        ``_record``: an attempt beyond the cap must never reach the event log.
+        Fail closed here: an unreadable or malformed registry refuses the claim
+        rather than letting it proceed with no accounting.
+
+        The counter is left untouched by this half. It is advanced by
+        ``_budget_commit_claim`` once the ACTION_RECORDED event is durable, so
+        a claim rejected by validation after this point consumes no slot and
+        the counter and the log agree on how many attempts exist (issue #1168).
 
         When the registry file does not exist, budgets are treated as
-        unconfigured and no drawdown happens. This keeps runs and tests
+        unconfigured and no refusal happens. This keeps runs and tests
         without authorization data byte-identical to today while still
         enforcing caps once an operator creates the file.
         """
@@ -513,8 +569,37 @@ class ActionLedger:
                 f"({counter} of {max_attempts} used, {remaining} remaining; "
                 f"{reason})"
             )
-        increment(raw, action_type, authorization_id)
-        save_budgets(path, raw)
+
+    def _budget_commit_claim(
+        self,
+        action_type: str,
+        authorization_id: str,
+    ) -> None:
+        """Advance the counter once the attempt is durably recorded (issue #1168).
+
+        The complement to ``_budget_refuse_if_exhausted``, and the mirror of
+        the settlement drawdown, which also records first and counts
+        afterwards. By the time this runs an ACTION_RECORDED event is already
+        in the log, so a failure to increment or save must not surface to the
+        caller: the event is the audit record and the counter is accounting
+        that follows it, never the other way round. Losing the accounting is
+        bad; losing a claim the ledger has already recorded is worse, so this
+        half is fail-open where the gate half is fail-closed.
+
+        A claim refused at the gate, or rejected by validation before this
+        point, never reaches here and consumes no slot.
+        """
+        path = self._budget_path()
+        if not path.exists():
+            return
+        try:
+            raw = load_budgets(path)
+            ensure_authorization_entry(raw, action_type, authorization_id)
+            increment(raw, action_type, authorization_id)
+            save_budgets(path, raw)
+        except Exception:
+            # The attempt is already recorded; the accounting is best effort.
+            pass
 
     def _budget_consume_settlement(
         self,
@@ -631,7 +716,7 @@ class ActionLedger:
                 return stored_key
         return None
 
-    def resolve_prior(
+    def resolve_claim(
         self,
         action_type: str,
         arguments: Mapping[str, Any] | None = None,
@@ -639,56 +724,60 @@ class ActionLedger:
         volatile: Sequence[str] = (),
         scoped_to_run: bool = True,
         key: str | None = None,
-    ) -> tuple[IdempotencyKey, Action] | None:
-        """The record a claim for these inputs would defer to, or None.
+    ) -> ClaimResolution:
+        """What :meth:`claim` would find, resolved without recording anything.
 
-        The three lookups :meth:`claim` performs, extracted so a gate that runs
-        *before* claim answers the same question claim will act on. The run-level
-        retry budget (issue #240) is evaluated at the intercept site, before
-        claim opens a slot; resolving under the derived key while claim answers
-        from another one let an exhausted budget suppress the very dedup and
-        reconciliation answers the gate exists to pass through (issue #1080).        In order: the exact idempotency key; then, for an unscoped claim, another
-        run's record under the same run-global key (issue 34) when it holds a
-        live or undecided effect; then, only when the caller asserted no identity
-        of its own, the drift-tolerant :meth:`_identity_match`. An explicit key
-        *is* the identity, so the fallbacks are skipped for it: no drift is
-        possible, and the derived key is the stored key.
+        A claim decision is read by two places: ``claim`` itself, and the
+        run-level retry budget gate in the MCP intercept handler, which has to
+        refuse a new attempt *before* one is recorded rather than after. The
+        gate once ran its own exact-key-only lookup, so it could gate a state
+        ``claim`` would have answered with a stored result, and an exhausted
+        budget suppressed the dedup and reconciliation paths a recovering agent
+        depends on instead of letting the ledger speak (issue #1080). Both
+        readers now go through here, which is what keeps them from drifting
+        apart again.
 
-        Returns ``(stored_key, action)``. For an identity match the key is the
-        *stored* key rather than the freshly-derived one, because that is the key
-        claim records and the caller settles against. None when nothing
-        identifies a prior attempt, which is the only case a fresh slot opens.
+        The resolution order is :meth:`claim`'s own, and each later step runs
+        only when the earlier one found nothing: the exact argument-hash key,
+        then another run holding the same unscoped key, then drift-tolerant
+        identity matching. Identity matching is skipped when the foreign record
+        already answers or refuses the claim, so a claim that returns or raises
+        never resolves to a different key than it would have on its own.
+
+        ``opens_slot`` reports whether ``claim`` would record a new attempt slot
+        for this resolution, which is exactly the condition under which a retry
+        budget may gate it. Re-claiming an action that already completed, and an
+        interrupted attempt awaiting reconciliation, both leave the record where
+        it is and open nothing (issue #309).
         """
         explicit_key = key is not None
-        idem = idempotency_key(
+        resolved = idempotency_key(
             action_type,
             arguments,
             scope=self.run_id if scoped_to_run else None,
             volatile=volatile,
             key=key,
         )
-        existing = self.get(idem)
+        existing = self.get(resolved)
+        foreign: Action | None = None
         if existing is None and not scoped_to_run:
-            # The local log has no such action, but an unscoped key claims
-            # global identity, so another run may already hold it. Defer only
-            # to a live or undecided effect: a FAILED/COMPENSATED foreign
-            # record leaves nothing standing, and returning it here would
-            # bypass the drift-tolerant fallback below, which the claim
-            # ordering this extraction preserves kept in the path (issue 34).
-            foreign = self._foreign_action(idem)
-            if foreign is not None and foreign.status in (
-                ActionStatus.COMPLETED,
-                ActionStatus.STARTED,
-                ActionStatus.UNKNOWN,
-            ):
-                return IdempotencyKey(idem), foreign
-        if existing is not None:
-            return IdempotencyKey(idem), existing
-        if not explicit_key:
+            foreign = self._foreign_action(resolved)
+        # A foreign record that completed, or that another run is still
+        # mid-flight on, already settles this claim. A foreign failure only
+        # means nothing stands in the way of this run's own slot, so the
+        # drift-tolerant lookup still gets its turn.
+        foreign_settles = foreign is not None and foreign.status not in (
+            ActionStatus.FAILED,
+            ActionStatus.COMPENSATED,
+        )
+        if existing is None and not explicit_key and not foreign_settles:
             matched = self._identity_match(action_type, arguments, volatile)
             if matched is not None:
-                return matched
-        return None
+                # The caller reports completion or failure against the key in
+                # the outcome, so it must be the stored key of the record being
+                # deferred to, not the freshly-derived one.
+                return ClaimResolution(matched[0], matched[1], foreign)
+        return ClaimResolution(resolved, existing, foreign)
 
     def _identity_match(
         self,
@@ -928,44 +1017,41 @@ class ActionLedger:
         its real-world outcome cannot be determined, unless ``on_unknown``
         resolves it.
         """
-        rendered_key = key
-        idem = idempotency_key(
-            action_type,
-            arguments,
-            scope=self.run_id if scoped_to_run else None,
-            volatile=volatile,
-            key=key,
-        )
-        key = idem
-
-        existing: Action | None = None
-        resolved_prior = self.resolve_prior(
+        _explicit_rendered = key
+        # The resolution is shared with the retry-budget gate in the MCP
+        # intercept handler, which has to decide *before* a slot is opened
+        # whether to allow it. Doing the lookup twice in two places let the two
+        # readers disagree about what a claim would find (issue #1080).
+        resolved = self.resolve_claim(
             action_type,
             arguments,
             volatile=volatile,
             scoped_to_run=scoped_to_run,
-            key=rendered_key,
+            key=key,
         )
-        if resolved_prior is not None:
-            # The key claim will record against, and the record it defers to.
-            # For an identity match this is the *stored* key, not the derived one.
-            key, existing = resolved_prior
-            if existing.run_id != self.run_id:
-                # An unscoped key is honoured store-wide (issue 34): the effect
-                # already happened under this identity elsewhere, so report it
-                # instead of duplicating it; an unresolved foreign attempt cannot
-                # be reconciled from this run's log, so refuse rather than guess.
-                if existing.status is ActionStatus.COMPLETED:
-                    return ActionOutcome(key=key, action=existing, fresh=False)
-                if existing.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
-                    raise UnknownSideEffect(
-                        f"action {existing.action_type!r} (key {key[:12]}...) has an "
-                        f"unresolved attempt recorded by another run; reconcile "
-                        f"that run before claiming the same unscoped identity."
-                    )
-                # FAILED or COMPENSATED elsewhere means no live effect stands
-                # in the way; this run may open its own slot.
-                existing = None
+        key = resolved.key
+        rendered_key = _explicit_rendered
+        existing = resolved.existing
+        foreign = resolved.foreign
+
+        if existing is None and foreign is not None:
+            # The local log has no such action, but an unscoped key claims
+            # global identity: another run may already hold it (issue 34).
+            if foreign.status is ActionStatus.COMPLETED:
+                # The effect already happened under this identity, wherever
+                # it happened. Report it instead of duplicating it.
+                return ActionOutcome(key=key, action=foreign, fresh=False)
+            if foreign.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
+                # Another run is mid-flight on the same identity and this
+                # ledger cannot reconcile a foreign record (its outcome
+                # belongs to that run's log), so refuse rather than guess.
+                raise UnknownSideEffect(
+                    f"action {foreign.action_type!r} (key {key[:12]}...) has an "
+                    f"unresolved attempt recorded by another run; reconcile "
+                    f"that run before claiming the same unscoped identity."
+                )
+            # FAILED or COMPENSATED elsewhere means no live effect stands
+            # in the way; this run may open its own slot.
 
         # Single-use grants (#269): refuse resurrection of spent authority
         # before anything fires. A live attempt carrying the same grant under
@@ -1087,8 +1173,12 @@ class ActionLedger:
             )
 
         if existing is None:
+            # Refuse an over-cap attempt before anything is recorded, then
+            # count it only once the record is durable: a claim rejected by
+            # the digest check below must consume no slot, or the counter and
+            # the log disagree on how many attempts exist (issue #1168).
             if budget_auth_id is not None:
-                self._budget_consume_claim(action_type, budget_auth_id)
+                self._budget_refuse_if_exhausted(action_type, budget_auth_id)
             # Origin digest (issue #566): optional 64 hex, validated by Action.
             # Fail closed on bad digest rather than storing garbage that
             # forensic joins would then misattribute.
@@ -1118,6 +1208,8 @@ class ActionLedger:
                 origin_digest=origin_digest,
                 rendered_key=rendered_key,
             )
+            if budget_auth_id is not None:
+                self._budget_commit_claim(action_type, budget_auth_id)
             self._count_claim()
             return ActionOutcome(key=key, action=action, fresh=True)
 
@@ -1126,8 +1218,10 @@ class ActionLedger:
 
         if existing.status is ActionStatus.COMPENSATED:
             # The effect was undone, so performing it again is legitimate.
+            # Same ordering as a fresh claim: refuse first, count once the
+            # record is durable (issue #1168).
             if budget_auth_id is not None:
-                self._budget_consume_claim(action_type, budget_auth_id)
+                self._budget_refuse_if_exhausted(action_type, budget_auth_id)
             action = existing.model_copy(
                 update={
                     "status": ActionStatus.STARTED,
@@ -1139,12 +1233,14 @@ class ActionLedger:
                 }
             )
             self._record(key, action)
+            if budget_auth_id is not None:
+                self._budget_commit_claim(action_type, budget_auth_id)
             self._count_claim()
             return ActionOutcome(key=key, action=action, fresh=True)
 
         if existing.status is ActionStatus.FAILED:
             if budget_auth_id is not None:
-                self._budget_consume_claim(action_type, budget_auth_id)
+                self._budget_refuse_if_exhausted(action_type, budget_auth_id)
             action = existing.model_copy(
                 update={
                     "status": ActionStatus.STARTED,
@@ -1153,6 +1249,8 @@ class ActionLedger:
                 }
             )
             self._record(key, action)
+            if budget_auth_id is not None:
+                self._budget_commit_claim(action_type, budget_auth_id)
             self._count_claim()
             return ActionOutcome(key=key, action=action, fresh=True)
 
@@ -1231,14 +1329,18 @@ class ActionLedger:
         settled_result = dict(result) if result is not None else existing.result
         normalized = _normalize_consumed_inputs(consumed_inputs)
         settled_consumed = normalized if normalized is not None else existing.consumed_inputs
+        if settled_result is not None:
+            # A result the ledger cannot canonicalize (issue #1394) is stored
+            # sanitized rather than failing the write after the effect ran.
+            settled_result, settled_hash = _settle_result(settled_result)
+        else:
+            settled_hash = None
         action = existing.model_copy(
             update={
                 "status": ActionStatus.COMPLETED,
                 "external_id": settled_external,
                 "result": dict(settled_result) if settled_result is not None else None,
-                "result_hash": (
-                    stable_hash(dict(settled_result)) if settled_result is not None else None
-                ),
+                "result_hash": settled_hash,
                 "completed_at": utcnow(),
                 "side_effect_uncertain": False,
                 "consumed_inputs": settled_consumed,
@@ -1351,14 +1453,19 @@ class ActionLedger:
             settled_result = dict(result) if result is not None else existing.result
             normalized = _normalize_consumed_inputs(consumed_inputs)
             settled_consumed = normalized if normalized is not None else existing.consumed_inputs
+            if settled_result is not None:
+                # Same guard as complete: a reconciliation that confirms the
+                # effect happened must not fail on the shape of the evidence
+                # (issue #1394).
+                settled_result, settled_hash = _settle_result(settled_result)
+            else:
+                settled_hash = None
             action = existing.model_copy(
                 update={
                     "status": ActionStatus.COMPLETED,
                     "external_id": settled_external,
                     "result": dict(settled_result) if settled_result is not None else None,
-                    "result_hash": (
-                        stable_hash(dict(settled_result)) if settled_result is not None else None
-                    ),
+                    "result_hash": settled_hash,
                     "completed_at": utcnow(),
                     "side_effect_uncertain": False,
                     "last_error": note or existing.last_error,

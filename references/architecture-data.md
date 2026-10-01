@@ -5,6 +5,14 @@ Where useful, the `file:line` citation is given so any claim can be re-checked.
 Use this as the single source of truth when drawing the diagram. No value here
 is inferred or idealized.
 
+Line numbers move with every refactor, so the symbol is the durable citation
+(`checkpoint/policy.py:ManualPolicy` survives a file edit; `:130` does not).
+Counts are not left to prose alone: the countable claims here — CLI commands,
+MCP tools, event types, action states, checkpoint policies, recovery modes —
+are asserted against the live code by `tests/test_architecture_data_doc.py`.
+That test fails if either side drifts, so a stale count now blocks CI rather
+than silently misleading a reader.
+
 Convention: MCP tool names are prefixed with `continuum_`. CLI subcommand names
 are not (the CLI binary itself is `continuum`, so its verbs are bare).
 
@@ -36,9 +44,9 @@ No code class needed; these are the callers.
 
 | Class | File:line | Notes |
 |--|--|--|
-| `GenericAgentAdapter` | `generic.py:23` | In-process facade; trusted as `Origin.DETERMINISTIC` |
-| `OpenAIAgentAdapter` | `openai.py:113` | Wraps the OpenAI Agents SDK |
-| `LangGraphAgentAdapter` | `langgraph.py:102` | Subclasses `GenericAgentAdapter`; wraps a LangGraph `StateGraph` |
+| `GenericAgentAdapter` | `generic.py:37` | In-process facade; trusted as `Origin.DETERMINISTIC` |
+| `OpenAIAgentAdapter` | `openai.py:129` | Wraps the OpenAI Agents SDK |
+| `LangGraphAgentAdapter` | `langgraph.py:105` | Subclasses `GenericAgentAdapter`; wraps a LangGraph `StateGraph` |
 
 Optional installs. An agent may also call the SDK or MCP server directly.
 
@@ -46,31 +54,35 @@ Optional installs. An agent may also call the SDK or MCP server directly.
 
 ## 4. MCP server (stdio, deny by default) `src/continuum/mcp/`
 
-Server name: `continuum-mcp` (`server.py`). Thirteen tools, all names prefixed,
-recounted from the tool registrations on 2026-08-24.
+Server name: `continuum-mcp` (`server.py:589`). 13 tools, all names prefixed,
+one per `@mcp.tool`-decorated function in `server.py`.
 
 | Tool (exact name) | Kind | Source |
 |--|--|--|
-| `continuum_validate` | read-only | `server.py:618`, annotation `read_only` at `:625` |
-| `continuum_resume` | read-only | `server.py:662`, annotation `read_only` at `:671` |
-| `continuum_list_actions` | read-only | `server.py:1041`, annotation `read_only` at `:1047` |
-| `continuum_record_progress` | mutating | `server.py:468` |
-| `continuum_checkpoint` | mutating | `server.py:516` |
-| `continuum_record_summary` | mutating | `server.py:556` |
-| `continuum_confirm` | mutating | `server.py:763` |
-| `continuum_intercept_action` | mutating | `server.py:804` |
-| `continuum_complete_action` | mutating | `server.py:951` |
-| `continuum_fail_action` | mutating | `server.py:980` |
-| `continuum_reconcile_action` | mutating | `server.py:1009` |
+| `continuum_validate` | read-only | `server.py:965`, annotation `read_only` at `:963` |
+| `continuum_resume` | read-only | `server.py:1027`, annotation `read_only` at `:1025` |
+| `continuum_list_actions` | read-only | `server.py:1585`, annotation `read_only` at `:1583` |
+| `continuum_record_progress` | mutating | `server.py:711` |
+| `continuum_checkpoint` | mutating | `server.py:775` |
+| `continuum_record_summary` | mutating | `server.py:821` |
+| `continuum_record_plan` | mutating | `server.py:886` |
+| `continuum_confirm` | mutating | `server.py:1168` |
+| `continuum_intercept_action` | mutating | `server.py:1238` |
+| `continuum_complete_action` | mutating | `server.py:1446` |
+| `continuum_fail_action` | mutating | `server.py:1479` |
+| `continuum_reconcile_action` | mutating | `server.py:1510` |
+| `continuum_compensate_action` | mutating | `server.py:1554` |
 
 Read-only annotation is `ToolAnnotations(read_only_hint=True)`
-(`server.py:386`); mutating is `read_only_hint=False` (`server.py:387`).
-Read-only count = 3, mutating count = 8.
+(`server.py:618`); mutating is `read_only_hint=False` (`server.py:619`).
+Read-only count = 3, mutating count = 10.
 
 Auth gate (allowlist for mutating tools):
-- Primary env var: `CONTINUUM_MCP_ALLOW` (`authz.py:57`).
-- Backward-compatible alias: `CONTINUUM_MCP_MUTATING_CLIENTS` (`authz.py:59`).
-- Per-project file: `.continuum/mcp-policy.json` (`authz.py`, `POLICY_FILENAME`).
+- Primary env var: `CONTINUUM_MCP_ALLOW` (`authz.py:72`, `POLICY_ENV_VAR`).
+- Backward-compatible alias: `CONTINUUM_MCP_MUTATING_CLIENTS` (`authz.py:79`,
+  `POLICY_ENV_VAR_ALIAS`).
+- Per-project file: `.continuum/mcp-policy.json` (`authz.py:81`,
+  `POLICY_FILENAME`).
 - Without explicit permission, no mutating call succeeds. This is the
   "DENY BY DEFAULT. WORKS WITH CLAUDE CODE." boundary.
 
@@ -102,8 +114,9 @@ source of truth, and events persist to storage.
 
 | Class | File:line | Notes |
 |--|--|--|
-| `DeterministicExtractor` | `extractor.py:75` | Default; folds the event log, no model |
-| `LLMExtractor` | `extractor.py:106` | Optional; adds info tagged `Origin.LLM`, flagged `REQUIRES_REVIEW` |
+| `DeterministicExtractor` | `extractor.py:81` | Default; folds the event log, no model |
+| `LLMExtractor` | `extractor.py:119` | Optional; adds info tagged `Origin.LLM`, flagged `REQUIRES_REVIEW` |
+| `CompositeExtractor` | `extractor.py:231` | Chains extractors, feeding each result forward as the next one's base |
 
 ---
 
@@ -111,10 +124,10 @@ source of truth, and events persist to storage.
 
 - Append-only, hash-chained: each event stores the digest of the prior event.
 - `EventLog.verify()` re-walks the chain and localizes the first corrupted
-  event (`events.py:401`).
-- 51 event types (`EventType` StrEnum, `events.py:47`). Complete list:
+  event (`events.py:304`).
+- 51 event types (`EventType` StrEnum, `events.py:46`). Complete list:
 
-```
+```text
 RUN_STARTED, RUN_COMPLETED, RUN_ABORTED, TASK_UPDATED,
 RUN_FORKED, RUN_RESTORED, RUN_MERGED, TOOL_CALLED,
 TOOL_COMPLETED, TOOL_FAILED, DECISION_CREATED,
@@ -129,9 +142,8 @@ REASONING_SUMMARY, EVENT_LOG_ANCHORED, PERCEPTION_OBSERVED,
 BRANCH_RESOLVED, ACTION_RECORDED, ACTION_RECONCILED,
 ACTION_COMPENSATED, GRANT_DENIED, LIVENESS_SILENCE_DETECTED,
 LIVENESS_RECOVERED, RISK_OBSERVED, AUTHORITY_CONSUMED,
-AUTHORITY_RECONCILED, ATTEMPT_LESSON, TRAJECTORY_REPORT,
-PLAN_UPSERT, MEMORY_TOMBSTONED, NOTIFICATION_SENT,
-NOTIFICATION_FAILED
+AUTHORITY_RECONCILED, ATTEMPT_LESSON, TRAJECTORY_REPORT, PLAN_UPSERT,
+MEMORY_TOMBSTONED, NOTIFICATION_SENT, NOTIFICATION_FAILED
 ```
 
 ---
@@ -147,34 +159,35 @@ NOTIFICATION_FAILED
 
 | Reconciler | File:line | Behavior |
 |--|--|--|
-| `ProbeReconciler` | `:73` | Asks the external system; only strategy that produces evidence |
-| `ManualReconciler` | `:120` | Escalates to a human |
-| `AssumeNotOccurredReconciler` | `:96` | Retries; only when caller explicitly asserts `idempotent=True` |
+| `ProbeReconciler` | `:74` | Asks the external system; only strategy that produces evidence |
+| `ManualReconciler` | `:132` | Escalates to a human |
+| `AssumeNotOccurredReconciler` | `:103` | Retries; only when caller explicitly asserts `idempotent=True` |
 
 There is deliberately **no** `AssumeOccurred` strategy (assuming success without
 evidence silently drops work).
 
-Action states (`ActionStatus`, `models.py:94`): `PLANNED`, `STARTED`,
-`COMPLETED`, `FAILED`, `UNKNOWN`, `COMPENSATED`, `REQUIRES_REVIEW` (7 values).
+Action states (`ActionStatus`, `models.py:117`): `PLANNED`, `STARTED`,
+`COMPLETED`, `FAILED`, `UNKNOWN`, `COMPENSATED`, `REQUIRES_REVIEW`, `EXPIRED`
+(8 values).
 
 ---
 
 ## 9. Checkpoint Manager `src/continuum/checkpoint/`
 
-Six policies (`policy.py`):
+6 policies (`policy.py`):
 
 | Policy | File:line |
 |--|--|
-| `ManualPolicy` | `:130` |
-| `IntervalPolicy` | `:141` |
-| `EventPolicy` | `:165` |
-| `SemanticPolicy` | `:200` |
-| `ContextPressurePolicy` | `:299` |
-| `HybridPolicy` | `:277` |
+| `ManualPolicy` | `:137` |
+| `IntervalPolicy` | `:149` |
+| `EventPolicy` | `:174` |
+| `SemanticPolicy` | `:210` |
+| `ContextPressurePolicy` | `:314` |
+| `HybridPolicy` | `:291` |
 
 Default policy is `HybridPolicy` (with `max_interval_seconds=300`), returned by
-`default_policy()` (`policy.py:329`) and used when none is supplied
-(`manager.py:83`).
+`default_policy()` (`policy.py:345`) and used when none is supplied
+(`manager.py:92`).
 
 Restore replays events recorded after the checkpoint, so a crash between
 checkpoints loses no work. Recovery context renders the minimum sufficient
@@ -199,10 +212,10 @@ Model switches are never assumed safe: state under a different model is marked
 
 ## 11. Recovery Engine `src/continuum/recovery/engine.py`
 
-Seven modes. Most cautious wins (highest rank). Ranks from `_ORDER`
-(`engine.py:63`):
+7 modes. Most cautious wins (highest rank). Ranks from `SEVERITY`
+(`engine.py:72`):
 
-| Mode | Rank | Safety class (`engine.py:73`) |
+| Mode | Rank | Safety class (`_SAFETY_FOR_MODE`, `engine.py:82`) |
 |--|--|--|
 | `RESUME` | 0 | `SAFE_TO_RESUME` |
 | `REPAIR_AND_RESUME` | 1 | `REQUIRES_REPAIR` |
@@ -215,17 +228,19 @@ Seven modes. Most cautious wins (highest rank). Ranks from `_ORDER`
 Precedence string (most cautious wins):
 `RESUME < REPAIR_AND_RESUME < REPLAN < WAIT < REQUEST_HUMAN < ROLLBACK < ABORT`.
 
-Repairs are ordered by dependency, never discovery: reconcile an uncertain side
-effect first, then re-pin a dependency, then re-derive its evidence and findings.
-The contract names exactly one next allowed action and is sealed with an
-integrity hash. The engine is read-only: it computes a decision without mutating
-the run.
+Repairs are ordered by dependency, never discovery, and the order is
+`_ORDER` (`recovery/planner.py:74`), which ranks `RepairKind`: repair the log
+itself first — until the fold can run again, nothing else about the run can
+even be assessed — then reconcile an uncertain side effect, then re-pin a
+dependency, then re-derive its evidence and findings. The contract names
+exactly one next allowed action and is sealed with an integrity hash. The
+engine is read-only: it computes a decision without mutating the run.
 
 ---
 
-## 12. SemanticState data model `src/continuum/models.py:398`
+## 12. SemanticState data model `src/continuum/models.py:1016`
 
-Ten semantic fields (exact attribute names):
+15 semantic fields (exact attribute names):
 
 | Attribute | Type |
 |--|--|
@@ -238,14 +253,21 @@ Ten semantic fields (exact attribute names):
 | `pending_work` | `list[PendingWork]` |
 | `approvals` | `list[Approval]` |
 | `external_dependencies` | `list[ExternalDependency]` |
+| `pins` | `dict[str, ConstraintPin]` |
+| `unmatched_pin_retractions` | `list[str]` |
+| `attempt_lessons` | `list[AttemptLesson]` |
+| `trajectory_reports` | `list[TrajectoryReport]` |
+| `observed_risks` | `list[ObservedRisk]` |
 | `model` | `ModelState | None` |
 
 Plus metadata: `run_id`, `version`, `source_sequence`, `created_at`,
-`updated_at`.
+`updated_at`, plus the `status` / `unprojectable_*` fields a degraded
+projection uses to name where the fold stopped (`models.py:1069-1078`).
 
-Provenance / origin enum (`models.py:171`): `DETERMINISTIC`, `LLM` (`:181`),
-`EXTERNAL_AGENT` (`:184`). `EXTERNAL_AGENT` is flagged `REQUIRES_REVIEW`;
-`LLM` is also flagged `REQUIRES_REVIEW`.
+Provenance / origin enum `Origin` (`models.py:200`): `DETERMINISTIC` (`:209`),
+`HUMAN` (`:218`), `LLM` (`:221`), `EXTERNAL_AGENT` (`:224`).
+`EXTERNAL_AGENT` is flagged `REQUIRES_REVIEW`; `LLM` is also flagged
+`REQUIRES_REVIEW`.
 
 ---
 
@@ -253,11 +275,12 @@ Provenance / origin enum (`models.py:171`): `DETERMINISTIC`, `LLM` (`:181`),
 
 | Class / behavior | Source |
 |--|--|
-| `SQLiteStorage` | `sqlite.py:125` |
-| WAL journaling; `synchronous=FULL` | `sqlite.py:144-145`, `:202` |
+| `SQLiteStorage` | `sqlite.py:109` |
+| WAL journaling; `synchronous=FULL` | `sqlite.py:165-166` |
 | Atomic sequence allocation for event IDs | `sqlite.py` |
-| Integrity verified on read; corruption refused | `CorruptedRecord` (`base.py:90`) |
-| Concurrent writes fail loudly | `ConcurrentWriteError` (`base.py:83`) |
+| Integrity verified on read; corruption refused | `CorruptedRecord` (`base.py:93`) |
+| Concurrent writes fail loudly | `ConcurrentWriteError` (`base.py:86`) |
+| Checkpoint requested but not found | `CheckpointNotFound` (`base.py:75`) |
 
 No exactly-once semantics; the ledger reconciles the gap.
 
@@ -271,11 +294,23 @@ gap.
 
 ---
 
-## 15. CLI commands (14) `src/continuum/cli/main.py:578-614`
+## 15. CLI commands (47) `src/continuum/cli/main.py`
 
-`init`, `runs`, `inspect`, `history`, `events`, `diff`, `validate`, `resume`,
-`checkpoint`, `verify`, `actions`, `show-contract`, `replay`, `benchmark`.
-All accept `--json`.
+Every subcommand is registered in `build_parser()` (`cli/main.py:4028`), which
+is the single registry — a verb that is not there is not a command. The full
+set, alphabetically:
+
+`actions`, `attest`, `attest-keygen`, `attest-verify`, `benchmark`,
+`briefing`, `budget`, `checkpoint`, `compact`, `complete`, `confirm`,
+`dashboard`, `diff`, `events`, `export-evidence`, `forget`, `fork`, `gate`,
+`gateway`, `health`, `history`, `hooks`, `impact`, `init`, `inspect`, `merge`,
+`notify-test`, `observe`, `precompact`, `provenance`, `reconcile`,
+`record-plan`, `replay`, `report`, `restore`, `resume`, `rewind`, `runs`,
+`serve`, `show-contract`, `start`, `status`, `tree`, `tui`, `validate`,
+`verify`, `watch`.
+
+All accept `--json`, which is a flag on the top-level parser (`cli/main.py:4047`)
+rather than one per subcommand.
 
 ---
 
@@ -284,10 +319,10 @@ All accept `--json`.
 - `canonical()` returns a sorted, JSON-native representation (`:72`).
 - Serialization uses `json.dumps(..., sort_keys=True, separators=(",", ":"),
   ensure_ascii=True)` (`:79`).
-- Enums are serialized by value (`:36`).
+- Enums are serialized by value (`:33-36`).
 - Non-finite floats (`NaN`/`Infinity`) are rejected (`:42-43`).
 - `datetime`/`date` serialize as ISO-8601 normalized to UTC
-  (`:47-51`).
+  (`:47-52`).
 - Hash-chained events form a tamper-evident audit trail (`events.py`).
 - Credentials are referenced, never serialized into state.
 

@@ -8,6 +8,7 @@ the seam, not the framework package.
 
 from __future__ import annotations
 
+import inspect
 import sys
 import types
 from pathlib import Path
@@ -163,30 +164,59 @@ class FakeAutoGenTool:
     def __init__(self) -> None:
         self.calls = 0
 
-    def run_json(self, args: dict[str, object], cancellation_token: object = None) -> str:
+    async def run_json(self, args: dict[str, object], cancellation_token: object = None) -> str:
+        # AutoGen core declares ``async def run_json`` on both the Tool protocol
+        # and BaseTool; a sync stand-in would let a sync wrapper pass CI while
+        # never exercising the real coroutine surface (issue #1392).
         self.calls += 1
         if args.get("boom"):
             raise RuntimeError("upstream exploded")
         return f"ticket:{args.get('title')}"
 
 
-def test_autogen_wrapper_claims_and_completes(db: str) -> None:
+@pytest.mark.asyncio
+async def test_autogen_wrapper_claims_and_completes(db: str) -> None:
     tool = FakeAutoGenTool()
     wrapped = wrap_autogen_tool(
         tool, SQLiteStorage(db), "run_1", key_fn=lambda t, a: f"ticket:{a['title']}"
     )
-    out = wrapped.run_json({"title": "Fix login"}, cancellation_token=None)
+    out = await wrapped.run_json({"title": "Fix login"}, cancellation_token=None)
     assert out == "ticket:Fix login"
     assert tool.calls == 1
     action = last_action(db)
     assert action.status is ActionStatus.COMPLETED
 
 
-def test_autogen_failure_is_recorded_then_reraised(db: str) -> None:
+@pytest.mark.asyncio
+async def test_autogen_claim_stays_open_until_the_coroutine_is_awaited(db: str) -> None:
+    """The ledger may not settle before the async tool body actually runs.
+
+    ``run_json`` returns a coroutine; nothing executes until the framework
+    awaits it, so nothing is settled at call time. A wrapper that settled at
+    call time would record COMPLETED with an unrun coroutine, so a crash before
+    the framework awaited it would leave the ledger claiming an effect that
+    never happened (issue #1392).
+    """
     tool = FakeAutoGenTool()
     wrapped = wrap_autogen_tool(tool, SQLiteStorage(db), "run_1")
-    with pytest.raises(RuntimeError):
-        wrapped.run_json({"boom": True})
+    pending = wrapped.run_json({"title": "Fix login"})
+    assert inspect.iscoroutine(pending)
+    assert tool.calls == 0, "the tool body must not run until the coroutine is awaited"
+    assert statuses(db) == [], "no claim may settle before the coroutine runs"
+
+    assert await pending == "ticket:Fix login"
+    assert tool.calls == 1
+    assert last_action(db).status is ActionStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_autogen_failure_is_recorded_then_reraised(db: str) -> None:
+    tool = FakeAutoGenTool()
+    wrapped = wrap_autogen_tool(tool, SQLiteStorage(db), "run_1")
+    pending = wrapped.run_json({"boom": True})
+    assert statuses(db) == []
+    with pytest.raises(RuntimeError, match="upstream exploded"):
+        await pending
     assert last_action(db).status is ActionStatus.FAILED
 
 

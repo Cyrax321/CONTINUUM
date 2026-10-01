@@ -15,7 +15,7 @@ Every term here is used in issues and in code. Definitions point to the implemen
   The three orthogonal axes that trace a fact back to its origin: `Origin` (who asserted it, `src/continuum/models.py:198`), `TrustLevel` (how verified it is, `src/continuum/security/provenance.py:27`), and `StateStatus` (what validity state it is in, `src/continuum/models.py:103`). `src/continuum/provenance_map.py:60` projects these onto `CanonicalProvenance` without deleting the source enums. `ProvenanceView` carries all three source values alongside the canonical labels.
 
 - **Checkpoint**  
-  A sealed `StateCheckpoint` (`src/continuum/models.py:1207`) bundling the projected `SemanticState` at a version, the event cursor it covers, and the `EnvironmentSnapshot` it was verified against. Created in `src/continuum/checkpoint/manager.py:184` via `checkpoint`, restored via `restore` which replays events recorded after the checkpoint. The checkpoint policy that decides when to write lives in `src/continuum/checkpoint/policy.py:126`.
+  A sealed `StateCheckpoint` (`src/continuum/models.py:1207`) bundling the projected `SemanticState` at a version, the event cursor it covers, and the `EnvironmentSnapshot` it was verified against. Created in `src/continuum/checkpoint/manager.py:184` via `checkpoint`, restored via `restore` which replays events recorded after the checkpoint. The checkpoint policy that decides when to write lives in `src/continuum/checkpoint/policy.py:54`.
 
 - **EnvironmentSnapshot**  
   A capture of the current external world for a run (`src/continuum/models.py:1091`). Each `EnvResource` (`src/continuum/models.py:1079`) records a named resource and its version or checksum. Comparison of a checkpoint environment and a live environment drives `EnvironmentDiff` and the validator's staleness propagation.
@@ -39,7 +39,7 @@ Every term here is used in issues and in code. Definitions point to the implemen
   Silence as a recovery signal. Cadence contracts in `src/continuum/recovery/health.py` declare how long each phase may go quiet; `continuum watch` evaluates the log against them, appending `LIVENESS_SILENCE_DETECTED` on breach and `LIVENESS_RECOVERED` on recovery (`src/continuum/events.py`). Breach is advisory: it informs the engine decision without replacing validation.
 
 - **Admissibility**
-  Whether a restore point is safe to resume from. `check_admissibility` in `src/continuum/state/validator.py` verifies the checkpoint against ledger history, and the engine refuses an inadmissible anchor (`src/continuum/recovery/engine.py:353`) instead of resuming into a commitment the log contradicts.
+  Whether a restore point is safe to resume from. `check_admissibility` in `src/continuum/state/validator.py` verifies the checkpoint against ledger history, and the engine refuses an inadmissible anchor (`src/continuum/recovery/engine.py:352`) instead of resuming into a commitment the log contradicts.
 
 - **Risk policy**
   The `.continuum/risk-policy.json` mapping from external risk names to recovery modes, loaded by `load_risk_policy` in `src/continuum/recovery/risk.py`. Operators may only tighten defaults, never loosen them. Matching risks arrive as `RISK_OBSERVED` events and land in the contract's `triggering_risks` section.

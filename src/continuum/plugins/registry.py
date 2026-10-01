@@ -71,15 +71,16 @@ class Registry:
         """Every registered service that is an instance of ``type_``."""
         return [s for s in self._services.values() if isinstance(s, type_)]
 
-    def all_services(self) -> list[Any]:
-        """Every registered service, unfiltered.
+    def all_matching(self, protocol: Any) -> list[Any]:
+        """Every registered service that is an instance of ``protocol``.
 
-        ``all_of`` is the typed view; this is the seam-membership view, for a
-        caller that applies its own ``isinstance`` check against a
-        ``runtime_checkable`` Protocol the registry cannot express as a ``type``
-        (issue #765).
+        ``all_of`` wants a concrete class for its return type, and a seam is a
+        runtime-checkable :class:`~typing.Protocol`, which is not one. This is
+        the Protocol-shaped spelling, and the services it returns still need an
+        ``isinstance`` narrowing at the call site because a Protocol is all
+        structure and no identity (issue #761).
         """
-        return list(self._services.values())
+        return [s for s in self._services.values() if isinstance(s, protocol)]
 
     def __contains__(self, name: str) -> bool:
         return name in self._services

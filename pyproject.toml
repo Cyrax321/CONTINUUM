@@ -35,7 +35,7 @@ dev = [
     "pytest-cov>=5.0",
     "pytest-asyncio>=0.23",
     "hypothesis>=6.0",
-    "ruff==0.16.5",
+    "ruff==0.16.8",
     "mypy>=1.13",
     "mcp>=2.0",
     # The adapter packages are optional runtime dependencies (see [project.optional-dependencies])
@@ -96,6 +96,7 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]
+"src/continuum/adapters/base.py" = ["B027"]
 
 [tool.mypy]
 python_version = "3.11"

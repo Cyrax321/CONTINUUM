@@ -23,7 +23,7 @@ abort) is the recovery engine's job in Phase 7.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC
 from typing import Any
@@ -50,6 +50,7 @@ __all__ = [
     "validate_state",
     "AdmissibilityResult",
     "check_admissibility",
+    "blocking_reason",
 ]
 
 
@@ -61,9 +62,14 @@ __all__ = [
 #: to resume in these cases via the repair plan, but the validator's own
 #: `safe_to_resume` disagreed with it, so anything reading the validation
 #: report directly got the wrong answer.
+#:
+#: PARTIAL belongs here too: a context-compacted component retains what the
+#: compaction summary kept but its full evidence trail is gone, so resuming as
+#: if the component were fully verified would be guessing in its own favour.
 _UNUSABLE = frozenset(
     {
         StateStatus.INVALID,
+        StateStatus.PARTIAL,
         StateStatus.STALE,
         StateStatus.CONFLICTED,
         StateStatus.EXPIRED,
@@ -71,6 +77,34 @@ _UNUSABLE = frozenset(
         StateStatus.REQUIRES_REVIEW,
     }
 )
+
+
+def _is_blocking(status: StateStatus, *, strict_unknown: bool) -> bool:
+    """Whether a component with this status withholds a clean resume.
+
+    Every status other than VALID withholds one; ``strict_unknown`` is the one
+    opt-out, and it applies only to UNKNOWN, the status that means "cannot
+    tell" rather than "wrong". Equivalent to membership in ``_UNUSABLE``, kept
+    as a predicate so the rule-merge path (#761) reports blocking components
+    in exactly this layer's words instead of re-deriving the set.
+    """
+    if status is StateStatus.VALID:
+        return False
+    return strict_unknown or status is not StateStatus.UNKNOWN
+
+
+def blocking_reason(blocking: Sequence[ComponentValidationEntry]) -> str:
+    """The report sentence for ``blocking``, the entries that withhold resume.
+
+    Shared by the validator and the rule merge so a rule-driven downgrade is
+    described in the same voice as a built-in one (issue #761).
+    """
+    if not blocking:
+        return "all components verified against the current environment"
+    return "; ".join(
+        f"{e.component.value}{f' {e.component_id}' if e.component_id else ''} is {e.status}"
+        for e in blocking[:5]
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,7 +245,10 @@ class ValidationOutcome:
             label = entry.component.value.replace("_", " ")
             identifier = f" {entry.component_id}" if entry.component_id else ""
             detail = f" - {entry.detail}" if entry.detail else ""
-            lines.append(f"{mark} {label}{identifier}: {entry.status}{detail}")
+            # A rule's finding is namespaced by its identifier (#761) so the
+            # two kinds of finding stay distinguishable in text.
+            rule = f" [rule:{entry.rule}]" if entry.rule else ""
+            lines.append(f"{mark} {label}{identifier}: {entry.status}{detail}{rule}")
         lines.append("")
         lines.append(f"Safe to resume: {'yes' if self.safe else 'no'}")
         if self.report.reason:
@@ -283,13 +320,26 @@ class StateValidator:
         # Only this frame knows which it was, so the distinction is passed down.
         observed = current_environment is not None
 
+        # Which observer supplied each resource's evidence (issue #762), so a
+        # validation entry names the provider that vouched for it. Resources a
+        # provider could not report carry their status in metadata instead.
+        provider_of: dict[str, str] = {}
+        if current_environment is not None:
+            for key, resource in current_environment.resources.items():
+                name = resource.metadata.get("provider")
+                if isinstance(name, str) and name:
+                    provider_of[key] = name
+
         if scope is None:
             state = self._apply_dependency_status(
-                state, environment_diff, entries, observed=observed
+                state, environment_diff, entries, observed=observed, provider_of=provider_of
             )
             state = self._propagate(state, broken, entries)
             if events is not None:
                 state = self._propagate_caused_by(state, events, entries)
+            state = self._apply_compaction_status(
+                state, list(events) if events is not None else None, entries
+            )
             self._check_goal(state, entries)
             self._check_progress(state, entries)
             self._check_plan(state, entries)
@@ -315,27 +365,22 @@ class StateValidator:
             scope_set = set(scope)
             broken = {r: c for r, c in broken.items() if r in scope_set}
             state = self._apply_dependency_status(
-                state, environment_diff, entries, scope=scope_set, observed=observed
+                state,
+                environment_diff,
+                entries,
+                scope=scope_set,
+                observed=observed,
+                provider_of=provider_of,
             )
             state = self._propagate(state, broken, entries)
             if events is not None:
                 state = self._propagate_caused_by(state, events, entries)
 
         blocking = [
-            e
-            for e in entries
-            if e.status in _UNUSABLE
-            and (self.strict_unknown or e.status is not StateStatus.UNKNOWN)
+            e for e in entries if _is_blocking(e.status, strict_unknown=self.strict_unknown)
         ]
         safe = not blocking
-        reason = (
-            "all components verified against the current environment"
-            if safe
-            else "; ".join(
-                f"{e.component.value}{f' {e.component_id}' if e.component_id else ''} is {e.status}"
-                for e in blocking[:5]
-            )
-        )
+        reason = blocking_reason(blocking)
 
         report = StateValidationResult(
             run_id=state.run_id,
@@ -360,6 +405,7 @@ class StateValidator:
         entries: list[ComponentValidationEntry],
         scope: set[str] | None = None,
         observed: bool = True,
+        provider_of: Mapping[str, str] | None = None,
     ) -> SemanticState:
         if not state.external_dependencies:
             return state
@@ -413,11 +459,30 @@ class StateValidator:
                     component=Component.EXTERNAL_DEPENDENCY,
                     component_id=dependency.resource,
                     status=status,
-                    detail=detail,
+                    detail=self._label_provenance(detail, dependency.resource, provider_of),
                 )
             )
 
         return state.model_copy(update={"external_dependencies": updated})
+
+    @staticmethod
+    def _label_provenance(
+        detail: str,
+        resource: str,
+        provider_of: Mapping[str, str] | None,
+    ) -> str:
+        """Name the observer behind one resource's evidence (issue #762).
+
+        A validation entry that says "verified unchanged" is answerable only if
+        it also says who vouched for it, so a reader can tell a configured
+        provider's observation from a caller's assertion.
+        """
+        if not provider_of:
+            return detail
+        provider = provider_of.get(resource)
+        if not provider:
+            return detail
+        return f"{detail} (provider: {provider})"
 
     # -- propagation ------------------------------------------------------ #
 

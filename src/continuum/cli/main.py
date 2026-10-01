@@ -10,7 +10,10 @@ Two principles shape the surface:
 **Read-only by default.** ``inspect``, ``history``, ``validate``, ``diff`` and
 ``show-contract`` never write. They are safe against a live database while an
 agent is mid-run. Only ``init``, ``start``, ``checkpoint``, ``confirm`` and
-``resume --repair`` mutate, and they say so.
+``resume --repair`` mutate, and they say so. Plain ``resume`` changes no state
+either, but a blocked run appends its webhook delivery outcome to the event log
+(issue #305): an audit record the projection ignores, deduped per verdict, and
+never written for a run an agent is still working.
 
 **Exit codes carry the verdict.** ``continuum resume $RUN && ./start-agent.sh``
 must not launch an agent onto stale state, so only a verified-safe run exits 0.
@@ -21,7 +24,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 import sqlite3
 import stat
 import sys
@@ -48,7 +53,18 @@ from continuum.clienthooks import (
     remove_claude_code_hook,
     remove_client_hook,
 )
-from continuum.environment import StaticProvider, capture
+from continuum.environment import (
+    BUILTIN_PROVIDER_NAMES,
+    UNKNOWN_VERSION,
+    ProviderConfig,
+    ProviderSpec,
+    StaticProvider,
+    capture,
+    config_from_events,
+    parse_params,
+    record_provider_config,
+    resolve_and_capture,
+)
 from continuum.events import EventType
 from continuum.gate import (
     DEFAULT_GATE_CONFIG_PATH,
@@ -60,6 +76,7 @@ from continuum.gate import (
 from continuum.gate import (
     decide as gate_decide,
 )
+from continuum.mcp.install import HOST_PROFILES as MCP_HOST_PROFILES
 from continuum.models import (
     ActionStatus,
     EnvironmentSnapshot,
@@ -75,11 +92,19 @@ from continuum.models import (
 from continuum.observability import render_dashboard
 from continuum.provenance.graph import build_provenance_graph, downstream_of
 from continuum.provenance_map import summarize
-from continuum.recovery import RecoveryDecision, RecoveryEngine, render_contract
+from continuum.recovery import RecoveryEngine, render_contract
+from continuum.runs import close_run
 from continuum.security.attestation import (
     generate_keypair,
     sign_chain,
     verify_attestation,
+)
+from continuum.security.lineage import (
+    DEFAULT_TOKEN_TTL_SECONDS,
+    TokenVerdict,
+    issue_token,
+    key_id,
+    verify_token,
 )
 from continuum.serve import cmd_serve
 from continuum.state.diff import diff_states, render_diff
@@ -780,6 +805,259 @@ def _page_bounds(
     return start, end, total - (end - start)
 
 
+def _cli_provenance() -> str:
+    """Who recorded a configuration from the CLI, for the audit trail.
+
+    The event already carries its Origin and sequence; this is the short human
+    answer to "who turned this on", which is what an operator reads first when
+    a provider starts failing closed.
+    """
+    import getpass
+
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = "unknown"
+    return f"cli:{user}"
+
+
+def cmd_providers(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Configure the environment providers a run trusts at resume time.
+
+    The configuration lives in the event log, so it is append-only, hashed and
+    auditable: every invocation records the whole set, and the newest record is
+    authoritative. ``list`` and ``check`` are read-only; ``check`` resolves the
+    providers exactly as resume would and reports what each one said, so an
+    operator can see a failing observer before it gates a recovery.
+    """
+    action = args.providers_command
+    try:
+        storage.get_run(args.run_id)
+    except RunNotFound:
+        print(f"error: run {args.run_id!r} does not exist", file=err)
+        return ExitCode.NOT_FOUND
+
+    if action == "list":
+        return _providers_list(args, storage, out)
+    if action == "check":
+        return _providers_check(args, storage, out, err)
+    if action == "add":
+        return _providers_add(args, storage, out, err)
+    if action == "remove":
+        return _providers_remove(args, storage, out, err)
+    print(f"error: unknown providers action {action!r}", file=err)
+    return ExitCode.ERROR
+
+
+def _providers_config(storage: Storage, run_id: str) -> ProviderConfig:
+    """The run's current configuration, empty when it has never configured one."""
+    return config_from_events(storage.read_all_events(run_id)) or ProviderConfig()
+
+
+def _providers_list(args: argparse.Namespace, storage: Storage, out: Any) -> int:
+    config = _providers_config(storage, args.run_id)
+    specs: list[dict[str, Any]] = [
+        {
+            "provider": spec.provider,
+            "resources": sorted(spec.declared_resources()),
+            "enabled": spec.enabled,
+            "params": dict(spec.params),
+            "provenance": spec.provenance,
+        }
+        for spec in config.specs
+    ]
+    conflicts = {
+        key: sorted(s.provider for s in specs_) for key, specs_ in config.conflicts().items()
+    }
+    text = (
+        f"{len(specs)} provider(s) configured for run {args.run_id}"
+        if specs
+        else f"No providers configured for run {args.run_id}"
+    )
+    if not specs:
+        text += (
+            "; resume validates only what a caller supplies, and a run with no "
+            "configuration behaves exactly as it does without this command"
+        )
+    if conflicts:
+        text += f" ({len(conflicts)} resource key(s) claimed by more than one provider)"
+    _emit(
+        {
+            "run_id": args.run_id,
+            "schema_version": config.schema_version,
+            "providers": specs,
+            "conflicts": conflicts,
+            "builtins": sorted(BUILTIN_PROVIDER_NAMES),
+        },
+        text,
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    if args.json:
+        # JSON stays parseable: the detail lines below are prose for a human.
+        return ExitCode.OK
+    for spec in specs:
+        state = "enabled" if spec["enabled"] else "disabled"
+        keys = ", ".join(spec["resources"]) or "(derives none)"
+        print(f"  {spec['provider']} [{state}]: {keys}", file=out)
+    for key, names in sorted(conflicts.items()):
+        print(
+            f"  warning: {key} is claimed by {', '.join(names)}; both fail closed "
+            "at resume rather than one silently winning",
+            file=out,
+        )
+    return ExitCode.OK
+
+
+def _providers_check(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Resolve and capture with the configured providers, as resume would."""
+    config = _providers_config(storage, args.run_id)
+    if not config.specs:
+        _emit(
+            {"run_id": args.run_id, "providers": [], "resources": {}, "diagnostics": []},
+            f"No providers configured for run {args.run_id}; nothing to check.",
+            as_json=args.json,
+            stream=out,
+            palette=getattr(args, "_palette", None),
+        )
+        return ExitCode.OK
+    result = resolve_and_capture(args.run_id, config)
+    resources = {
+        key: {
+            "version": resource.version,
+            "kind": resource.kind,
+            "provider": resource.metadata.get("provider"),
+            "unknown": resource.version is None or resource.version == UNKNOWN_VERSION,
+        }
+        for key, resource in sorted(result.snapshot.resources.items())
+    }
+    diagnostics = [
+        {
+            "provider": d.provider,
+            "status": d.status.value,
+            "resources": sorted(d.resources),
+            "detail": d.detail,
+        }
+        for d in result.diagnostics
+    ]
+    text = f"Captured {len(resources)} resource(s) from {len(config.specs)} provider(s)."
+    if result.fail_closed:
+        failed = [d for d in result.diagnostics if d.status.blocking]
+        text = (
+            f"{len(failed)} provider(s) could not report their resources; those "
+            "resources are unknown, not assumed unchanged."
+        )
+    _emit(
+        {
+            "run_id": args.run_id,
+            "providers": [s.provider for s in config.specs],
+            "resources": resources,
+            "diagnostics": diagnostics,
+            "fail_closed": result.fail_closed,
+        },
+        text,
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    if not args.json:
+        for d in diagnostics:
+            print(f"  {d['provider']} [{d['status']}]: {d['detail']}", file=out)
+    return ExitCode.OK
+
+
+def _providers_add(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    resources = list(getattr(args, "resource", None) or [])
+    params = parse_params(getattr(args, "param", None) or [])
+    provider = args.provider
+    if provider not in BUILTIN_PROVIDER_NAMES and not resources:
+        # A built-in can derive its scope from its parameters; anything else is
+        # a registered name the resolver looks up, and only the caller knows
+        # what it owns, so its scope must be declared explicitly.
+        print(
+            f"error: --resource is required for {provider!r}, which is not a "
+            f"built-in ({', '.join(sorted(BUILTIN_PROVIDER_NAMES))})",
+            file=err,
+        )
+        return ExitCode.ERROR
+    if provider == "file" and "paths" not in params and resources:
+        # The file provider's resources are its paths; declaring them twice
+        # would be noise, so the resource keys stand in for the parameter.
+        params["paths"] = resources
+    try:
+        spec = ProviderSpec(
+            provider=provider,
+            resources=frozenset(resources),
+            params=params,
+            enabled=not bool(getattr(args, "disable", False)),
+            provenance=f"continuum providers add ({_cli_provenance()})",
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=err)
+        return ExitCode.ERROR
+
+    config = _providers_config(storage, args.run_id)
+    if any(s.provider == spec.provider and s.resources == spec.resources for s in config.specs):
+        print(
+            f"error: provider {spec.provider!r} already declares those resources",
+            file=err,
+        )
+        return ExitCode.ERROR
+    updated = ProviderConfig(specs=(*config.specs, spec))
+    record_provider_config(storage, args.run_id, updated, provenance=spec.provenance)
+    keys = ", ".join(sorted(spec.declared_resources())) or "(derives scope)"
+    _emit(
+        {
+            "run_id": args.run_id,
+            "provider": spec.provider,
+            "resources": sorted(spec.declared_resources()),
+            "enabled": spec.enabled,
+            "providers": [s.provider for s in updated.specs],
+        },
+        f"Configured {spec.provider} for run {args.run_id}: {keys}",
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK
+
+
+def _providers_remove(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    config = _providers_config(storage, args.run_id)
+    name = args.provider
+    if getattr(args, "all", False):
+        removed = config.specs
+        kept: tuple[ProviderSpec, ...] = ()
+    else:
+        if not name:
+            print("error: pass --provider or --all", file=err)
+            return ExitCode.ERROR
+        removed = tuple(s for s in config.specs if s.provider == name)
+        kept = tuple(s for s in config.specs if s.provider != name)
+    if not removed:
+        print(f"error: no configured provider named {name!r}", file=err)
+        return ExitCode.NOT_FOUND
+    record_provider_config(
+        storage,
+        args.run_id,
+        ProviderConfig(specs=kept),
+        provenance=f"continuum providers remove ({_cli_provenance()})",
+    )
+    _emit(
+        {
+            "run_id": args.run_id,
+            "removed": [s.provider for s in removed],
+            "providers": [s.provider for s in kept],
+        },
+        f"Removed {len(removed)} provider record(s); {len(kept)} remain.",
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK
+
+
 def cmd_provenance(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Show provenance DAG with per-node Origin (issue #554). Read-only, compaction-aware."""
     storage.get_run(args.run_id)
@@ -828,6 +1106,21 @@ def cmd_provenance(args: argparse.Namespace, storage: Storage, out: Any, err: An
         children_str = ",".join(c[:8] for c in children) if children else "-"
         lines.append(
             f"  {node.sequence:>3}  {node.type.value:<18} {node.event_id[:8]}  origin={node.origin.value}  parents={parents_str}  children={children_str}  {node.label}"
+        )
+    for span in graph.subagent_spans:
+        lines.append(
+            f"  subagent {span.get('subagent_run_id', '')[:8]}  status={span.get('status', 'active')}"
+        )
+    if graph.compactions:
+        compacted_total = 0
+        for compaction in graph.compactions:
+            try:
+                compacted_total += int(compaction.get("compacted_events") or 0)
+            except (TypeError, ValueError):
+                continue
+        lines.append(
+            f"  context compacted: {len(graph.compactions)} compaction(s), "
+            f"{compacted_total} pre-compaction event(s) summarised (evidence kept as partial)"
         )
     if hidden:
         lines.append(
@@ -1429,7 +1722,18 @@ def _anchor_on_recovery(
 
 
 def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
-    """Report how a run may resume. Read-only unless ``--repair`` is given."""
+    """Report how a run may resume.
+
+    Read-only unless ``--repair`` is given, with one documented exception
+    (issue #305): when the verdict is ``REQUEST_HUMAN`` and
+    ``.continuum/webhooks.json`` subscribes an endpoint to that mode, the
+    delivery outcome is appended to the event log as ``NOTIFICATION_SENT`` or
+    ``NOTIFICATION_FAILED``. That append is an audit record, not state: the
+    projection ignores it, so it cannot change this verdict or the exit code,
+    and it fires only for a run that is already parked, never for one an agent
+    is actively working. Dedup on ``(run_id, mode, contract hash)`` means it
+    happens once per distinct verdict, even across processes.
+    """
     run_id = args.run_id
     if not run_id:
         active = storage.get_active_run()
@@ -1515,11 +1819,11 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
         try:
             current = normalize_pinning(json.loads(args.pinning))
-            # The newest pinning is usually an archived ACTION_RECORDED: the
-            # fold must see the prefix compaction moved, or a compacted run
-            # reads {} as its recorded pinning and reports every key as newly
-            # pinned (#1126). Mirrors the assess (#1050) and watch (#1072)
-            # folds over the same history.
+            # Full history, not the live tail: compaction archives the
+            # pre-anchor prefix, and every ACTION_RECORDED carrying a pinning
+            # lives in it, so the live tail folds to {} and every key would
+            # read as newly pinned (issue #1126). The anchor marker that
+            # remains carries only anchored_through/version.
             recorded = latest_pinning(storage.read_all_events(run_id))
             drift_lines = compute_drift(recorded, current)
             if drift_lines:
@@ -1937,24 +2241,12 @@ def cmd_complete(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
         )
         return ExitCode.OK
 
-    note = {"summary": args.summary} if args.summary else {}
-    storage.append_event(
-        args.run_id,
-        EventType.REVIEW_CONFIRMED,
-        {"components": ["goal", "progress"]},
-        source=Origin.HUMAN,
-    )
-    storage.append_event(
-        args.run_id,
-        EventType.RUN_COMPLETED,
-        {"closed_by": "cli", **note},
-        source=Origin.HUMAN,
-    )
-    updated = run.touch(status=RunStatus.COMPLETED)
-    storage.update_run(updated)
-    # Instant resume file tracks the most recent checkpoint; a completed run
-    # is no longer interrupted, so the pointer must not keep naming it.
-    clear_resume_pointer(args.run_id)
+    # The REVIEW_CONFIRMED + RUN_COMPLETED pair, the row flip, and the
+    # instant-resume cleanup are shared with the TUI and the dashboard HITL
+    # button (issue #1153): one helper, so the three surfaces cannot drift
+    # apart and a run closed from any of them stops hijacking the next
+    # session's resume.
+    updated = close_run(storage, args.run_id, closed_by="cli", summary=args.summary or "")
     payload = {
         "run_id": args.run_id,
         "status": updated.status.value,
@@ -3157,6 +3449,151 @@ def cmd_hooks_remove(args: argparse.Namespace, storage: Storage, out: Any, err: 
     return ExitCode.OK
 
 
+def _mcp_settings_path(args: argparse.Namespace) -> Path:
+    """The file a ``mcp install``/``mcp remove`` acts on, per host and scope."""
+    profile = MCP_HOST_PROFILES[args.host]
+    if args.settings:
+        return Path(args.settings)
+    if args.scope == "project":
+        return Path(profile["project_settings"])
+    return Path(profile["local_settings"]).expanduser()
+
+
+def cmd_mcp_install(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Register the MCP server with a host, baking resolved values (issue #834).
+
+    The committed ``.mcp.json`` cannot carry platform conditionals, and a bare
+    command name is resolved against the *host's* PATH by ``CreateProcess``,
+    which is how a healthy install surfaces as ``CONNECTION_CLOSED``. So the
+    command is resolved here, on the machine that will spawn it, and baked
+    absolute alongside an absolute ``--db`` (the host's spawn cwd is not the
+    project root and is not guaranteed to be). The ``mcp`` extra is verified
+    by spawning a probe subprocess before anything is written: an in-process
+    import check passes in exactly the states where the baked command would be
+    dead for the host.
+    """
+    from continuum.mcp.install import (
+        INSTALL_COMMAND,
+        SERVER_NAME,
+        display_command,
+        install_server,
+        resolve_command,
+        verify_sdk,
+    )
+
+    command, form = resolve_command()
+    sdk_ok, detail = verify_sdk(form)
+    if not sdk_ok:
+        print(
+            f"error: the mcp SDK is not importable by {sys.executable} ({detail}). "
+            "Refusing to register a server that cannot start.",
+            file=err,
+        )
+        print(f"Install it with: {INSTALL_COMMAND}", file=err)
+        return ExitCode.ERROR
+
+    # Absolute on purpose: every config path in the codebase resolves against
+    # the cwd, and the host's spawn cwd is neither documented nor guaranteed
+    # to be the project root.
+    db = Path(args.db or Path.cwd() / "continuum.db").resolve()
+    settings_path = _mcp_settings_path(args)
+    try:
+        status = install_server(
+            settings_path,
+            scope=args.scope,
+            project_root=Path.cwd(),
+            command=command,
+            db=db,
+            host=args.host,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=err)
+        return ExitCode.ERROR
+
+    lines = [
+        f"MCP server registered with {args.host} ({args.scope} scope)",
+        f"  [{status}] {SERVER_NAME} in {settings_path}",
+        f"    command: {display_command([*command, '--db', str(db)])}",
+        f"    form: {form} (resolved at install time, independent of the host's PATH)",
+    ]
+    # The host reports a conflicting-scopes diagnostic when a local entry and
+    # the committed .mcp.json both name the server. That is expected: local
+    # wins, which is the point of registering there. Saying so here keeps the
+    # operator from "fixing" it by unregistering everyone else's entry.
+    conflict = args.scope == "local" and _project_mcp_json_names_server()
+    if conflict:
+        lines.append(
+            "  note: a project .mcp.json also registers this server; the local entry "
+            "takes precedence and the host's conflicting-scopes notice is expected"
+        )
+    _emit(
+        {
+            "host": args.host,
+            "scope": args.scope,
+            "settings": str(settings_path),
+            "server": SERVER_NAME,
+            "status": status,
+            "command": command,
+            "db": str(db),
+            "form": form,
+            "project_conflict": conflict,
+        },
+        "\n".join(lines),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK
+
+
+def _project_mcp_json_names_server() -> bool:
+    """True when a project-scope ``.mcp.json`` in the cwd registers the server."""
+    from continuum.mcp.install import SERVER_NAME
+
+    try:
+        data = json.loads(Path(".mcp.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    return isinstance(servers, dict) and SERVER_NAME in servers
+
+
+def cmd_mcp_remove(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Remove the MCP registration ``mcp install`` wrote (issue #834).
+
+    Only an entry this command's shape recognises is touched: the committed
+    ``.mcp.json`` registration and anything hand-registered survive, so an
+    uninstall can never unplug the server for other users of the same clone.
+    """
+    from continuum.mcp.install import SERVER_NAME, remove_server
+
+    settings_path = _mcp_settings_path(args)
+    try:
+        removed = remove_server(settings_path, scope=args.scope, project_root=Path.cwd())
+    except ValueError as exc:
+        print(f"error: {exc}", file=err)
+        return ExitCode.ERROR
+    text = (
+        f"Removed {SERVER_NAME} from {settings_path}"
+        if removed
+        else f"No CONTINUUM-registered {SERVER_NAME} in {settings_path}"
+    )
+    _emit(
+        {
+            "host": args.host,
+            "scope": args.scope,
+            "settings": str(settings_path),
+            "server": SERVER_NAME,
+            "removed": removed,
+        },
+        text,
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK
+
+
 def cmd_gate(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Decide whether one tool call may proceed (issue #217).
 
@@ -3352,8 +3789,20 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
         return ExitCode.OK if authority_report.valid is True else ExitCode.REQUIRES_HUMAN
 
     pending = ActionLedger(storage, args.run_id).pending()
-    report = settle_run(storage, args.run_id, probes, dry_run=args.dry_run)
-    payload: dict[str, Any] = {"run_id": args.run_id, "dry_run": args.dry_run, **report.as_dict()}
+    report = settle_run(storage, args.run_id, probes, dry_run=args.dry_run, strict=args.strict)
+    # Discrepancy pass (issue #268): evidence that contradicts the ledger is a
+    # review finding, never a silent re-settlement. Only artifact_check probes
+    # have an independent reality to check against.
+    from continuum.evidence import detect_discrepancies
+
+    discrepancies = detect_discrepancies(storage, args.run_id, probes, flag=not args.dry_run)
+    payload = {
+        "run_id": args.run_id,
+        "dry_run": args.dry_run,
+        "strict": args.strict,
+        **report.as_dict(),
+        "discrepancies": [d.as_dict() for d in discrepancies],
+    }
     lines = [
         f"pending actions: {len(pending)}, "
         f"settled: {report.settled} "
@@ -3363,39 +3812,8 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
     ]
     for action_type, detail in report.unresolved:
         lines.append(f"  [!!] {action_type}: {detail}")
-
-    # Plugin pass (issue #765): only actions the probes left pending are seen
-    # here, so a probe's settlement is never revisited or contradicted.
-    unresolved_after_plugins = 0
-    if plugins:
-        from continuum.plugins.reconcile import (
-            ReconciliationOutcome,
-            settle_with_reconcilers,
-        )
-
-        # Counted before the pass: an action the plugins escalate to
-        # REQUIRES_REVIEW leaves `pending()` (which only lists STARTED and
-        # UNKNOWN), so re-reading the ledger afterwards would report an
-        # escalated conflict as resolved and exit OK on a run a human must see.
-        open_before = len(ActionLedger(storage, args.run_id).pending())
-        plugin_report = settle_with_reconcilers(storage, args.run_id, plugins, dry_run=args.dry_run)
-        payload["plugins"] = plugin_report.as_dict()
-        unresolved_after_plugins = open_before - plugin_report.settled
-        lines.append(
-            f"plugin reconcilers: {len(plugins)} registered, "
-            f"settled: {plugin_report.settled} "
-            f"(occurred {len(plugin_report.settled_true)}, "
-            f"not-occurred {len(plugin_report.settled_false)}), "
-            f"escalated: {len(plugin_report.escalated)}"
-        )
-        for assessment in plugin_report.assessments:
-            # Only the escalated ones carry the warning sigil: a confirmed
-            # outcome is good news and must not render red in the terminal.
-            rendered = assessment.render().splitlines()[0]
-            if assessment.outcome is ReconciliationOutcome.CONFIRMED_OCCURRED:
-                lines.append(f"  [ok] {rendered}")
-            else:
-                lines.append(f"  [!!] {rendered}")
+    for finding in discrepancies:
+        lines.append(f"  [!!] {finding.action_type}: {finding.detail}")
     if args.dry_run:
         lines.append("dry run: nothing was written")
     _emit(
@@ -3405,7 +3823,9 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
         stream=out,
         palette=getattr(args, "_palette", None),
     )
-    remaining = unresolved_after_plugins if plugins else len(pending) - report.settled
+    remaining = len(pending) - report.settled
+    if discrepancies:
+        return ExitCode.REQUIRES_HUMAN
     return ExitCode.OK if remaining <= 0 else ExitCode.REQUIRES_HUMAN
 
 
@@ -3724,70 +4144,86 @@ def cmd_replay(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     # Check existence first: otherwise a typo'd name reports "never recorded
     # RUN_STARTED", which diagnoses the wrong problem entirely.
     storage.get_run(args.run_id)
-    # Full log, archived prefix included, windowed by --upto: a compacted run
-    # must replay the same as one that was never compacted (#1172). Reading the
-    # live tail alone put RUN_STARTED in the archive, so every --upto value hit
-    # the guard below and advised raising N -- the one fix that cannot help,
-    # since the event had moved, not been excluded. Mirrors cmd_events, which
-    # reached this contract first (#532).
-    events = [
-        event
-        for event in storage.read_all_events(args.run_id)
-        if args.upto is None or event.sequence <= args.upto
-    ]
+    # The window covers the run's full history, archived prefix included, so a
+    # compacted run windows the same as one that was never compacted (issue
+    # #1172). Compaction archives RUN_STARTED, and reading only the live tail
+    # made every --upto on a compacted run fail with advice that could not
+    # help: the event was in events_archive, not behind the window. This is the
+    # same read cmd_events uses, so the two commands agree on what "the event
+    # log" is. The bound is pushed into the engine, so a narrow window on a
+    # heavily compacted run does not materialize the whole archive to discard
+    # most of it.
+    events = storage.read_all_events(args.run_id, upto=args.upto)
 
     stored = storage.latest_version(args.run_id)
-    anchored = any(e.type is EventType.EVENT_LOG_ANCHORED for e in events) and stored is not None
-    if anchored and args.upto is None and stored is not None:
-        # Compacted run (#239): fold the restored checkpoint state forward
-        # over the post-anchor tail; the archived prefix lives in
-        # events_archive and is deep-audited by verify.
-        from continuum.state.semantic import project_incremental
-
+    # A run is anchored when its *live* tail still carries the marker. An anchor
+    # that has itself been archived belongs to a compaction a later one
+    # superseded (#648): a window can contain it and still end short of the
+    # current boundary, and restoring the current checkpoint would then serve
+    # the boundary's state for a window that asked for an earlier one.
+    anchored = any(e.type is EventType.EVENT_LOG_ANCHORED for e in storage.read_events(args.run_id))
+    if anchored and stored is not None:
         base = CheckpointManager(storage).restore(args.run_id, replay=False).state
-        # The anchor event sits exactly at the base boundary; folding it would
-        # trip the monotonic-sequence check.
-        tail = [e for e in events if e.sequence > base.source_sequence]
-        state, _report = project_incremental(args.run_id, tail, base=base)
-        # Verify for real: re-fold only the stored version's own prefix and
-        # compare fingerprints, exactly as the plain path's
-        # _verify_against_stored does. A hardcoded pass here silently retired
-        # the corruption contract for every compacted run.
-        at_stored, _ = project_incremental(
-            args.run_id,
-            [e for e in tail if e.sequence <= stored.source_sequence],
-            base=base,
-            on_unprojectable="degrade",
-        )
-        matches = state_fingerprint(at_stored) == state_fingerprint(stored)
-        where = f"checkpoint v{stored.version} at sequence {stored.source_sequence}"
-        verification = (
-            f"anchored run: {'matches' if matches else 'DOES NOT match'} stored {where}; "
-            f"{len(tail)} tail event(s) folded, prefix audited in events_archive"
-        )
-        payload = {
-            "run_id": args.run_id,
-            "events_replayed": len(events),
-            "completed": state.progress.completed,
-            "source_sequence": state.source_sequence,
-            "verified": matches,
-            "verification": verification,
-        }
-        _emit(
-            payload,
-            f"Anchored replay: folded {where} + {len(tail)} tail event(s)\n"
-            f"Verification: {verification}",
-            as_json=args.json,
-            stream=out,
-            palette=getattr(args, "_palette", None),
-        )
-        if not matches:
-            print(
-                f"replayed state does not match the stored version for run {args.run_id}",
-                file=err,
+        if args.upto is None or args.upto > base.source_sequence:
+            # Compacted run (#239): fold the restored checkpoint state forward
+            # over the post-anchor tail; the archived prefix lives in
+            # events_archive and is deep-audited by verify. A windowed request
+            # reaches this branch too (#1172): the tail below is already cut by
+            # the window, so --upto narrows what is folded without shutting the
+            # anchored path out.
+            from continuum.state.semantic import project_incremental
+
+            # The anchor event sits exactly at the base boundary; folding it
+            # would trip the monotonic-sequence check. Everything the archive
+            # holds is at or before that boundary, so this also drops the
+            # archived prefix.
+            tail = [e for e in events if e.sequence > base.source_sequence]
+            state, _report = project_incremental(args.run_id, tail, base=base)
+            # Verify for real: re-fold only the stored version's own prefix and
+            # compare fingerprints, exactly as the plain path's
+            # _verify_against_stored does. A hardcoded pass here silently
+            # retired the corruption contract for every compacted run.
+            at_stored, _ = project_incremental(
+                args.run_id,
+                [e for e in tail if e.sequence <= stored.source_sequence],
+                base=base,
+                on_unprojectable="degrade",
             )
-            return ExitCode.CORRUPTED
-        return ExitCode.OK
+            matches = state_fingerprint(at_stored) == state_fingerprint(stored)
+            where = f"checkpoint v{stored.version} at sequence {stored.source_sequence}"
+            verification = (
+                f"anchored run: {'matches' if matches else 'DOES NOT match'} stored {where}; "
+                f"{len(tail)} tail event(s) folded, prefix audited in events_archive"
+            )
+            payload = {
+                "run_id": args.run_id,
+                "events_replayed": len(events),
+                "completed": state.progress.completed,
+                "source_sequence": state.source_sequence,
+                "verified": matches,
+                "verification": verification,
+            }
+            _emit(
+                payload,
+                f"Anchored replay: folded {where} + {len(tail)} tail event(s)\n"
+                f"Verification: {verification}",
+                as_json=args.json,
+                stream=out,
+                palette=getattr(args, "_palette", None),
+            )
+            if not matches:
+                print(
+                    f"replayed state does not match the stored version for run {args.run_id}",
+                    file=err,
+                )
+                return ExitCode.CORRUPTED
+            return ExitCode.OK
+        # The window ends at or before the anchor boundary, so everything it
+        # covers sits in the archived prefix. The checkpoint holds the state
+        # *at* the boundary, past what was asked for, and folding it forward
+        # over an empty tail would report the boundary's state for an earlier
+        # window. The plain path below folds that prefix from scratch instead,
+        # which is exactly what an uncompacted run does for the same window.
 
     if args.upto is not None and not any(e.type == EventType.RUN_STARTED for e in events):
         raise ValueError(
@@ -3857,15 +4293,10 @@ def _verify_against_stored(run_id: str, storage: Storage) -> tuple[bool | None, 
     stored = storage.latest_version(run_id)
     if stored is None:
         return None, "skipped (no stored version to compare against)"
-    # The stored prefix starts at sequence 1, which compaction moves into
-    # events_archive: windowing the live tail by source_sequence reads an empty
-    # log on every compacted run and reports a healthy checkpoint as corrupt
-    # (#1172). The whole history is the prefix's actual source.
-    prefix = [
-        event
-        for event in storage.read_all_events(run_id)
-        if event.sequence <= stored.source_sequence
-    ]
+    # The stored prefix may live in events_archive: a compacted run's boundary
+    # checkpoint derives from archived events, and reading only the live tail
+    # would replay nothing and report a sound version as corrupt (issue #1172).
+    prefix = storage.read_all_events(run_id, upto=stored.source_sequence)
     replayed = project(run_id, prefix, on_unprojectable="degrade")
     where = f"version {stored.version} at sequence {stored.source_sequence}"
     if replayed.status is StateStatus.INVALID:
@@ -4096,6 +4527,172 @@ def cmd_attest_verify(args: argparse.Namespace, storage: Storage, out: Any, err:
     return ExitCode.OK if verdict == "SIGNED" else ExitCode.CORRUPTED
 
 
+_PEM_BLOCK = re.compile(r"-----BEGIN(?: [A-Z]+)* KEY-----[\s\S]*?-----END(?: [A-Z]+)* KEY-----")
+
+
+def _pem_blocks(text: str) -> list[str]:
+    """Every complete PEM block in ``text``, so a keyring file parses like a single key."""
+    return [match.group(0) for match in _PEM_BLOCK.finditer(text)]
+
+
+def _load_signing_key(args: argparse.Namespace) -> str:
+    """Read the issuer key from ``--key`` or ``CONTINUUM_SIGNER_KEY``."""
+    key_path = args.key or os.environ.get("CONTINUUM_SIGNER_KEY")
+    if not key_path:
+        raise ValueError("no signing key: pass --key PATH or set CONTINUUM_SIGNER_KEY")
+    try:
+        return Path(key_path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"cannot read signing key {key_path!r}: {exc}") from exc
+
+
+def _run_head(storage: Storage, run_id: str) -> tuple[int, str]:
+    """The live chain point (sequence, head hash) a token binds."""
+    storage.get_run(run_id)
+    events = storage.read_events(run_id)
+    if not events:
+        raise ValueError(f"run {run_id!r} has no events to attest")
+    head = events[-1]
+    if head.hash is None:
+        raise ValueError(f"run {run_id!r} head event has no hash; the chain is incomplete")
+    return head.sequence, head.hash
+
+
+def cmd_lineage_issue(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Issue a portable lineage token delegating this run's provenance downstream.
+
+    Binds the run's sealed recovery contract and an event-chain attestation of
+    its live head under one issuer signature. The token is evidence of origin
+    and delegation only: it authorizes nothing on the source run, and the
+    downstream holder verifies it with ``lineage-verify``.
+    """
+    private_pem = _load_signing_key(args)
+    seq, chain_hash = _run_head(storage, args.run_id)
+    signer = args.signer or os.environ.get("CONTINUUM_SIGNER")
+
+    # The contract is re-derived read-only, exactly as `show-contract` derives
+    # it, so the token binds terms the engine actually reached rather than terms
+    # the caller asserted. `assess` never writes.
+    contract = (
+        RecoveryEngine(storage)
+        .assess(args.run_id, current_environment=_environment(args, args.run_id))
+        .contract
+    )
+
+    if args.attest:
+        # Bind an attestation a third party already signed, which may be a
+        # different key from the issuer's: attesting a chain and delegating work
+        # are separate acts.
+        try:
+            attestation = json.loads(Path(args.attest).read_text(encoding="utf-8"))
+        except OSError as exc:
+            print(f"error: cannot read attestation {args.attest!r}: {exc}", file=err)
+            return ExitCode.NOT_FOUND
+    else:
+        attestation = sign_chain(private_pem, args.run_id, seq, chain_hash, signer=signer).to_dict()
+
+    token = issue_token(
+        contract,
+        attestation,
+        private_pem,
+        purpose=args.purpose,
+        audience=args.audience,
+        issuer=signer,
+        expires_at=args.expires_at or None,
+        ttl_seconds=None if args.expires_at else args.ttl,
+    )
+    doc = token.to_dict()
+
+    if args.out:
+        Path(args.out).write_text(token.to_canonical_json() + "\n", encoding="utf-8")
+        payload = {"token_file": args.out, **doc}
+        text = (
+            f"Lineage token written to {args.out} (run {token.run_id}, "
+            f"checkpoint v{token.checkpoint_version}, seq {token.trusted_through_seq}, "
+            f"expires {token.expires_at})."
+        )
+    else:
+        payload = doc
+        text = token.to_canonical_json()
+    _emit(payload, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
+    return ExitCode.OK
+
+
+def cmd_lineage_verify(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Verify a lineage token a downstream handoff produced.
+
+    Checks the issuer signature, expiry, audience and the referenced run /
+    checkpoint without writing state. A ``run_id`` is optional: with one, the
+    sealed contract is re-derived and its seal compared to the token's; without
+    one, the token is verified on its own contents, which is what a verifier
+    with no access to the source store needs.
+    """
+    try:
+        raw = Path(args.token).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"error: cannot read token {args.token!r}: {exc}", file=err)
+        return ExitCode.NOT_FOUND
+
+    contract = None
+    if args.run_id:
+        storage.get_run(args.run_id)
+        # Read-only: the verifier confirms the sealed terms the token claims,
+        # and never mutates the source run it is only reading.
+        contract = (
+            RecoveryEngine(storage)
+            .assess(args.run_id, current_environment=_environment(args, args.run_id))
+            .contract
+        )
+
+    trusted = None
+    if args.trusted_keys:
+        # A keyring file may hold several public keys; each complete PEM block
+        # becomes one trusted issuer identity.
+        trusted = set(_pem_blocks(args.trusted_keys.read_text(encoding="utf-8")))
+    elif args.issuer_key:
+        trusted = set(_pem_blocks(Path(args.issuer_key).read_text(encoding="utf-8")))
+
+    verification = verify_token(
+        raw,
+        expected_audience=args.audience,
+        trusted_issuers=trusted,
+        contract=contract,
+        expected_run_id=args.run_id,
+    )
+    parsed = verification.token
+    token_run = parsed.run_id if parsed else None
+
+    payload = {
+        "run_id": token_run,
+        "verdict": verification.verdict.value,
+        "reasons": verification.reasons,
+        "advisories": verification.advisories,
+        "issuer_key_id": key_id(parsed.public_key) if parsed else None,
+        "issuer": parsed.issuer if parsed else None,
+        "audience": parsed.audience if parsed else None,
+        "purpose": parsed.purpose if parsed else None,
+        "expires_at": parsed.expires_at if parsed else None,
+    }
+    if verification.verdict is TokenVerdict.VALID:
+        if parsed is None:  # Only MALFORMED reports without a parsed token.
+            raise ValueError("a VALID verdict must carry the parsed token")
+        text = (
+            f"Lineage token VALID for run {token_run} (checkpoint v"
+            f"{parsed.checkpoint_version}, seq {parsed.trusted_through_seq}); "
+            f"issuer {parsed.issuer or key_id(parsed.public_key)}, purpose {parsed.purpose!r}."
+        )
+        if verification.advisories:
+            text += " Advisory: " + "; ".join(verification.advisories)
+    else:
+        text = f"Lineage token {verification.verdict.value}: " + "; ".join(
+            verification.reasons or ["the token was rejected"]
+        )
+        if verification.advisories:
+            text += " Advisory: " + "; ".join(verification.advisories)
+    _emit(payload, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
+    return ExitCode.OK if verification.verdict is TokenVerdict.VALID else ExitCode.CORRUPTED
+
+
 # --------------------------------------------------------------------------- #
 # parser
 # --------------------------------------------------------------------------- #
@@ -4262,19 +4859,14 @@ def build_parser() -> argparse.ArgumentParser:
     # health is advisory only; it never gates, never moves mode, never changes exit code
     # (issue #401). It reports trust_score with per-dimension breakdown.
 
-    # The analyser folds the archive alongside the live log, so it stays correct
-    # after compaction (issue #1427).
-    report = with_run(add("report", cmd_report, "Analyse a run's history. Read-only."))
-    report.add_argument(
-        "--trajectory",
-        action="store_true",
-        help="distil claims, uncertain side effects, scar rate and stall sites "
-        "from the archive and the active log.",
+    providers = add(
+        "providers",
+        cmd_providers,
+        "Configure the environment providers a run trusts at resume. Mutates storage.",
     )
     # ``--json`` reaches this subparser through ``json_parent`` like every
     # other one; the #677 SUPPRESS default it needed already lives there, so
     # re-adding it here raised a conflicting-option error.
-
     resume = with_env(add("resume", cmd_resume, "Decide how a run may resume."))
     resume.add_argument(
         "run_id",
@@ -4593,6 +5185,49 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hooks_client(remove, cmd_hooks_remove)
 
+    mcp = add("mcp", cmd_mcp_install, "Register the MCP server with a host.")
+    mcp_sub = mcp.add_subparsers(dest="mcp_command", metavar="ACTION", required=True)
+
+    def mcp_options(p: argparse.ArgumentParser, func: Any) -> None:
+        """Give a ``mcp`` action its host, scope and settings override."""
+        p.add_argument(
+            "--host",
+            choices=tuple(MCP_HOST_PROFILES),
+            default="claude-code",
+            help="which host to configure (claude-code).",
+        )
+        p.add_argument(
+            "--scope",
+            choices=("local", "project"),
+            default="local",
+            help=(
+                "where to register: 'local' is the per-user file for this project "
+                "(default, wins over the committed .mcp.json); 'project' is the "
+                "shared .mcp.json in the project root."
+            ),
+        )
+        p.add_argument(
+            "--settings",
+            default=None,
+            help="path to the host's settings file (default: per host and scope).",
+        )
+        p.set_defaults(func=func)
+
+    mcp_install = mcp_sub.add_parser(
+        "install", help="Register the MCP server. Mutates host config."
+    )
+    mcp_install.add_argument(
+        "--db",
+        default=None,
+        help="database path to bake, stored absolute (default: ./continuum.db).",
+    )
+    mcp_options(mcp_install, cmd_mcp_install)
+
+    mcp_remove = mcp_sub.add_parser(
+        "remove", help="Remove the registration mcp install wrote. Mutates host config."
+    )
+    mcp_options(mcp_remove, cmd_mcp_remove)
+
     verify = with_run(add("verify", cmd_verify, "Re-audit the event chain."))
     verify.add_argument(
         "--index",
@@ -4633,6 +5268,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reconcile_auto.add_argument(
         "--dry-run", action="store_true", help="report what probes would settle, write nothing."
+    )
+    reconcile_auto.add_argument(
+        "--strict",
+        action="store_true",
+        help="escalate actions a probe could not settle to requires-review "
+        "instead of leaving them pending (issue #268).",
     )
     reconcile_auto.add_argument(
         "--config",
@@ -4689,6 +5330,58 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     attest_verify.add_argument("--attest", required=True, help="path to attestation JSON.")
+
+    lineage_issue = with_run(
+        add(
+            "lineage-issue", cmd_lineage_issue, "Issue a portable lineage token for delegated work."
+        )
+    )
+    lineage_issue.add_argument(
+        "--key", help="issuer private key PEM path (or CONTINUUM_SIGNER_KEY)."
+    )
+    lineage_issue.add_argument("--signer", help="issuer name (or CONTINUUM_SIGNER env).")
+    lineage_issue.add_argument(
+        "--attest", help="bind a pre-signed attestation JSON instead of signing the live head."
+    )
+    lineage_issue.add_argument(
+        "--purpose", required=True, help="why this work is delegated (recorded in the token)."
+    )
+    lineage_issue.add_argument("--audience", help="recipient this token is bound to (optional).")
+    lineage_issue.add_argument(
+        "--ttl",
+        type=float,
+        default=DEFAULT_TOKEN_TTL_SECONDS,
+        help="token lifetime in seconds (default: 3600).",
+    )
+    lineage_issue.add_argument("--expires-at", help="ISO-8601 expiry, overriding --ttl.")
+    lineage_issue.add_argument("--out", help="write the token JSON here (default: stdout).")
+    lineage_issue.add_argument(
+        "--env",
+        action="append",
+        metavar="NAME=VERSION",
+        help="declare a current environment resource (repeatable).",
+    )
+
+    lineage_verify = add("lineage-verify", cmd_lineage_verify, "Verify a portable lineage token.")
+    lineage_verify.add_argument(
+        "run_id", nargs="?", help="run the token is checked against (optional)."
+    )
+    lineage_verify.add_argument("--token", required=True, help="path to lineage token JSON.")
+    lineage_verify.add_argument("--audience", help="recipient this token must be bound to.")
+    lineage_verify.add_argument(
+        "--env",
+        action="append",
+        metavar="NAME=VERSION",
+        help="declare a current environment resource (repeatable).",
+    )
+    lineage_verify.add_argument(
+        "--issuer-key", type=Path, help="trusted issuer public key PEM path."
+    )
+    lineage_verify.add_argument(
+        "--trusted-keys",
+        type=Path,
+        help="file of trusted issuer public keys (one or more PEM blocks).",
+    )
 
     serve = add("serve", cmd_serve, "Run the CONTINUUM sidecar (JSON wire protocol over stdio).")
     serve.add_argument(
@@ -4844,9 +5537,18 @@ def main(
     if getattr(args, "func", None) is None:
         return _bare_invocation(parser, args, out, err)
 
-    # hooks never touches a run, so it must not create an empty database as a
-    # side effect of editing a settings file.
-    if args.command in ("benchmark", "attest-keygen", "serve", "hooks", "notify-test"):
+    # hooks, notify-test and mcp registration never touch a run, so they must
+    # not create an empty database as a side effect (of editing a settings
+    # file, sending a test notification, or of writing an `.mcp.json` entry
+    # without a run to attach it to).
+    if args.command in (
+        "benchmark",
+        "attest-keygen",
+        "serve",
+        "hooks",
+        "notify-test",
+        "mcp",
+    ):
         return int(args.func(args, None, out, err))
 
     # Instant resume detection (issue #394): SessionStart hook reads

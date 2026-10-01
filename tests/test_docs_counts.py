@@ -25,6 +25,7 @@ REQUIRED_FILES = (
     ROOT / "README.md",
     ROOT / "docs" / "CONTRIBUTING_ONBOARDING.md",
     ROOT / "CHANGELOG.md",
+    ROOT / "references" / "install.md",
 )
 
 # Docs that may state it. references/ and the translated READMEs are
@@ -115,6 +116,55 @@ def live_total() -> int:
     return int(match.group(1).replace(",", ""))
 
 
+def _tree_module_count() -> int:
+    """``.py`` files under ``src/continuum`` minus the top ``__init__.py``.
+
+    The convention is not arbitrary: #1068 recovered it from the commit that
+    introduced the "124 modules" figure, running the same command there
+    returned 124, so this measures exactly what the prose describes. Package
+    markers in subpackages still count, only ``src/continuum/__init__.py``
+    itself is excluded.
+    """
+    top_init = ROOT / "src" / "continuum" / "__init__.py"
+    return len(
+        [
+            p
+            for p in (ROOT / "src" / "continuum").rglob("*.py")
+            if "__pycache__" not in p.parts and p != top_init
+        ]
+    )
+
+
+def _tree_test_file_count() -> int:
+    """``test_*.py`` files anywhere under ``tests/``."""
+    return len([p for p in (ROOT / "tests").rglob("test_*.py") if "__pycache__" not in p.parts])
+
+
+def test_readme_module_and_file_counts_match_the_tree() -> None:
+    """README's module and test-file counts are pinned to the tree (#1068).
+
+    Both figures had aged silently since the commit that wrote them, and the
+    collected-total guard never saw them because they are not test counts.
+    Unlike the suite size they are deterministic properties of the tree, so
+    they are pinned exactly rather than within a tolerance.
+    """
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    modules = re.search(r"`src/continuum`, (\d+) modules", text)
+    assert modules, "README states no module count"
+    assert int(modules.group(1)) == _tree_module_count(), (
+        f"README says {modules.group(1)} modules but the tree has "
+        f"{_tree_module_count()}: the count in README.md's module-map "
+        "sentence needs the figure from `_tree_module_count`"
+    )
+    test_files = re.search(r"(\d+) test files", text)
+    assert test_files, "README states no test-file count"
+    assert int(test_files.group(1)) == _tree_test_file_count(), (
+        f"README says {test_files.group(1)} test files but the tree has "
+        f"{_tree_test_file_count()}: the count in README.md's module-map "
+        "sentence needs the figure from `_tree_test_file_count`"
+    )
+
+
 def test_required_files_state_a_total() -> None:
     stated = {f.name: documented_total(f) for f in REQUIRED_FILES}
     missing = [name for name, total in stated.items() if total is None]
@@ -128,6 +178,36 @@ def test_documented_counts_agree() -> None:
         if total is not None:
             stated[f.name] = total
     assert len(set(stated.values())) == 1, f"documented counts disagree: {stated}"
+
+
+def test_readme_module_and_file_counts_match_the_tree() -> None:
+    """The README module-map summary must count the tree, not a stale snapshot.
+
+    The line read ``130 modules`` and ``182 test files`` while the tree held
+    132 and 186: every PR landing a module or a test file moves both figures,
+    and nothing re-measured them (#1108). The ``cli/`` row of the same table
+    is already guarded against the parser; this covers the two figures beside
+    it the same way, so a stale count fails CI instead of quietly misstating
+    the size of the project. The basis is every ``.py`` under ``src/continuum``
+    and every ``test_*.py`` under ``tests/``.
+    """
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    match = re.search(
+        r"one library \(`src/continuum`, (\d+) modules\) plus a large test suite \((\d+) test files",
+        readme,
+    )
+    assert match, (
+        "README module map no longer states module/test-file counts where this guard expects them"
+    )
+    documented_modules, documented_files = int(match.group(1)), int(match.group(2))
+    live_modules = len(list((ROOT / "src" / "continuum").rglob("*.py")))
+    live_files = len(list((ROOT / "tests").rglob("test_*.py")))
+    assert documented_modules == live_modules, (
+        f"README says {documented_modules} modules but src/continuum holds {live_modules}"
+    )
+    assert documented_files == live_files, (
+        f"README says {documented_files} test files but tests/ holds {live_files}"
+    )
 
 
 def test_documented_narrative_count_forms(tmp_path: Path) -> None:
@@ -151,27 +231,35 @@ def test_documented_narrative_count_forms(tmp_path: Path) -> None:
         assert documented_total(path) == expected
 
 
-def test_readme_event_type_count_matches_the_enum() -> None:
-    """README's stated event-type counts must equal ``len(EventType)`` (#1171).
+def test_index_html_test_figure_matches_the_docs() -> None:
+    """The marketing page states the suite size too, so it is watched (#840).
 
-    The figure was documented twice in one file and both copies were wrong and
-    mutually inconsistent, one citing a count for a version that had not
-    shipped. Nothing checked it: this module pinned the collected-test totals
-    only. The count is a claim about an enum a reader can verify in one line, so
-    it is asserted against the enum rather than against a number.
-
-    Scoped to README because that is where this issue's figures live. The same
-    claim in ``references/`` and ``docs/index.html`` is still stale and belongs
-    to #1100; asserting there now would fail on figures that issue owns.
+    ``docs/index.html`` said ``2,163 tests`` while every guarded file said
+    ~2,195: the page is edited rarely enough that nothing compared it with the
+    rest of the docs. Its tool-count and CLI-command figures are already
+    guarded (``tests/test_mcp_docs.py`` scans ``*.html``); this pins the test
+    figure to the same total the markdown files carry.
     """
-    from continuum.events import EventType
-
-    text = COUNTED_FILES[0].read_text(encoding="utf-8")
-    stated = {int(match.replace(",", "")) for match in _EVENT_TYPES_RES.findall(text)}
-    assert stated, "README.md states no event-type count"
-    assert stated == {len(EventType)}, (
-        f"README.md states {sorted(stated)} event types, but EventType has {len(EventType)} members"
-    )
+    text = (ROOT / "docs" / "index.html").read_text(encoding="utf-8")
+    # The page states the figure three ways and the original guard saw one. The
+    # meta description carries plain "2,324 tests" inside the tag's attribute,
+    # which tag-stripping destroys, so it is matched on the raw text; the hero
+    # footer ("2,324 TESTS PASSING") and the metrics card ("2,324+ TESTS
+    # PASSING", split across spans so the markup has to go first) only surface
+    # after the tags are stripped. Matching any one of the three let the other
+    # two contradict it unnoticed (#840 review).
+    stripped = re.sub(r"<[^>]+>", " ", text)
+    pattern = re.compile(r"\b([\d,]+)\s*\+?\s*tests\b", re.IGNORECASE)
+    figures = list(dict.fromkeys(pattern.findall(text) + pattern.findall(stripped)))
+    assert figures, "docs/index.html states no test-count figure"
+    expected = documented_total(COUNTED_FILES[0])
+    for figure in figures:
+        stated = int(figure.replace(",", ""))
+        assert stated == expected, (
+            f"docs/index.html states {stated} tests, but the docs say ~{expected}: "
+            "bump the figure in the meta description, the hero footer and the "
+            "metrics card together with the markdown files"
+        )
 
 
 @pytest.mark.slow
@@ -220,3 +308,41 @@ def test_documented_extras_exist_in_pyproject() -> None:
                         f"{path} installs the [{extra}] extra, but pyproject.toml "
                         f"declares only {sorted(declared)}"
                     )
+
+
+def _tree_counts() -> tuple[int, int]:
+    """Modules and test files, counted the way README.md states them.
+
+    The module figure excludes the top-level ``__init__.py`` (the package
+    entry point, not a module with a role) and the test figure counts
+    ``tests/test_*.py``. Both are read from the working tree, so a merged
+    module or test file fails the guard instead of silently aging the
+    sentence (#1068).
+    """
+    package_init = ROOT / "src" / "continuum" / "__init__.py"
+    modules = [p for p in (ROOT / "src" / "continuum").rglob("*.py") if p != package_init]
+    tests = list((ROOT / "tests").glob("test_*.py"))
+    return len(modules), len(tests)
+
+
+def test_readme_module_and_test_file_counts_match_tree() -> None:
+    """README's module and test-file counts must match the tree (#1068).
+
+    The sentence read "124 modules" and "161 test files" while the tree
+    carried 126 and 169. Only the two file counts had rotted: the ~2,241
+    collected total in the same sentence is covered by the tolerance guard
+    above, but the two file counts had no guard at all, and the test-file
+    figure was already stale the day it was written.
+    """
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    match = re.search(r"`src/continuum`,\s*(\d+)\s*modules\)\D*?(\d+)\s*test files", text)
+    assert match, "README states no module/test-file counts to guard"
+
+    documented_modules, documented_tests = int(match.group(1)), int(match.group(2))
+    live_modules, live_tests = _tree_counts()
+    assert documented_modules == live_modules, (
+        f"README says {documented_modules} modules but src/continuum carries {live_modules}"
+    )
+    assert documented_tests == live_tests, (
+        f"README says {documented_tests} test files but tests/ carries {live_tests}"
+    )

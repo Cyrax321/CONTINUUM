@@ -18,7 +18,7 @@ import pytest
 from continuum.actions import ActionLedger
 from continuum.checkpoint import CheckpointManager
 from continuum.events import EventType
-from continuum.models import ActionStatus, Origin, Run, RunStatus
+from continuum.models import Action, ActionStatus, Origin, Run, RunStatus
 from continuum.storage.base import ConcurrentWriteError, CorruptedRecord, RunNotFound
 from continuum.storage.postgres import PostgresStorage
 
@@ -86,6 +86,27 @@ def test_active_run_resolution_skips_terminal(storage: PostgresStorage) -> None:
     active = storage.get_active_run()
     assert active is not None
     assert active.run_id == "pg_live"
+
+
+def test_fork_lineage_survives_the_round_trip(storage: PostgresStorage) -> None:
+    """A fork must persist and return parent_run_id (#1079).
+
+    ``children_of`` filters ``list_runs`` on this column, so a backend that
+    drops it makes the family resume block silently vacuous: no error, just a
+    parent that never learns its child is unsafe.
+    """
+    from continuum.recovery.family import children_of
+
+    make_run(storage, "pg_parent", "supervise")
+    storage.create_run_started(
+        Run(run_id="pg_child", goal="work", parent_run_id="pg_parent"),
+        source=Origin.HUMAN,
+    )
+
+    assert storage.get_run("pg_child").parent_run_id == "pg_parent"
+    assert storage.get_run("pg_parent").parent_run_id is None
+    # the query the family roll-up reads through, not just the column
+    assert [c.run_id for c in children_of(storage, "pg_parent")] == ["pg_child"]
 
 
 # --- events --------------------------------------------------------------------- #
@@ -390,15 +411,14 @@ def test_pg_action_index_covers_the_archive_after_rebuild(
     ledger.complete(outcome.key, external_id="doc:1")
     storage.compact_run("pg_ki")
 
-    # Compaction moves the rows the index describes into events_archive, and
-    # the fold merges that table ahead of every live row, so the projection
-    # is reported dirty until it is rebuilt. That desync is the archive/live
-    # ordering gap, #1322, which is separate from #1321 (a healthy store
-    # reported dirty with no compaction at all).
-    drift = storage.action_index_drift()
-    assert drift > 0
-    corrected = storage.rebuild_action_index()
-    assert corrected == drift
+    # Compaction moves the rows the index describes into events_archive, but
+    # the fold treats the archive and the live log as one stream ordered by
+    # timestamp, so the projection stays clean and the archived completion
+    # stays visible to cross-run lookups. This is the #1322 fix: the fold used
+    # to merge the archive ahead of every live row, which inverted write order
+    # across runs and reported a clean store as dirty until it was rebuilt.
+    assert storage.action_index_drift() == 0
+    assert storage.rebuild_action_index() == 0
     assert storage.action_index_drift() == 0
     key = str(idempotency_key("process_doc", None, scope="pg_ki", key="doc:1"))
     foreign = storage.foreign_action(key, exclude_run="some_other_run")
@@ -410,13 +430,11 @@ def test_pg_action_index_covers_the_archive_after_rebuild(
 def isolated_storage() -> Iterator[PostgresStorage]:
     """A database the test owns exclusively.
 
-    ``action_index_drift`` compares a store-wide count of action events
-    against a store-wide sequence value, so the comparison is only meaningful
-    in a database whose entire history the test controls. The shared suite
-    database accumulates every test's runs, and once one run is compacted the
-    fold's merged order stops tracking the sequence (the archive/live ordering
-    gap, #1322, tracked separately from #1321), which would make a clean store
-    read as dirty for reasons this test does not exercise.
+    ``action_index_drift`` compares a store-wide projection against a
+    store-wide fold, so the comparison is only meaningful in a database whose
+    entire history the test controls. The shared suite database accumulates
+    every test's runs, so a key this test rewrites could have been touched by
+    another test's run.
     """
     import psycopg
     from psycopg.conninfo import conninfo_to_dict, make_conninfo
@@ -442,16 +460,16 @@ def isolated_storage() -> Iterator[PostgresStorage]:
 def test_pg_action_index_drift_stays_zero_with_non_action_events_between_actions(
     isolated_storage: PostgresStorage,
 ) -> None:
-    """A healthy store must not report drift because of how it counts rows (#1321).
+    """A healthy store must not report drift because of how it numbers rows (#1321).
 
-    ``_maintain_action_index`` numbers a row with ``nextval``, which advances
-    once per action event, while the canonical fold numbered it by its
-    position in the merged row stream, which counts RUN_STARTED, TOOL_CALLED,
-    EVIDENCE_ADDED and every other non-action row too. An ordinary run has
-    those between its actions, so the two figures disagreed by one per
-    intervening row and ``verify`` reported a permanently dirty index on a
-    store nothing had tampered with. The fold now counts action events only,
-    1-based, which is the number the sequence actually assigned.
+    ``_maintain_action_index`` and the canonical fold must derive the same
+    number for the same event. They used not to: the writer took ``nextval``
+    while the fold numbered by position in the merged row stream, which counts
+    RUN_STARTED, TOOL_CALLED, EVIDENCE_ADDED and every other non-action row
+    too. An ordinary run has those between its actions, so the two figures
+    disagreed by one per intervening row and ``verify`` reported a permanently
+    dirty index on a store nothing had tampered with. Both sides now take the
+    number from the event's own timestamp.
     """
     storage = isolated_storage
     make_run(storage, "pg_1321", "healthy run")
@@ -483,7 +501,8 @@ def test_pg_action_index_stays_clean_after_a_rebuild_and_further_appends(
     appended action took the next ``nextval`` on the other; the two diverged
     again immediately. ``foreign_action`` ranks with
     ``ORDER BY updated_seq DESC``, so a fresh event that landed below the
-    rewritten rows would rank as the older write.
+    rewritten rows would rank as the older write. Both sides now take the
+    number from the event's own timestamp, which a rebuild cannot perturb.
     """
     storage = isolated_storage
     make_run(storage, "pg_rb", "rebuild then append")
@@ -505,147 +524,169 @@ def test_pg_action_index_stays_clean_after_a_rebuild_and_further_appends(
     assert newest.run_id == "pg_rb"
 
 
+def test_pg_compacting_the_later_writer_does_not_invert_ownership(
+    isolated_storage: PostgresStorage,
+) -> None:
+    """Cross-run compaction must not change which run owns a key (#1322).
+
+    The Postgres twin of ``test_compacting_the_later_writer_does_not_invert_ownership``
+    in ``tests/test_action_index.py``: this is the engine whose fold numbered
+    archived rows ahead of live ones by ``ctid``, so a run compacted *after*
+    another run's live write ranked below it and a clean store read dirty.
+    """
+    from continuum.actions.idempotency import idempotency_key
+
+    storage = isolated_storage
+    make_run(storage, "pg_late_a")
+    make_run(storage, "pg_late_b")
+    key = str(idempotency_key("send_invoice", None, scope=None, key="pg:shared:2"))
+    for run_id, status in (
+        ("pg_late_a", ActionStatus.COMPLETED),
+        ("pg_late_b", ActionStatus.FAILED),
+    ):
+        storage.append_event(
+            run_id,
+            EventType.ACTION_RECORDED,
+            {
+                "key": key,
+                "action": Action(
+                    run_id=run_id, action_type="send_invoice", status=status
+                ).model_dump(mode="json"),
+            },
+        )
+    assert storage.action_index_drift() == 0
+    owner = storage.foreign_action(key, exclude_run="nobody")
+    assert owner is not None and owner.run_id == "pg_late_b"
+
+    # B is the later writer and compacts its own log, so its row for the key
+    # moves entirely into events_archive while A's stays live.
+    storage.compact_run("pg_late_b")
+    assert storage.action_index_drift() == 0
+    after = storage.foreign_action(key, exclude_run="nobody")
+    assert after is not None and after.run_id == "pg_late_b"
+    assert storage.rebuild_action_index() == 0
+
+
+def test_pg_repair_keeps_a_later_archived_completion_above_an_earlier_live_failure(
+    isolated_storage: PostgresStorage,
+) -> None:
+    """The Postgres twin of the #1054 regression in ``tests/test_action_index.py``.
+
+    This is the engine whose fold ranked the whole ``events_archive`` below the
+    whole live ``ctid`` stream, so the repair path itself demoted a completion
+    that had already been archived and the next claim re-fired the side effect.
+    """
+    from continuum.actions.idempotency import idempotency_key
+
+    storage = isolated_storage
+    make_run(storage, "pg_early")
+    make_run(storage, "pg_late")
+    key = str(idempotency_key("send_invoice", None, scope=None, key="pg:1054"))
+
+    # The earlier failure, which stays live: this run never compacts.
+    storage.append_event(
+        "pg_early",
+        EventType.ACTION_RECORDED,
+        {
+            "key": key,
+            "action": Action(
+                run_id="pg_early", action_type="send_invoice", status=ActionStatus.FAILED
+            ).model_dump(mode="json"),
+        },
+    )
+    # The later completion, then its own compaction. A failure recorded
+    # elsewhere leaves no live effect in the way, so this run opens its own slot.
+    ledger = ActionLedger(storage, "pg_late")
+    outcome = ledger.claim("send_invoice", {}, key="pg:1054", scoped_to_run=False)
+    assert outcome.fresh is True
+    assert ledger.complete(outcome.key, external_id="INV-PG-1054") is not None
+    storage.compact_run("pg_late")
+
+    # The incremental row is correct and the canonical fold agrees with it.
+    assert storage.action_index_drift() == 0
+    assert storage.rebuild_action_index() == 0, "repair must not demote the later completion"
+    assert storage.action_index_drift() == 0
+
+    # The claim path still sees the completion and does not re-fire it.
+    make_run(storage, "pg_third")
+    replay = ActionLedger(storage, "pg_third").claim(
+        "send_invoice", {}, key="pg:1054", scoped_to_run=False
+    )
+    assert replay.fresh is False
+    assert replay.action.status is ActionStatus.COMPLETED
+    assert replay.action.external_id == "INV-PG-1054"
+
+
+def test_pg_backfill_seeds_an_emptied_index_on_the_folds_own_scale(
+    isolated_storage: PostgresStorage,
+) -> None:
+    """Reopening a store with action events but no projection rebuilds it (#1322).
+
+    ``_backfill_action_index`` runs from ``_create_schema`` whenever action
+    events exist and ``action_index`` does not. Its rows must already carry the
+    fold's own numbers, or a store rebuilt this way reads dirty until its first
+    explicit rebuild. The SQLite twin is
+    ``test_v2_database_backfills_on_open``.
+    """
+    from continuum.actions.idempotency import idempotency_key
+
+    storage = isolated_storage
+    make_run(storage, "pg_backfill")
+    key = str(idempotency_key("send_invoice", None, scope=None, key="pg:backfill"))
+    ledger = ActionLedger(storage, "pg_backfill")
+    outcome = ledger.claim("send_invoice", {}, key="pg:backfill", scoped_to_run=False)
+    assert outcome.fresh is True
+    assert ledger.complete(outcome.key, external_id="INV-BACKFILL") is not None
+
+    # Wipe the projection but keep the log, then reopen: _create_schema seeds it.
+    # ``storage.dsn`` rather than ``connection.info.dsn``: psycopg redacts the
+    # password from the latter, so a store reopened on it cannot authenticate
+    # against a server that requires one (CI's service container; a Homebrew
+    # ``trust`` server masks the bug locally).
+    dsn = storage.dsn
+    storage._connection.execute("DELETE FROM action_index")
+    assert storage.foreign_action(key, exclude_run="nobody") is None
+    storage.close()
+
+    reopened = PostgresStorage(dsn)
+    try:
+        found = reopened.foreign_action(key, exclude_run="nobody")
+        assert found is not None
+        assert found.status is ActionStatus.COMPLETED
+        assert found.external_id == "INV-BACKFILL"
+        # The seeded rows already sit on the fold's scale, so nothing is owed.
+        assert reopened.action_index_drift() == 0
+    finally:
+        reopened.close()
+
+
 def test_pg_action_index_drift_skips_malformed_json_payload(
     storage: PostgresStorage,
 ) -> None:
-    """Postgres fold skips a malformed JSON payload without raising JSONDecodeError (#1386)."""
-    make_run(storage, "pg_corrupt", "corrupt payload")
-    ledger = ActionLedger(storage, "pg_corrupt")
-    outcome = ledger.claim("process_doc", {}, key="doc:corrupt")
-    ledger.complete(outcome.key, external_id="doc:corrupt")
+    """Issue #1078: the SQLite engine refused an explicit through_sequence at
+    or above the anchor marker's sequence (#705) and Postgres did not, so the
+    marker and every live row after it were archived and deleted, and the next
+    append minted a fresh genesis that forked the live chain away from the
+    archive. The bound is now resolved by shared code, so the refusal holds on
+    both engines."""
+    make_run(storage, "pg_anchor", "guard target")
+    for i in range(4):
+        storage.append_event("pg_anchor", EventType.WORK_COMPLETED, {"i": i})
+    pre_live = len(storage.read_events("pg_anchor"))
 
-    with storage._write():
-        storage._connection.execute(
-            "UPDATE events SET payload = '{not valid json' WHERE run_id = 'pg_corrupt' AND sequence = 2"
-        )
+    with pytest.raises(ValueError, match="anchor"):
+        storage.compact_run("pg_anchor", through_sequence=10_000)
 
-    # action_index_drift and rebuild_action_index must skip the corrupt row instead of crashing
-    drift = storage.action_index_drift()
-    assert isinstance(drift, int)
-    rebuilt = storage.rebuild_action_index()
-    assert isinstance(rebuilt, int)
+    # The rejected call leaves a healthy, verifiable log: nothing was
+    # archived, only the forced checkpoint marker was appended.
+    report = storage.verify_events("pg_anchor")
+    assert report.ok, [v.kind for v in report.violations]
+    live = storage.read_events("pg_anchor")
+    assert len(live) == pre_live + 1
+    assert live[0].sequence == 1, "live rows must not have moved"
 
-
-def test_backfill_recovers_an_emptied_action_index(
-    isolated_storage: PostgresStorage,
-) -> None:
-    """An empty index over existing ACTION_* events rebuilds on open (#1441).
-
-    ``_backfill_action_index`` runs on every open and short-circuits unless
-    ACTION_* events exist and the index is empty, so it fires only in the
-    recovery case the method exists for: a database that predates the index,
-    or one that lost its rows. That is why the defect went unnoticed. The
-    WHERE clause used SQLite's ``json_extract()``, which Postgres does not
-    have, so opening such a store raised ``UndefinedFunction`` (SQLSTATE
-    42883) and the recovery path was dead.
-    """
-    from psycopg.conninfo import conninfo_to_dict, make_conninfo
-
-    storage = isolated_storage
-    make_run(storage, "pg_bf", "recovery target")
-    ledger = ActionLedger(storage, "pg_bf")
-    outcome = ledger.claim("process_doc", {}, key="doc:bf")
-    ledger.complete(outcome.key, external_id="doc:bf")
-    assert storage.foreign_action(outcome.key, exclude_run="other") is not None
-
-    # A database that predates the index, or one whose index rows were lost.
-    storage._connection.execute("DELETE FROM action_index")
-    assert storage.foreign_action(outcome.key, exclude_run="other") is None
-
-    # Reopening runs the backfill inside _create_schema. On the broken query
-    # this is where the store failed to open; nothing was recovered.
-    params = conninfo_to_dict(DSN)
-    params["dbname"] = storage._connection.info.dbname
-    with PostgresStorage(make_conninfo(**params)) as fresh:
-        recovered = fresh.foreign_action(outcome.key, exclude_run="other")
-
-    # The completion is the last write for the key, so that is the live state.
-    assert recovered is not None
-    assert recovered.status is ActionStatus.COMPLETED
-    assert recovered.external_id == "doc:bf"
-
-
-def test_pg_run_without_a_parent_round_trips_null(storage: PostgresStorage) -> None:
-    """A parentless run must load back as parentless, not as a corrupt row."""
-    make_run(storage, "pg_solo", "solo")
-    assert storage.get_run("pg_solo").parent_run_id is None
-
-
-def test_pg_child_run_keeps_its_parent_after_the_round_trip(
-    storage: PostgresStorage,
-) -> None:
-    """A fork's lineage column must survive the write and the read (#1079).
-
-    ``children_of`` filters ``list_runs`` on ``parent_run_id``, so a dropped
-    column made the family resume block vacuous here while SQLite enforced it.
-    """
-    make_run(storage, "pg_par", "supervise")
-    storage.create_run_started(
-        Run(run_id="pg_kid", goal="work", parent_run_id="pg_par"),
-        source=Origin.HUMAN,
-    )
-
-    assert storage.get_run("pg_kid").parent_run_id == "pg_par"
-    assert storage.get_run("pg_par").parent_run_id is None
-
-    from continuum.recovery.family import children_of
-
-    assert [run.run_id for run in children_of(storage, "pg_par")] == ["pg_kid"]
-    assert children_of(storage, "pg_kid") == []
-
-
-def test_pg_append_rolls_back_the_event_when_the_index_upsert_fails(
-    isolated_storage: PostgresStorage,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The event and its action_index row must commit atomically (#1371).
-
-    The connection is autocommit, so the ``events`` INSERT and the
-    ``action_index`` upsert used to land in two separate durable commits: a
-    crash (or the ``CorruptedRecord`` the upsert can raise) between them left
-    the ACTION event durably in the log with no matching index row, and
-    ``foreign_action`` then reports a committed claim as un-recorded, so the
-    idempotency gate re-fires the effect. Wrapping the append in an explicit
-    ``transaction()`` makes the two writes atomic, matching SQLite. When the
-    index upsert fails, the event must not be durably present either.
-    """
-    storage = isolated_storage
-    make_run(storage, "pg_atomic", "atomicity")
-    ledger = ActionLedger(storage, "pg_atomic")
-
-    def boom(_event: object, payload: object = None) -> None:
-        raise CorruptedRecord("injected action-index failure")
-
-    monkeypatch.setattr(storage, "_maintain_action_index", boom)
-    before = storage.last_sequence("pg_atomic")
-    with pytest.raises(CorruptedRecord):
-        ledger.claim("process_doc", {}, key="doc:atomic")
-
-    # The failed append rolled back: no orphan event past the last good one.
-    monkeypatch.undo()
-    assert storage.last_sequence("pg_atomic") == before
-    action_rows = storage._connection.execute(
-        "SELECT count(*) AS c FROM events WHERE run_id = %s AND type ILIKE 'action_%%'",
-        ("pg_atomic",),
-    ).fetchone()
-    assert action_rows["c"] == 0
-
-
-def test_pg_payload_offload(storage: PostgresStorage, tmp_path: Path) -> None:
-    """PostgresStorage offloads oversized payloads to blob storage."""
-    make_run(storage, "pg_offload", "test offload")
-    storage._payload_offload_bytes = 50
-    storage._storage_dir = tmp_path
-
-    large_payload = {"details": "q" * 200}
-    event = storage.append_event("pg_offload", EventType.TOOL_CALLED, large_payload)
-    from continuum.storage.blob import OFFLOAD_KEY, is_offload_descriptor
-
-    assert is_offload_descriptor(event.payload)
-    sha256_hex = event.payload[OFFLOAD_KEY]
-    blob_file = tmp_path / "blobs" / f"{sha256_hex}.blob"
-    assert blob_file.exists()
-    assert event.hash == event.digest()
-
-    report = storage.verify_events("pg_offload")
-    assert report.ok
+    # A bounded value below the anchor still compacts normally.
+    result = storage.compact_run("pg_anchor", through_sequence=1)
+    assert result["archived"] >= 1
+    assert any(e.type is EventType.EVENT_LOG_ANCHORED for e in storage.read_events("pg_anchor"))
+    assert storage.verify_events("pg_anchor").ok, "chain must still verify after a safe compact"

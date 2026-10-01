@@ -15,7 +15,11 @@ from continuum.actions import ActionLedger
 from continuum.actions.idempotency import idempotency_key
 from continuum.events import EventType
 from continuum.models import Run
-from continuum.recovery.gate import EditPreconditionError, check_merge_preconditions
+from continuum.recovery.gate import (
+    EditPreconditionError,
+    MergePreconditionError,
+    check_merge_preconditions,
+)
 from continuum.recovery.merge import approve_merge
 from continuum.storage import SQLiteStorage
 
@@ -438,6 +442,59 @@ def test_merge_gate_with_source_union() -> None:
             carry_forward=[out.key],
         )
         assert summary is not None
+    finally:
+        storage.close()
+
+
+def test_cross_run_merge_refusal_raises_merge_subclass() -> None:
+    """The cross-run arm raises MergePreconditionError, not just the base (#1114).
+
+    ``check_merge_preconditions`` with a ``source_run_id`` computes the union
+    derivation itself rather than going through ``check_preconditions``, so it
+    has its own raise site. A caller who catches ``MergePreconditionError`` to
+    handle a merge refusal specifically must catch this path too.
+    """
+    storage = SQLiteStorage(":memory:")
+    try:
+        _make_run(storage, "target")
+        _make_run(storage, "source")
+        ledger_src = ActionLedger(storage, "source")
+        outcome = ledger_src.claim("github.create_issue", {"title": "t"}, key="k1")
+        ledger_src.complete(outcome.key, external_id="42")
+        expected_key = idempotency_key(
+            "github.create_issue", {"title": "t"}, scope="source", key="k1"
+        )
+        storage.append_event(
+            "target",
+            EventType.WORK_ADDED,
+            {"task_id": "w1", "prerequisite": [expected_key]},
+        )
+        # Caught as the merge subclass, which is the contract callers rely on
+        with pytest.raises(MergePreconditionError) as exc:
+            approve_merge(
+                storage,
+                "target",
+                source_run_id="source",
+                anchor_sequence=0,
+                reason="cross",
+            )
+        err = exc.value
+        assert type(err) is MergePreconditionError
+        assert err.edit_type == "merge"
+        # Still an EditPreconditionError, so the base-class catch-all still works
+        assert isinstance(err, EditPreconditionError)
+        assert "depended" in str(err).lower()
+
+        # Same site reached directly through the gate function
+        with pytest.raises(MergePreconditionError) as exc:
+            check_merge_preconditions(
+                storage,
+                target_run_id="target",
+                target_anchor=0,
+                source_run_id="source",
+            )
+        assert type(exc.value) is MergePreconditionError
+        assert exc.value.rationale["source_run_id"] == "source"
     finally:
         storage.close()
 

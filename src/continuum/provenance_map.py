@@ -95,6 +95,7 @@ _TRUST_MAP: dict[TrustLevel, CanonicalProvenance] = {
 #: ``what`` validity state a fact is in -> canonical label.
 _STATE_MAP: dict[StateStatus, CanonicalProvenance] = {
     StateStatus.VALID: CanonicalProvenance.VERIFIED,
+    StateStatus.PARTIAL: CanonicalProvenance.UNKNOWN,
     StateStatus.STALE: CanonicalProvenance.STALE,
     StateStatus.CONFLICTED: CanonicalProvenance.CONTRADICTED,
     StateStatus.UNKNOWN: CanonicalProvenance.UNKNOWN,

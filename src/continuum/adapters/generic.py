@@ -198,6 +198,16 @@ class GenericAgentAdapter(AgentAdapter):
         parsing a response *after* the server already acted. Distinguishing them
         requires knowledge only the caller has, so the default is uncertainty
         and the caller narrows it via ``reconcile_pending``.
+
+        Step 4 never fails on the shape of the result. A tool returning a value
+        the ledger cannot canonicalize (a ``Decimal`` amount, a ``set`` of ids,
+        any object without ``model_dump``) is completed all the same: completion
+        runs after the effect, and letting it raise would leave a successful
+        effect recorded as never-completed and unrepeatable (issue #1394). The
+        caller's own return value is untouched on the first call; the stored
+        copy, and therefore what a replay returns, is the JSON-native form the
+        durable record holds anyway, with any non-canonical part replaced by its
+        repr.
         """
         ledger = ActionLedger(self.storage, run_id)
         outcome = ledger.claim(
@@ -332,3 +342,53 @@ class GenericAgentAdapter(AgentAdapter):
             scope=scope,
             dependency_budgets=dependency_budgets,
         )
+
+    def spawn_subagent(
+        self,
+        parent_run_id: str,
+        subagent_run_id: str,
+        task_description: str,
+    ) -> None:
+        """Record a SUBAGENT_SPAWNED event linking parent to subagent run."""
+        self.storage.append_event(
+            parent_run_id,
+            EventType.SUBAGENT_SPAWNED,
+            {
+                "subagent_run_id": subagent_run_id,
+                "task_description": task_description,
+            },
+        )
+
+    def complete_subagent(
+        self,
+        parent_run_id: str,
+        subagent_run_id: str,
+        *,
+        success: bool = True,
+        result_summary: str | None = None,
+    ) -> None:
+        """Record SUBAGENT_COMPLETED or SUBAGENT_FAILED for a subagent run."""
+        event_type = (
+            EventType.SUBAGENT_COMPLETED if success else EventType.SUBAGENT_FAILED
+        )
+        payload: dict[str, Any] = {"subagent_run_id": subagent_run_id}
+        if result_summary:
+            payload["result_summary"] = result_summary
+        self.storage.append_event(parent_run_id, event_type, payload)
+
+    def compact_context(
+        self,
+        run_id: str,
+        *,
+        retained_events: int,
+        compacted_events: int,
+        summary: str | None = None,
+    ) -> None:
+        """Record a PRECOMPACT_HOOK event marking context compaction."""
+        payload: dict[str, Any] = {
+            "retained_events": retained_events,
+            "compacted_events": compacted_events,
+        }
+        if summary:
+            payload["summary"] = summary
+        self.storage.append_event(run_id, EventType.PRECOMPACT_HOOK, payload)

@@ -48,12 +48,11 @@ def _anchor_for(
             return 0
         return latest.state.source_sequence
     if isinstance(target, int):
-        version = target
-        for cp in storage.list_checkpoints(run_id):
-            if cp.version == version or cp.state.source_sequence == version:
-                return cp.state.source_sequence
+        anchor = _numeric_anchor(storage, run_id, target)
+        if anchor is not None:
+            return anchor
         raise ValueError(
-            f"no checkpoint with version/source_sequence {version!r} for run {run_id!r}"
+            f"no checkpoint with version/source_sequence {target!r} for run {run_id!r}"
         )
     text = str(target).strip()
     if not text:
@@ -70,15 +69,58 @@ def _anchor_for(
         pass
     try:
         version = int(text)
-        for cp in storage.list_checkpoints(run_id):
-            if cp.version == version or cp.state.source_sequence == version:
-                return cp.state.source_sequence
+        anchor = _numeric_anchor(storage, run_id, version)
+        if anchor is not None:
+            return anchor
         for cp in storage.list_checkpoints(run_id):
             if cp.checkpoint_id == text:
                 return cp.state.source_sequence
     except ValueError:
         pass
     raise ValueError(f"no checkpoint {text!r} for run {run_id!r}")
+
+
+def _numeric_anchor(
+    storage: Storage,
+    run_id: str,
+    version: int,
+) -> int | None:
+    """Anchor for a numeric target, version first then source_sequence.
+
+    Mirrors the documented precedence in ``checkpoint.rewind.resolve_checkpoint``
+    (id, then version, then source_sequence): a bare number is a checkpoint
+    version before it is a log position. Folding both fields into one ``or``
+    let list order decide, so a numeric target that is one checkpoint's
+    ``source_sequence`` and an earlier-listed checkpoint's version resolved to
+    different anchors under ``restore`` and ``rewind`` for the same input --
+    ``restore`` could discard a larger span of history than the version match
+    intends. Two passes keep the two rollback paths in agreement.
+    """
+    for cp in storage.list_checkpoints(run_id):
+        if cp.version == version:
+            return cp.state.source_sequence
+    for cp in storage.list_checkpoints(run_id):
+        if cp.state.source_sequence == version:
+            return cp.state.source_sequence
+    return None
+
+
+def restore_to_anchor(
+    storage: Storage,
+    run_id: str,
+    anchor: int,
+    *,
+    reason: str,
+    carry_forward: Collection[str] | None = None,
+) -> tuple[Any, set[str], dict[str, Any]]:
+    """Check preconditions for restoring ``run_id`` to ``anchor``."""
+    return check_preconditions(
+        storage,
+        run_id,
+        anchor,
+        edit_type="restore",
+        carry_forward=carry_forward,
+    )
 
 
 def approve_restore(

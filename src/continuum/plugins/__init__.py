@@ -6,11 +6,10 @@ conforming to one of the four capability seams:
 * :class:`~continuum.environment.EnvironmentProvider` (discover the world)
 * :class:`StateExtractor` (map a framework's state onto CONTINUUM)
 * :class:`ActionReconciler` (settle an uncertain side effect)
-* :class:`ValidationRule` (domain-specific staleness)
-
-``ActionReconciler`` has a consumer: :mod:`continuum.plugins.reconcile` dispatches
-registered reconcilers over a run's uncertain actions and merges their evidence
-(issue #765).
+* :class:`ValidationRule` (domain-specific staleness; the built-in
+  :class:`~continuum.plugins.validation_rules.RevokedApprovalRule` is a worked
+  example, and :func:`~continuum.plugins.validation_rules.check_validation_rule`
+  is the conformance check a rule author runs against their own rule)
 """
 
 from continuum.plugins.reconcile import (
@@ -31,6 +30,12 @@ from continuum.plugins.seams import (
     StateExtractor,
     ValidationRule,
 )
+from continuum.plugins.validation_rules import (
+    ConformanceReport,
+    RevokedApprovalRule,
+    check_validation_rule,
+    conformance_states,
+)
 
 __all__ = [
     "Registry",
@@ -40,12 +45,8 @@ __all__ = [
     "ActionReconciler",
     "ValidationRule",
     "Reconciliation",
-    "ReconciliationOutcome",
-    "ReconcilerEvidence",
-    "ReconciliationAssessment",
-    "SettlementReport",
-    "resolve_reconcilers",
-    "select_reconcilers",
-    "assess_action",
-    "settle_with_reconcilers",
+    "ConformanceReport",
+    "RevokedApprovalRule",
+    "check_validation_rule",
+    "conformance_states",
 ]

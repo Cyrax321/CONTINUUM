@@ -161,3 +161,42 @@ def test_sqlite_storage_refuses_newer_database(tmp_path):
     conn.close()
     with pytest.raises(SchemaVersionError):
         SQLiteStorage(str(db))
+
+
+def test_v1_database_with_action_events_backfills_the_index_on_the_fold_scale():
+    """Upgrading a v1 database holding ACTION_* events seeds the index on the
+    fold's own scale (#1322).
+
+    The v3 step used to number reseeded rows by ``rowid`` while the writer and
+    the fold disagreed on the scale, so an upgraded store read dirty until it
+    was rebuilt. The reseeded row must carry ``index_order_for`` of its
+    event's timestamp, the same number the writer and the fold derive.
+    """
+    import json as _json
+
+    from continuum.storage.actionindex import index_order_for
+
+    conn = _connect()
+    conn.executescript(_LEGACY_V1_SCHEMA)
+    conn.execute(
+        "INSERT INTO runs(run_id, goal, status, created_at, updated_at) VALUES (?,?,?,?,?)",
+        ("mig1", "migrate me", "started", "2026-09-01T10:00:00+00:00", "2026-09-01T10:00:00+00:00"),
+    )
+    ts = "2026-09-01T10:00:01+00:00"
+    payload = {
+        "key": "doc:mig",
+        "action": {"run_id": "mig1", "action_id": "a1", "status": "claimed"},
+    }
+    conn.execute(
+        "INSERT INTO events(run_id, sequence, event_id, type, timestamp, payload, hash) "
+        "VALUES (?,?,?,?,?,?,?)",
+        ("mig1", 1, "e1", "ACTION_RECORDED", ts, _json.dumps(payload), "h1"),
+    )
+    _stamp(conn, 1)
+
+    final = migrate_schema(conn)
+    assert final == SCHEMA_VERSION
+    row = conn.execute("SELECT * FROM action_index WHERE key = 'doc:mig'").fetchone()
+    assert row is not None
+    assert int(row["updated_seq"]) == index_order_for(ts)
+    conn.close()

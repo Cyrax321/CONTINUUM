@@ -37,8 +37,13 @@ continuum gate                                   # pre-tool-use verdict: allow o
 continuum briefing                               # session-start context injection
 continuum gateway --port 8765                    # enforcing proxy for registered upstreams. mutates
 continuum hooks install <client> [--with-gate]   # wire a coding CLI (claude-code, gemini, codex)
+continuum mcp install [--scope project]          # register the MCP server, resolved absolute. mutates
+continuum mcp remove                             # remove the registration install wrote. mutates
 continuum health <run_id>                        # advisory prefix-trust health check
-continuum policy-review [run_id]                 # advisory recovery-history report by action type
+continuum providers list <run_id>                # configured resume-time observers
+continuum providers check <run_id>               # resolve them as resume would [--json]
+continuum providers add <run_id> --provider <n>  # trust an observer at resume. mutates
+continuum providers remove <run_id> [--all]      # retract configured observers. mutates
 continuum impact <run_id> --evidence <id>        # downstream impact of an evidence item
 continuum provenance <run_id>                    # show provenance DAG
 continuum report --trajectory <run_id>           # claims, uncertain side effects, scar rate, stall sites
@@ -52,19 +57,29 @@ continuum tui [--refresh N]                      # full-screen terminal dashboar
 continuum attest-keygen                          # generate Ed25519 signer key pair
 continuum attest <run_id>                        # sign run event-chain attestation
 continuum attest-verify <run_id> --attest <file> # verify signed attestation against live chain
+continuum lineage-issue <run_id> --key <file>    # issue portable lineage token for delegated work
+      --purpose <text> [--audience <svc>] [--ttl N] [--out <file>]
+continuum lineage-verify [<run_id>] --token <file> # verify lineage token; exit 0 only when VALID
+      [--audience <svc>] [--issuer-key <file> | --trusted-keys <file>]
 continuum benchmark [--total N]                  # run CONTINUUM-Bench harness
 ```
 
-Most commands accept global `--json` **before** the subcommand (e.g. `continuum --json resume RUN`), not after it; `continuum resume RUN --json` exits 2 with an argument error. Read-only commands (`inspect`, `status`, `history`, `events`,
-`diff`, `validate`, `resume`, `verify`, `actions`, `show-contract`, `replay`, `budget`, `tree`,
-`gate`, `briefing`, `health`, `policy-review`, `impact`, `provenance`, `export-evidence`, `watch`) do not mutate
-run state or checkpoints. **Exception:** plain `resume` (without `--repair`) may still append
-`NOTIFICATION_SENT` / `NOTIFICATION_FAILED` events when `.continuum/webhooks.json` is configured
-for a blocked decision — the recovery decision itself remains non-mutating. With `--repair`, `resume`
-also records a `RECOVERY` anchor (`checkpoint_on_recovery`) after a non-RESUME verdict, which
-`restore --to-recovery-anchor` rolls back to. Mutating commands (`start`,
+Most commands accept global `--json` **before** the subcommand (e.g. `continuum --json resume RUN`). Read-only commands (`inspect`, `status`, `history`, `events`,
+`diff`, `validate`, `verify`, `actions`, `show-contract`, `replay`, `budget`, `tree`,
+`gate`, `briefing`, `health`, `impact`, `provenance`, `export-evidence`) never write, so
+they are safe against a live database while an agent is mid-run. Mutating commands (`start`,
 `checkpoint`, `confirm`, `complete`, `fork`, `merge`, `restore`, `compact`, `precompact`, `rewind`,
 `observe`, `reconcile`, `gateway`, `record-plan`, `forget`) say so in their help.
+
+`resume` and `watch` are not in that list: they append to the event log when the run is
+already parked, never while an agent is mid-run and healthy. `resume` records its webhook
+delivery outcome, `NOTIFICATION_SENT` or `NOTIFICATION_FAILED`, when the verdict is
+`REQUEST_HUMAN` and `.continuum/webhooks.json` subscribes an endpoint to that mode
+(issue #305); `watch` appends `LIVENESS_SILENCE_DETECTED` or `LIVENESS_RECOVERED` when the
+liveness verdict flips. Both are hash-chained audit records: the state projection ignores them,
+so they cannot change a recovery verdict or an exit code, and dedup on `(run_id, mode,
+contract hash)` keeps `resume` from re-ringing on the same verdict across processes. Both stay
+safe to run against a live database.
 
 #### Registries are executable configuration
 

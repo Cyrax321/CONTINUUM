@@ -27,7 +27,7 @@ from datetime import UTC, date, datetime
 from enum import Enum
 from typing import Any
 
-__all__ = ["canonical", "to_json", "stable_hash", "hash_content", "make_id"]
+__all__ = ["canonical", "canonical_sanitize", "to_json", "stable_hash", "hash_content", "make_id"]
 
 
 def _canonical(value: Any) -> Any:
@@ -72,6 +72,47 @@ def _canonical(value: Any) -> Any:
 def canonical(value: Any) -> Any:
     """Return a canonical (sorted, JSON-native) representation of ``value``."""
     return _canonical(value)
+
+
+def canonical_sanitize(value: Any) -> Any:
+    """Return a canonical representation of ``value``, degrading instead of raising.
+
+    Identical to :func:`canonical` wherever ``value`` is canonicalizable. Where
+    any part of it is not, a type :func:`canonical` has no rule for (a
+    ``Decimal``, a ``set``, an arbitrary object without ``model_dump``), that
+    part is replaced by its ``repr``: deterministic within a run, JSON-native,
+    and still distinguishable from every other value.
+
+    This is for values the module cannot audit but must record, a tool result
+    handed to the action ledger for instance. It is lossy by construction:
+    ``Decimal("1.5")`` becomes the string ``"Decimal('1.5')"``. Prefer
+    :func:`canonical` wherever a value that cannot be canonicalized is a defect
+    worth failing on, and use this only where failing would be worse than the
+    lossy form.
+    """
+    # Container branches first, so a nested non-canonical value is replaced in
+    # place instead of collapsing the whole structure to a repr.
+    if isinstance(value, Mapping):
+        # Same key handling as _canonical, sorted and coerced to strings, so a
+        # sanitized mapping is itself canonical and re-hashable.
+        sanitized: dict[str, Any] = {}
+        for key in sorted(value, key=str):
+            name = str(key)
+            if name in sanitized:
+                # Coercion collided. _canonical raises here, but this function
+                # must not, and dropping either value would lose data, so the
+                # whole mapping falls back to its repr.
+                return repr(value)
+            sanitized[name] = canonical_sanitize(value[key])
+        return sanitized
+    if isinstance(value, (list, tuple)):
+        return [canonical_sanitize(v) for v in value]
+    if hasattr(value, "model_dump"):
+        return canonical_sanitize(value.model_dump(mode="json"))
+    try:
+        return _canonical(value)
+    except (TypeError, ValueError):
+        return repr(value)
 
 
 def to_json(value: Any) -> str:

@@ -288,9 +288,12 @@ wrap_autogen_tool(tool, store, "ag1")  # same object, now intercepted
 ```
 
 Wrapping `run_json` covers every execution of that tool, including calls the
-model makes through an agent you did not build. An exception from the tool is
-recorded as a certain failure and then re-raised, so the framework's own error
-handling still sees it.
+model makes through an agent you did not build. The replacement keeps the
+framework's own signature, which is a coroutine function in AutoGen core, so
+calling code awaits it exactly as before and the claim brackets the real
+execution rather than the call that returns the coroutine. An exception from
+the tool is recorded as a certain failure and then re-raised, so the
+framework's own error handling still sees it.
 
 ### Pydantic AI
 

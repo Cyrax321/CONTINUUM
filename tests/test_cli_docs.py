@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from continuum.cli.main import build_parser
 
 TABLE = Path(__file__).resolve().parents[1] / "docs" / "api" / "cli.md"
@@ -88,32 +90,34 @@ def test_readme_module_map_command_count_matches_parser() -> None:
     )
 
 
-def test_landing_page_command_count_matches_parser() -> None:
-    """The landing page's CLI-command figure must match the parser (#1283).
+#: Each translation phrases the ``cli/`` count differently, but states the same
+#: figure. All five read 38 while the parser built 47 (#1013 review): nothing
+#: compared them with anything, so a translated README described a smaller CLI
+#: than the one its own readers had installed.
+_TRANSLATED_CLI_COUNTS = {
+    "README.es.md": r"^\|\s*`cli/`\s*\|\s*(\d+) comandos argparse",
+    "README.pt-BR.md": r"^\|\s*`cli/`\s*\|\s*(\d+) comandos argparse",
+    "README.ja.md": r"^\|\s*`cli/`\s*\|\s*(\d+) の argparse コマンド",
+    "README.ko.md": r"^\|\s*`cli/`\s*\|\s*(\d+)개 argparse 명령",
+    "README.zh-CN.md": r"^\|\s*`cli/`\s*\|\s*(\d+) 个 argparse 命令",
+}
 
-    ``docs/index.html`` is the first thing a visitor sees and it stated 45
-    while the parser built 46. The page states the count twice -- the meta
-    description search engines read and the metrics card -- and a figure that
-    disagrees with either the parser or itself is wrong, so both are compared
-    against the parser rather than pinned.
+
+@pytest.mark.parametrize("filename,pattern", sorted(_TRANSLATED_CLI_COUNTS.items()))
+def test_translated_readme_command_count_matches_parser(filename: str, pattern: str) -> None:
+    """A translation's ``cli/`` row must state the live command count too.
+
+    The English row is guarded above; the translations rotted behind the same
+    parser because no guard read them. Matched against the parser rather than
+    a literal, for the same reason: the count moves with every subcommand.
     """
-    html = LANDING.read_text(encoding="utf-8")
+    readme = (Path(__file__).resolve().parents[1] / filename).read_text(encoding="utf-8")
+    match = re.search(pattern, readme, re.MULTILINE)
+    assert match, f"{filename} has no `cli/` argparse-commands count to guard"
+    documented = int(match.group(1))
     live = len(build_parser()._subparsers._group_actions[0].choices)
-    documented = set()
-    for pattern in (
-        re.compile(r"([\d,]+)\s+CLI commands"),
-        re.compile(
-            r'class="metric-value">([\d,]+)</span>\s*<span class="metric-label">CLI COMMANDS'
-        ),
-    ):
-        match = pattern.search(html)
-        assert match, f"docs/index.html no longer states a CLI-command count ({pattern.pattern})"
-        documented.add(int(match.group(1).replace(",", "")))
-    assert len(documented) == 1, (
-        f"docs/index.html states inconsistent CLI-command counts: {sorted(documented)}"
-    )
-    assert documented == {live}, (
-        f"docs/index.html says {documented.pop()} CLI commands but the parser builds {live}"
+    assert documented == live, (
+        f"{filename} says {documented} argparse commands but the parser builds {live}"
     )
 
 

@@ -98,6 +98,11 @@ class EventType(StrEnum):
     STATE_CHECKPOINTED = "STATE_CHECKPOINTED"
     STATE_VALIDATED = "STATE_VALIDATED"
     ENVIRONMENT_CHANGED = "ENVIRONMENT_CHANGED"
+    # Which world-observers a run trusts at resume (issue #762). Append-only:
+    # the newest one is the authoritative configuration, and the payload holds
+    # the whole set, so an add and a remove are both full rewrites. Not folded:
+    # it configures validation rather than describing the task.
+    ENVIRONMENT_PROVIDERS_CONFIGURED = "ENVIRONMENT_PROVIDERS_CONFIGURED"
     RECOVERY_STARTED = "RECOVERY_STARTED"
     RECOVERY_COMPLETED = "RECOVERY_COMPLETED"
     RECOVERY_BLOCKED = "RECOVERY_BLOCKED"
@@ -143,7 +148,13 @@ class EventType(StrEnum):
     # structured plan (issue #312): durable milestones for long-horizon recovery
     PLAN_UPSERT = "PLAN_UPSERT"
 
-    # memory governance (issue #304, #567): per-tenant tombstone for erasure
+    # subagent spanning: trace delegation chains when a main agent spawns subagents
+    SUBAGENT_SPAWNED = "SUBAGENT_SPAWNED"
+    SUBAGENT_COMPLETED = "SUBAGENT_COMPLETED"
+    SUBAGENT_FAILED = "SUBAGENT_FAILED"
+
+    # precompact hook: context compaction boundary for agents that summarize history
+    PRECOMPACT_HOOK = "PRECOMPACT_HOOK"
     MEMORY_TOMBSTONED = "MEMORY_TOMBSTONED"
 
     # outbound notifications (issue #305): the bell next to the HITL door.

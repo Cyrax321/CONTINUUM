@@ -37,7 +37,7 @@ from continuum.events import CAUSED_BY_TYPES, Event, EventType, IntegrityReport,
 from continuum.models import Action, Origin, Run, RunStatus, SemanticState, StateCheckpoint, utcnow
 from continuum.security.hashing import make_id
 from continuum.state.versioning import canonical_state_json, state_fingerprint
-from continuum.storage.actionindex import index_entry_from_payload
+from continuum.storage.actionindex import index_entry_from_payload, index_order_for
 from continuum.storage.base import (
     CheckpointNotFound,
     ConcurrentWriteError,
@@ -45,13 +45,7 @@ from continuum.storage.base import (
     RunNotFound,
     Storage,
 )
-from continuum.storage.blob import (
-    audit_blob_descriptor,
-    get_payload_offload_threshold,
-    is_offload_descriptor,
-    load_blob_payload,
-    maybe_offload_payload,
-)
+from continuum.storage.compaction import resolve_compaction_bound
 from continuum.storage.migrations import SCHEMA_VERSION, migrate_schema
 
 __all__ = ["SQLiteStorage", "SCHEMA_VERSION"]
@@ -517,7 +511,7 @@ class SQLiteStorage(Storage):
         raw_payload: Mapping[str, Any] | None = None,
     ) -> None:
         try:
-            cursor = conn.execute(
+            conn.execute(
                 "INSERT INTO events(run_id, sequence, event_id, type, timestamp, payload, "
                 "causer_event_id, source, prev_hash, hash) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -538,7 +532,7 @@ class SQLiteStorage(Storage):
             raise ConcurrentWriteError(
                 f"run {event.run_id!r} sequence {event.sequence} was taken by another writer"
             ) from exc
-        _maintain_action_index(conn, event, int(cursor.lastrowid or 0), payload=raw_payload)
+        _maintain_action_index(conn, event, index_order_for(event.timestamp), payload=raw_payload)
 
     def compact_run(
         self,
@@ -564,30 +558,9 @@ class SQLiteStorage(Storage):
         every live row, which would leave the next append minting a fresh
         genesis and fork the hash chain away from the archive.
 
-        Content-addressed blobs referenced by archived events remain preserved
-        in the blob directory without modification (issues #254, #1419).
-
-        The anchor carries ``environment`` when supplied, else the environment
-        the run's newest checkpoint already recorded (#1049): an
-        environment-blind anchor makes every pinned dependency UNKNOWN at the
-        next assessment and silently downgrades a clean run.
-        """
-        from continuum.checkpoint.manager import CheckpointManager
-
         lv = self.latest_version(run_id)
         head = self.last_sequence(run_id)
-        # A caller-supplied environment has to land on a checkpoint, so it
-        # forces the fresh-anchor path whatever the log state. In practice the
-        # other terms already cover every reachable state (a version's
-        # STATE_CHECKPOINTED annotation sits one past its source_sequence, so
-        # head always outruns it); this term keeps the caller's request from
-        # depending on that invariant (#1049).
-        needs_fresh_anchor = (
-            lv is None
-            or through_sequence is not None
-            or lv.source_sequence < head
-            or environment is not None
-        )
+        needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
         if needs_fresh_anchor:
             try:
                 manager = CheckpointManager(self)
@@ -597,15 +570,17 @@ class SQLiteStorage(Storage):
                 # never started (issue #648). Per-turn checkpoint evaluation
                 # deliberately keeps the cheaper live-tail read.
                 state = manager.project_current(run_id, full_history=True)
+                # The anchor becomes the newest checkpoint, so it inherits the
+                # environment the run validated against: writing it without one
+                # would leave a compacted run with no snapshot to diff a resumed
+                # capture against, and every resource would read as unknown
+                # (issue #762).
+                anchored = self.latest_checkpoint(run_id)
                 manager.checkpoint(
                     run_id,
                     state=state,
                     force_version=True,
-                    # The anchor carries the environment the run's newest
-                    # checkpoint already recorded when none is supplied
-                    # (#1049): an environment-blind anchor makes every pinned
-                    # dependency UNKNOWN at the next assessment.
-                    environment=self._anchor_environment(run_id, environment),
+                    environment=anchored.environment if anchored is not None else None,
                 )
             except Exception as exc:
                 raise ValueError(f"run {run_id!r} could not be anchored: {exc}") from exc
@@ -654,18 +629,17 @@ class SQLiteStorage(Storage):
 
         return {"archived": max(archived, 0)}
 
-    def read_archived_events(
-        self,
-        run_id: str,
-        *,
-        rehydrate: bool = True,
-    ) -> Sequence[Event]:
+    def read_archived_events(self, run_id: str, *, upto: int | None = None) -> Sequence[Event]:
         """Compacted events from the archive, oldest first."""
+        query = "SELECT * FROM events_archive WHERE run_id = ?"
+        params: list[Any] = [run_id]
+        if upto is not None:
+            query += " AND sequence <= ?"
+            params.append(upto)
+        query += " ORDER BY sequence ASC"
         with self._read() as conn:
-            rows = conn.execute(
-                "SELECT * FROM events_archive WHERE run_id = ? ORDER BY sequence ASC", (run_id,)
-            ).fetchall()
-        return [self._row_to_event(row, rehydrate=rehydrate) for row in rows]
+            rows = conn.execute(query, params).fetchall()
+        return [self._row_to_event(row) for row in rows]
 
     def foreign_action(self, key: str, *, exclude_run: str) -> Action | None:
         """Indexed cross-run ledger lookup (issue #216).
@@ -741,26 +715,29 @@ class SQLiteStorage(Storage):
     def _canonical_index_rows(self) -> dict[str, tuple[tuple[str, str, str, str, str], int]]:
         """Fold the log into ``{key: ((entry...), order_seq)}``, last write wins.
 
-        Compacted history (#239) folds too, archive first and live second:
-        everything in ``events_archive`` predates every live row of its run,
-        so folding the two tables in one shared stream would let an archived
-        action claimed long ago outrank a newer live write of the same key
-        (they number their rows independently). Live rows keep their
-        insertion rowid, matching incremental index maintenance exactly;
-        archived rows receive negative order positions below every possible
-        rowid, oldest first, so last-write-per-key stays true after
-        compaction while uncompacted stores fold identically to before.
+        The archive and the live log are one stream, not two segments.
+        Compaction (#239) moves a run's prefix into ``events_archive`` while
+        other runs keep appending, so "everything archived is older than
+        everything live" holds only within a single run. Across runs it
+        inverted write order and the fold stopped reproducing the number the
+        incremental writer stored (#1322). The stream is now merged on
+        ``(timestamp, run_id, sequence)``: ``timestamp`` is assigned at append
+        time and copied into the archive verbatim, so it is global write order
+        in every state of the store. The order value is
+        :func:`index_order_for` of the winning row's own timestamp -- the same
+        number the writer stored, not a position that rowid reuse or a fresh
+        ``nextval`` can invalidate.
         """
         with self._read() as conn:
-            archived = conn.execute(
-                "SELECT type, payload FROM events_archive ORDER BY rowid"
-            ).fetchall()
             rows = conn.execute(
-                "SELECT rowid AS rid, type, payload FROM events ORDER BY rowid"
+                "SELECT timestamp, run_id, sequence, type, payload FROM ("
+                "SELECT timestamp, run_id, sequence, type, payload FROM events_archive "
+                "UNION ALL "
+                "SELECT timestamp, run_id, sequence, type, payload FROM events) "
+                "ORDER BY timestamp, run_id, sequence"
             ).fetchall()
         canonical: dict[str, tuple[tuple[str, str, str, str, str], int]] = {}
-        offset = len(archived)
-        for position, row in enumerate([*archived, *rows]):
+        for row in rows:
             try:
                 payload = json.loads(row["payload"])
             except json.JSONDecodeError:
@@ -770,8 +747,7 @@ class SQLiteStorage(Storage):
                     payload = load_blob_payload(self.storage_dir, payload)
             entry = index_entry_from_payload(EventType(row["type"]), payload)
             if entry is not None:
-                order = int(row["rid"]) if position >= offset else position - offset
-                canonical[entry[0]] = (entry, order)
+                canonical[entry[0]] = (entry, index_order_for(row["timestamp"]))
         return canonical
 
     @staticmethod

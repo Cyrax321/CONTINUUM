@@ -20,6 +20,8 @@ These must be present and byte identical for verification to succeed:
 
 A verifier recomputes `stable_hash` over the payload excluding `integrity_hash` and `created_at`, as done in `verify_contract`. If `seal_key_id` is present, the HMAC path in `docs/signing_key_rotation.md` is tried first, then the hash paths.
 
+The digest rules are published, versioned and covered by a checked-in corpus: see `docs/contract_compatibility.md` (#764). That document, not this note, is the spec an external verifier implements against.
+
 ### Optional fields
 
 These may be omitted or empty and verification still succeeds via the legacy payload fallback. They are useful for humans and for richer UIs but not required for the safety decision:
@@ -36,9 +38,9 @@ A contract with empty optional fields still seals and verifies, but carries less
 
 ## Compatibility rule
 
-1. Old verifier reading a new contract: ignores unknown optional fields it does not understand, then checks the hash over the known payload. Since new optional fields are included in the current payload, an old verifier that does not know them will see a hash mismatch and then try the legacy payload without them, which will also mismatch for a new contract. To keep forward compatibility, new optional fields should be added with care and verifiers should be updated before producers start emitting them. The current `verify_contract` already handles the specific `evidence` and `reason` history by trying both payloads.
+1. Old verifier reading a new contract: fails closed with a diagnostic naming the unknown contract version, and does not guess what the newer digest covers. This replaces the earlier "ignore unknown optional fields" guidance, which could not distinguish a field the verifier does not understand from one the producer removed.
 
-2. New verifier reading an old contract: succeeds via the legacy payload path, as tested in the Phase 1 backward compatibility tests.
+2. New verifier reading an old contract: succeeds by trying the contract's declared version and then each older one, as tested in the Phase 1 backward compatibility tests and pinned by the `legacy` corpus fixtures.
 
 ## Out of scope
 

@@ -44,6 +44,13 @@ if TYPE_CHECKING:
 from continuum.actions.ledger import ActionLedger
 from continuum.analysis.depends import DependencyGraph as SourceDependencyGraph
 from continuum.checkpoint.manager import CheckpointManager, RestoredRun
+from continuum.environment.config import (
+    ProviderConfig,
+    ProviderDiagnostic,
+    ProviderRegistry,
+    config_from_events,
+    resolve_and_capture,
+)
 from continuum.environment.diff import EnvironmentDiff
 from continuum.events import EventType
 from continuum.gate import collect_consumed_authorities
@@ -58,9 +65,12 @@ from continuum.models import (
     SemanticState,
     StateStatus,
 )
+from continuum.plugins import Registry, ValidationRule
 from continuum.recovery.contract import build_contract
+from continuum.recovery.ledger import BudgetStatus, RecoveryLedger, resolve_scope
 from continuum.recovery.observations import collect_observations
 from continuum.recovery.planner import RepairPlan, plan_repairs
+from continuum.recovery.rules import active_rules, apply_rule_findings, run_validation_rules
 from continuum.recovery.summary import build_informed_retry
 from continuum.state.validator import StateValidator, ValidationOutcome, check_admissibility
 from continuum.storage.base import Storage
@@ -130,6 +140,11 @@ class RecoveryDecision:
     #: events plus current failure signals, or None when there is no history.
     #: Informational only; presence never changes mode or safety.
     informed_retry: dict[str, Any] | None = None
+    #: Per-provider outcomes from the run's configured providers (issue #762),
+    #: empty when the caller supplied the environment or the run configures
+    #: none. A non-empty entry is evidence, not a mode: an unavailable provider
+    #: already degrades validation through the UNKNOWN resources it produced.
+    provider_diagnostics: tuple[ProviderDiagnostic, ...] = ()
 
     @property
     def state(self) -> SemanticState:
@@ -200,7 +215,8 @@ class RecoveryDecision:
             label = entry.component.value.replace("_", " ")
             identifier = f" {entry.component_id}" if entry.component_id else ""
             detail = f" - {entry.detail}" if entry.detail else ""
-            lines.append(f"  {mark} {label}{identifier}{detail}")
+            rule = f" [rule:{entry.rule}]" if entry.rule else ""
+            lines.append(f"  {mark} {label}{identifier}{detail}{rule}")
 
         if self.uncertain_actions:
             lines.append("")
@@ -244,15 +260,30 @@ class RecoveryEngine:
         *,
         validator: StateValidator | None = None,
         strict_unknown: bool = True,
-        ledger: RecoveryLedger | None = None,
-        dependency_budgets: Mapping[str, Any] | None = None,
+        providers: ProviderRegistry | None = None,
     ) -> None:
+        """Build an engine.
+
+        ``validation_rules`` are domain staleness rules (issue #761) run after
+        built-in validation, merged most-cautious-wins. A rule may raise a
+        component's status, never lower it. None by default: an engine with no
+        rules behaves exactly as before, and nothing is auto-discovered.
+
+        ``registry`` is the registry-backed spelling of the same thing: every
+        service in it satisfying the :class:`~continuum.plugins.ValidationRule`
+        protocol is treated as a rule. Rules from both sources add together.
+        Registration stays explicit either way; CONTINUUM never loads a rule
+        from a path or an entry point.
+        """
         self.storage = storage
         self.validator = validator or StateValidator(strict_unknown=strict_unknown)
         self.strict_unknown = strict_unknown
         self.ledger = ledger
         self.dependency_budgets = dependency_budgets
         self._manager = CheckpointManager(storage)
+        #: Providers a configuration may resolve by name. Built-ins need no
+        #: registration; this is how a CallableProvider becomes discoverable.
+        self.providers = providers or ProviderRegistry()
 
     def assess(
         self,
@@ -263,8 +294,7 @@ class RecoveryEngine:
         replay: bool = True,
         scope: Iterable[str] | None = None,
         source_graph: SourceDependencyGraph | None = None,
-        ledger: RecoveryLedger | None = None,
-        dependency_budgets: Mapping[str, Any] | None = None,
+        provider_config: ProviderConfig | None = None,
     ) -> RecoveryDecision:
         """Decide how ``run_id`` may resume, without changing anything.
 
@@ -282,6 +312,17 @@ class RecoveryEngine:
         Passing ``source_graph`` (the source-level graph from
         :mod:`continuum.analysis`) records on the returned decision every file
         whose imports belong to a scoped dependency.
+
+        ``validation_rules`` are domain staleness rules (issue #761) run over
+        the projected state in addition to any the engine was constructed with.
+        Rules are read-only: they receive the state and the current environment
+        and nothing else, so they can neither mutate storage, emit events, nor
+        change this repair plan. Their findings are namespaced by rule name and
+        sealed into the contract. A rule can only add caution; a crashing,
+        duplicate-named or malformed rule reports a ``validation_rule`` entry
+        asking for review instead of being ignored. Rules are not filtered by
+        ``scope``: a domain rule that knows a decision is unauthorized is not
+        made wrong by the caller asking about one dependency.
         """
         # Degrade, not raise (issue #383): the engine's whole job is to answer
         # "where does this run stand", and a poisoned log is precisely the run
@@ -311,6 +352,24 @@ class RecoveryEngine:
             archive_aware_events = self.storage.read_all_events(run_id)
         except Exception:
             archive_aware_events = self.storage.read_events(run_id)
+
+        # Discoverable providers (issue #762): when the caller did not hand over
+        # a current environment, consult the run's configured providers instead,
+        # so a run that registered a world-observer is validated by it at resume
+        # without anyone having to remember to pass it in. An unconfigured run
+        # records no configuration event and keeps today's behaviour exactly.
+        provider_diagnostics: tuple[ProviderDiagnostic, ...] = ()
+        if current_environment is None:
+            config = (
+                provider_config
+                if provider_config is not None
+                else config_from_events(archive_aware_events)
+            )
+            if config is not None and config.specs:
+                captured = resolve_and_capture(run_id, config, registry=self.providers)
+                current_environment = captured.snapshot
+                provider_diagnostics = captured.diagnostics
+
         for _ev in archive_aware_events:
             if _ev.type is not EventType.REVIEW_CONFIRMED:
                 continue
@@ -418,44 +477,20 @@ class RecoveryEngine:
                 report=new_report,
                 environment_diff=validation.environment_diff,
             )
-        active_ledger = ledger if ledger is not None else self.ledger
-        active_budgets = (
-            dependency_budgets if dependency_budgets is not None else self.dependency_budgets
-        )
-        if active_budgets is None and active_ledger is not None:
-            try:
-                from pathlib import Path
 
-                from continuum.budgets import DEFAULT_BUDGETS_PATH, load_budgets
-
-                active_budgets = load_budgets(Path(DEFAULT_BUDGETS_PATH))
-            except Exception:
-                active_budgets = None
-
-        exhausted_dependencies: set[str] = set()
-        run_budget_exhausted = False
-        if active_ledger is not None:
-            run_budget_exhausted = active_ledger.requires_human(
-                run_id, dependency_budgets=active_budgets
+        # Domain validation rules (issue #761). Built-in validation asks whether
+        # the state still matches the environment; a domain rule knows
+        # staleness that question cannot reach. Rules run last, over the state
+        # built-in validation already revised, and their findings merge by
+        # maximum caution so a rule can escalate but never launder. With no
+        # rules configured this block returns the input untouched, which is
+        # what keeps the default path byte-identical.
+        rules = active_rules(self._validation_rules, validation_rules)
+        if rules:
+            rule_findings = run_validation_rules(rules, validation.state, current_environment)
+            validation = apply_rule_findings(
+                validation, rule_findings, strict_unknown=self.validator.strict_unknown
             )
-            candidate_deps: set[str] = set()
-            if scope is not None:
-                candidate_deps.update(scope)
-            else:
-                from continuum.models import Component
-
-                for entry in validation.report.statuses:
-                    if entry.component == Component.EXTERNAL_DEPENDENCY and entry.component_id:
-                        candidate_deps.add(entry.component_id)
-                for a in uncertain:
-                    if a.dep_scope:
-                        candidate_deps.add(a.dep_scope)
-
-            for dep in candidate_deps:
-                if active_ledger.requires_human(
-                    run_id, dependency=dep, dependency_budgets=active_budgets
-                ):
-                    exhausted_dependencies.add(dep)
 
         plan = plan_repairs(
             validation.report.statuses,
@@ -465,7 +500,6 @@ class RecoveryEngine:
             exhausted_dependencies=exhausted_dependencies,
             run_budget_exhausted=run_budget_exhausted,
         )
-        # Liveness: silence as WAIT, never auto-rollback (issue #302)
         liveness_advisory = None
         liveness_breaches = 0
         try:
@@ -637,6 +671,7 @@ class RecoveryEngine:
             plan=plan,
             reason=reason,
             scope=scope,
+            budget=self._budget_for(run_id, scope, plan),
             post_checkpoint_observations=observations,
             liveness=liveness_section,
             triggering_risks=triggering_risks,
@@ -671,6 +706,7 @@ class RecoveryEngine:
             impacted_files=impacted_files,
             tail_evidence=tail_evidence,
             informed_retry=informed_retry,
+            provider_diagnostics=provider_diagnostics,
         )
 
         # Process-wide counters (#1032). Imported lazily: observability imports
@@ -686,6 +722,26 @@ class RecoveryEngine:
             pass
 
         return decision
+
+    def _budget_for(
+        self, run_id: str, scope: Iterable[str] | None, plan: RepairPlan
+    ) -> BudgetStatus | None:
+        """The attempt budget this decision charges, or ``None`` when unknown.
+
+        Ownership is the assessment scope together with the dependencies the
+        plan's own steps name: they must agree on one dependency, otherwise the
+        attempt is unattributable and :func:`resolve_scope` returns the run-wide
+        bucket rather than charging a dependency the repair may not belong to.
+        The budget is advisory evidence in the contract; it never participates
+        in the decision, so a ledger that cannot be read costs a line of
+        evidence and nothing else.
+        """
+        if self._ledger is None:
+            return None
+        try:
+            return self._ledger.budget(run_id, scope=resolve_scope(scope, *plan.scopes))
+        except Exception:
+            return None
 
     # -- the decision rule ------------------------------------------------ #
 

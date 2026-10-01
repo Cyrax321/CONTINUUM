@@ -8,248 +8,52 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- **`continuum policy-review` reports recovery history by action type (#743).**
-  A read-only, deterministic aggregate of repair attempts, human-gate
-  outcomes, compaction survival and reconciliation outcomes per action type,
-  over live and archived history alike, for periodic maintainer review. The
-  report is evidence for a human decision and never a policy engine: nothing
-  it computes feeds `plan_repairs` or changes a recovery verdict, and a high
-  human-required rate means the probes or the workflow deserve investigation,
-  not a lower safety bar. Without a `run_id` it spans every run.
+- **A run can configure the environment providers it trusts at resume (#762).**
+  Providers for files, git, values and static inputs existed, but a resume only
+  applied the ones a caller remembered to pass to `assess`, so an integration
+  could wire a reliable world-observer and still resume through a path that
+  validated only what was supplied by hand, with nothing in the output saying
+  so. A run now records provider descriptors and their bounded resource scopes
+  in the event log (`ENVIRONMENT_PROVIDERS_CONFIGURED`, append-only, newest
+  record authoritative); at resume `RecoveryEngine.assess` resolves them when no
+  environment was supplied, captures, and feeds the result to the validator that
+  already existed. New `continuum providers <add|remove|list|check>` manages the
+  configuration, and `check` resolves exactly as resume would so a failing
+  observer is visible before it gates a recovery.
 
-- **The escalation policy that budgets human attention (#1409).** Every action
-  the ledger cannot settle on its own becomes `REQUIRES_REVIEW` and interrupts
-  a human at once, and on a weeks-long run that floods the reviewer into
-  approving without reading, which is a gate with no gate in it. This ships
-  the schema, the loader and the deterministic scorer for the
-  attention-budgeted human gate: an `hourly_prompt_cap`, a
-  `batch_window_seconds` buffering window, a `blast_radius_threshold` above
-  which an item skips batching and interrupts immediately, and `risk_weights`
-  per action type or resource class. `load_escalation_policy` in
-  `src/continuum/recovery/escalation.py` reads `.continuum/escalation.json`,
-  falling back to a fail-safe default when the file is absent and raising
-  `EscalationPolicyError` when it exists but cannot be honoured, so a broken
-  policy never silently substitutes a risk posture the operator never chose.
-  `evaluate_action_risk` scores an action as the highest applicable weight,
-  because when two classifications disagree the more dangerous one should
-  govern. Nothing consumes the policy yet: the deferred review queue (#1410)
-  and the reviewer fatigue telemetry (#1411) are its wired consumers, so the
-  scorer is shipped and tested on its own rather than arriving with a heuristic
-  that moves while the queue is built.
+  The trust boundary is the design. A provider name is a lookup key matching
+  `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`, never a path or import; only the four
+  built-ins and names handed to a `ProviderRegistry` resolve, and an unknown
+  name is reported unavailable rather than autoloaded. Parameters must be
+  JSON-native, so a callable cannot mean one thing in memory and another after
+  a restart, and a parameter whose name looks like a secret is refused so it
+  never reaches the hashed log. `CallableProvider` is not configurable at all:
+  it registers by name and the configuration references the name.
 
-- **`continuum report --trajectory <run_id>` distils a run's whole history into
-  an auditable summary (#1427).** Operators had no high-level view of a
-  long-running agent's archived behaviour: replaying the raw log is expensive
-  and there was no structured way to inspect failure patterns once compaction
-  moved most of the history out of the live log. The new command folds
-  `events_archive` and the active log together, so the figures cover the whole
-  run regardless of compaction, and it is read-only -- it says what the run did,
-  never whether resuming it is safe (`status` answers that). The report carries
-  the counts the issue named: `total_attempts` (actions put into flight, counted
-  once each, since the ledger records a claim and its settlement as two
-  `ACTION_RECORDED` events), `uncertain_count` (side effects still flagged
-  `side_effect_uncertain`, i.e. awaiting reconciliation), `scar_rate`, and the
-  stall sites, which now rank a re-claimed-but-unsettled action type as a retry
-  site so a single retry surfaces before any type has failed twice. `--json`
-  emits the full model; the human form renders the same figures, and both carry
-  the report's digest. `TrajectoryReport` gained a `digest()` method that hashes
-  its own analytical fields deterministically, and `report_id` is now the prefix
-  of that digest, so a stored report can be checked against the events it
-  summarises instead of taken on trust; the command exits non-zero when a
-  persisted `TRAJECTORY_REPORT` no longer hashes to its own id. The two new
-  fields default to zero, so reports written before this change still load.
-  Existing quiet-time generation is unchanged.
-
-- **Typed `RiskObservedPayload` schema and projection of observed risks into
-  `SemanticState` (#1421).** `RISK_OBSERVED` existed as an event type with
-  `EXTERNAL_MONITOR` provenance (#303), but its payload had no typed schema and
-  the fold skipped it entirely, so a projection never reported what a run had
-  been seen doing. `RiskObservedPayload` in `src/continuum/models.py` now types
-  the wire payload (`trigger`, `score`, `episode_id`, `step_id`, `detail`,
-  `ts`), normalising what monitors send rather than refusing it: scores clamp
-  to `[0.0, 1.0]`, `detail` accepts a structured dict or a legacy plain string
-  (wrapped as `{"message": ...}`) bounded to 32 keys and 512 chars, and `ts`
-  accepts an epoch number or ISO 8601. `ingest_risk` validates and normalises
-  through the schema, so what lands on the log is always schema-shaped.
-  `project()` folds each event into `SemanticState.observed_risks` carrying its
-  provenance forward, and `RISK_OBSERVED` left `_NON_PROJECTING`. An observation
-  is knowledge rather than a change, so `observed_risks` joins
-  `PROJECTION_BOOKKEEPING`: folding one mints no state version, while mitigation
-  that actually alters the run still bumps it through whatever it changed.
-
-- **Continuous-monitoring fault-injection scenarios for the recovery-correctness
-  suite (#1426).** Four scenarios in `continuum.benchmark.phase6.scenarios`
-  inject mid-run `RISK_OBSERVED` events into a live trajectory instead of
-  unit-mocking the risk feed: `risk_loop_replan` (a repeating-tool-action signal
-  must drive REPLAN with guidance naming the steps to avoid),
-  `risk_meltdown_rollback` (an error cascade with a meltdown on top must roll
-  back to the verified fact-gathering checkpoint), `risk_fail_open_resilience`
-  (corrupted, blank and torn feed lines must be dropped without disturbing the
-  trajectory), and `risk_side_effect_abort` (a duplicate side-effect signal must
-  abort and settle on the completed record without a second execution). Each
-  records decision accuracy against the policy expectation, duplicate side
-  effects, and ingestion latency per step. The phase6 suite is now 18 scenarios.
-
-- **Risk verdicts now carry located guidance for repeating steps (#1426).** A
-  `loop` trigger previously produced a replan verdict naming only the trigger;
-  the `step_id` the probe supplied was dropped, so a replanning agent had no way
-  to tell which plan units to avoid. The decision rationale and sealed contract
-  reason now append `repeating steps to avoid: <ids>`, deduplicated in
-  first-seen order, collected only from the events that contributed to the
-  winning mode. Triggers carrying no step id, and less severe triggers that lost
-  the severity vote, contribute no guidance.
-
-- **The recovery surfaces now name the risk observations that triggered a
-  verdict (#1424).** A risk-driven verdict already carried the `RISK_OBSERVED`
-  event ids behind it on the sealed contract as `triggering_risks`, and the
-  field was covered by the integrity hash with a legacy fallback for contracts
-  sealed before it existed, but no surface rendered it: an operator could see
-  *that* a run was rolled back and read the prose rationale, and a resumed
-  session could read the verdict, without either being able to cite the
-  observation that produced it. `render_contract` (`continuum show-contract`)
-  now lists the ids under a `triggering_risks:` block, `RecoveryDecision.render`
-  (`continuum resume` / `watch`) lists them under a `Triggering risks:` heading
-  next to the rationale, and the curated briefing's verified contract section
-  carries a `triggering risks:` line. All three omit the section entirely when
-  the verdict came from drift or the ledger alone, so an empty list stays the
-  signal that no risk drove it. The field is unchanged and still `list[str]` of
-  event ids, deduplicated by trigger (#1057), so existing sealed contracts and
-  every machine-readable consumer are unaffected.
-
-- **Out-of-band blob store and `CONTINUUM_PAYLOAD_OFFLOAD_BYTES` threshold (#1418).**
-  Event payloads exceeding the configurable byte threshold `CONTINUUM_PAYLOAD_OFFLOAD_BYTES`
-  (default 0, disabled) are offloaded to content-addressed canonical JSON blob files at
-  `<storage_dir>/blobs/<sha256>.blob`. Stored event records replace inline payloads with an
-  offload descriptor `{"__offloaded": sha256_hex, "size_bytes": length, "keys": list(payload.keys())}`.
-  The event hash chain calculation covers the offload descriptor, maintaining full cryptographic
-  tamper evidence while preventing row bloat and scan degradation across SQLite and Postgres.
-
-- **Transparent blob payload rehydration and deep integrity verification (#1419).**
-  Event payloads offloaded to content-addressed blobs are transparently rehydrated during
-  `read_events()`, `read_archived_events()`, and `read_all_events()`, allowing downstream
-  projections, validators, and replays to operate seamlessly over complete payloads without
-  descriptor-awareness. If a referenced blob is missing or tampered with on disk, reads fail
-  closed by raising `CorruptedRecord` identifying the event sequence number and sha256 digest.
-  Extended `continuum verify` and storage engines with `--deep` / `deep=True` verification to
-  audit the existence and content hashes of on-disk blobs across both live and archived events.
-  Compaction preserves content-addressed blobs for archived event records.
-
-- **The gateway now enforces tenant-scoped namespace boundaries on external memory claims (#1415).**
-  External memory mutation claims now support the standardized structured key convention
-  `memory:<store_id>:<tenant_id>:<namespace>:<record_key>` alongside `mem:<store_id>:<tenant>:<record_key>`.
-  `continuum gateway` binds the authorized tenant identity from server configuration, request headers
-  (`X-Continuum-Tenant`), or run context metadata (`tenant_id`, `tenant`),
-  and denies cross-tenant write attempts with HTTP 403 before outbound requests reach external stores.
-  The gateway CLI command also exposes `--tenant` to allow operators to pin the tenant boundary at proxy startup.
-
-- **Registered `ActionReconciler` plugins are now dispatched during reconciliation (#765).**
-  The `ActionReconciler` seam in `continuum.plugins.seams` was declared in Phase 7
-  with no consumer: `docs/ARCHITECTURE_EVOLUTION.md` listed it among the plugin
-  seams declared but not load-bearing. `continuum.plugins.reconcile` is the
-  consumer. It dispatches registered reconcilers over a run's uncertain actions,
-  merges their evidence, and settles through the existing ledger path alongside the
-  subprocess probe registry (#218).
-
-  Every assessed action lands in one of four documented categories: confirmed
-  occurrence, confirmed non-occurrence, unavailable evidence, or conflicting
-  evidence. Confirmation settles the action; anything else escalates it to
-  `REQUIRES_REVIEW`. Two rules keep that safe: a reconciler that raises or returns
-  a malformed value blocks confirmation rather than being ignored (its silence is
-  not neutrality), and disagreeing sources are escalated rather than
-  majority-voted. The human queue only ever grows on anything less than unanimous
-  confirmation, so plugins can shrink what a person must inspect and never widen
-  what an agent may certify on its own.
-
-  Reconcilers run sorted by declared name, so registration or iteration order can
-  never change a verdict, and every report carries per-source provenance in that
-  same order for diffable JSON and text diagnostics. `Reconciliation.occurred`
-  widens from `bool` to `bool | None`, where `None` means looked and could not
-  obtain evidence rather than evidence of absence; existing reconcilers returning
-  `True`/`False` are unaffected.
-
-  A reconciler receives the `Action` record and nothing else (no storage, no
-  ledger), so plugin code cannot persist anything outside the controlled
-  settlement loop. Registration stays explicit and is never discovered: `continuum
-  reconcile run_1 --reconciler myapp:OutboxReconciler` (repeatable) names each
-  plugin by dotted path, and `settle_with_reconcilers` also accepts a `Registry` to
-  resolve from. Probes and plugins compose: the probe pass runs first and plugins
-  only see what it left pending. Default behaviour with no `--reconciler` is
-  unchanged. See `docs/guides/reconciler-plugins.md`, including how to implement a
-  #268-compatible OpenTelemetry reconciler on the seam.
-
-- **Per-dependency human gate budgets are now wired into the recovery boundary (#1459).**
-  The per-dependency recovery attempt tracking introduced in #1428 is now enforced
-  across the recovery lifecycle:
-  `RecoveryEngine.assess` and `assess_scoped` accept a `ledger` and `dependency_budgets`
-  mapping (auto-loading `.continuum/budgets.json` by default), evaluate ceilings for
-  every relevant external dependency and uncertain action, and escalate only exhausted
-  dependencies to `REQUEST_HUMAN` while letting untouched, healthy dependencies recover
-  automatically (`REPAIR_AND_RESUME` or `RESUME`).
-  `plan_repairs` flags repair steps as `requires_human` when the target dependency or
-  action has exhausted its recovery budget.
-  `build_contract` withholds automatic machine-executable steps as `next_allowed_action`
-  under `REQUIRES_HUMAN`, ensuring automation cannot proceed until human intervention
-  clears the gate.
-  `GenericAgentAdapter` exposes `ledger` configuration and forwards scoping and
-  per-dependency budgets to `resume()`, `record_attempt()`, and `requires_human()`.
-
-- **`RecoveryLedger` now evaluates the human gate per external dependency, not
-  only for the run as a whole (#1428).** A single flaky upstream (a
-  rate-limited sandbox, a weather API) failed repeatedly and drained the run's
-  one global attempt budget, and once that pool was empty every later recovery,
-  including unrelated and highly reliable core tasks, escalated to a person.
-  `record_attempt` accepts a `dependency` and tags the attempt with it;
-  `requires_human` accepts the same `dependency` and counts only that
-  dependency's attempts against its own ceiling. Escalation writes a
-  namespaced, anchored `human_required:<dependency>` gate entry rather than the
-  run-wide marker, so exhausting one dependency escalates only that dependency,
-  and the marker survives compaction the same way the global one does.
-  Dependency ceilings come from an optional `dependency_budgets` section in
-  `.continuum/budgets.json` (`{"dependency_budgets": {"ext:weather-api": 2}}`),
-  validated on load like every other integer in the registry: a positive
-  integer, with a boolean or a float rejected rather than silently read as a cap
-  of 1. A dependency the section does not name falls back to
-  `default_max_attempts`, then to the caller's own threshold, so a registry
-  never has to list every dependency to govern all of them. The change is
-  additive: entries written before the field existed load with no dependency tag
-  and behave exactly as before.
+  Fail-closed everywhere. A disabled, unavailable, malformed, conflicting or
+  failing provider emits `UNKNOWN_VERSION` for every resource it declared
+  instead of leaving it out, and `UNKNOWN` is what the validator already
+  downgrades on. Two specs claiming one resource key fail closed for both
+  rather than letting one win by order. A provider reporting beyond its scope
+  has those keys marked unknown too. Unconfigured runs behave exactly as
+  before, and a caller-supplied environment still wins. Captured resources
+  carry the provider that produced them, so a validation entry reads
+  `verified unchanged (provider: git)` and the recovery contract inherits that
+  evidence. See `docs/guides/environment-providers.md`.
 ### Fixed
 
-- **The Postgres action index backfill uses jsonb accessors instead of
-  SQLite's `json_extract` (#1441).** `PostgresStorage._backfill_action_index`
-  seeds the `action_index` projection from existing `ACTION_*` events when the
-  index is empty, which is the recovery path for a database that predates the
-  index (#216) or one that lost its rows. Its `INSERT ... SELECT` was ported
-  from the SQLite v3 migration, but the two `WHERE` predicates were left as
-  `json_extract(e.payload, '$.key')` while the rest of the statement had been
-  translated to jsonb. Postgres has no `json_extract`, so whenever the backfill
-  actually fired the store failed to open outright with `UndefinedFunction`
-  (SQLSTATE 42883), out of `_create_schema` on connection. No test covered the
-  case, which is why CI saw nothing: the backfill short-circuits unless
-  `ACTION_*` events exist and the index is empty, and every test database
-  starts empty in both senses. The `WHERE` clause now reads
-  `e.payload::jsonb->>'key' IS NOT NULL` and
-  `e.payload::jsonb->'action' IS NOT NULL`, matching the `SELECT` list.
-
-  The same statement had also dropped SQLite's `INSERT OR REPLACE`, so a key
-  that was claimed and later completed, appearing in two `ACTION_*` events,
-  proposed a duplicate primary key. The port now selects
-  `DISTINCT ON (key) ... ORDER BY key, ord DESC`, keeping the last event per
-  key, with `ON CONFLICT (key) DO NOTHING` as a second guard.
-
-- **`policy-review` no longer reports an uncertain side effect as absent.**
-  The `side_effect_actions` rows folded every `ACTION_RECONCILED` event that was
-  not `completed` into `reconciled_absent`, but only `reconcile(occurred=False)`
-  is a confirmation of absence. `ActionLedger.claim` also writes that event type
-  for whatever a caller-supplied `on_unknown` resolver returns, and such a
-  resolver can legitimately resolve to `UNKNOWN` ("the probe could not tell") or
-  `REQUIRES_REVIEW` ("a human has to judge"). Both were counted as confirmed
-  absence, so the report answered "was the effect absent?" with "yes" when the
-  truth was "nobody knows", which is the one claim a maintainer reading it must
-  not be able to make by mistake. Only `failed` counts as absent now; the other
-  two land in a new `reconciled_uncertain` bucket that the text render shows
-  alongside the other two, so the open question stays visible instead of being
-  reported as a finding.
+- **The Level 4 MCP inspector walkthrough now names the config the repository
+  ships (#1395).** `references/testing.md` pointed
+  `@modelcontextprotocol/inspector --cli` at `mcp-config.json`, which has never
+  existed anywhere in the tree (not tracked, never committed, absent on disk),
+  so the copy-pasted command failed at the exact step meant to exercise the
+  protocol boundary. It now points at the tracked `.mcp.json`, whose
+  `continuum-mcp` entry is the server the `--server continuum-mcp` flag names. A
+  guard in `tests/test_docs_mcp_inspector.py` folds the fenced command's
+  backslash continuations and asserts, for every inspector command in
+  `references/` and `docs/`, that its `--config` file is present in the tree and
+  its `--server` name is an entry in that file, so a walkthrough cannot drift
+  back out of sync with the shipped config.
 
 - **File-derived progress no longer bloats the log on a compacted run.**
   `record_file_progress` gates its mirror on a projection of the log, but folded
@@ -391,35 +195,6 @@ All notable changes to this project are documented here. The format follows
   `except EditPreconditionError` handlers are unaffected; only `type(exc)`
   becomes observable.
 
-- **The gateway again caps the upstream reply, not just the request body
-  (#1055).** This fix shipped in `54002e2` and was then deleted by the merge
-  `a37442f` ("Merge main into PR #1263"), which resolved a conflict in
-  `gateway.py` against the other branch's side and removed `MAX_RESPONSE_BYTES`,
-  `_read_bounded_response`, the capped read, and the tests that guarded them,
-  without a matching revert in the changelog, so the regression reached `main`
-  silently. Restored here. A proxy that only bounds what a client can make it
-  hold is still hostage to what an upstream sends it, so the reply half carries
-  the request cap's sibling: a reply whose declared `Content-Length` passes
-  `MAX_RESPONSE_BYTES` (10 MB) is refused with `502` before it is buffered, and
-  a reply that declares no length at all is bounded by the running total rather
-  than read whole, which is the only way a chunked reply can be bounded. The
-  claim settles uncertain rather than completed, since an upstream that cannot
-  answer inside the cap may still have applied the side effect, and reporting it
-  as done would promise a delivery the proxy could not verify.
-
-- **`codecov/patch` no longer fails on every change to the Postgres backend
-  (#1329).** Coverage was uploaded from a single matrix leg, the Linux
-  Python 3.12 one, and that leg runs the suite without
-  `CONTINUUM_TEST_POSTGRES_DSN`, so `tests/test_storage_postgres.py` skips
-  wholesale there. The `Test (Postgres backend)` job is the only place the
-  suite actually executes, and it uploaded nothing. Every `postgres.py` line
-  therefore read as uncovered, the patch check reported `0.00% of diff hit` on
-  an otherwise-green PR, and it had been doing so since the backend landed --
-  the last `postgres.py` change before the fix carries the identical failure.
-  The Postgres job now runs under `--cov` and uploads its own report; Codecov
-  merges the two per commit rather than overriding, so the backend's line data
-  folds into the same patch and total figures.
-
 - **A padded argument token can no longer reset the authorization-bound retry
   budget (#1052).** The bucket was derived from every argument token, and the
   arguments are caller-controlled noise plus the real resource, so keeping the
@@ -437,81 +212,15 @@ All notable changes to this project are documented here. The format follows
   since declaring such fields `volatile` at every call site is not a fix: a
   caller that wants around the cap simply forgets to declare them.
 
-- **A human-gated contract no longer advertises a machine-executable step as
-  the next permitted action (#1388).** `build_contract` nulled
-  `next_allowed_action` only for `ROLLBACK` and `ABORT` (the #1058 fix), so
-  `RecoverySafety.REQUIRES_HUMAN` fell through to the `else` and named
-  `plan.first`. That step stays automatic whenever the verdict is imposed
-  *after* the plan is built, which a consumed authority and a risk-policy
-  escalation both do without adding a `RepairStep` of their own, so the engine
-  declared a human must gate while the sealed contract handed out a green
-  light, and `permits()` confirmed it. Under `REQUIRES_HUMAN` a step is now
-  named only when it itself requires a person, so the #42 reconcile step and
-  the unreadable-log repair (#385) keep their action and their permission, and
-  `REQUIRES_REPAIR` / `REQUIRES_REVALIDATION` are untouched. `permits()` also
-  returns `False` when the contract names no action at all: the plain
-  comparison answered `permits(None) is True` on any verdict that deliberately
-  permits nothing, so a caller reading the action back out of the contract was
-  told it may proceed. `required_actions` is unchanged, so an auditor still
-  sees the work; only the single permitted action is held until the gate
-  clears.
-
-- **The evidence export builds its own models instead of untyped dicts (#1155).**
-  `src/continuum/interchange/evidence.py` declared `EvidencePrimitive` plus the
-  four subclasses `Transition`, `Observation`, `Relation` and `Checkpoint`,
-  exported all of them, and then constructed none of them: `export_evidence`
-  hand-rolled `dict[str, Any]` values and returned `list[dict[str, Any]]`. So
-  every subclass field existed only in a class the producing function never
-  touched, and a field could be added, renamed or dropped with nothing
-  breaking, because the dict keys were spelled separately in the function
-  body. `content()` and `digest()` were unreachable, and `verify_export` had
-  no typed shape to work against. The exporter now routes every primitive
-  through the models and returns `list[EvidencePrimitive]`; pydantic's
-  `extra="forbid"` makes a missing or stray field an immediate error at
-  export instead of a silent shape drift, and `Relation.from_event` hosts the
-  one piece of construction that inspects a payload (dependency endpoints are
-  spelled `resource` for a declaration and `decision_id` / `finding_id` for
-  those families) next to the fields it fills. `Checkpoint` now declares
-  `event_id` and `event_type`, which the dict it replaced always emitted, so
-  the wire format is unchanged; `cmd_export_evidence` serialises with
-  `model_dump(mode="json")`. `verify_export` accepts the models or the
-  mappings a JSON-lines receiver produces after `json.loads`, so both paths
-  run the same check.
-
 ### Changed
 
-- **`approve_restore` target resolution and input validation are now covered
-  branch by branch (#1292).** `tests/test_restore_target_resolution.py`
-  previously had one entry point, `approve_restore(..., anchor_sequence=0)`,
-  so every branch of `_anchor_for` and every guard in front of it was
-  uncovered and a change to any of them would have shipped green. The new
-  tests drive each rung directly and pin the exact error messages. Two are
-  load-bearing rather than redundant: the no-target case writes checkpoints
-  out of order so the highest version is not the highest `source_sequence`,
-  which catches a resolver returning the wrong field, and the cross-run case
-  pins that a checkpoint id belonging to another run is not a valid target.
-  `restore.py` is unchanged. Three lines stay uncovered: the `CorruptedRecord`
-  rung is already covered by `tests/test_checkpoint_corruption.py`, and the
-  trailing `checkpoint_id` ladder at `restore.py:76-78` is unreachable,
-  since a real id resolves in `get_checkpoint` before that loop runs.
-
-- **The `__all__` guard now walks the installed package instead of five
-  hand-listed modules (#1228).** `tests/test_module_all_exports.py` asserted
-  that names in `__all__` resolve by importing five modules by name, so a
-  rename that forgot `__all__` stayed green on the other 117 modules that
-  declare one. `test_all_symbols_exist_on_modules` now enumerates the package
-  with `pkgutil.walk_packages` and checks every module it finds (122 today,
-  against a floor of 90 so a walk that silently shrank to nothing fails
-  instead of passing vacuously), and `test_star_import_execution` covers the
-  same set, catching a module whose import has a side effect or a name that
-  shadows an earlier one. A second check, `__all__` equals the public names a
-  leaf module defines itself, is added per-module on a curated list: it
-  cannot hold package-wide, because aggregator modules (`continuum.actions`
-  re-exports all 15 of its entries from submodules) legitimately list names
-  they do not define and some modules hold a public name back on purpose
-  (`continuum.budgets` keeps `FALLBACK_MAX_ATTEMPTS` private to its own
-  defaulting). Both are per-module policy, so only modules that define their
-  whole surface are pinned.
+- **A compaction anchor keeps the environment it was validated against (#762).**
+  `compact_run` writes a forced anchor checkpoint, which becomes the newest one
+  and the resume comparison point. It was written with no environment, so a
+  compacted run had no snapshot to diff a resumed capture against and every
+  resource read as unknown. The anchor now inherits the previous checkpoint's
+  environment. Both the SQLite and Postgres paths changed, since they carry
+  identical anchor logic.
 
 - **The TUI `tree` view fetches the run once instead of twice (#1157).**
   `family_lines` in `src/continuum/tui/model.py` called
@@ -525,23 +234,6 @@ All notable changes to this project are documented here. The format follows
   The neighbouring views (`checkpoint_rows`, `action_rows`, `event_rows`,
   `budget_rows`) already fetched the row exactly once for the same guard
   purpose, so this removes the outlier.
-
-### Changed
-
-- **Recovery anchors are now produced by a product path (#1097).**
-  `CheckpointManager.checkpoint_on_recovery` and `last_recovery_anchor` had no
-  caller in `src/` (only tests) so the `RECOVERY` trigger, the `keep_anchors`
-  guard in `prune`, and the anchor branch in `cleanup_ephemeral_artifacts` all
-  protected a set that could never be populated. `continuum resume <run>
-  --repair` now records an anchor after a non-RESUME verdict, before the
-  `RECOVERY_STARTED` event so the pin covers the state the verdict judged rather
-  than the state after the repair bookkeeping landed, and `continuum restore
-  <run> --reason ... --to-recovery-anchor` rolls back to it (refusing with an
-  error when no anchor exists, and refusing a `--to`/`--anchor` given alongside).
-  A plain `resume` stays read-only and records nothing: judging is still
-  separate from acting, so the write lives in the CLI caller, never in
-  `RecoveryEngine.assess`. An anchor failure is reported on stderr and never
-  changes the verdict or its exit code.
 
 - **The advisory verdict contract is now stated where a reader can find it (#1031).**
   `RecoveryDecision` and its `permits()` method describe themselves as
@@ -589,23 +281,6 @@ All notable changes to this project are documented here. The format follows
 
 ### Removed
 
-- **Dead `backoff_delay` export (#1095).** The exponential-with-cap pacing
-  helper in `src/continuum/budgets.py` was the only member of
-  `budgets.__all__` with no consumer anywhere in the repo. Every refusal site
-  (`cli/main.py`, `mcp/server.py`, `actions/ledger.py`) refuses and returns;
-  none computes or applies a delay, and the module's own docstring states
-  CONTINUUM never retries anything itself; it counts and gates. The helper
-  shipped speculatively with #240 ("ships as a pure exponential+cap helper;
-  CONTINUUM never retries itself") and no caller arrived in the year since.
-  Removed with its tests. Recoverable from history (6217a65) if a real
-  retry-pacing surface ever needs it.
-
-- **Dead `DuplicateAction` and `LeaseError` exception classes (#1115).**
-  `DuplicateAction` (`continuum.actions.ledger`) and `LeaseError`
-  (`continuum.concurrency.lease`) were exported exceptions that no code path
-  could raise: duplicate attempts are handled via `fresh=False` outcomes,
-  `UnknownSideEffect`, or `GrantDenied`, while lease contention is signaled by
-  `acquire() -> False`. Dead exception definitions and exports removed.
 - **Dead `observations_evidence_lines` helper (#867).** The function in
   `src/continuum/recovery/observations.py` was defined once and called
   nowhere: leftover scaffolding from #208 whose engine-side rendering at
@@ -742,20 +417,6 @@ All notable changes to this project are documented here. The format follows
   served one literal segment that never reached the invoice endpoint. The
   verdict is now taken on the raw request line, which is what the upstream
   decodes.
-
-- **The landing page's headline metrics no longer drift behind the code (#1283).**
-  `docs/index.html` stated 2,163 tests and 45 CLI commands while the suite
-  collected 2,401 and the parser built 46 -- the figures a first-time visitor
-  sees were the oldest in the repo, and nothing noticed, because every existing
-  guard reads markdown. The page now states 2,452 tests (the README canonical
-  figure the rest of the docs agree on) and 46 commands, and two guards now
-  read the page: `tests/test_docs_counts.py` treats it as a counted file, so
-  its test figure must agree with every markdown figure exactly, and
-  `tests/test_cli_docs.py` compares its two CLI-command sites against
-  `build_parser()` and against each other. The page's own refresh note names
-  the three sources, so a future resync is one edit plus a test run rather
-   than a hunt.
-
 - **`resume --pinning` compares against the archived pinning, so a compacted
   run stops reporting every key as newly pinned (#1126).** The drift display
   folded the live event tail alone, and compaction moves the pinning-carrying
@@ -772,6 +433,21 @@ All notable changes to this project are documented here. The format follows
   but it was wrong in the direction of hiding drift, which is the opposite of
   what a drift report is for. `latest_pinning` now folds `read_all_events`, the
   same history the assess (#1050) and watch (#1072) folds already read.
+- **`continuum mcp doctor` names the directory the console script is installed
+  into, not the one the venv python symlinks to.** `_scripts_dir()` took
+  `Path(sys.executable).resolve().parent`, but a venv's `python` is a symlink
+  to the base interpreter and resolving it walks past the venv to that
+  interpreter's `bin` -- a directory that holds neither the script nor the one
+  an operator should add to PATH. Windows has the same shape one level over:
+  scripts install into `Scripts` beside the executable, not beside it. It now
+  reads `sysconfig.get_path("scripts")`, which reports the directory the
+  install actually uses on both platforms. The bug was invisible to the suite
+  because the test module recomputed the same expression for its own
+  expectations, so both sides agreed on the wrong directory; that constant now
+  comes from the function under test, and
+  `tests/test_mcp_doctor.py::test_scripts_dir_follows_the_venv_not_the_symlink`
+  installs a real symlinked python and asserts the old logic's answer for it
+  is wrong.
 - **The content-addressed snapshot store now rejects a key that is not a digest
   before it is joined into a path, so a traversal string cannot turn `rewind`
   into a file-read primitive (#1268).** `snapshot_path` built its storage
@@ -826,7 +502,7 @@ All notable changes to this project are documented here. The format follows
   and the stale counts they held are re-synced (#1109, #1071).** The guard in
   `tests/test_docs_counts.py` watched only three files, so `references/testing.md`
   and `references/install.md` quietly stated a collected total of 2,241 while
-  `README.md` stated 2,278, and all five translated READMEs still reported 2,195
+  `README.md` stated 2,338, and all five translated READMEs still reported 2,195
   collected with a 1,380-test narrative. None of those files could fail the
   guard. Its scope is now the three required docs plus every `README*.md` and
   every `references/*.md`: a doc that states no total is skipped, and a doc
@@ -835,16 +511,7 @@ All notable changes to this project are documented here. The format follows
   all its prose is rephrased, so that one pattern reads all six READMEs.
   `references/testing.md`, `references/install.md`, and the translated READMEs
   now carry the same figures as `README.md`.
-
-- **A consumed authority no longer downgrades a stricter recovery verdict
-  (#1146).** `RecoveryEngine.assess` overwrote the mode with
-  `REQUEST_HUMAN` whenever a consumed authority blocked resume, discarding an
-  `ABORT` or `ROLLBACK` the risk policy had already proposed — both strictly
-  more cautious, per the module's own "the engine always returns the maximum
-  proposed mode" invariant. The rationale still named the abort the verdict
-  no longer delivered. The block now escalates to `max(mode, REQUEST_HUMAN)`
-  instead of replacing it, so the authority raises the floor without
-  weakening the ceiling.
+>>>>>>> origin/main
 
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
@@ -869,50 +536,6 @@ All notable changes to this project are documented here. The format follows
   prepends it to the rendered steps rather than dropping the run's guidance
   entirely, and the MCP server raises it as a `ToolError` so the calling agent
   sees it.
-
-- **A tampered checkpoint is reported as corrupted, not as missing (#1059).**
-  Both checkpoint resolvers wrapped `storage.get_checkpoint` in a bare
-  `except Exception: pass`, so a record whose body failed validation or whose
-  sealed integrity hash no longer matched was silently retried as a version
-  number and finally reported as a lookup miss. `resolve_checkpoint` and
-  `_anchor_for` now let `CorruptedRecord` through, wrapping it in the same
-  `RewindError`/`ValueError` the resolvers already raise, but naming the
-  corruption instead of pointing the operator at a typo or a missing version.
-  The tamper-evidence the storage layer raises is the one signal an operator
-  most needs on this path, and it was the signal both resolvers converted into
-  noise. A genuine lookup miss still falls through to the version and
-  source-sequence strategies exactly as before.
-
-- **`continuum attest-keygen` writes the private key owner-only (#1056).** The
-  command wrote an unencrypted PKCS8 Ed25519 private key with
-  `Path.write_text`, which creates the file at 0666 masked by the ambient umask
-  (0644 out of the box, readable by every local user on the host) while its
-  own output told the operator to keep it secret. Anyone with read access to the
-  file or a backup copy could produce validly-signed attestations for a tampered
-  event chain. The key is now created through `os.open` with an explicit 0600
-  mode, so it is owner-only from the moment it appears with no window at 0644,
-  and a pre-existing wider-mode file being overwritten is narrowed too, since
-  `open(2)` ignores the mode argument for a file that already exists. The public
-  key stays world-readable, as intended. The command now reports the mode it
-  applied next to the existing "keep the private key secret" line, so an operator
-  on a surprising filesystem can see what they actually got. Two tests pin the
-  property on POSIX (created mode, narrowing of a pre-existing 0644 key,
-  reported mode in output); Windows has no POSIX permission bits and is
-  skipped, matching the `tests/test_retry_budgets.py` precedent. A third test
-  covers the file-descriptor leak guard in the write helper on every platform.
-- **Every run-completion path now clears the instant-resume pointer (#394).**
-  `.continuum/resume.json` is written on every checkpoint so a `SessionStart`
-  hook can banner the interrupted run without opening the database. A run
-  closed as completed is no longer interrupted, but only `continuum complete`
-  removed the pointer; the TUI's and the dashboard HITL button's `complete_run`
-  claimed to mirror that command and did not, so completing a run from either
-  left the next session banner surfacing finished work as the active run. The
-  cleanup is now a single helper (`continuum.checkpoint.clear_resume_pointer`)
-  all three paths route through. A pointer naming any other run is left in
-  place, and an unreadable or undeletable file, or one holding valid JSON that
-  is not an object, is tolerated rather than failing the completion.
-  `tests/test_resume_pointer.py` pins the helper and each of the three
-  completion paths, and was verified to fail without the fix.
 
 - **The horizon `abort_condition_year` scenario now reaches abort (#1028).**
   The scenario was labelled `correct_mode="abort"` but drove the abort through
@@ -951,6 +574,26 @@ All notable changes to this project are documented here. The format follows
   recovery verdicts and safety semantics are unchanged.
 
 ### Fixed
+
+- **`continuum mcp install` and `continuum mcp remove` register the server
+  cross-platform (#834), and the registration's lifecycle is now defined
+  (#841).** The committed `.mcp.json` cannot express "`.venv/bin/x` on POSIX,
+  `.venv\Scripts\x.exe` on Windows", and a bare command name is resolved by
+  the host's `CreateProcess` against *its* PATH, never the child's, so
+  resolution has to happen on the machine that will spawn the server.
+  `mcp install` does that: it probes the `mcp` SDK in a fresh subprocess
+  first (a missing extra is refused with the install command and nothing is
+  written), then bakes the resolved console script, or the
+  `python -u -m continuum.mcp` fallback that carries zero PATH assumptions,
+  plus an absolute `--db`, into the local- or project-scope registration.
+  The result connects regardless of the host's PATH and spawn cwd. `mcp
+  remove` deletes only the entries install recognises; a foreign or
+  hand-edited entry under the same name is left alone. The lifecycle #841
+  left undefined is documented as a table in `docs/api/mcp.md`: a re-run
+  after an upgrade repoints a moved venv in place and never duplicates, and
+  `pip uninstall` leaves the registration behind so `mcp remove` is the
+  documented pairing. `tests/test_mcp_install.py` pins idempotency, the
+  repoint, the foreign-entry guarantee and both scopes.
 
 - **MCP and sidecar ledger writes now carry `EXTERNAL_AGENT` (#653).**
   `ContinuumMCP.ledger` and `SidecarServer._ledger` construct their
@@ -1702,7 +1345,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,906 collected, ~2,870 passed, ~36 skipped on a minimal env).
+  (~2,864 collected, ~2,825 passed, ~34 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

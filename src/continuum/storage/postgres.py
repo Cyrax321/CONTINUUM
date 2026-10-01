@@ -49,7 +49,7 @@ from continuum.models import (
 )
 from continuum.security.hashing import make_id
 from continuum.state.versioning import canonical_state_json, state_fingerprint
-from continuum.storage.actionindex import index_entry_from_payload
+from continuum.storage.actionindex import index_entry_from_payload, index_order_for
 from continuum.storage.base import (
     CheckpointNotFound,
     ConcurrentWriteError,
@@ -57,13 +57,7 @@ from continuum.storage.base import (
     RunNotFound,
     Storage,
 )
-from continuum.storage.blob import (
-    audit_blob_descriptor,
-    get_payload_offload_threshold,
-    is_offload_descriptor,
-    load_blob_payload,
-    maybe_offload_payload,
-)
+from continuum.storage.compaction import resolve_compaction_bound
 
 __all__ = [
     "PostgresStorage",
@@ -139,8 +133,6 @@ CREATE TABLE IF NOT EXISTS events_archive (
     PRIMARY KEY (run_id, sequence)
 );
 
-CREATE SEQUENCE IF NOT EXISTS action_index_ord_seq AS BIGINT;
-
 CREATE TABLE IF NOT EXISTS lg_checkpoints (
     id            BIGSERIAL PRIMARY KEY,
     thread_id     TEXT NOT NULL,
@@ -172,7 +164,7 @@ CREATE TABLE IF NOT EXISTS action_index (
     run_id TEXT NOT NULL,
     action_id TEXT NOT NULL,
     status TEXT NOT NULL,
-    updated_seq BIGINT NOT NULL DEFAULT nextval('action_index_ord_seq'),
+    updated_seq BIGINT NOT NULL,
     action_json TEXT NOT NULL
 );
 
@@ -216,6 +208,9 @@ class PostgresStorage(Storage):
             )
         except Exception as exc:  # connection refused, auth, missing driver, etc.
             raise RuntimeError(f"could not connect to PostgreSQL at {dsn!r}: {exc}") from exc
+        # The normalised locator, kept verbatim: connection.info.dsn redacts the
+        # password, so a caller that reopens from it cannot authenticate.
+        self.dsn = dsn
         self._storage_dir = Path(storage_dir) if storage_dir is not None else None
         self._payload_offload_bytes = (
             max(int(payload_offload_bytes), 0) if payload_offload_bytes is not None else None
@@ -265,6 +260,13 @@ class PostgresStorage(Storage):
         TEXT, so it is cast to ``jsonb`` before the ``->``/``->>`` accessors
         apply (Postgres has no ``json_extract``; that is the SQLite spelling in
         ``migrations.py``).
+
+        The number comes from :func:`index_order_for`, read row by row, for the
+        same reason the writer uses it: the value has to be reproducible by
+        the fold from the stored ``timestamp`` alone. It is also the only way
+        to get microsecond resolution -- ``EXTRACT(EPOCH FROM ...)`` on this
+        engine and ``strftime`` on SQLite both round, and a rounded number is
+        not the number the fold reproduces.
         """
         has_events = self._connection.execute(
             "SELECT 1 FROM events WHERE type IN "
@@ -275,40 +277,27 @@ class PostgresStorage(Storage):
         empty = self._connection.execute("SELECT 1 FROM action_index LIMIT 1").fetchone()
         if empty is not None:
             return
-        self._connection.execute(
-            """
-            WITH numbered AS (
-                SELECT e.payload::jsonb->>'key' AS key,
-                       e.payload::jsonb->'action' AS action,
-                       row_number() OVER (ORDER BY e.ctid) AS ord
-                FROM events e
-                WHERE e.type IN ('ACTION_RECORDED', 'ACTION_RECONCILED', 'ACTION_COMPENSATED')
-            ), latest AS (
-                SELECT DISTINCT ON (key) key, action, ord
-                FROM numbered
-                WHERE key IS NOT NULL AND action IS NOT NULL
-                ORDER BY key, ord DESC
+        rows = self._connection.execute(
+            "SELECT timestamp, type, payload FROM events "
+            "WHERE type IN ('ACTION_RECORDED', 'ACTION_RECONCILED', 'ACTION_COMPENSATED') "
+            "ORDER BY timestamp, run_id, sequence"
+        ).fetchall()
+        for row in rows:
+            payload = (
+                row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
             )
-            INSERT INTO action_index(key, run_id, action_id, status, updated_seq, action_json)
-            SELECT key,
-                   action->>'run_id',
-                   action->>'action_id',
-                   action->>'status',
-                   ord,
-                   action::text
-            FROM latest
-            ON CONFLICT (key) DO NOTHING
-            """
-        )
-        self._connection.execute(
-            """
-            SELECT setval(
-                'action_index_ord_seq',
-                (SELECT COUNT(*) FROM events
-                 WHERE type IN ('ACTION_RECORDED', 'ACTION_RECONCILED', 'ACTION_COMPENSATED'))
+            entry = index_entry_from_payload(EventType(row["type"]), payload)
+            if entry is None:
+                continue
+            key, run_id, action_id, status, action_json = entry
+            self._connection.execute(
+                "INSERT INTO action_index(key, run_id, action_id, status, "
+                "updated_seq, action_json) VALUES (%s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (key) DO UPDATE SET run_id = EXCLUDED.run_id, "
+                "action_id = EXCLUDED.action_id, status = EXCLUDED.status, "
+                "updated_seq = EXCLUDED.updated_seq, action_json = EXCLUDED.action_json",
+                (key, run_id, action_id, status, index_order_for(row["timestamp"]), action_json),
             )
-            """
-        )
 
     # -- transactions ----------------------------------------------------- #
 
@@ -643,8 +632,10 @@ class PostgresStorage(Storage):
     ) -> None:
         """Upsert the projection row for an ACTION_* event, same txn (#216).
 
-        updated_seq comes from a sequence so recency is global insertion
-        order, matching the global last-write-per-key fold.
+        ``updated_seq`` is epoch microseconds of the event's own timestamp, so
+        it is a property of the event rather than of a table position; see
+        :func:`continuum.storage.actionindex.index_order_for` for why that is
+        what makes the projection survive compaction.
         """
         target_payload = dict(payload if payload is not None else event.payload)
         entry = index_entry_from_payload(event.type, target_payload)
@@ -658,16 +649,12 @@ class PostgresStorage(Storage):
                 "ON CONFLICT (key) DO UPDATE SET run_id = EXCLUDED.run_id, "
                 "action_id = EXCLUDED.action_id, status = EXCLUDED.status, "
                 "updated_seq = EXCLUDED.updated_seq, action_json = EXCLUDED.action_json",
-                (key, run_id, action_id, status, self._next_index_ord(), action_json),
+                (key, run_id, action_id, status, index_order_for(event.timestamp), action_json),
             )
         except self._psycopg.IntegrityError as exc:
             raise CorruptedRecord(
                 f"action index maintenance failed for key {key[:12]}...: {exc}"
             ) from exc
-
-    def _next_index_ord(self) -> int:
-        row = self._connection.execute("SELECT nextval('action_index_ord_seq') AS v").fetchone()
-        return int(row["v"])
 
     def compact_run(
         self,
@@ -688,38 +675,16 @@ class PostgresStorage(Storage):
         earned. The connection runs in autocommit mode, so the explicit
         ``transaction()`` block is what makes the three writes atomic.
 
-        ``through_sequence`` must stay below the anchor marker's sequence:
-        the live log always retains its anchor, so a value at or above it is
-        rejected (issue #705) instead of silently deleting the anchor and
-        every live row, which would leave the next append minting a fresh
-        genesis and fork the hash chain away from the archive. The check is
-        shared with the SQLite backend so the two cannot drift apart again
-        (issue #1078).
-
-        Content-addressed blobs referenced by archived events remain preserved
-        in the blob directory without modification (issues #254, #1419).
-
-        The anchor carries ``environment`` when supplied, else the environment
-        the run's newest checkpoint already recorded (#1049): an
-        environment-blind anchor makes every pinned dependency UNKNOWN at the
-        next assessment and silently downgrades a clean run.
+        The bound is resolved by :func:`continuum.storage.compaction.
+        resolve_compaction_bound`, shared with the SQLite engine, so an
+        explicit ``through_sequence`` at or above the anchor marker is
+        rejected here too instead of archiving and deleting it (issue #1078).
         """
         from continuum.checkpoint.manager import CheckpointManager
 
         lv = self.latest_version(run_id)
         head = self.last_sequence(run_id)
-        # A caller-supplied environment has to land on a checkpoint, so it
-        # forces the fresh-anchor path whatever the log state. In practice the
-        # other terms already cover every reachable state (a version's
-        # STATE_CHECKPOINTED annotation sits one past its source_sequence, so
-        # head always outruns it); this term keeps the caller's request from
-        # depending on that invariant (#1049).
-        needs_fresh_anchor = (
-            lv is None
-            or through_sequence is not None
-            or lv.source_sequence < head
-            or environment is not None
-        )
+        needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
         if needs_fresh_anchor:
             try:
                 manager = CheckpointManager(self)
@@ -729,15 +694,17 @@ class PostgresStorage(Storage):
                 # never started (issue #648). Per-turn checkpoint evaluation
                 # deliberately keeps the cheaper live-tail read.
                 state = manager.project_current(run_id, full_history=True)
+                # The anchor becomes the newest checkpoint, so it inherits the
+                # environment the run validated against: writing it without one
+                # would leave a compacted run with no snapshot to diff a resumed
+                # capture against, and every resource would read as unknown
+                # (issue #762).
+                anchored = self.latest_checkpoint(run_id)
                 manager.checkpoint(
                     run_id,
                     state=state,
                     force_version=True,
-                    # The anchor carries the environment the run's newest
-                    # checkpoint already recorded when none is supplied
-                    # (#1049): an environment-blind anchor makes every pinned
-                    # dependency UNKNOWN at the next assessment.
-                    environment=self._anchor_environment(run_id, environment),
+                    environment=anchored.environment if anchored is not None else None,
                 )
             except Exception as exc:
                 raise ValueError(f"run {run_id!r} could not be anchored: {exc}") from exc
@@ -786,18 +753,17 @@ class PostgresStorage(Storage):
 
         return {"archived": max(archived, 0)}
 
-    def read_archived_events(
-        self,
-        run_id: str,
-        *,
-        rehydrate: bool = True,
-    ) -> Sequence[Event]:
+    def read_archived_events(self, run_id: str, *, upto: int | None = None) -> Sequence[Event]:
         """Compacted events from the archive, oldest first."""
+        query = "SELECT * FROM events_archive WHERE run_id = %s"
+        params: list[Any] = [run_id]
+        if upto is not None:
+            query += " AND sequence <= %s"
+            params.append(upto)
+        query += " ORDER BY sequence ASC"
         with self._read():
-            rows = self._connection.execute(
-                "SELECT * FROM events_archive WHERE run_id = %s ORDER BY sequence ASC", (run_id,)
-            ).fetchall()
-        return [self._row_to_event(row, rehydrate=rehydrate) for row in rows]
+            rows = self._connection.execute(query, params).fetchall()
+        return [self._row_to_event(row) for row in rows]
 
     def foreign_action(self, key: str, *, exclude_run: str) -> Action | None:
         """Indexed cross-run ledger lookup (issue #216)."""
@@ -883,35 +849,34 @@ class PostgresStorage(Storage):
         The order value is not a position in the row stream -- it has to be
         the same number :meth:`_maintain_action_index` stored, or
         :meth:`action_index_drift` compares two unrelated figures and reports
-        a dirty index on a healthy store (#1321). That number comes from
-        ``action_index_ord_seq``, which advances once per action event and
-        nothing else, so the fold reaches it by counting action events only,
-        1-based: a non-action row consumes no ``nextval`` and moves no
-        position. Counting every row instead -- RUN_STARTED, TOOL_CALLED,
-        EVIDENCE_ADDED all sit between actions in an ordinary run -- made the
-        fold read one higher per intervening non-action event than the
-        incremental writer ever wrote.
+        a dirty index on a healthy store (#1321). That number is
+        :func:`index_order_for` of the event's own append time, so the fold
+        reproduces it by reading the row's ``timestamp`` and the writer by
+        reading the same field of the event it is storing. A position could
+        never do this: counting action events matched ``nextval`` only while
+        the store was untouched, and every row here was equally unreachable
+        once a run was compacted (#1322).
 
-        Compacted history (#239) folds too, archive first and live second.
-        Within a run the archived prefix genuinely predates the live tail, so
-        a key written in both places keeps its live value, and because the
-        count is now the true global action-event number an archived write
-        can no longer outrank the same run's later live one. Across runs the
-        archive-first merge is still not insertion order -- that is #1322,
-        which makes a store read dirty after one run is compacted while
-        another holds actions. It was not reachable before only because the
-        dense scheme was already wrong on every store.
+        The archive and the live log are one stream, not two segments.
+        Compaction (#239) moves a run's prefix into ``events_archive`` while
+        other runs keep appending, so "everything archived is older than
+        everything live" holds only within a single run. Across runs the
+        archive-first merge inverted write order and the projection read
+        dirty after routine log maintenance. Merging on
+        ``(timestamp, run_id, sequence)`` fixes both at once: the timestamp
+        is assigned at append time and copied into the archive verbatim, so
+        it is global write order in every state of the store.
         """
         with self._read():
-            archived = self._connection.execute(
-                "SELECT type, payload FROM events_archive ORDER BY ctid"
-            ).fetchall()
             rows = self._connection.execute(
-                "SELECT type, payload FROM events ORDER BY ctid"
+                "SELECT timestamp, run_id, sequence, type, payload FROM ("
+                "SELECT timestamp, run_id, sequence, type, payload FROM events_archive "
+                "UNION ALL "
+                "SELECT timestamp, run_id, sequence, type, payload FROM events) "
+                "ORDER BY timestamp, run_id, sequence"
             ).fetchall()
         canonical: dict[str, tuple[tuple[str, str, str, str, str], int]] = {}
-        order = 0
-        for row in [*archived, *rows]:
+        for row in rows:
             raw = row["payload"]
             if not isinstance(raw, dict):
                 try:
@@ -924,9 +889,8 @@ class PostgresStorage(Storage):
                     payload = load_blob_payload(self.storage_dir, payload)
             entry = index_entry_from_payload(EventType(row["type"]), payload)
             if entry is None:
-                continue  # consumed no nextval, so it advances no position
-            order += 1
-            canonical[entry[0]] = (entry, order)
+                continue  # not an action event, so it stores no index row
+            canonical[entry[0]] = (entry, index_order_for(row["timestamp"]))
         return canonical
 
     @staticmethod

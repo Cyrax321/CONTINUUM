@@ -59,6 +59,19 @@ def test_schema_normalises_trigger_and_clamps_score() -> None:
     assert RiskObservedPayload(trigger="loop", score=-0.9).score == 0.0
 
 
+def test_schema_fails_open_on_an_unusable_score() -> None:
+    # Ingestion is fail-open: a monitor reporting nonsense has still reported.
+    # None, unparseable text and non-finite floats all fall back to 0.0, the
+    # same fallback the pre-#1421 writer used, so a malformed score neither
+    # drops the event on write nor breaks a later project() of a log already
+    # carrying one (NaN is rejected by the field's ge=0.0 constraint inside
+    # ObservedRisk, and a raised ValueError propagates out of project()).
+    for bad in (None, "nan", "high", "", float("nan"), float("inf"), "-inf", True):
+        assert RiskObservedPayload(trigger="loop", score=bad).score == 0.0
+    # A sane score still passes through untouched.
+    assert RiskObservedPayload(trigger="loop", score=0.5).score == 0.5
+
+
 def test_schema_coerces_a_mistyped_trigger_but_refuses_none() -> None:
     # Pre-#1421 ingestion rejected any non-string trigger outright. The schema
     # coerces instead, which is a deliberate change to the contract, not an

@@ -23,9 +23,13 @@ ADD COLUMN``), which is what makes forward motion safe and replayable.
 
 from __future__ import annotations
 
+import json
 import sqlite3
+from collections.abc import Callable
 from datetime import UTC, datetime
 
+from continuum.events import EventType
+from continuum.storage.actionindex import index_entry_from_payload, index_order_for
 from continuum.storage.base import SchemaVersionError
 
 __all__ = [
@@ -165,10 +169,16 @@ class Migration:
     """A single forward step from version ``version - 1`` to ``version``.
 
     ``up`` runs against an already-open connection in autocommit mode and must be
-    additive so it is safe to apply and to reason about.
+    additive so it is safe to apply and to reason about. It is either a script
+    string or a callable receiving the connection; the callable form is for a
+    step that cannot be expressed in SQL, which today means any step that has
+    to produce the action index's ordering number (see
+    :func:`_backfill_action_index_v3`).
     """
 
-    def __init__(self, version: int, name: str, up: str) -> None:
+    def __init__(
+        self, version: int, name: str, up: str | Callable[[sqlite3.Connection], None]
+    ) -> None:
         self.version = version
         self.name = name
         self.up = up
@@ -202,7 +212,7 @@ def _up_v2() -> str:
 
 
 def _up_v3() -> str:
-    """Introduce the ``action_index`` projection (issue #216).
+    """The DDL half of the ``action_index`` projection (issue #216).
 
     Cross-run idempotency lookups previously folded every run's full event
     log, O(total logged events) per unscoped claim miss. The index is a
@@ -211,6 +221,11 @@ def _up_v3() -> str:
     the storage engines and rebuildable at any time because the log remains
     the source of truth. The backfill seeds it from existing events so a v2
     database opens with correct lookups.
+
+    Only the DDL lives here: seeding the rows needs
+    :func:`_backfill_action_index_v3`, because SQLite cannot compute the
+    projection's ordering number in SQL (``strftime('%s', ts)`` truncates to
+    the second, ``strftime('%f', ts)`` to the millisecond).
     """
     return """
     CREATE TABLE IF NOT EXISTS action_index (
@@ -223,20 +238,45 @@ def _up_v3() -> str:
     );
 
     CREATE INDEX IF NOT EXISTS action_index_run ON action_index(run_id);
-
-    INSERT OR REPLACE INTO action_index(key, run_id, action_id, status, updated_seq, action_json)
-    SELECT json_extract(e.payload, '$.key')                          AS key,
-           json_extract(e.payload, '$.action.run_id')                AS run_id,
-           json_extract(e.payload, '$.action.action_id')             AS action_id,
-           json_extract(e.payload, '$.action.status')                AS status,
-           e.rowid                                                   AS updated_seq,
-           json(json_extract(e.payload, '$.action'))                 AS action_json
-    FROM events e
-    WHERE e.type IN ('ACTION_RECORDED', 'ACTION_RECONCILED', 'ACTION_COMPENSATED')
-      AND json_extract(e.payload, '$.key') IS NOT NULL
-      AND json_extract(e.payload, '$.action') IS NOT NULL
-    ORDER BY e.rowid;
     """
+
+
+def _up_v3_apply(conn: sqlite3.Connection) -> None:
+    """Create the projection, then seed it from the log (issue #216)."""
+    conn.executescript(_up_v3())
+    _backfill_action_index_v3(conn)
+
+
+def _backfill_action_index_v3(conn: sqlite3.Connection) -> None:
+    """Seed ``action_index`` from the existing log on the fold's own scale.
+
+    The ordering number is a property of each event, not of its row (see
+    :func:`continuum.storage.actionindex.index_order_for`), and it must be the
+    same number the fold would derive from that row's ``timestamp`` -- that is
+    what makes ``action_index_drift`` read zero on a freshly upgraded store.
+    Walking the merged stream in ``(timestamp, run_id, sequence)`` order and
+    letting later writes overwrite earlier ones reproduces the fold's
+    last-write-per-key exactly.
+    """
+    rows = conn.execute(
+        "SELECT timestamp, type, payload FROM events "
+        "WHERE type IN ('ACTION_RECORDED', 'ACTION_RECONCILED', 'ACTION_COMPENSATED') "
+        "ORDER BY timestamp, run_id, sequence"
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except json.JSONDecodeError:
+            continue
+        entry = index_entry_from_payload(EventType(row["type"]), payload)
+        if entry is None:
+            continue
+        key, run_id, action_id, status, action_json = entry
+        conn.execute(
+            "INSERT OR REPLACE INTO action_index(key, run_id, action_id, status, "
+            "updated_seq, action_json) VALUES (?, ?, ?, ?, ?, ?)",
+            (key, run_id, action_id, status, index_order_for(row["timestamp"]), action_json),
+        )
 
 
 def _up_v4() -> str:
@@ -315,7 +355,7 @@ def _up_v6() -> str:
 #: Forward migrations, keyed by the version they *produce*.
 MIGRATIONS: dict[int, Migration] = {
     2: Migration(version=2, name="add_versions_table_and_event_provenance", up=_up_v2()),
-    3: Migration(version=3, name="add_action_index_projection", up=_up_v3()),
+    3: Migration(version=3, name="add_action_index_projection", up=_up_v3_apply),
     4: Migration(version=4, name="add_langgraph_checkpoint_tables", up=_up_v4()),
     5: Migration(version=5, name="add_events_archive", up=_up_v5()),
     6: Migration(version=6, name="add_runs_parent_column", up=_up_v6()),
@@ -389,7 +429,10 @@ def migrate_schema(conn: sqlite3.Connection) -> int:
                 f"v{SCHEMA_VERSION}, and no automatic migration to v{target} "
                 f"is available; open it with a compatible build or reset it."
             )
-        conn.executescript(migration.up)
+        if callable(migration.up):
+            migration.up(conn)
+        else:
+            conn.executescript(migration.up)
         _stamp_version(conn, target)
         _record_migration(conn, target, migration.name)
         version = target

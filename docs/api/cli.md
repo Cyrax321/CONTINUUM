@@ -42,6 +42,8 @@ continuum --json <command>                    # machine-readable output
 | `briefing [--run-id <id>] [--raw-summary]` | Session-start context, curated by provenance: verified contract facts and system-derived lessons before agent-authored summaries, stale items quarantined with reasons. Read-only; `--raw-summary` is the diagnostic path to the verbatim agent summary (#742). |
 | `gate` | Decide whether a tool call may proceed (pre-tool-use hook). Read-only. |
 | `hooks` | Manage host-side observation hooks. |
+| `mcp install` | Register the MCP server with a host, baking resolved absolute paths (issue #834). Mutates host config. |
+| `mcp remove` | Remove the registration `mcp install` wrote. Mutates host config. |
 | `verify <run_id>` | Re-audit the event chain for tampering. |
 | `reconcile <run_id>` | Settle uncertain actions with registered probes. Mutates storage. |
 | `actions <run_id>` | List recorded side effects and flag uncertain outcomes. |
@@ -51,6 +53,8 @@ continuum --json <command>                    # machine-readable output
 | `attest-keygen` | Generate an Ed25519 signer key pair (PEM files). |
 | `attest <run_id>` | Sign a run's event chain into an attestation document. |
 | `attest-verify <run_id> --attest <file>` | Verify a signed attestation against the live chain. |
+| `lineage-issue <run_id> --key <file> --purpose <text>` | Issue a portable lineage token delegating a run's provenance. Read-only. |
+| `lineage-verify [<run_id>] --token <file>` | Verify a lineage token; exits 0 only when VALID. Read-only. |
 | `serve` | Run the Tier 0 newline-delimited JSON sidecar (no MCP dependency). |
 | `dashboard` | Serve the dashboard (presentation over run data). Listens on port 8000 by default (`--port`). |
 | `tui [--refresh <seconds>]` | Full-screen terminal dashboard: monitor and control runs, read-only until an action is confirmed (`q` quits). |
@@ -68,6 +72,7 @@ continuum --json <command>                    # machine-readable output
 | `rewind` | Rewind workspace and projection to a checkpoint. |
 | `watch` | Watch a run for liveness breach, optionally notify via webhook. See [liveness watch](../guides/liveness-watch.md). |
 | `notify-test [run_id]` | POST a test notification to every endpoint in the webhook registry. Verifies wiring without a real blockage. See [webhooks](../guides/webhooks.md). |
+| `providers <ACTION> <run_id>` | Configure the environment providers a run trusts at resume (`add`, `remove`, `list`, `check`). `add`/`remove` mutate storage; `check` resolves exactly as resume would. See [configured providers](../guides/environment-providers.md). |
 
 ## Examples
 
@@ -118,8 +123,8 @@ The authority-probe flow (`--authority`, verdicts, unblocking) is walked through
 in `docs/guides/authority-probes.md`.
 
 `reconcile <run_id>` reads its probe registry from `.continuum/reconcilers.json`
-unless `--config <path>` names another file, and each probe's `timeout` is in
-seconds and optional:
+unless `--config <path>` names another file, and each command probe's `timeout`
+is in seconds and optional:
 
 ```json
 {
@@ -135,6 +140,31 @@ number is refused rather than clamped, and the `probes` wrapper is required: a
 file that maps action types at the top level registers nothing, so `reconcile`
 reports every uncertain action as having no probe rather than saying the registry
 was wrong (issue #322).
+
+A probe may also be one of the built-in evidence types, selected by `type`
+(issue #268). A spec with no `type` is a command probe, so an existing registry
+keeps working unchanged:
+
+```json
+{
+  "probes": {
+    "write_report": {"type": "artifact_check", "path_key": "path"},
+    "tool.call": {"type": "otel_span", "identity": ["path"]}
+  }
+}
+```
+
+`artifact_check` settles a path-scoped action from the filesystem (existence plus
+a SHA-256 digest); `otel_span` settles it from a tool-call span already recorded
+in the run's observations, and the settlement event cites the span and trace ids.
+Each type's required keys are enforced and unknown keys are refused, so a typo'd
+spec fails loudly instead of registering a probe that settles nothing. The two
+types and the contradiction check are walked through in
+`docs/guides/evidence-reconciliation.md`.
+
+`--strict` escalates any action a probe could not settle to `REQUIRES_REVIEW`
+rather than leaving it pending, and a contradiction between the ledger and the
+filesystem makes the command exit 20 with the finding named.
 
 ## hooks
 
@@ -210,4 +240,46 @@ To remove all installed CONTINUUM hooks from a client settings file:
 ```bash
 continuum hooks remove claude-code
 ```
+
+## mcp
+
+`continuum mcp install` registers the MCP server with a host (Claude Code today,
+`HOST_PROFILES` in `src/continuum/mcp/install.py` holds the per-host data) so it
+connects no matter how the host was launched. The registration bakes values
+resolved at install time, because a committed file cannot express
+"`.venv/bin/continuum-mcp` on POSIX, `.venv\Scripts\continuum-mcp.exe` on
+Windows", and a bare command name is resolved by the host's own `CreateProcess`
+against *its* PATH, which is how a healthy install surfaces as
+`CONNECTION_CLOSED` (issue #834, see [the MCP docs](mcp.md)).
+
+What gets baked:
+
+- **Command**: the console script installed beside this interpreter (absolute
+  path), else the first `continuum-mcp` on PATH, else
+  `/path/to/python -u -m continuum.mcp`. The fallback is what makes venv and
+  editable installs work on Windows with zero PATH assumptions.
+- **`--db`**: an absolute database path (default: `./continuum.db` under the
+  project root, resolved), because the host's spawn cwd is neither documented
+  nor guaranteed to be the project root.
+- **`env`**: names the host's client in the mutating-tools allowlist, so the
+  registration exposes all thirteen tools rather than the three read-only ones.
+
+Before writing anything, the `mcp` SDK extra is verified by spawning a probe
+subprocess; when it is missing, install prints
+`pip install "continuum-agent[mcp]"` and exits non-zero without touching the
+config file.
+
+```bash
+continuum mcp install                        # local scope: ~/.claude.json, this project
+continuum mcp install --scope project        # the shared .mcp.json in the project root
+continuum mcp install --db /abs/path.db      # bake a specific database, stored absolute
+continuum mcp remove                         # take the registration back out
+```
+
+Install is idempotent: re-running it updates the entry in place (a moved
+virtualenv is repointed) and never duplicates. Remove deletes only entries
+this command wrote: the committed `.mcp.json` registration and anything
+hand-registered survive untouched. Both take `--settings <path>` to act on a
+file other than the default for the scope.
+
 

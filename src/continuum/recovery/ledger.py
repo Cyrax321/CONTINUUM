@@ -21,6 +21,12 @@ Three properties matter and the design defends all three:
   ledger stays bounded without losing its audit anchors or its tamper-evidence.
   Safety signals that must outlive compaction (such as the human-escalation
   marker written by ``record_attempt``) are recorded as anchors.
+* Budgets scoped to a dependency (issue #744). An attempt charges the allowance
+  of the dependency that owns it, not the run's, so one repeatedly failing
+  integration cannot exhaust the attempts a *different* dependency needs to
+  repair. Ownership that is unknown, conflicting or malformed never opens a
+  private budget: it falls back to the shared run-wide bucket, which can only
+  escalate sooner.
 
 The ledger is storage-agnostic: it talks to a small ``LedgerBackend`` (in-memory
 for tests, JSONL file for real use). For cross-process safety it can take a
@@ -50,6 +56,7 @@ __all__ = [
     "RecoveryLedgerEntry",
     "ReconcileReport",
     "RecoveryLedger",
+    "BudgetStatus",
     "LedgerBackend",
     "MemoryLedgerBackend",
     "FileLedgerBackend",
@@ -64,77 +71,49 @@ GENESIS = "genesis"
 HUMAN_REQUIRED = "human_required"
 
 
-def _dependency_gate(dependency: str) -> str:
-    """The gate name that records escalation for a single dependency (#1428).
+def _normalize_scope(value: object) -> str | None:
+    """Reduce one ownership signal to a canonical dependency key.
 
-    Namespaced rather than a bare ``human_required`` so the two escalations stay
-    distinguishable: a dependency that exhausted only its own allowance must not
-    set the run-wide marker, and readers that ask ``requires_human()`` for the
-    run as a whole must not see it either.
+    Declared dependency names are lower-cased (``PyYAML>=6`` and ``pyyaml`` are
+    one dependency, see :func:`continuum.analysis.depends._normalize_dep`), so a
+    scope differing only in case must not become two budgets. Anything that is
+    not a non-empty string is rejected: the caller gets the run-wide bucket
+    rather than a private one.
     """
-    return f"{HUMAN_REQUIRED}:{dependency}"
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
 
 
-def dependencies_for_contract(contract: RecoveryContract) -> list[str]:
-    """Derive external dependency names from a sealed recovery contract."""
-    deps: list[str] = []
-    for line in contract.evidence:
-        prefix = "localized recovery scoped to: "
-        if line.startswith(prefix):
-            raw = line[len(prefix) :].strip()
-            deps.extend([d.strip() for d in raw.split(",") if d.strip()])
-    for action in contract.required_actions:
-        prefix = "revalidate_dependency:"
-        if action.startswith(prefix):
-            dep = action[len(prefix) :].strip()
-            if dep and dep not in deps:
-                deps.append(dep)
-    return deps
+def resolve_scope(*candidates: object) -> str | None:
+    """Pick the dependency scope a recovery attempt is charged to.
 
+    Each candidate is one ownership signal: a dependency name, an action's
+    ``dep_scope``, or the resource set a scoped assessment was confined to (an
+    iterable of names, in which case every name it names counts as a candidate).
 
-def dependencies_for_action(action: Any) -> list[str]:
-    """Derive external dependency names from an action or action-like object."""
-    if action is None:
-        return []
-    dep = getattr(action, "dep_scope", None)
-    if isinstance(action, dict):
-        dep = action.get("dep_scope") or action.get("dependency")
-    if not dep or not isinstance(dep, str):
-        return []
-    if "," in dep:
-        return [d.strip() for d in dep.split(",") if d.strip()]
-    return [dep.strip()]
-
-
-def derive_recovery_dependencies(
-    *,
-    dependency: str | None = None,
-    dependencies: Iterable[str] | None = None,
-    contract: RecoveryContract | None = None,
-    action: Any | None = None,
-    scope: Iterable[str] | None = None,
-) -> list[str]:
-    """Derive external dependency names from explicit inputs, contract, action, or scope."""
-    out: list[str] = []
-    if dependency:
-        out.append(dependency)
-    if dependencies:
-        for d in dependencies:
-            if d and d not in out:
-                out.append(d)
-    if scope:
-        for s in scope:
-            if s and s not in out:
-                out.append(s)
-    if contract is not None:
-        for d in dependencies_for_contract(contract):
-            if d not in out:
-                out.append(d)
-    if action is not None:
-        for d in dependencies_for_action(action):
-            if d not in out:
-                out.append(d)
-    return out
+    Exactly one distinct name wins. Zero candidates (ownership unknown) or two
+    or more (ownership conflicting) both return ``None``, which is the run-wide
+    bucket: the attempt then costs the shared allowance instead of opening a
+    fresh private one, so ambiguity can only escalate sooner and can never grant
+    capacity the run did not have (issue #744, fail-closed by design).
+    """
+    found: set[str] = set()
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            names: tuple[object, ...] = (candidate,)
+        elif isinstance(candidate, (list, tuple, set, frozenset)):
+            names = tuple(candidate)
+        else:
+            names = ()
+        for name in names:
+            normalized = _normalize_scope(name)
+            if normalized is not None:
+                found.add(normalized)
+    if len(found) != 1:
+        return None
+    return next(iter(found))
 
 
 class LedgerError(RuntimeError):
@@ -173,14 +152,20 @@ class RecoveryLedgerEntry:
     anchor: bool
     created_at: datetime
     note: str = ""
-    #: The external dependency an ATTEMPT went through (#1428). ``None`` on every
-    #: other kind and on attempts not tied to one, so a ledger written before the
-    #: field existed loads unchanged.
-    dependency: str | None = None
+    #: The dependency whose attempt budget this entry charges. ``None`` is the
+    #: run-wide bucket: every entry written before scopes existed (issue #744)
+    #: lives there, and so does any attempt whose ownership could not be
+    #: established (see :func:`resolve_scope`).
+    scope: str | None = None
 
     def content(self) -> dict[str, Any]:
-        """The sealed portion of the entry, excluding its own hash."""
-        data: dict[str, Any] = {
+        """The sealed portion of the entry, excluding its own hash.
+
+        ``scope`` is included only when set, so a record written before scopes
+        existed still hashes exactly as it did then: the chain an auditor holds
+        from before this field must keep verifying after the upgrade.
+        """
+        content: dict[str, Any] = {
             "entry_id": self.entry_id,
             "run_id": self.run_id,
             "sequence": self.sequence,
@@ -192,9 +177,9 @@ class RecoveryLedgerEntry:
             "created_at": self.created_at.isoformat(),
             "note": self.note,
         }
-        if self.dependency is not None:
-            data["dependency"] = self.dependency
-        return data
+        if self.scope is not None:
+            content["scope"] = self.scope
+        return content
 
     def verify(self) -> bool:
         """Whether the entry's content hash still matches its content."""
@@ -216,6 +201,11 @@ class RecoveryLedgerEntry:
         raise on an embedded contract that does not validate: a record that
         did not come from ``to_record`` is a caller bug to surface, not a
         ledger condition to absorb.
+
+        ``scope`` is re-validated: a hand-edited record that carries a scope
+        which is not a non-empty string falls back to the run-wide bucket, so a
+        malformed scope cannot manufacture a fresh private budget out of a file
+        an attacker controls.
         """
         contract = rec.get("contract")
         return cls(
@@ -230,7 +220,7 @@ class RecoveryLedgerEntry:
             anchor=rec.get("anchor", False),
             created_at=datetime.fromisoformat(rec["created_at"]),
             note=rec.get("note", ""),
-            dependency=rec.get("dependency"),
+            scope=_normalize_scope(rec.get("scope")),
         )
 
 
@@ -364,6 +354,76 @@ class ReconcileReport:
     details: list[str]
 
 
+@dataclass(frozen=True)
+class BudgetStatus:
+    """The recovery-attempt allowance standing for one dependency scope.
+
+    Carries counts and the scope name only. The reason an attempt failed, the
+    arguments it carried and the files it touched are not budget facts, so they
+    stay out of anything a contract or a CLI prints (issue #744).
+    """
+
+    scope: str | None
+    attempts: int
+    max_attempts: int
+    escalated: bool
+
+    @property
+    def remaining(self) -> int:
+        """Attempts the scope still has, never negative."""
+        return max(0, self.max_attempts - self.attempts)
+
+    @property
+    def exhausted(self) -> bool:
+        """Whether the allowance has been spent."""
+        return self.attempts >= self.max_attempts
+
+    @property
+    def requires_human(self) -> bool:
+        """Whether this scope is now human-gated: escalated, or simply spent."""
+        return self.escalated or self.exhausted
+
+    def to_dict(self) -> dict[str, Any]:
+        """The JSON-safe form; the scope is named ``global`` when it is run-wide."""
+        return {
+            "scope": self.scope if self.scope is not None else "global",
+            "attempts": self.attempts,
+            "max_attempts": self.max_attempts,
+            "remaining": self.remaining,
+            "exhausted": self.exhausted,
+            "requires_human": self.requires_human,
+        }
+
+
+def _ceiling(limit: int, global_limit: int | None) -> int:
+    """The allowance actually enforced: never above the run-wide ceiling.
+
+    ``global_limit`` ``None`` means the caller imposed no run-wide ceiling, so
+    the scoped limit stands; otherwise the smaller of the two wins, so a
+    per-dependency allowance configured above the run-wide number still
+    escalates at that number.
+    """
+    if global_limit is None:
+        return limit
+    return min(limit, global_limit)
+
+
+def _marker_covers(entry: RecoveryLedgerEntry, scope: str | None) -> bool:
+    """Whether an anchored ``human_required`` marker blocks ``scope``.
+
+    A run-wide marker (no scope) blocks every scope, and any marker blocks the
+    run-wide query: an unknown-ownership caller must read a known escalation as
+    its own. A scoped marker leaves every other scope alone, which is the whole
+    point of per-dependency budgets.
+    """
+    marker = entry.scope
+    if marker is None:
+        return True
+    if scope is None:
+        return True
+    return marker == scope
+
+
 class RecoveryLedger:
     """Append-only, tamper-evident record of recovery decisions for a run."""
 
@@ -406,7 +466,7 @@ class RecoveryLedger:
         gate: str | None = None,
         anchor: bool = False,
         note: str = "",
-        dependency: str | None = None,
+        scope: str | None = None,
     ) -> RecoveryLedgerEntry:
         # Sequence and prev_hash must follow the highest-sequence entry, not
         # the last position of the backend's load order: after compact() the
@@ -427,7 +487,7 @@ class RecoveryLedger:
             anchor=anchor,
             created_at=utcnow(),
             note=note,
-            dependency=dependency,
+            scope=scope,
         )
         sealed = replace(partial, content_hash=stable_hash(partial.content()))
         self._backend.save(sealed)
@@ -442,7 +502,7 @@ class RecoveryLedger:
         gate: str | None = None,
         anchor: bool = False,
         note: str = "",
-        dependency: str | None = None,
+        scope: str | None = None,
     ) -> RecoveryLedgerEntry:
         return self._seal_and_save(
             run_id,
@@ -452,7 +512,7 @@ class RecoveryLedger:
             gate=gate,
             anchor=anchor,
             note=note,
-            dependency=dependency,
+            scope=scope,
         )
 
     def append_decision(
@@ -479,57 +539,63 @@ class RecoveryLedger:
         self,
         run_id: str,
         *,
+        scope: object = None,
         note: str = "",
         max_attempts: int | None = None,
-        dependency: str | None = None,
-        dependencies: Iterable[str] | None = None,
-        contract: RecoveryContract | None = None,
-        action: Any | None = None,
-        scope: Iterable[str] | None = None,
-        dependency_budgets: Mapping[str, Any] | None = None,
+        global_max_attempts: int | None = None,
     ) -> int:
-        """Record one recovery attempt and return the attempt count.
+        """Record one recovery attempt and return the new count for its scope.
 
-        When ``max_attempts`` is given and the untagged count reaches it, an anchored
-        ``human_required`` gate entry is written (once), so the escalation
-        survives later compaction of the ATTEMPT entries.
+        ``scope`` is any ownership signal (a dependency name, an action's
+        ``dep_scope``, the resource set a scoped assessment was confined to);
+        it is reduced by :func:`resolve_scope`, so unknown or conflicting
+        ownership charges the run-wide bucket rather than a private one.
 
-        When ``dependency``, ``dependencies``, ``contract``, ``action``, or ``scope``
-        names external resources, the attempt is tagged with each resolved dependency
-        and counted against that dependency's own ceiling (#1428, #1459), leaving the
-        global counter and other dependencies' allowances untouched. If an action
-        or contract targets multiple dependencies, one attempt entry is recorded per
-        dependency.
+        When ``max_attempts`` is given and the scope's new count reaches it, an
+        anchored ``human_required`` gate entry is written (once per scope), so
+        the escalation survives later compaction of the ATTEMPT entries. The
+        marker carries the scope, so dependency A's escalation does not block a
+        repair path for dependency B.
 
-        ``dependency_budgets`` is either the loaded budget registry or a bare
-        ``{dependency: limit}`` mapping; if omitted, it is loaded from
-        ``.continuum/budgets.json`` if that file exists.
+        ``global_max_attempts`` caps a scoped allowance at the run-wide ceiling:
+        a per-dependency limit configured above it still escalates at the
+        run-wide number, so a scope can never buy more attempts than the run
+        was ever allowed (issue #744).
         """
-        if dependency_budgets is None:
-            try:
-                from continuum.budgets import DEFAULT_BUDGETS_PATH, load_budgets
-
-                dependency_budgets = load_budgets(Path(DEFAULT_BUDGETS_PATH))
-            except Exception:
-                dependency_budgets = None
-
-        deps = derive_recovery_dependencies(
-            dependency=dependency,
-            dependencies=dependencies,
-            contract=contract,
-            action=action,
-            scope=scope,
-        )
-
+        resolved = resolve_scope(scope)
         with self._locked(run_id):
             entries = self._backend.load(run_id)
-            if not deps:
-                sealed = self._seal_and_save(
+            sealed = self._seal_and_save(
+                run_id, entries, kind=LedgerEntryKind.ATTEMPT, note=note, scope=resolved
+            )
+            count = (
+                sum(
+                    1
+                    for e in entries
+                    if e.kind == LedgerEntryKind.ATTEMPT.value and e.scope == resolved
+                )
+                + 1
+            )
+            limit = (
+                _ceiling(max_attempts, global_max_attempts) if max_attempts is not None else None
+            )
+            escalated = any(
+                e.kind == LedgerEntryKind.GATE.value
+                and e.gate == HUMAN_REQUIRED
+                and _marker_covers(e, resolved)
+                for e in entries
+            )
+            if limit is not None and count >= limit and not escalated:
+                label = resolved if resolved is not None else "global"
+                self._seal_and_save(
                     run_id,
-                    entries,
-                    kind=LedgerEntryKind.ATTEMPT,
-                    note=note,
-                    dependency=None,
+                    [*entries, sealed],
+                    kind=LedgerEntryKind.GATE,
+                    gate=HUMAN_REQUIRED,
+                    anchor=True,
+                    scope=resolved,
+                    note=f"attempt {count} for scope {label} reached the escalation "
+                    f"threshold {limit}",
                 )
                 count = (
                     sum(
@@ -554,173 +620,87 @@ class RecoveryLedger:
                     )
                 return count
 
-            current_entries = list(entries)
-            last_count = 0
-            for dep in deps:
-                sealed = self._seal_and_save(
-                    run_id,
-                    current_entries,
-                    kind=LedgerEntryKind.ATTEMPT,
-                    note=note,
-                    dependency=dep,
-                )
-                current_entries.append(sealed)
-                gate_entry = self._maybe_escalate_dependency(
-                    current_entries[:-1], sealed, dep, dependency_budgets, max_attempts
-                )
-                if gate_entry is not None:
-                    current_entries.append(gate_entry)
-                last_count = sum(
-                    1
-                    for e in current_entries
-                    if e.kind == LedgerEntryKind.ATTEMPT.value and e.dependency == dep
-                )
-            return last_count
+    def attempts(self, run_id: str, *, scope: object = None) -> int:
+        """The attempt count for ``scope``: how many of its ATTEMPT entries survive.
 
-    def _maybe_escalate_dependency(
-        self,
-        entries: Sequence[RecoveryLedgerEntry],
-        sealed: RecoveryLedgerEntry,
-        dependency: str,
-        dependency_budgets: Mapping[str, Any] | None,
-        global_max: int | None,
-    ) -> RecoveryLedgerEntry | None:
-        """Write the per-dependency escalation marker if this attempt used its ceiling.
-
-        ``sealed`` is already saved, so it counts but is not in ``entries``; the
-        gate entry is appended after it exactly the way the global one is, so
-        both markers sort after the attempt that tripped them.
-        """
-        limit = max_attempts_for_dependency(dependency_budgets, dependency, fallback=global_max)
-        if limit is None:
-            return None
-        gate = _dependency_gate(dependency)
-        if any(e.kind == LedgerEntryKind.GATE.value and e.gate == gate for e in entries):
-            return None  # already escalated: one marker is enough, and it is anchored
-        used = (
-            sum(
-                1
-                for e in entries
-                if e.kind == LedgerEntryKind.ATTEMPT.value and e.dependency == dependency
-            )
-            + 1
-        )
-        if used >= limit:
-            return self._seal_and_save(
-                run_id=sealed.run_id,
-                entries=[*entries, sealed],
-                kind=LedgerEntryKind.GATE,
-                gate=gate,
-                anchor=True,
-                dependency=dependency,
-                note=(
-                    f"dependency {dependency!r} reached its escalation threshold {limit} "
-                    f"(attempt {used})"
-                ),
-            )
-        return None
-
-    def attempts(
-        self,
-        run_id: str,
-        *,
-        dependency: str | None = None,
-        dependencies: Iterable[str] | None = None,
-        contract: RecoveryContract | None = None,
-        action: Any | None = None,
-        scope: Iterable[str] | None = None,
-    ) -> int:
-        """The run's recovery-attempt count: how many ATTEMPT entries survive.
-
-        With a dependency or derived dependencies, only attempts tagged for those
-        dependencies count (#1428, #1459). When none are specified, returns the count
-        of all surviving attempts for the run.
-
-        Compaction can lower this count, which is why escalation is recorded
-        as an anchored GATE entry (see ``record_attempt``) rather than
+        ``scope`` is reduced by :func:`resolve_scope`; without one this counts
+        the run-wide bucket, which is every attempt written before scopes
+        existed. Compaction can lower the count, which is why escalation is
+        recorded as an anchored GATE entry (see ``record_attempt``) rather than
         inferred from the number.
         """
-        deps = derive_recovery_dependencies(
-            dependency=dependency,
-            dependencies=dependencies,
-            contract=contract,
-            action=action,
-            scope=scope,
+        resolved = resolve_scope(scope)
+        return sum(
+            1
+            for e in self.entries(run_id)
+            if e.kind == LedgerEntryKind.ATTEMPT.value and e.scope == resolved
         )
-        if deps:
-            dep_set = set(deps)
-            return sum(
-                1
-                for e in self.entries(run_id)
-                if e.kind == LedgerEntryKind.ATTEMPT.value and e.dependency in dep_set
-            )
-        return sum(1 for e in self.entries(run_id) if e.kind == LedgerEntryKind.ATTEMPT.value)
 
     def requires_human(
         self,
         run_id: str,
         *,
+        scope: object = None,
         max_attempts: int = 3,
-        dependency: str | None = None,
-        dependencies: Iterable[str] | None = None,
-        contract: RecoveryContract | None = None,
-        action: Any | None = None,
-        scope: Iterable[str] | None = None,
-        dependency_budgets: Mapping[str, Any] | None = None,
+        global_max_attempts: int | None = None,
     ) -> bool:
-        """True once attempts have reached the human-in-the-loop threshold.
+        """True once ``scope`` has reached the human-in-the-loop threshold.
 
-        Also True if a persisted ``human_required`` marker exists, so a prior
-        escalation is not forgotten when compaction drops old ATTEMPT entries.
-
-        With ``dependency``, ``dependencies``, ``contract``, ``action``, or ``scope``,
-        the threshold is evaluated per dependency against its own ceiling (#1428, #1459):
-        one flaky external service escalating itself must not starve unrelated core
-        tasks of their recovery attempts. If any targeted dependency has exceeded its
-        ceiling, True is returned. A run-wide ``human_required`` marker still wins,
-        deliberately fail-closed in that direction.
+        Also True if a persisted ``human_required`` marker covers the scope, so
+        a prior escalation is not forgotten when compaction drops old ATTEMPT
+        entries. A run-wide marker covers every scope, and a scoped marker also
+        answers the run-wide query, because an unknown-ownership caller cannot
+        assume some other dependency's escalation is not its own (issue #744).
         """
-        if dependency_budgets is None:
-            try:
-                from continuum.budgets import DEFAULT_BUDGETS_PATH, load_budgets
-
-                dependency_budgets = load_budgets(Path(DEFAULT_BUDGETS_PATH))
-            except Exception:
-                dependency_budgets = None
-
+        resolved = resolve_scope(scope)
         entries = self.entries(run_id)
-        if any(e.kind == LedgerEntryKind.GATE.value and e.gate == HUMAN_REQUIRED for e in entries):
+        if any(
+            e.kind == LedgerEntryKind.GATE.value
+            and e.gate == HUMAN_REQUIRED
+            and _marker_covers(e, resolved)
+            for e in entries
+        ):
             return True
+        limit = _ceiling(max_attempts, global_max_attempts)
+        return self._attempt_count(entries, resolved) >= limit
 
-        deps = derive_recovery_dependencies(
-            dependency=dependency,
-            dependencies=dependencies,
-            contract=contract,
-            action=action,
-            scope=scope,
+    def budget(
+        self,
+        run_id: str,
+        *,
+        scope: object = None,
+        max_attempts: int = 3,
+        global_max_attempts: int | None = None,
+    ) -> BudgetStatus:
+        """The allowance standing for ``scope``: counts only, for a contract or
+        a CLI to print.
+
+        ``scope`` is reduced by :func:`resolve_scope`; the returned status names
+        the scope it actually resolved, so a caller whose ownership was
+        ambiguous can see that it fell back to the run-wide bucket rather than
+        silently getting a private one.
+        """
+        resolved = resolve_scope(scope)
+        entries = self.entries(run_id)
+        limit = _ceiling(max_attempts, global_max_attempts)
+        escalated = any(
+            e.kind == LedgerEntryKind.GATE.value
+            and e.gate == HUMAN_REQUIRED
+            and _marker_covers(e, resolved)
+            for e in entries
         )
-        if deps:
-            for dep in deps:
-                gate = _dependency_gate(dep)
-                if any(e.kind == LedgerEntryKind.GATE.value and e.gate == gate for e in entries):
-                    return True
-                limit = max_attempts_for_dependency(dependency_budgets, dep, fallback=max_attempts)
-                used = sum(
-                    1
-                    for e in entries
-                    if e.kind == LedgerEntryKind.ATTEMPT.value and e.dependency == dep
-                )
-                if limit is not None and used >= limit:
-                    return True
-            return False
+        used = self._attempt_count(entries, resolved)
+        return BudgetStatus(
+            scope=resolved,
+            attempts=used,
+            max_attempts=limit,
+            escalated=escalated,
+        )
 
-        return (
-            sum(
-                1
-                for e in entries
-                if e.kind == LedgerEntryKind.ATTEMPT.value and e.dependency is None
-            )
-            >= max_attempts
+    @staticmethod
+    def _attempt_count(entries: Sequence[RecoveryLedgerEntry], scope: str | None) -> int:
+        return sum(
+            1 for e in entries if e.kind == LedgerEntryKind.ATTEMPT.value and e.scope == scope
         )
 
     def record_gate(self, run_id: str, status: str, *, note: str = "") -> RecoveryLedgerEntry:

@@ -1258,7 +1258,6 @@ def build_server(
     ) -> str:
         """Claim an action in the ledger and report whether to proceed."""
         from continuum.actions.grants import GrantDenied, normalize_grant
-        from continuum.actions.idempotency import idempotency_key
         from continuum.actions.ledger import LedgerError
         from continuum.pinning import normalize_pinning
 
@@ -1302,47 +1301,28 @@ def build_server(
         # recovering agent depends on, turning a safety limit into the cause of
         # a duplicate side effect (issue #309).
         #
-        # The resolution here must be the same one claim performs, not the exact
-        # idempotency key alone: claim recognises an already-recorded action by
-        # shared identity tokens when the argument hash misses (argument drift),
-        # and an unscoped key by another run's record. A gate that settles under
-        # the derived key while claim answers from a different stored key sees a
-        # budget the claim never draws on, and refuses with "raise the limit" in
-        # front of an answer that needs no retry at all (issue #1080).
-        prior = ledger.resolve_prior(
+        # The resolution is claim's own rather than a re-derivation of it. The
+        # gate once looked the action up under the derived key alone, but the
+        # drift-tolerant lookup claim falls back to can answer from a different
+        # stored key, so the two readers disagreed about what a claim would find
+        # and the gate refused states claim would have answered (issue #1080).
+        resolution = ledger.resolve_claim(
             action_type,
             arguments,
             scoped_to_run=scoped_to_run,
             key=key,
         )
-        # Only a claim that opens a slot is an attempt. Everything else answers
-        # from the record it resolved to, whatever that record's status.
-        opens_slot = prior is None or prior[1].status in (
-            ActionStatus.FAILED,
-            ActionStatus.COMPENSATED,
-        )
 
-        if opens_slot:
+        if resolution.opens_slot:
             # Archive-aware (issue #734): attempts live in the event log, and
             # compaction moves failed attempts into the archive. Counting only
             # the live tail reset an exhausted budget after every compaction.
             events = ctx.storage.read_all_events(run_id)
             # Counted per key, so the budget caps retries of *this* operation
-            # rather than the run's distinct work of this type (issue #368).
-            # The key is the one claim will record under, which for a resolved
-            # prior is the stored key rather than the derived one.
-            claim_key = (
-                str(prior[0])
-                if prior is not None
-                else str(
-                    idempotency_key(
-                        action_type,
-                        arguments,
-                        scope=run_id if scoped_to_run else None,
-                        key=key,
-                    )
-                )
-            )
+            # rather than the run's distinct work of this type (issue #368). The
+            # key is the one claim would record under, which for a claim that
+            # opens a slot is the derived key.
+            claim_key = str(resolution.key)
             attempts = attempts_by_key(events, action_type).get(claim_key, 0)
             allowed, used, maximum = evaluate_budget(budgets, action_type, attempts)
             if not allowed:

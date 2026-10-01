@@ -17,6 +17,7 @@ Conventions
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -27,8 +28,18 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from continuum.security.hashing import make_id, stable_hash
 
+#: The recovery-contract compatibility version this build speaks (issue #764).
+#:
+#: It names the field set a sealed contract's integrity hash covers, and it is
+#: carried on every contract so a verifier can pick the right digest input
+#: without guessing. See ``continuum.recovery.contract`` for the version table
+#: and the forward/backward compatibility rules. Bump it only when a field
+#: changes whether it is hash-covered, never for a content change.
+CONTRACT_VERSION = 1
+
 __all__ = [
     "RunStatus",
+    "CONTRACT_VERSION",
     "StateStatus",
     "ActionStatus",
     "RecoveryMode",
@@ -59,6 +70,7 @@ __all__ = [
     "ModelState",
     "Run",
     "SemanticState",
+    "SubagentSpan",
     "ConsumedInputs",
     "Action",
     "EnvResource",
@@ -106,6 +118,7 @@ class StateStatus(StrEnum):
     """Validity status of semantic state entities."""
 
     VALID = "valid"
+    PARTIAL = "partial"
     STALE = "stale"
     CONFLICTED = "conflicted"
     UNKNOWN = "unknown"
@@ -166,6 +179,13 @@ class Component(StrEnum):
     APPROVAL = "approval"
     ENVIRONMENT = "environment"
     PIN = "pin"
+    VALIDATION_RULE = "validation_rule"
+    """A finding reported by a registered domain rule, not a state component.
+
+    Used when a rule fails closed (issue #761): the entry then names the rule
+    itself, because that is what needs attention. Well-behaved rules report
+    against the component they examined and never use this value.
+    """
 
 
 class DiffKind(StrEnum):
@@ -842,12 +862,20 @@ def _risk_score(value: Any) -> float:
     """Clamp a monitor's confidence into [0, 1] rather than reject it.
 
     A monitor reporting 1.4 or -0.1 is reporting nonsense, but the observation
-    behind it is still a signal worth keeping, and ingestion is fail-open.
+    behind it is still a signal worth keeping, and ingestion is fail-open. A
+    ``None``, unparseable or non-finite score therefore maps to ``0.0``, the
+    same fallback the pre-#1421 writer used, so a malformed score neither drops
+    the event on the write path nor blows up a later ``project()`` of a log
+    that already carries one.
     """
+    if value is None or isinstance(value, bool):
+        return 0.0
     try:
         score = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("score must be a number") from exc
+    except (TypeError, ValueError):
+        return 0.0
+    if math.isnan(score) or math.isinf(score):
+        return 0.0
     if score < 0.0:
         return 0.0
     if score > 1.0:
@@ -1056,6 +1084,26 @@ class ModelState(BaseModel):
     provider: str | None = None
     fingerprint: str | None = None
     model_specific_state: list[ModelSpecificState] = Field(default_factory=list)
+
+
+class SubagentSpan(BaseModel):
+    """Tracks a subagent delegation within a parent run.
+
+    When a main agent spawns a subagent, CONTINUUM records a SUBAGENT_SPAWNED
+    event. The subagent runs in its own run_id but is linked back to the parent
+    via this span, enabling end-to-end tracing of delegation chains.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    span_id: str = Field(default_factory=lambda: make_id("span"))
+    parent_run_id: str
+    subagent_run_id: str
+    task_description: str
+    spawned_at: datetime = Field(default_factory=utcnow)
+    completed_at: datetime | None = None
+    status: str = "active"  # active, completed, failed
+    result_summary: str | None = None
 
 
 class SemanticState(BaseModel):
@@ -1438,6 +1486,11 @@ class ComponentValidationEntry(BaseModel):
     component_id: str | None = None
     status: StateStatus
     detail: str = ""
+    #: Identifier of the registered rule that produced this entry, or None
+    #: when built-in validation produced it (issue #761). Findings a rule
+    #: reports are namespaced by this identifier in the contract and every
+    #: diagnostic surface, and are covered by the contract's integrity seal.
+    rule: str | None = None
 
 
 class StateValidationResult(BaseModel):
@@ -1468,6 +1521,14 @@ class RecoveryContract(BaseModel):
 
     run_id: str
     checkpoint_version: int = 0
+    #: The compatibility version whose digest rules this contract was sealed
+    #: under (issue #764). ``build_contract`` always writes the current one.
+    #: An absent key on the wire means the payload predates versioning, so the
+    #: field defaults to 0 and verifies against the pre-Phase-1 digest rules
+    #: rather than being read as a claim about the current field set.
+    #: Excluded from the hash payload: it selects the payload, it is not part
+    #: of it.
+    contract_version: int = Field(default=0)
     recovery_status: RecoverySafety
     verified: list[str] = Field(default_factory=list)
     invalidated: list[str] = Field(default_factory=list)

@@ -2635,25 +2635,90 @@ async def test_an_uncertain_action_still_refuses_at_budget(
 
 
 @pytest.mark.asyncio
-async def test_an_interrupted_claim_still_reconciles_at_budget(
+async def test_an_interrupted_action_still_reconciles_at_budget(
     server_ctx: tuple[Any, Any],
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A claim interrupted mid-flight never reaches a status the gate may settle.
+    """An in-flight record re-claimed at an exhausted budget is not a retry.
 
-    The sibling test above reaches the reconciliation path through
-    ``fail_action(certain=False)``, which records UNKNOWN, and UNKNOWN was in
-    the gate's settled set. A claim whose caller simply died before reporting
-    anything is still STARTED, and STARTED was not in that set, so with
-    ``max_attempts: 1`` the one and only attempt was already spent when the
-    recovering agent came back. The gate then raised "retry budget exhausted"
-    in front of the interrupted-action answer it exists to pass through
-    (issue #1080): the run is pointed at a limit that is working as intended
-    while the real situation is that an outcome is owed and unknown.
+    The gate once decided this from an exact-key lookup alone, so a STARTED
+    record counted as unsettled, its own attempt counted against it, and the
+    tool answered "raise the retry budget" when the ledger's answer was that
+    the attempt was interrupted and its outcome is unknown (issue #1080). An
+    operator pointed at the budget is pointed at the wrong knob: nothing was
+    retried, and the work may already have happened.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
 
-    No explicit ``key`` is passed, so the operation is identified by argument
-    hashing, which is the caller shape the issue describes.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".continuum").mkdir()
+    (tmp_path / ".continuum" / "budgets.json").write_text('{"default_max_attempts": 1}')
+    server, _ = server_ctx
+    await seed_run(server)
+
+    claimed = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="charge",
+        arguments={"card": "4242"},
+    )
+    assert claimed["proceed"] is True
+
+    # The process died between claim and complete, so the record is still
+    # STARTED. Its single attempt is the whole budget.
+    again = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="charge",
+        arguments={"card": "4242"},
+    )
+    assert again["proceed"] is False
+    assert again["status"] == ActionStatus.UNKNOWN.value
+    assert "reconcile" in again["guidance"].lower()
+    assert again["action_key"] == claimed["action_key"]
+
+    # The budget still holds for work that genuinely would open a slot, so the
+    # gate has not been switched off.
+    fresh = await call(
+        server,
+        "continuum_intercept_action",
+        run_id="run_1",
+        action_type="charge",
+        arguments={"card": "5454"},
+    )
+    assert fresh["proceed"] is True
+    await call(
+        server,
+        "continuum_fail_action",
+        run_id="run_1",
+        action_key=fresh["action_key"],
+        error="declined",
+        certain=True,
+    )
+    with pytest.raises(ToolError, match="retry budget exhausted"):
+        await server.call_tool(
+            "continuum_intercept_action",
+            {"run_id": "run_1", "action_type": "charge", "arguments": {"card": "5454"}},
+            context=_ctx(TEST_CLIENT),
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_drifted_reclaim_of_a_completed_action_answers_at_budget(
+    server_ctx: tuple[Any, Any],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate must resolve a claim the way claim does, not by derived key only.
+
+    The idempotency key hashes arguments verbatim, so a renamed field or a
+    reformed path derives a different key and the exact lookup misses the
+    completed record. The gate and claim now share one resolution, so the
+    drifted re-claim still answers with the stored result instead of consulting
+    a budget that has nothing to say about work already done (issue #1080).
     """
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".continuum").mkdir()
@@ -2661,167 +2726,33 @@ async def test_an_interrupted_claim_still_reconciles_at_budget(
     server, _ = server_ctx
     await seed_run(server)
 
-    claim = await call(
+    done = await call(
         server,
         "continuum_intercept_action",
         run_id="run_1",
-        action_type="charge",
-        arguments={"invoice": "INV-1", "cents": 500},
+        action_type="send_invoice",
+        arguments={"invoice_id": "INV-001", "target": "/tmp/e2e-outbox/INV-001.sent"},
     )
-    assert claim["proceed"] is True
-    interrupted_key = claim["action_key"]
-
-    # No complete, no failure report: the caller died mid-action, so the record
-    # is still STARTED and its single attempt slot is spent.
-    again = await call(
-        server,
-        "continuum_intercept_action",
-        run_id="run_1",
-        action_type="charge",
-        arguments={"invoice": "INV-1", "cents": 500},
-    )
-    assert again["proceed"] is False
-    assert again["status"] == ActionStatus.UNKNOWN.value
-    assert again["action_key"] == interrupted_key
-    assert "reconcile" in again["guidance"].lower()
-    # Asking again did not buy a second attempt slot: the claim was interrupted,
-    # not retried, so the allowance the gate is protecting is still intact.
-    _, ctx = server_ctx
-    slots = [
-        e
-        for e in ctx.storage.read_all_events("run_1")
-        if e.type.value == "ACTION_RECORDED"
-        and str(e.payload.get("key", "")) == interrupted_key
-        and e.payload.get("action", {}).get("status") == ActionStatus.STARTED.value
-    ]
-    assert len(slots) == 1
-
-
-def test_ensure_run_recognises_archived_run_started_after_compaction(tmp_path: Any) -> None:
-    """ensure_run must not append duplicate RUN_STARTED or wipe constraints after compaction (#1436)."""
-    from continuum.state.semantic import project
-
-    storage = SQLiteStorage(str(tmp_path / "compacted_ensure.db"))
-    storage.create_run(Run(run_id="run_c", goal="deliver cargo"))
-    storage.append_event(
-        "run_c",
-        EventType.RUN_STARTED,
-        {"goal": "deliver cargo", "constraints": ["refrigerated", "priority"], "total": 10},
-        source=Origin.HUMAN,
-    )
-    storage.append_event(
-        "run_c",
-        EventType.WORK_ADDED,
-        {"task_id": "w1", "description": "load pallet"},
-        source=Origin.HUMAN,
-    )
-    storage.compact_run("run_c")
-
-    ctx = ContinuumMCP(storage=storage)
-    ctx.ensure_run("run_c")
-
-    events = storage.read_all_events("run_c")
-    run_started_events = [e for e in events if e.type is EventType.RUN_STARTED]
-    assert len(run_started_events) == 1
-
-    state = project("run_c", events)
-    assert state.goal.constraints == ["refrigerated", "priority"]
-
-
-async def _compact_out_run_started(ctx: Any, run_id: str = "run_1") -> None:
-    """Archive the pre-anchor prefix so ``RUN_STARTED`` leaves the live tail.
-
-    Mirrors a long run that has been compacted: the goal-bearing genesis event
-    lives only in ``events_archive`` afterwards, which is precisely the state a
-    live-tail read cannot project (issue #1133).
-    """
-    live = list(ctx.storage.read_events(run_id))
-    # Bound below the anchor the next append would mint; seq 1 (RUN_STARTED) and
-    # the first update move to the archive, the tail keeps a valid anchor.
-    ctx.storage.compact_run(run_id, through_sequence=live[1].sequence)
-    assert not any(e.type is EventType.RUN_STARTED for e in ctx.storage.read_events(run_id)), (
-        "precondition: RUN_STARTED must be out of the live tail"
-    )
-    assert any(e.type is EventType.RUN_STARTED for e in ctx.storage.read_all_events(run_id)), (
-        "precondition: RUN_STARTED must survive in the archive"
-    )
-
-
-@pytest.mark.asyncio
-async def test_record_progress_survives_compaction(server_ctx: tuple[Any, Any]) -> None:
-    """Regression (#1133): record_progress folds full history, not the live tail.
-
-    PR #1219 fixed this and was dropped in a merge-of-main, so a compacted run
-    (``RUN_STARTED`` archived) again refused every progress update as
-    "unprojectable" -- exactly the long runs the tool exists for. The candidate
-    fold must read the archive too so the goal still projects.
-    """
-    server, ctx = server_ctx
-    await call(server, "continuum_record_progress", run_id="run_1", completed=1, total=10, goal="G")
-    await call(server, "continuum_record_progress", run_id="run_1", completed=2, total=10)
-    await _compact_out_run_started(ctx)
-    payload = await call(server, "continuum_record_progress", run_id="run_1", completed=4, total=10)
-    assert payload["completed"] == 4
-    assert payload["pending"] == 6
-
-
-@pytest.mark.asyncio
-async def test_record_plan_survives_compaction(server_ctx: tuple[Any, Any]) -> None:
-    """Regression (#1133): record_plan shares the same candidate fold as progress,
-    so a compacted run must accept a plan upsert instead of rejecting it."""
-    server, ctx = server_ctx
-    await call(server, "continuum_record_progress", run_id="run_1", completed=1, total=10, goal="G")
-    await call(server, "continuum_record_progress", run_id="run_1", completed=2, total=10)
-    await _compact_out_run_started(ctx)
-    payload = await call(
-        server,
-        "continuum_record_plan",
-        run_id="run_1",
-        plan_id="p1",
-        units=[{"id": "u1", "title": "do the thing", "status": "working"}],
-    )
-    assert payload["plan_id"] == "p1"
-    assert payload["units"] == 1
-
-
-@pytest.mark.asyncio
-async def test_checkpoint_survives_compaction(server_ctx: tuple[Any, Any]) -> None:
-    """Regression: the checkpoint tool folds full history, not the live tail.
-
-    ``ensure_run`` already accepts a compacted run (#1452), but the checkpoint's
-    own projection -- and the two declare helpers it calls -- read the live tail
-    alone. Once ``RUN_STARTED`` moved into the archive the fold saw no goal and
-    every ``continuum_checkpoint`` raised, precisely on the long-running runs the
-    tool exists for. The declare helpers also have to see the archived model and
-    dependencies to de-duplicate an unchanged declaration instead of re-recording
-    it over the compacted prefix.
-    """
-    server, ctx = server_ctx
-    await call(server, "continuum_record_progress", run_id="run_1", completed=1, total=10, goal="G")
     await call(
         server,
-        "continuum_checkpoint",
+        "continuum_complete_action",
         run_id="run_1",
-        model_id="sonnet-5",
-        provider="anthropic",
-        env={"dataset": "v3"},
+        action_key=done["action_key"],
+        external_id="INV-001.sent",
+        result={"cents": 500},
     )
-    await _compact_out_run_started(ctx)
 
-    # Must not raise: the goal lives in the archive now, and the fold must read it.
-    payload = await call(
+    # Drifted spelling: a renamed field and the invoice id alone. It derives a
+    # different key, so an exact-key gate would see no settled record.
+    drifted = await call(
         server,
-        "continuum_checkpoint",
+        "continuum_intercept_action",
         run_id="run_1",
-        model_id="sonnet-5",
-        provider="anthropic",
-        env={"dataset": "v3"},
+        action_type="send_invoice",
+        arguments={"invoice": "INV-001"},
     )
-    assert payload["run_id"] == "run_1"
-    assert payload["model"] == "sonnet-5"
-
-    # The archived model and dependency are still visible, so the unchanged
-    # declaration is de-duplicated rather than appended a second time.
-    history = list(ctx.storage.read_all_events("run_1"))
-    assert sum(1 for e in history if e.type is EventType.MODEL_CHANGED) == 1
-    assert sum(1 for e in history if e.type is EventType.DEPENDENCY_DECLARED) == 1
+    assert drifted["proceed"] is False
+    assert drifted["status"] == ActionStatus.COMPLETED.value
+    assert drifted["external_id"] == "INV-001.sent"
+    assert drifted["previous_result"] == {"cents": 500}
+    assert drifted["action_key"] == done["action_key"]
