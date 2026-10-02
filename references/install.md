@@ -26,7 +26,7 @@ uv pip install -e ".[dev]"
 uv pip install -e .
 
 # Composable extras
-uv pip install -e ".[mcp]"           # MCP server (13 stdio tools), requires mcp>=2.0
+uv pip install -e ".[mcp]"           # MCP server (14 stdio tools), requires mcp>=2.0
 uv pip install -e ".[otel]"          # OpenTelemetry bridge, API + SDK >=1.20
 uv pip install -e ".[browser]"       # BrowserAdapter, Playwright (run playwright install chromium separately)
 uv pip install -e ".[kubernetes]"    # KubernetesAdapter, Kubernetes client; kubectl and a cluster remain external
