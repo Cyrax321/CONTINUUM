@@ -580,24 +580,6 @@ Open an issue before submitting large PRs. See [CONTRIBUTING.md](CONTRIBUTING.md
   <img src="https://contrib.rocks/image?repo=Cyrax321/CONTINUUM" />
 </a>
 
-Thanks to our community contributors, ordered by contributions:
-[@Adhi1-2](https://github.com/Adhi1-2), [@abyyxhek](https://github.com/abyyxhek),
-[@Amiirhosseini](https://github.com/Amiirhosseini), [@yuki-fuyutsuki](https://github.com/yuki-fuyutsuki),
-[@vjymisal0](https://github.com/vjymisal0), [@adity982](https://github.com/adity982),
-[@dchaudhari7177](https://github.com/dchaudhari7177), [@tasodoufu](https://github.com/tasodoufu),
-[@anya-research](https://github.com/anya-research), [@lesbass](https://github.com/lesbass),
-[@Parthipashok04](https://github.com/Parthipashok04), [@Samearth17](https://github.com/Samearth17),
-[@stoppo22](https://github.com/stoppo22),
-[@timothyanderson096-ocdealcheck](https://github.com/timothyanderson096-ocdealcheck),
-[@unmoha](https://github.com/unmoha), [@aastha-m22](https://github.com/aastha-m22),
-[@as950118](https://github.com/as950118), [@asarakhatun17-lgtm](https://github.com/asarakhatun17-lgtm),
-[@challenge456](https://github.com/challenge456),
-[@gouthamkrishnak2003](https://github.com/gouthamkrishnak2003), [@ItzSaurav](https://github.com/ItzSaurav),
-[@mhaye9545](https://github.com/mhaye9545), [@Newer1107](https://github.com/Newer1107),
-[@okestroHjJeong](https://github.com/okestroHjJeong), [@quangshuynh](https://github.com/quangshuynh), [@Rahul-pamula](https://github.com/Rahul-pamula),
-[@Shaisolaris](https://github.com/Shaisolaris), [@VedantMadane](https://github.com/VedantMadane),
-[@zynx-real](https://github.com/zynx-real).
-
 ## Sponsor
 
 If CONTINUUM helps your agents recover reliably, consider sponsoring to support long term maintenance.
