@@ -45,6 +45,8 @@ __all__ = [
     "ContractVerification",
     "SUPPORTED_CONTRACT_VERSIONS",
     "build_contract",
+    "canonical_digest_input",
+    "contract_digest",
     "render_budget",
     "render_contract",
     "seal_contract",
@@ -198,20 +200,14 @@ def render_budget(budget: BudgetStatus) -> str:
     return line
 
 
-def _hashable_payload(contract: RecoveryContract) -> dict[str, Any]:
-    """Payload the integrity hash covers.
+def _liveness_digest_value(liveness: Any) -> Any:
+    """Strip the one wall-clock reading ``liveness`` carries.
 
-    ``created_at`` is wall-clock metadata, not terms. ``liveness`` carries one
-    wall-clock reading too (``last_append_age``, seconds since the last append
-    at assessment time), so two assessments of an unchanged run would seal
-    different hashes without this: the age is display, while the verdict fields
-    (``breached``, ``threshold_seconds``, ``phase``, ``breaches``) stay covered.
-
-    ``excluded`` drops the additive fields of a contract sealed before they
-    existed, so an upgrade does not invalidate a stored contract.
+    ``last_append_age`` is seconds since the last append at assessment time, so
+    two assessments of an unchanged run would seal different hashes without
+    this: the age is display, while the verdict fields (``breached``,
+    ``threshold_seconds``, ``phase``, ``breaches``) stay covered by the digest.
     """
-    payload = contract.model_dump(mode="json", exclude={"integrity_hash", "created_at", *excluded})
-    liveness = payload.get("liveness")
     if isinstance(liveness, dict):
         return {k: v for k, v in liveness.items() if k != "last_append_age"}
     return liveness
@@ -361,10 +357,21 @@ def verify_contract(contract: RecoveryContract) -> bool:
     """
     if contract.integrity_hash is None:
         return False
-    return any(
-        contract.integrity_hash == stable_hash(_hashable_payload(contract, excluded=group))
-        for group in _ADDITIVE_FIELDS
-    )
+    return verify_contract_detailed(contract).verified
+
+
+def _namespaced(entry: ComponentValidationEntry) -> str:
+    """A component's evidence name, qualified by id and by the rule that spoke.
+
+    A rule's findings are namespaced by its identifier so an operator reading
+    ``invalidated`` or ``evidence`` can tell a built-in finding from a domain
+    one, and can see *which* domain rule spoke (issue #761). Built-in findings
+    carry no suffix and read exactly as before.
+    """
+    ident = f"{entry.component.value}{f':{entry.component_id}' if entry.component_id else ''}"
+    if not entry.rule:
+        return ident
+    return f"{ident} [rule:{entry.rule}]"
 
 
 def build_contract(

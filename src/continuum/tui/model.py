@@ -22,7 +22,7 @@ from continuum.budgets import (
     evaluate_budget,
     load_budgets,
 )
-from continuum.checkpoint import CheckpointManager, clear_resume_pointer
+from continuum.checkpoint import CheckpointManager
 from continuum.events import EventType
 from continuum.models import ActionStatus, Origin, Run, RunStatus, StateStatus
 from continuum.recovery import RecoveryEngine

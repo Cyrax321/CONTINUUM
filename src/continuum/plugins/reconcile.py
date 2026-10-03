@@ -226,7 +226,9 @@ def resolve_reconcilers(
         return []
     if isinstance(source, Registry):
         return [
-            service for service in source.all_services() if isinstance(service, ActionReconciler)
+            service
+            for service in source.all_matching(ActionReconciler)
+            if isinstance(service, ActionReconciler)
         ]
     return [item for item in source if isinstance(item, ActionReconciler)]
 

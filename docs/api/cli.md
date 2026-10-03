@@ -141,6 +141,37 @@ file that maps action types at the top level registers nothing, so `reconcile`
 reports every uncertain action as having no probe rather than saying the registry
 was wrong (issue #322).
 
+### What a command probe must print
+
+The probe receives the full `Action` record as JSON on stdin (a probe that needs
+no context can ignore it) and answers on its **last stdout line**, in exactly one
+of these forms:
+
+```text
+occurred=true      # the effect happened; the action is settled completed
+occurred=false     # the effect did not happen; the action is settled failed
+occurred=unknown   # could not tell; the action stays pending
+```
+
+A JSON object or a bare JSON boolean also works -- `{"occurred": true}`,
+`{"occurred": null}`, a bare `true` or `false`. The exit code must be 0, or the
+run is an error rather than a verdict and settles nothing. Case is ignored, and
+only the last non-empty line is read, so a probe may print diagnostics above its
+verdict.
+
+The separator is `=`, not `:`. A probe that prints `occurred:false` has not
+answered false: it has answered nothing, because that line is not one of the
+forms above, and the action stays pending. This is the shape a shell `echo` and
+most config formats suggest, so `reconcile` names the colon when it sees one
+rather than reporting generic unparseable output:
+
+```text
+send_invoice: probe printed 'occurred:false'; the verdict uses ':' where a
+probe prints '=' -- print occurred=false rather than 'occurred:false'. A
+probe's last stdout line must be occurred=true, occurred=false or
+occurred=unknown (a JSON object like {"occurred": true} also works)
+```
+
 A probe may also be one of the built-in evidence types, selected by `type`
 (issue #268). A spec with no `type` is a command probe, so an existing registry
 keeps working unchanged:

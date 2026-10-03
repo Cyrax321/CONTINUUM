@@ -129,4 +129,3 @@ class AgentAdapter(ABC):
         manage context compaction.
         """
         pass  # noqa: B027 - intentional no-op default
-

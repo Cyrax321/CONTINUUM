@@ -92,7 +92,7 @@ from continuum.models import (
 from continuum.observability import render_dashboard
 from continuum.provenance.graph import build_provenance_graph, downstream_of
 from continuum.provenance_map import summarize
-from continuum.recovery import RecoveryEngine, render_contract
+from continuum.recovery import RecoveryDecision, RecoveryEngine, render_contract
 from continuum.runs import close_run
 from continuum.security.attestation import (
     generate_keypair,
@@ -3449,6 +3449,57 @@ def cmd_hooks_remove(args: argparse.Namespace, storage: Storage, out: Any, err: 
     return ExitCode.OK
 
 
+def _doctor_timeout(raw: str) -> float:
+    """Argparse type for ``mcp doctor --timeout``: finite and strictly positive.
+
+    The deadline bounds every probe, not just the handshake reads, so a value
+    that is not a usable wait is not a slow diagnosis but a wrong one: zero or
+    negative means the probes give up before they start, and a healthy install
+    is reported as entirely broken -- every check fails, including the import
+    and PATH probes that involve no waiting at all. Rejecting it here keeps the
+    failure at argument-parsing time, where the parser's own error handling can
+    name the flag, instead of deep inside a diagnosis.
+    """
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected a number of seconds, got {raw!r}") from exc
+    if math.isnan(value) or math.isinf(value) or value <= 0:
+        raise argparse.ArgumentTypeError(
+            f"--timeout must be a positive, finite number of seconds, got {raw!r}"
+        )
+    return value
+
+
+def cmd_mcp_doctor(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Diagnose why an MCP host cannot connect to the server (issue #835).
+
+    A host that fails to start ``continuum-mcp`` reports one opaque string
+    (``CONNECTION_CLOSED``), because the useful stderr never crosses the
+    stdio protocol pipe and a spawn failure happens before any CONTINUUM
+    code runs. The doctor works client-side instead: it checks the ``mcp``
+    extra in a fresh interpreter, resolves the command the way a host would,
+    and completes a real ``initialize`` handshake against it.
+
+    The import is lazy so the CLI never pulls in the server stack at startup
+    (the base install may not have it). Exit 0 only when the handshake
+    completed; every failure state names its cause and its fix.
+    """
+    from continuum.mcp.doctor import render_doctor, run_doctor
+
+    # ``--timeout`` is validated at parse time (see ``_doctor_timeout``), so
+    # this is the configured positive deadline rather than a best effort.
+    report = run_doctor(timeout=args.timeout)
+    _emit(
+        report,
+        render_doctor(report),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK if report["healthy"] else ExitCode.ERROR
+
+
 def _mcp_settings_path(args: argparse.Namespace) -> Path:
     """The file a ``mcp install``/``mcp remove`` acts on, per host and scope."""
     profile = MCP_HOST_PROFILES[args.host]
@@ -3814,6 +3865,39 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
         lines.append(f"  [!!] {action_type}: {detail}")
     for finding in discrepancies:
         lines.append(f"  [!!] {finding.action_type}: {finding.detail}")
+
+    # Plugin pass (issue #765): only actions the probes left pending are seen
+    # here, so a probe's settlement is never revisited or contradicted.
+    unresolved_after_plugins = 0
+    if plugins:
+        from continuum.plugins.reconcile import (
+            ReconciliationOutcome,
+            settle_with_reconcilers,
+        )
+
+        # Counted before the pass: an action the plugins escalate to
+        # REQUIRES_REVIEW leaves `pending()` (which only lists STARTED and
+        # UNKNOWN), so re-reading the ledger afterwards would report an
+        # escalated conflict as resolved and exit OK on a run a human must see.
+        open_before = len(ActionLedger(storage, args.run_id).pending())
+        plugin_report = settle_with_reconcilers(storage, args.run_id, plugins, dry_run=args.dry_run)
+        payload["plugins"] = plugin_report.as_dict()
+        unresolved_after_plugins = open_before - plugin_report.settled
+        lines.append(
+            f"plugin reconcilers: {len(plugins)} registered, "
+            f"settled: {plugin_report.settled} "
+            f"(occurred {len(plugin_report.settled_true)}, "
+            f"not-occurred {len(plugin_report.settled_false)}), "
+            f"escalated: {len(plugin_report.escalated)}"
+        )
+        for assessment in plugin_report.assessments:
+            # Only the escalated ones carry the warning sigil: a confirmed
+            # outcome is good news and must not render red in the terminal.
+            rendered = assessment.render().splitlines()[0]
+            if assessment.outcome is ReconciliationOutcome.CONFIRMED_OCCURRED:
+                lines.append(f"  [ok] {rendered}")
+            else:
+                lines.append(f"  [!!] {rendered}")
     if args.dry_run:
         lines.append("dry run: nothing was written")
     _emit(
@@ -3823,7 +3907,7 @@ def cmd_reconcile_auto(args: argparse.Namespace, storage: Storage, out: Any, err
         stream=out,
         palette=getattr(args, "_palette", None),
     )
-    remaining = len(pending) - report.settled
+    remaining = unresolved_after_plugins if plugins else len(pending) - report.settled
     if discrepancies:
         return ExitCode.REQUIRES_HUMAN
     return ExitCode.OK if remaining <= 0 else ExitCode.REQUIRES_HUMAN
@@ -4859,11 +4943,57 @@ def build_parser() -> argparse.ArgumentParser:
     # health is advisory only; it never gates, never moves mode, never changes exit code
     # (issue #401). It reports trust_score with per-dimension breakdown.
 
+    # The analyser folds the archive alongside the live log, so it stays correct
+    # after compaction (issue #1427).
+    report = with_run(add("report", cmd_report, "Analyse a run's history. Read-only."))
+    report.add_argument(
+        "--trajectory",
+        action="store_true",
+        help="distil claims, uncertain side effects, scar rate and stall sites "
+        "from the archive and the active log.",
+    )
+    # ``--json`` reaches this subparser through ``json_parent`` like every
+    # other one; the #677 SUPPRESS default it needed already lives there, so
+    # re-adding it here raised a conflicting-option error.
+
     providers = add(
         "providers",
         cmd_providers,
         "Configure the environment providers a run trusts at resume. Mutates storage.",
     )
+    providers.add_argument(
+        "providers_command",
+        choices=["add", "remove", "list", "check"],
+        metavar="ACTION",
+        help="add, remove, list or check configured providers.",
+    )
+    providers.add_argument("run_id", help="the run to configure.")
+    providers.add_argument(
+        "--provider",
+        help="provider name: a built-in "
+        f"({', '.join(sorted(BUILTIN_PROVIDER_NAMES))}) or one registered in-process.",
+    )
+    providers.add_argument(
+        "--resource",
+        action="append",
+        metavar="KEY",
+        help="a resource key this provider owns (repeatable); required for a "
+        "registered provider, derived for a built-in when omitted.",
+    )
+    providers.add_argument(
+        "--param",
+        action="append",
+        metavar="KEY=VALUE",
+        help="a provider parameter, JSON where it parses else text (repeatable); "
+        "a file provider takes paths and max_bytes, a git provider takes path.",
+    )
+    providers.add_argument(
+        "--disable",
+        action="store_true",
+        help="record the provider disabled: its resources report unknown at "
+        "resume rather than being assumed unchanged.",
+    )
+    providers.add_argument("--all", action="store_true", help="with remove: clear every provider.")
     # ``--json`` reaches this subparser through ``json_parent`` like every
     # other one; the #677 SUPPRESS default it needed already lives there, so
     # re-adding it here raised a conflicting-option error.
@@ -5185,8 +5315,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hooks_client(remove, cmd_hooks_remove)
 
-    mcp = add("mcp", cmd_mcp_install, "Register the MCP server with a host.")
+    mcp = add("mcp", cmd_mcp_doctor, "Diagnose and register the MCP server install.")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", metavar="ACTION", required=True)
+
+    mcp_doctor = mcp_sub.add_parser(
+        "doctor",
+        help="Diagnose why an MCP host cannot connect: SDK, command resolution, live handshake.",
+    )
+    mcp_doctor.add_argument(
+        "--timeout",
+        type=_doctor_timeout,
+        default=15.0,
+        help="seconds each probe waits before giving up (default: 15).",
+    )
+    mcp_doctor.set_defaults(func=cmd_mcp_doctor)
 
     def mcp_options(p: argparse.ArgumentParser, func: Any) -> None:
         """Give a ``mcp`` action its host, scope and settings override."""
@@ -5549,6 +5691,12 @@ def main(
         "notify-test",
         "mcp",
     ):
+        return int(args.func(args, None, out, err))
+
+    # A lineage token can be checked with no access to the source store at all:
+    # without a run_id there is nothing to read, and opening storage would only
+    # risk creating an empty database as a side effect of a read-only check.
+    if args.command == "lineage-verify" and not getattr(args, "run_id", None):
         return int(args.func(args, None, out, err))
 
     # Instant resume detection (issue #394): SessionStart hook reads

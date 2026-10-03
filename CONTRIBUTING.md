@@ -97,13 +97,13 @@ root.
 
 ```bash
 # Lint with ruff
-ruff check src/ tests/ examples/ scripts/ demo-run/
+ruff check src/ tests/ examples/ benchmarks/ scripts/ demo-run/
 
 # Auto-fix safe issues
-ruff check --fix src/ tests/ examples/ scripts/ demo-run/
+ruff check --fix src/ tests/ examples/ benchmarks/ scripts/ demo-run/
 
 # Format check
-ruff format --check src/ tests/ examples/ scripts/ demo-run/
+ruff format --check src/ tests/ examples/ benchmarks/ scripts/ demo-run/
 
 # Type-check with mypy (strict mode)
 mypy src/continuum
@@ -124,19 +124,19 @@ pre-commit install
 `.pre-commit-config.yaml` is committed at the repo root, so there is nothing to
 write yourself. It runs the same two ruff steps as the CI `Lint & Type-check`
 job, pinned to the same ruff version as the `dev` extra in `pyproject.toml` and
-scoped to the same five directories CI lints (`src/`, `tests/`, `examples/`,
-`scripts/`, `demo-run/`):
+scoped to the same directories CI lints (`src/`, `tests/`, `examples/`,
+`benchmarks/`, `_bugaudit/`, `scripts/`, `demo-run/`):
 
 ```yaml
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.5
+    rev: v0.16.8
     hooks:
       - id: ruff-check
         args: [--fix]
-        files: ^(src|tests|examples|scripts|demo-run)/
+        files: ^(src|tests|examples|benchmarks|_bugaudit|scripts|demo-run)/
       - id: ruff-format
-        files: ^(src|tests|examples|scripts|demo-run)/
+        files: ^(src|tests|examples|benchmarks|_bugaudit|scripts|demo-run)/
 ```
 
 Now `ruff check --fix` and `ruff format` run automatically on every `git commit`.

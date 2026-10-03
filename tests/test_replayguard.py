@@ -31,6 +31,7 @@ from continuum.replayguard import (
     langgraph_protected_node,
     protected_call,
 )
+from continuum.security.hashing import canonical_sanitize
 from continuum.storage import SQLiteStorage
 
 
@@ -274,14 +275,19 @@ def test_a_non_canonical_result_completes_instead_of_refiring(db: str) -> None:
     )
     assert kind2 is GuardKind.SKIP_DUPLICATE
     assert len(fired) == 1, "the replay must answer from the record, not re-fire the effect"
-    assert result2 == repr(result1), "the journal degrades to a description of the real result"
+    # The journal degrades to a description of the real result. The degradation
+    # is per leaf (#1394's canonical_sanitize), not the whole value: the Decimal
+    # is what has no canonical form, so only it becomes a string and the
+    # surrounding mapping keeps its shape.
+    assert result2 == canonical_sanitize(result1)
 
 
 def test_a_non_canonical_result_degrades_only_the_journal(db: str) -> None:
     # The caller keeps its real result from the call that ran the effect. Only
-    # the journal degrades, to a repr envelope canonical() can always hash, so a
+    # the journal degrades, to a form canonical() can always hash, so a
     # replay answers with an honest description of that value instead of firing
-    # it again (issue #1444).
+    # it again (issue #1444). The set is the only part with no canonical form,
+    # so #1394's per-leaf degradation replaces just it and leaves the rest alone.
     result = {"ids": {1, 2, 3}}
 
     kind1, result1 = protected_call(
@@ -301,7 +307,7 @@ def test_a_non_canonical_result_degrades_only_the_journal(db: str) -> None:
         fn=lambda: {"SHOULD_NOT_RUN": True},
     )
     assert kind2 is GuardKind.SKIP_DUPLICATE
-    assert result2 == repr(result)
+    assert result2 == canonical_sanitize(result)
 
 
 def test_exception_marks_uncertain_failure_and_reraises(db: str) -> None:

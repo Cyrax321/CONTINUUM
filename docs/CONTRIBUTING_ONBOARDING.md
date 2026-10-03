@@ -27,16 +27,16 @@ Welcome. This guide gets you from clone to green tests without re-deriving conte
 Install once with `uv sync --extra dev` (or `pip install -e ".[dev]"`).
 
 - Recommended: install the [pre-commit hooks](../CONTRIBUTING.md#pre-commit-hooks-optional-but-recommended) before committing.
-- Run all tests: `uv run pytest` or `pytest -q`. Expect `~2,864 collected, ~2,825 passed, ~34 skipped`
-  on main at this writing (`~2,864` collected).
+- Run all tests: `uv run pytest` or `pytest -q`. Expect `~3,356 collected, ~2,825 passed, ~34 skipped`
+  on main at this writing (`~3,356` collected).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
   Skips are environmental (Postgres without `CONTINUUM_TEST_POSTGRES_DSN`, adapter tests without `langgraph` or `openai-agents`).
 - Run a single area: `uv run pytest tests/test_checkpoint_phase4.py -v`
 - Fast loop (skip slow integration tests): `uv run pytest -m "not slow"` or `pytest -q -m "not slow"`
 - Full suite (as CI runs it, slow tests included): `uv run pytest` or `pytest -q`
-- Lint: `uv run ruff check src/ tests/ examples/ scripts/ demo-run/`
-- Format check: `uv run ruff format --check src/ tests/ examples/ scripts/ demo-run/`
-- Auto fix lint and format: `uv run ruff check --fix src/ tests/ examples/ scripts/ demo-run/` then `uv run ruff format src/ tests/ examples/ scripts/ demo-run/`
+- Lint: `uv run ruff check src/ tests/ examples/ benchmarks/ scripts/ demo-run/`
+- Format check: `uv run ruff format --check src/ tests/ examples/ benchmarks/ scripts/ demo-run/`
+- Auto fix lint and format: `uv run ruff check --fix src/ tests/ examples/ benchmarks/ scripts/ demo-run/` then `uv run ruff format src/ tests/ examples/ benchmarks/ scripts/ demo-run/`
 - Type check: `uv run mypy src/continuum` (strict, with the `pydantic.mypy` plugin)
 
 CI runs the same three jobs on Python 3.11, 3.12, and 3.13 and on lint and type check. A change must pass all four required status checks.

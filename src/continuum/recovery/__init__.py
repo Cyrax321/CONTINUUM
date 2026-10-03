@@ -111,6 +111,7 @@ __all__ = [
     "resolve_scope",
     "seal_contract",
     "verify_contract",
+    "verify_contract_detailed",
     "STATUS_CAUTION",
     "active_rules",
     "apply_rule_findings",

@@ -42,6 +42,21 @@ All notable changes to this project are documented here. The format follows
   evidence. See `docs/guides/environment-providers.md`.
 ### Fixed
 
+- **A probe that prints `occurred:false` is now told the separator is the
+  problem.** A command probe's verdict contract was documented only in the
+  module docstring, so the place an operator met it was the error, and the
+  error said `probe could not determine the outcome from output 'occurred:false'`
+  -- which sends someone hunting in their probe's logic when the cause is one
+  character away. `occurred:false` is the natural shape for a shell `echo` and
+  for most config formats, and it reads as unknown rather than as a verdict,
+  because the separator is `=`. The message now names the colon and shows the
+  line to print instead, and every other unparseable output carries the accepted
+  forms with it. The output contract is documented next to the registry schema
+  in `docs/api/cli.md` (the three verdicts, the JSON alternatives, the
+  last-non-empty-line rule, and the colon trap), and the authority probe's
+  `valid=` parser, which had the identical opaque message, gets the same
+  diagnosis.
+
 - **The Level 4 MCP inspector walkthrough now names the config the repository
   ships (#1395).** `references/testing.md` pointed
   `@modelcontextprotocol/inspector --cli` at `mcp-config.json`, which has never
@@ -1345,7 +1360,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~2,864 collected, ~2,825 passed, ~34 skipped on a minimal env).
+  (~3,356 collected, ~2,825 passed, ~34 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

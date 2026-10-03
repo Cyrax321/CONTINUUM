@@ -46,6 +46,7 @@ continuum providers add <run_id> --provider <n>  # trust an observer at resume. 
 continuum providers remove <run_id> [--all]      # retract configured observers. mutates
 continuum impact <run_id> --evidence <id>        # downstream impact of an evidence item
 continuum provenance <run_id>                    # show provenance DAG
+continuum policy-review [<run_id>]               # advisory per-action-type recovery report. read-only
 continuum report --trajectory <run_id>           # claims, uncertain side effects, scar rate, stall sites
 continuum record-plan <run_id> --plan-id <id>    # record structured plan upsert. mutates
 continuum export-evidence <run_id>               # export evidence as JSON lines

@@ -523,6 +523,19 @@ class ActionLedger:
         except Exception:
             return None
 
+    def _settlement_authorization_id(self, action: Action) -> str | None:
+        """The bucket a settlement of ``action`` draws from.
+
+        The claim that opened the slot pinned its bucket onto the record
+        (issue #1052), so the settlement reads it back and the two share one
+        counter whatever the caller sends between them. A record written before
+        the field existed carries ``None`` and is re-derived from its stored
+        arguments with no volatile declaration, which is the pre-#1052 rule.
+        """
+        if action.budget_authorization_id is not None:
+            return action.budget_authorization_id
+        return self._budget_authorization_id(action.action_type, None, dict(action.arguments), ())
+
     def _budget_refuse_if_exhausted(
         self,
         action_type: str,
@@ -657,6 +670,67 @@ class ActionLedger:
     def folded(self) -> dict[str, Action]:
         """Public view of the ``key -> newest action`` fold, archive included."""
         return self._replay()
+
+    def resolve_prior(
+        self,
+        action_type: str,
+        arguments: Mapping[str, Any] | None = None,
+        *,
+        volatile: Sequence[str] = (),
+        scoped_to_run: bool = True,
+        key: str | None = None,
+    ) -> tuple[IdempotencyKey, Action] | None:
+        """The record a claim for these inputs would defer to, or None.
+
+        The three lookups :meth:`claim` performs, extracted so a gate that runs
+        *before* claim answers the same question claim will act on. The run-level
+        retry budget (issue #240) is evaluated at the intercept site, before
+        claim opens a slot; resolving under the derived key while claim answers
+        from another one let an exhausted budget suppress the very dedup and
+        reconciliation answers the gate exists to pass through (issue #1080).
+
+        In order: the exact idempotency key; then, for an unscoped claim, another
+        run's record under the same run-global key (issue 34); then, only when the
+        caller asserted no identity of its own, the drift-tolerant
+        :meth:`_identity_match`. An explicit key *is* the identity, so the
+        fallbacks are skipped for it: no drift is possible, and the derived key is
+        the stored key.
+
+        Returns ``(stored_key, action)``. For an identity match the key is the
+        *stored* key rather than the freshly-derived one, because that is the key
+        claim records and the caller settles against. None when nothing
+        identifies a prior attempt, which is the only case a fresh slot opens.
+        """
+        explicit_key = key is not None
+        idem = idempotency_key(
+            action_type,
+            arguments,
+            scope=self.run_id if scoped_to_run else None,
+            volatile=volatile,
+            key=key,
+        )
+        existing = self.get(idem)
+        if existing is None and not scoped_to_run:
+            # The local log has no such action, but an unscoped key claims
+            # global identity, so another run may already hold it. Defer only
+            # to a live or undecided effect: a FAILED/COMPENSATED foreign
+            # record leaves nothing standing, and returning it here would
+            # bypass the drift-tolerant fallback below, which the claim
+            # ordering this extraction preserves kept in the path (issue 34).
+            foreign = self._foreign_action(idem)
+            if foreign is not None and foreign.status in (
+                ActionStatus.COMPLETED,
+                ActionStatus.STARTED,
+                ActionStatus.UNKNOWN,
+            ):
+                return IdempotencyKey(idem), foreign
+        if existing is not None:
+            return IdempotencyKey(idem), existing
+        if not explicit_key:
+            matched = self._identity_match(action_type, arguments, volatile)
+            if matched is not None:
+                return matched
+        return None
 
     def _foreign_action(self, key: str) -> Action | None:
         """Find ``key`` in another run's ledger, for unscoped claims.
@@ -1022,17 +1096,17 @@ class ActionLedger:
         # intercept handler, which has to decide *before* a slot is opened
         # whether to allow it. Doing the lookup twice in two places let the two
         # readers disagree about what a claim would find (issue #1080).
-        resolved = self.resolve_claim(
+        resolution = self.resolve_claim(
             action_type,
             arguments,
             volatile=volatile,
             scoped_to_run=scoped_to_run,
             key=key,
         )
-        key = resolved.key
+        key = resolution.key
         rendered_key = _explicit_rendered
-        existing = resolved.existing
-        foreign = resolved.foreign
+        existing = resolution.existing
+        foreign = resolution.foreign
 
         if existing is None and foreign is not None:
             # The local log has no such action, but an unscoped key claims

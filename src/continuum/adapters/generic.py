@@ -368,9 +368,7 @@ class GenericAgentAdapter(AgentAdapter):
         result_summary: str | None = None,
     ) -> None:
         """Record SUBAGENT_COMPLETED or SUBAGENT_FAILED for a subagent run."""
-        event_type = (
-            EventType.SUBAGENT_COMPLETED if success else EventType.SUBAGENT_FAILED
-        )
+        event_type = EventType.SUBAGENT_COMPLETED if success else EventType.SUBAGENT_FAILED
         payload: dict[str, Any] = {"subagent_run_id": subagent_run_id}
         if result_summary:
             payload["result_summary"] = result_summary

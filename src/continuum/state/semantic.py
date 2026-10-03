@@ -806,8 +806,9 @@ _NON_PROJECTING = frozenset(
         # liveness (issue #302): silence detection and recovery, never state
         EventType.LIVENESS_SILENCE_DETECTED,
         EventType.LIVENESS_RECOVERED,
-        # risk (issue #303): real-time risk signal, never state
-        EventType.RISK_OBSERVED,
+        # risk (issue #303/#1421) is folded into observed_risks above: an
+        # observation is knowledge the projection carries, so it has a case in
+        # _dispatch and must not also appear here.
         # restore/merge lineage (issue #1169): markers that a run's history was
         # spliced, read by the CLI lineage views; the splice itself replays
         # events that carry the state change, the marker carries none.
@@ -836,6 +837,20 @@ _NON_PROJECTING = frozenset(
         # environment (issue #762): the provider configuration is append-only
         # audit the resume path replays; it is not a field of run state.
         EventType.ENVIRONMENT_PROVIDERS_CONFIGURED,
+        # memory governance (issue #304, #567): tombstone an operator finds
+        # by polling the log, never a projected field
+        EventType.MEMORY_TOMBSTONED,
+        # delegation (subagent spans): the provenance graph collects
+        # parent/subagent spans for end-to-end tracing of delegation chains;
+        # the span is a fact about who ran what, not a field of this run's
+        # state.
+        EventType.SUBAGENT_SPAWNED,
+        EventType.SUBAGENT_COMPLETED,
+        EventType.SUBAGENT_FAILED,
+        # precompact hook: the receipt a context-compaction leaves behind. The
+        # validator reads it off the log to report how much the compaction
+        # kept versus archived; the receipt itself changes nothing projected.
+        EventType.PRECOMPACT_HOOK,
     }
 )
 

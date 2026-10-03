@@ -167,7 +167,11 @@ def test_a_truncated_upstream_reply_settles_the_claim_uncertain(
     class _TruncatedResponse:
         status = 200
 
-        def read(self) -> bytes:
+        # ``_read_bounded_response`` reads in 64 KiB chunks, so the fake has to
+        # accept a size the way ``http.client.HTTPResponse.read`` does; without
+        # it the truncation surfaces as a TypeError instead of an IncompleteRead
+        # and never reaches the HTTPException catch this test pins.
+        def read(self, amt: int | None = None) -> bytes:
             raise http.client.IncompleteRead(b"partial", 512)
 
     class _TruncatedConn:

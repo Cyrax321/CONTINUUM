@@ -260,6 +260,10 @@ class RecoveryEngine:
         *,
         validator: StateValidator | None = None,
         strict_unknown: bool = True,
+        ledger: RecoveryLedger | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
+        validation_rules: Iterable[ValidationRule] | None = None,
+        registry: Registry | None = None,
         providers: ProviderRegistry | None = None,
     ) -> None:
         """Build an engine.
@@ -281,6 +285,15 @@ class RecoveryEngine:
         self.ledger = ledger
         self.dependency_budgets = dependency_budgets
         self._manager = CheckpointManager(storage)
+        self._validation_rules: tuple[object, ...] = tuple(validation_rules or ())
+        if registry is not None:
+            # A seam is a Protocol: structural selection, then narrowing.
+            registered = tuple(
+                service
+                for service in registry.all_matching(ValidationRule)
+                if isinstance(service, ValidationRule)
+            )
+            self._validation_rules = (*self._validation_rules, *registered)
         #: Providers a configuration may resolve by name. Built-ins need no
         #: registration; this is how a CallableProvider becomes discoverable.
         self.providers = providers or ProviderRegistry()
@@ -294,6 +307,9 @@ class RecoveryEngine:
         replay: bool = True,
         scope: Iterable[str] | None = None,
         source_graph: SourceDependencyGraph | None = None,
+        ledger: RecoveryLedger | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
+        validation_rules: Iterable[ValidationRule] | None = None,
         provider_config: ProviderConfig | None = None,
     ) -> RecoveryDecision:
         """Decide how ``run_id`` may resume, without changing anything.
@@ -491,6 +507,55 @@ class RecoveryEngine:
             validation = apply_rule_findings(
                 validation, rule_findings, strict_unknown=self.validator.strict_unknown
             )
+
+        # Per-dependency recovery budgets (issues #1428, #1459). The ledger is
+        # optional: absent it both sets stay empty and the decision is
+        # byte-identical to a budget-free run.
+        active_ledger = ledger if ledger is not None else self.ledger
+        active_budgets = (
+            dependency_budgets if dependency_budgets is not None else self.dependency_budgets
+        )
+        if active_budgets is None and active_ledger is not None:
+            try:
+                from pathlib import Path
+
+                from continuum.budgets import DEFAULT_BUDGETS_PATH, load_budgets
+
+                active_budgets = load_budgets(Path(DEFAULT_BUDGETS_PATH))
+            except Exception:
+                active_budgets = None
+
+        exhausted_dependencies: set[str] = set()
+        run_budget_exhausted = False
+        if active_ledger is not None:
+            # A ledger that cannot be read costs the budget evidence and this
+            # gate, not the verdict: the budgets are advisory, so a read
+            # failure must not change the recovery decision.
+            try:
+                run_budget_exhausted = active_ledger.requires_human(
+                    run_id, dependency_budgets=active_budgets
+                )
+                candidate_deps: set[str] = set()
+                if scope is not None:
+                    candidate_deps.update(scope)
+                else:
+                    from continuum.models import Component
+
+                    for entry in validation.report.statuses:
+                        if entry.component == Component.EXTERNAL_DEPENDENCY and entry.component_id:
+                            candidate_deps.add(entry.component_id)
+                    for a in uncertain:
+                        if a.dep_scope:
+                            candidate_deps.add(a.dep_scope)
+
+                for dep in candidate_deps:
+                    if active_ledger.requires_human(
+                        run_id, dependency=dep, dependency_budgets=active_budgets
+                    ):
+                        exhausted_dependencies.add(dep)
+            except Exception:
+                run_budget_exhausted = False
+                exhausted_dependencies = set()
 
         plan = plan_repairs(
             validation.report.statuses,
@@ -736,10 +801,10 @@ class RecoveryEngine:
         in the decision, so a ledger that cannot be read costs a line of
         evidence and nothing else.
         """
-        if self._ledger is None:
+        if self.ledger is None:
             return None
         try:
-            return self._ledger.budget(run_id, scope=resolve_scope(scope, *plan.scopes))
+            return self.ledger.budget(run_id, scope=resolve_scope(scope, *plan.scopes))
         except Exception:
             return None
 

@@ -1058,14 +1058,21 @@ def test_replay_upto_survives_compaction(compacted_db: str) -> None:
         assert not any(e.type is EventType.RUN_STARTED for e in store.read_events("run_1"))
         assert any(e.type is EventType.RUN_STARTED for e in store.read_archived_events("run_1"))
 
-    for upto, completed in (("4", 2), ("13", 10), ("999", 10)):
+    for upto, expect in (
+        # A window inside the head replays the archived prefix the fix taught
+        # the fold to read, so the counts pin what it folded.
+        ("4", "Replayed 4 events -> 2 completed"),
+        ("13", "Replayed 13 events -> 10 completed"),
+        # 999 is past the head (13), so it reads as the whole run through the
+        # anchored path instead: the checkpoint plus the surviving tail. That
+        # is what proves the failure was about the archive rather than about
+        # the value of N -- the whole run is reachable without replaying it.
+        ("999", "Anchored replay: folded checkpoint v0 at sequence 13"),
+    ):
         code, out, err = run("--db", compacted_db, "replay", "run_1", "--upto", upto)
         assert code == ExitCode.OK, f"--upto {upto}: {err}"
-        # The window narrows the fold; 999 is past the head (13) and reads as
-        # the whole run, which is what proves the failure was about the archive
-        # rather than about the value of N.
-        assert f"{completed} completed" in out, f"--upto {upto} folded the wrong prefix: {out}"
-        assert "matches stored version" in out, f"--upto {upto}: {out}"
+        assert expect in out, f"--upto {upto} folded the wrong prefix: {out}"
+        assert "matches stored" in out, f"--upto {upto}: {out}"
 
 
 def test_replay_upto_still_names_a_genuinely_excluded_genesis(compacted_db: str) -> None:

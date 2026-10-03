@@ -45,7 +45,13 @@ from continuum.storage.base import (
     RunNotFound,
     Storage,
 )
-from continuum.storage.compaction import resolve_compaction_bound
+from continuum.storage.blob import (
+    audit_blob_descriptor,
+    get_payload_offload_threshold,
+    is_offload_descriptor,
+    load_blob_payload,
+    maybe_offload_payload,
+)
 from continuum.storage.migrations import SCHEMA_VERSION, migrate_schema
 
 __all__ = ["SQLiteStorage", "SCHEMA_VERSION"]
@@ -557,12 +563,25 @@ class SQLiteStorage(Storage):
         rejected (issue #705) instead of silently deleting the anchor and
         every live row, which would leave the next append minting a fresh
         genesis and fork the hash chain away from the archive.
-
+        """
         lv = self.latest_version(run_id)
         head = self.last_sequence(run_id)
-        needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
+        # A caller-supplied environment has to land on a checkpoint, so it
+        # forces the fresh-anchor path whatever the log state. In practice the
+        # other terms already cover every reachable state (a version's
+        # STATE_CHECKPOINTED annotation sits one past its source_sequence, so
+        # head always outruns it); this term keeps the caller's request from
+        # depending on that invariant (#1049).
+        needs_fresh_anchor = (
+            lv is None
+            or through_sequence is not None
+            or lv.source_sequence < head
+            or environment is not None
+        )
         if needs_fresh_anchor:
             try:
+                from continuum.checkpoint.manager import CheckpointManager
+
                 manager = CheckpointManager(self)
                 # The anchor must project over full history: after an earlier
                 # compaction the live tail begins at the anchor markers with
@@ -575,12 +594,11 @@ class SQLiteStorage(Storage):
                 # would leave a compacted run with no snapshot to diff a resumed
                 # capture against, and every resource would read as unknown
                 # (issue #762).
-                anchored = self.latest_checkpoint(run_id)
                 manager.checkpoint(
                     run_id,
                     state=state,
                     force_version=True,
-                    environment=anchored.environment if anchored is not None else None,
+                    environment=self._anchor_environment(run_id, environment),
                 )
             except Exception as exc:
                 raise ValueError(f"run {run_id!r} could not be anchored: {exc}") from exc
@@ -629,7 +647,13 @@ class SQLiteStorage(Storage):
 
         return {"archived": max(archived, 0)}
 
-    def read_archived_events(self, run_id: str, *, upto: int | None = None) -> Sequence[Event]:
+    def read_archived_events(
+        self,
+        run_id: str,
+        *,
+        upto: int | None = None,
+        rehydrate: bool = True,
+    ) -> Sequence[Event]:
         """Compacted events from the archive, oldest first."""
         query = "SELECT * FROM events_archive WHERE run_id = ?"
         params: list[Any] = [run_id]
@@ -639,7 +663,7 @@ class SQLiteStorage(Storage):
         query += " ORDER BY sequence ASC"
         with self._read() as conn:
             rows = conn.execute(query, params).fetchall()
-        return [self._row_to_event(row) for row in rows]
+        return [self._row_to_event(row, rehydrate=rehydrate) for row in rows]
 
     def foreign_action(self, key: str, *, exclude_run: str) -> Action | None:
         """Indexed cross-run ledger lookup (issue #216).

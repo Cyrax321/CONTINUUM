@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI 진입점
 continuum-mcp --help             # MCP 서버 진입점 ([mcp] 또는 [dev] 필요)
-pytest -q                        # 최소 환경에서 약 2,864개 수집, 약 2,825개 통과, 약 34개 스킵 (정확한 수는 환경에 따라 다름)
+pytest -q                        # 최소 환경에서 약 3,356개 수집, 약 2,825개 통과, 약 34개 스킵 (정확한 수는 환경에 따라 다름)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI가 강제하는 세 가지 게이트
 ```
@@ -394,7 +394,7 @@ RESUME < REPAIR_AND_RESUME < REPLAN < WAIT < REQUEST_HUMAN < ROLLBACK < ABORT
 
 ### 모듈 맵, 하나의 라이브러리, 많은 표면
 
-CONTINUUM은 하나의 라이브러리(`src/continuum`, 131 모듈) plus 대규모 테스트 스위트(185 테스트 파일, 약 2,864 테스트)이다. 모든 모듈은 하나의 해시 체인 이벤트 로그에 추가하고 재생한다.
+CONTINUUM은 하나의 라이브러리(`src/continuum`, 142 모듈) plus 대규모 테스트 스위트(204 테스트 파일, 약 3,356 테스트)이다. 모든 모듈은 하나의 해시 체인 이벤트 로그에 추가하고 재생한다.
 
 | 모듈 | 역할 |
 |:--|:--|
@@ -416,7 +416,7 @@ CONTINUUM은 하나의 라이브러리(`src/continuum`, 131 모듈) plus 대규�
 | `mcp/` | 12개 stdio 도구 plus 인가 `authz.py` 토큰 인증, allowlist, 확인 토큰 |
 | `serve/` | Sidecar stdio JSON 와이어 + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | 웹 대시보드 `app.py` `hitl.py`와 HITL 버튼 확인, 조정, 완료, 접두사 신뢰 조언, 고정 |
-| `cli/` | 49개 argparse 명령, 종료 코드가 평결, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 52개 argparse 명령, 종료 코드가 평결, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | OpenTelemetry 스팬 프로세서 브리지 |
 | `benchmark/` | CONTINUUM-Bench 하네스, 5개 크래시 시나리오 + 인자 드리프트 + 14 시나리오 복구 스위트 |
 
@@ -512,7 +512,7 @@ CONTINUUM은 내구성 있는 실행, 멱등한 사이드 이펙트 추적, LLM 
 
 2026년 초, 장시간 실행되는 에이전트가 추론이 아니라 복구에서 실패하는 것을 보았다. 체크포인트는 검증해야 할 증거가 아니라 계속하기 위한 증명으로 취급되고 있었다. Temporal, LangGraph, ACRFence 2603.20625, self conditioning 2509.09677을 조사한 결과, 간극이 이식 가능한 검증 기판임을 발견했다. 그것은, 시간 T의 상태와 지금의 세계가 주어졌을 때, 계속하는 것이 여전히 안전한지를 묻는 것이다.
 
-3주 만에 나는 하나의 불변식으로부터 CONTINUUM을 구축했다. 모든 사실은 그 기원을 가진다. 결과는 `verify()`를 가진 해시 체인 로그, 안정적인 키 중복排除를 가진 원장, 청구되지 않은 효과를 차단하는 게이트와 게이트웨이, 그리고 계약을 봉인하는 복구 엔진이다. 다섯 개의 심이 동일한 로그를 Claude Code, LangGraph, LangChain, OpenAI, HTTP, OpenTelemetry에 노출한다. 실제 킬과 약 2,864개의 테스트로 검증되었으며, 단순한 재생이 `50`으로 출력하는 곳에서 `0 중복`으로 출력한다.
+3주 만에 나는 하나의 불변식으로부터 CONTINUUM을 구축했다. 모든 사실은 그 기원을 가진다. 결과는 `verify()`를 가진 해시 체인 로그, 안정적인 키 중복排除를 가진 원장, 청구되지 않은 효과를 차단하는 게이트와 게이트웨이, 그리고 계약을 봉인하는 복구 엔진이다. 다섯 개의 심이 동일한 로그를 Claude Code, LangGraph, LangChain, OpenAI, HTTP, OpenTelemetry에 노출한다. 실제 킬과 약 3,356개의 테스트로 검증되었으며, 단순한 재생이 `50`으로 출력하는 곳에서 `0 중복`으로 출력한다.
 
 CONTINUUM은 **Anandhu P Shaji**([@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/))에 의해 생성되었고 원저자에 의해 유지된다. 오픈 소스이며 [Apache-2.0](LICENSE) 하에 있다. 커뮤니티 기여는 [CONTRIBUTING.md](CONTRIBUTING.md)를 통해 환영되며, [AUTHORS.md](AUTHORS.md)와 [graphs/contributors](https://github.com/Cyrax321/CONTINUUM/graphs/contributors)에서 크레딧을 받는다.
 
