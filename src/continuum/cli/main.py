@@ -92,7 +92,7 @@ from continuum.models import (
 from continuum.observability import render_dashboard
 from continuum.provenance.graph import build_provenance_graph, downstream_of
 from continuum.provenance_map import summarize
-from continuum.recovery import RecoveryEngine, render_contract
+from continuum.recovery import RecoveryDecision, RecoveryEngine, render_contract
 from continuum.runs import close_run
 from continuum.security.attestation import (
     generate_keypair,

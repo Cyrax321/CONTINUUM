@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 
 from continuum.actions.ledger import ActionLedger
 from continuum.analysis.depends import DependencyGraph as SourceDependencyGraph
+from continuum.budgets import max_attempts_for_dependency
 from continuum.checkpoint.manager import CheckpointManager, RestoredRun
 from continuum.environment.config import (
     ProviderConfig,
@@ -67,8 +68,17 @@ from continuum.models import (
 )
 from continuum.plugins import Registry, ValidationRule
 from continuum.recovery.contract import build_contract
-from continuum.recovery.ledger import BudgetStatus, RecoveryLedger, resolve_scope
-from continuum.recovery.observations import collect_observations
+from continuum.recovery.ledger import (
+    BudgetStatus,
+    RecoveryLedger,
+    derive_recovery_dependencies,
+    resolve_scope,
+)
+from continuum.recovery.observations import (
+    ObservationDrift,
+    collect_observations,
+    drifted_observations,
+)
 from continuum.recovery.planner import RepairPlan, plan_repairs
 from continuum.recovery.rules import active_rules, apply_rule_findings, run_validation_rules
 from continuum.recovery.summary import build_informed_retry
@@ -113,6 +123,46 @@ def _collect_repeating_step(steps: list[str], risk_event: Any) -> None:
         cleaned = step.strip()
         if cleaned not in steps:
             steps.append(cleaned)
+
+
+def _default_ceiling(budgets: Mapping[str, Any] | None) -> int:
+    """The run-wide attempt ceiling a budgets registry declares, if it declares one.
+
+    A registry that names individual dependencies sets ``default_max_attempts``
+    as the ceiling for every dependency it did not name individually, so that is
+    also the honest run-wide number. ``None``-shaped budgets mean no registry was
+    configured and the ledger's own default applies.
+    """
+    if not budgets:
+        return 3
+    default_max = budgets.get("default_max_attempts")
+    return (
+        int(default_max)
+        if isinstance(default_max, int) and not isinstance(default_max, bool)
+        else 3
+    )
+
+
+def _ceiling_for(
+    budgets: Mapping[str, Any] | None,
+    resolved: str | None,
+    max_attempts: int | None,
+) -> int:
+    """The attempt ceiling to charge one resolved scope under.
+
+    An explicit ``max_attempts`` wins: the caller knows the limit it is
+    enforcing. Otherwise a dependency the budgets registry names carries its own
+    ceiling (issue #1428), and anything else falls back to the run-wide default.
+    A scope that resolved to ``None`` (ambiguous or unknown ownership) charges the
+    run-wide bucket and takes its ceiling.
+    """
+    if max_attempts is not None:
+        return max_attempts
+    if resolved is not None:
+        per_dependency = max_attempts_for_dependency(budgets, resolved, fallback=None)
+        if per_dependency is not None:
+            return per_dependency
+    return _default_ceiling(budgets)
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +310,10 @@ class RecoveryEngine:
         *,
         validator: StateValidator | None = None,
         strict_unknown: bool = True,
+        validation_rules: Iterable[ValidationRule] | None = None,
+        registry: Registry | None = None,
+        ledger: RecoveryLedger | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
         providers: ProviderRegistry | None = None,
     ) -> None:
         """Build an engine.
@@ -274,13 +328,26 @@ class RecoveryEngine:
         protocol is treated as a rule. Rules from both sources add together.
         Registration stays explicit either way; CONTINUUM never loads a rule
         from a path or an entry point.
+
+        ``ledger`` and ``dependency_budgets`` carry the per-dependency attempt
+        budgets (issue #744) that gate how often a human decision may repeat
+        before it escalates.
         """
         self.storage = storage
         self.validator = validator or StateValidator(strict_unknown=strict_unknown)
         self.strict_unknown = strict_unknown
+        self._manager = CheckpointManager(storage)
+        self._validation_rules: tuple[object, ...] = tuple(validation_rules or ())
+        if registry is not None:
+            # A seam is a Protocol: structural selection, then narrowing.
+            registered = tuple(
+                service
+                for service in registry.all_matching(ValidationRule)
+                if isinstance(service, ValidationRule)
+            )
+            self._validation_rules = (*self._validation_rules, *registered)
         self.ledger = ledger
         self.dependency_budgets = dependency_budgets
-        self._manager = CheckpointManager(storage)
         #: Providers a configuration may resolve by name. Built-ins need no
         #: registration; this is how a CallableProvider becomes discoverable.
         self.providers = providers or ProviderRegistry()
@@ -294,6 +361,9 @@ class RecoveryEngine:
         replay: bool = True,
         scope: Iterable[str] | None = None,
         source_graph: SourceDependencyGraph | None = None,
+        validation_rules: Iterable[ValidationRule] | None = None,
+        ledger: RecoveryLedger | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
         provider_config: ProviderConfig | None = None,
     ) -> RecoveryDecision:
         """Decide how ``run_id`` may resume, without changing anything.
@@ -492,6 +562,82 @@ class RecoveryEngine:
                 validation, rule_findings, strict_unknown=self.validator.strict_unknown
             )
 
+        # Per-dependency attempt budgets (issue #744): a human gate that fires
+        # repeatedly is a loop, and the ledger is what counts the turns. The
+        # ledger counts per scope, and a dependency name is a scope; the ceiling
+        # for a named dependency comes from the budgets registry when one is
+        # configured (issue #1428), falling back to the run-wide default. Read
+        # before planning so an exhausted budget can both name a repair step and
+        # join the proposals below.
+        active_ledger = ledger if ledger is not None else self.ledger
+        active_budgets = (
+            dependency_budgets if dependency_budgets is not None else self.dependency_budgets
+        )
+        if active_budgets is None and active_ledger is not None:
+            try:
+                from pathlib import Path
+
+                from continuum.budgets import DEFAULT_BUDGETS_PATH, load_budgets
+
+                active_budgets = load_budgets(Path(DEFAULT_BUDGETS_PATH))
+            except Exception:
+                active_budgets = None
+
+        exhausted_dependencies: set[str] = set()
+        run_budget_exhausted = False
+        if active_ledger is not None:
+            # The budget is evidence, not an authority: a ledger that cannot be
+            # read costs the attempt counts and nothing else (issue #744), so a
+            # broken backend never changes the verdict on its own.
+            try:
+                resolved_scope = resolve_scope(*scope) if scope is not None else None
+                # A scoped assessment has declared ownership, so it asks about its
+                # own bucket: a marker for a dependency outside the scope is not
+                # its escalation to inherit (issue #744). An unscoped assessment
+                # owns everything and asks run-wide, where a scoped marker does
+                # answer True -- an ownership-less caller cannot assume some other
+                # dependency's escalation is not its own.
+                run_budget_exhausted = active_ledger.requires_human(
+                    run_id,
+                    scope=resolved_scope,
+                    max_attempts=_default_ceiling(active_budgets),
+                )
+                candidate_deps: set[str] = set()
+                if scope is not None:
+                    candidate_deps.update(scope)
+                else:
+                    from continuum.models import Component
+
+                    for entry in validation.report.statuses:
+                        if entry.component == Component.EXTERNAL_DEPENDENCY and entry.component_id:
+                            candidate_deps.add(entry.component_id)
+                    for a in uncertain:
+                        if a.dep_scope:
+                            candidate_deps.add(a.dep_scope)
+
+                for dep in candidate_deps:
+                    ceiling = max_attempts_for_dependency(active_budgets, dep)
+                    if ceiling is None:
+                        continue
+                    if active_ledger.requires_human(run_id, scope=dep, max_attempts=ceiling):
+                        exhausted_dependencies.add(dep)
+            except Exception:
+                run_budget_exhausted = False
+                exhausted_dependencies = set()
+
+        # Post-checkpoint file observations (#208): every file a hooked tool
+        # wrote after the checkpoint, re-checked against disk right now. A row
+        # that no longer matches is a file that moved after the recorded write
+        # by something the event log does not describe -- exactly the tamper the
+        # hooks run outside model control to catch (#210) -- so it feeds both
+        # the plan and the verdict below instead of decorating the contract.
+        after_sequence = 0
+        latest_version = self.storage.latest_version(run_id)
+        if latest_version is not None:
+            after_sequence = latest_version.source_sequence
+        observations = collect_observations(self.storage, run_id, after_sequence=after_sequence)
+        observation_drift = drifted_observations(observations)
+
         plan = plan_repairs(
             validation.report.statuses,
             uncertain_actions=uncertain,
@@ -499,6 +645,7 @@ class RecoveryEngine:
             unprojectable=unprojectable,
             exhausted_dependencies=exhausted_dependencies,
             run_budget_exhausted=run_budget_exhausted,
+            observation_drift=observation_drift,
         )
         liveness_advisory = None
         liveness_breaches = 0
@@ -598,6 +745,7 @@ class RecoveryEngine:
             risk_rationale=risk_rationale,
             exhausted_dependencies=exhausted_dependencies,
             run_budget_exhausted=run_budget_exhausted,
+            observation_drift=observation_drift,
         )
 
         # Authority lifecycle (issue #289c): consumed authorities block resume
@@ -645,13 +793,9 @@ class RecoveryEngine:
 
         reason = "; ".join(rationale) if rationale else validation.report.reason
 
-        # Post-checkpoint file observations (#208): informational evidence for
-        # the resuming agent, never a factor in the decision itself.
-        after_sequence = 0
-        latest_version = self.storage.latest_version(run_id)
-        if latest_version is not None:
-            after_sequence = latest_version.source_sequence
-        observations = collect_observations(self.storage, run_id, after_sequence=after_sequence)
+        # Observations were collected above the plan so drift could name a
+        # repair step; the rows themselves ride along here for the resuming
+        # agent, disk-checked and honestly labelled.
 
         # Build liveness section for contract
         liveness_section = None
@@ -736,10 +880,10 @@ class RecoveryEngine:
         in the decision, so a ledger that cannot be read costs a line of
         evidence and nothing else.
         """
-        if self._ledger is None:
+        if self.ledger is None:
             return None
         try:
-            return self._ledger.budget(run_id, scope=resolve_scope(scope, *plan.scopes))
+            return self.ledger.budget(run_id, scope=resolve_scope(scope, *plan.scopes))
         except Exception:
             return None
 
@@ -788,20 +932,30 @@ class RecoveryEngine:
         scope: Iterable[str] | None = None,
         dependency_budgets: Mapping[str, Any] | None = None,
     ) -> int:
-        """Record one recovery attempt in the configured RecoveryLedger."""
+        """Record one recovery attempt in the configured RecoveryLedger.
+
+        The caller may name the dependency any way it has it: explicitly, via
+        the contract or action the attempt settles, or as an assessment scope.
+        All spellings reduce to one ownership signal, and the ledger charges the
+        scope it resolves to (issue #744), with the ceiling the budgets registry
+        declares for that dependency when one is configured (issue #1428).
+        """
         if self.ledger is None:
             raise RuntimeError("RecoveryEngine was initialized without a RecoveryLedger")
         budgets = dependency_budgets if dependency_budgets is not None else self.dependency_budgets
-        return self.ledger.record_attempt(
-            run_id,
-            note=note,
-            max_attempts=max_attempts,
+        named = derive_recovery_dependencies(
             dependency=dependency,
             dependencies=dependencies,
             contract=contract,
             action=action,
             scope=scope,
-            dependency_budgets=budgets,
+        )
+        resolved = resolve_scope(*named)
+        return self.ledger.record_attempt(
+            run_id,
+            note=note,
+            scope=resolved,
+            max_attempts=_ceiling_for(budgets, resolved, max_attempts),
         )
 
     def requires_human(
@@ -820,15 +974,18 @@ class RecoveryEngine:
         if self.ledger is None:
             return False
         budgets = dependency_budgets if dependency_budgets is not None else self.dependency_budgets
-        return self.ledger.requires_human(
-            run_id,
-            max_attempts=max_attempts,
+        named = derive_recovery_dependencies(
             dependency=dependency,
             dependencies=dependencies,
             contract=contract,
             action=action,
             scope=scope,
-            dependency_budgets=budgets,
+        )
+        resolved = resolve_scope(*named)
+        return self.ledger.requires_human(
+            run_id,
+            scope=resolved,
+            max_attempts=_ceiling_for(budgets, resolved, max_attempts),
         )
 
     def _decide(
@@ -844,6 +1001,7 @@ class RecoveryEngine:
         risk_rationale: str | None = None,
         exhausted_dependencies: Collection[str] = (),
         run_budget_exhausted: bool = False,
+        observation_drift: Sequence[ObservationDrift] = (),
     ) -> tuple[RecoveryMode, tuple[str, ...]]:
         """Collect a proposal per signal and return the most cautious."""
         proposals: list[tuple[RecoveryMode, str]] = []
@@ -912,6 +1070,30 @@ class RecoveryEngine:
                 (
                     RecoveryMode.REPAIR_AND_RESUME,
                     f"{len(needs_repair)} component(s) need repair before continuing",
+                )
+            )
+
+        # A file the hooks recorded no longer matches disk (#208): something
+        # changed it after the recorded write and outside the event log, so
+        # content whose provenance the log cannot explain would underlie any
+        # further work. REPAIR_AND_RESUME, not REQUEST_HUMAN: unlike an external
+        # side effect, the file is right here and can be re-read and
+        # re-checkpointed locally, so an automatic step is an honest offer
+        # rather than a human gate that noise from unhooked tools would trip
+        # constantly.
+        if observation_drift:
+            changed = sum(1 for d in observation_drift if d.status == "changed")
+            missing = len(observation_drift) - changed
+            tally = ", ".join(
+                f"{count} {label}"
+                for count, label in ((changed, "changed"), (missing, "missing"))
+                if count
+            )
+            proposals.append(
+                (
+                    RecoveryMode.REPAIR_AND_RESUME,
+                    f"{len(observation_drift)} observed file(s) drifted since the "
+                    f"checkpoint ({tally})",
                 )
             )
 

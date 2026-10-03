@@ -42,6 +42,40 @@ All notable changes to this project are documented here. The format follows
   evidence. See `docs/guides/environment-providers.md`.
 ### Fixed
 
+- **Post-checkpoint file drift now moves the recovery verdict (#208).** A
+  `TOOL_COMPLETED` event records the `sha256` a hooked tool saw, but
+  `collect_observations` re-checks the file against disk and the result only
+  reached `post_checkpoint_observations` in the contract. A file that no longer
+  matched the recorded digest left `mode: resume` and the reason "all state
+  verified against the environment" standing — the exact out-of-band tamper the
+  observation hooks run outside model control to catch, reported but never
+  enforced. A drifted row is now a verdict signal: it proposes
+  `REPAIR_AND_RESUME` (so a changed or missing observed file can never read as
+  safe-to-resume) and becomes a blocking, automatic `reconcile_file` repair step
+  the contract names in `required_actions`. It stays below a human gate: unlike
+  an external side effect, the file is local and can be re-read and
+  re-checkpointed, so an automatic step is an honest offer rather than a gate
+  that noise from unhooked tools would trip constantly. A verified row remains
+  inert, so a clean run still resumes with no repairs.
+
+- **Code the 2026-09-30 merge batch dropped is restored.** Four long-lived
+  branches (#761 validation rules, #744 scoped budgets, #762 discoverable
+  providers, #1018 precompact adapter) merged into `main` together on 2026-09-30,
+  and each merge silently dropped pieces the others had landed: helper methods
+  (`StateValidator._latest_compaction`/`_apply_compaction_status`,
+  `Storage._validate_compaction_bound`/`_anchor_environment`,
+  `ActionLedger._settlement_authorization_id`/`resolve_prior`,
+  `Registry.all_services`), three `recovery/ledger` dependency helpers that
+  `__all__` still promised, the `--env` flag's effect on the compaction anchor
+  (#1049), and several `__all__` membership entries. The result imported on
+  Linux but not under the tarball export, `ruff` reported 469 errors, and 166
+  test modules failed at collection. Each piece is restored verbatim from the
+  commit that introduced it. `RecoveryEngine` reconciles the two ledger APIs the
+  merge left incompatible — #744's scope-based counting underneath #1459's
+  dependency-based callers — preserving #744's fail-closed marker semantics and
+  its "a ledger that cannot be read costs a line of evidence and nothing else"
+  advisory contract.
+
 - **The Level 4 MCP inspector walkthrough now names the config the repository
   ships (#1395).** `references/testing.md` pointed
   `@modelcontextprotocol/inspector --cli` at `mcp-config.json`, which has never

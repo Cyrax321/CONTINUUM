@@ -1,9 +1,9 @@
 """Post-checkpoint observations surfaced in the recovery contract (#208).
 
-The hooks record what landed on disk (#210); the contract now shows it to
-whoever resumes, disk-checked at assess time and honestly labelled when
-drift or deletion happened since. Informational only: these rows must never
-change the recovery decision.
+The hooks record what landed on disk (#210); the contract shows it to whoever
+resumes, disk-checked at assess time and honestly labelled when drift or
+deletion happened since. A row that no longer matches disk is a verdict
+signal, not decoration: it escalates the decision and names a repair step.
 """
 
 from __future__ import annotations
@@ -16,10 +16,11 @@ import pytest
 
 from continuum.checkpoint import CheckpointManager
 from continuum.events import EventType
-from continuum.models import Origin, Run
+from continuum.models import Origin, RecoveryMode, Run
 from continuum.recovery import RecoveryEngine, render_contract
 from continuum.recovery.contract import verify_contract
 from continuum.recovery.observations import collect_observations
+from continuum.recovery.planner import RepairKind
 from continuum.storage import SQLiteStorage
 
 
@@ -198,9 +199,12 @@ def test_render_shows_the_section(db: str, workspace: Path, assess_in_root) -> N
     assert "[verified]" in text
 
 
-def test_observations_never_change_the_decision(db: str, workspace: Path, tmp_path: Path) -> None:
-    """Two identical runs, one with an unclaimed-looking observation: the
-    decision fields must match, because provenance stays conservative."""
+def test_verified_observations_do_not_change_the_decision(
+    db: str, workspace: Path, tmp_path: Path
+) -> None:
+    """Two identical runs, one carrying an observation whose file still matches
+    disk: the decision fields must agree, because a file that still holds what
+    the hook recorded needs no repair (issue #208)."""
     clean = str(tmp_path / "clean.db")
     make_run(clean)
     with SQLiteStorage(clean) as store:
@@ -212,7 +216,7 @@ def test_observations_never_change_the_decision(db: str, workspace: Path, tmp_pa
         store.append_event("run_1", EventType.TASK_UPDATED, {"completed": 1, "total": 2})
     f = workspace / "g.txt"
     f.write_text("x")
-    observe(observed, f)
+    observe(observed, f, content="x")
 
     import os
 
@@ -230,6 +234,146 @@ def test_observations_never_change_the_decision(db: str, workspace: Path, tmp_pa
     # ...but the evidence itself is there.
     assert d_obs.contract.post_checkpoint_observations
     assert not d_clean.contract.post_checkpoint_observations
+
+
+def test_a_drifted_observation_escalates_the_decision(
+    db: str, workspace: Path, tmp_path: Path
+) -> None:
+    """Two identical runs, one whose observed file moved on disk after the hook
+    recorded it: the verdict must rise to REPAIR_AND_RESUME and the plan must
+    name the file, because a change the event log does not explain underlies
+    any further work on it (issue #208)."""
+    clean = str(tmp_path / "clean.db")
+    make_run(clean)
+
+    drifted = db
+    make_run(drifted)
+    f = workspace / "g.txt"
+    f.write_text("tampered")
+    observe(drifted, f, content="recorded")
+
+    import os
+
+    cwd = os.getcwd()
+    try:
+        os.chdir(workspace)
+        d_clean = RecoveryEngine(SQLiteStorage(clean)).assess("run_1")
+        d_obs = RecoveryEngine(SQLiteStorage(drifted)).assess("run_1")
+    finally:
+        os.chdir(cwd)
+
+    assert d_clean.mode is RecoveryMode.RESUME
+    assert d_obs.mode is RecoveryMode.REPAIR_AND_RESUME
+    (step,) = d_obs.plan.of_kind(RepairKind.RECONCILE_FILE)
+    assert step.target == str(f)
+    assert step.blocking
+    assert not step.requires_human
+    assert any("drifted since the checkpoint" in line for line in d_obs.rationale)
+
+
+def test_a_deleted_observation_escalates_the_decision(
+    db: str, workspace: Path, tmp_path: Path
+) -> None:
+    """An observed file removed from disk escalates just as drift does: the
+    digest can no longer be checked at all, which is the strongest form of
+    mismatch (issue #208)."""
+    make_run(db)
+    f = workspace / "gone.txt"
+    f.write_text("recorded")
+    observe(db, f, content="recorded")
+    f.unlink()
+
+    import os
+
+    cwd = os.getcwd()
+    try:
+        os.chdir(workspace)
+        decision = RecoveryEngine(SQLiteStorage(db)).assess("run_1")
+    finally:
+        os.chdir(cwd)
+
+    assert decision.mode is RecoveryMode.REPAIR_AND_RESUME
+    (step,) = decision.plan.of_kind(RepairKind.RECONCILE_FILE)
+    assert step.target == str(f)
+    assert "missing" in step.reason
+
+
+def test_the_drift_rationale_counts_changed_and_missing_separately(
+    db: str, workspace: Path, tmp_path: Path
+) -> None:
+    """One file tampered with and one deleted: the rationale names both counts
+    so a reader knows whether files moved or vanished, and labels a run with
+    only one kind without a zero for the other (issue #208)."""
+    make_run(db)
+    moved = workspace / "moved.txt"
+    moved.write_text("recorded")
+    observe(db, moved, content="recorded")
+    gone = workspace / "gone.txt"
+    gone.write_text("recorded")
+    observe(db, gone, content="recorded")
+    moved.write_text("tampered")
+    gone.unlink()
+
+    import os
+
+    cwd = os.getcwd()
+    try:
+        os.chdir(workspace)
+        decision = RecoveryEngine(SQLiteStorage(db)).assess("run_1")
+    finally:
+        os.chdir(cwd)
+
+    assert decision.mode is RecoveryMode.REPAIR_AND_RESUME
+    assert "2 observed file(s) drifted since the checkpoint (1 changed, 1 missing)" in " ".join(
+        decision.rationale
+    )
+
+    # A deletion-only run reports no spurious "0 changed".
+    only_gone = str(tmp_path / "only_gone.db")
+    make_run(only_gone)
+    g2 = workspace / "gone2.txt"
+    g2.write_text("recorded")
+    observe(only_gone, g2, content="recorded")
+    g2.unlink()
+    try:
+        os.chdir(workspace)
+        only = RecoveryEngine(SQLiteStorage(only_gone)).assess("run_1")
+    finally:
+        os.chdir(cwd)
+    assert "1 observed file(s) drifted since the checkpoint (1 missing)" in " ".join(only.rationale)
+
+
+def test_drift_does_not_outrank_a_human_gate(db: str, workspace: Path, tmp_path: Path) -> None:
+    """Drift proposes REPAIR_AND_RESUME; an uncertain side effect under
+    ``strict_unknown`` proposes REQUEST_HUMAN. The verdict takes the maximum on
+    the severity order, so the human gate must survive -- drift adds a repair,
+    it does not soften an escalation."""
+    from continuum.actions.ledger import ActionLedger
+
+    make_run(db)
+    f = workspace / "d.txt"
+    f.write_text("recorded")
+    observe(db, f, content="recorded")
+    f.write_text("tampered")
+
+    import os
+
+    with SQLiteStorage(db) as store:
+        # An action that never settled: under strict_unknown its reconciliation
+        # needs a person, which proposes REQUEST_HUMAN.
+        ActionLedger(store, "run_1").claim("github.create_issue", {})
+
+    cwd = os.getcwd()
+    try:
+        os.chdir(workspace)
+        decision = RecoveryEngine(SQLiteStorage(db), strict_unknown=True).assess("run_1")
+    finally:
+        os.chdir(cwd)
+
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    # The drift repair still lands, alongside the human review the action asked for.
+    assert decision.plan.of_kind(RepairKind.RECONCILE_FILE)
+    assert decision.plan.requires_human
 
 
 def test_sealed_contract_still_verifies_with_observations_present(

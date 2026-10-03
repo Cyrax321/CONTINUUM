@@ -38,15 +38,13 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
-from pathlib import Path
 from typing import Any
 
-from continuum.budgets import max_attempts_for_dependency
 from continuum.concurrency.lease import LeaseCoordinator
 from continuum.models import RecoveryContract, utcnow
 from continuum.security.hashing import make_id, stable_hash
@@ -114,6 +112,68 @@ def resolve_scope(*candidates: object) -> str | None:
     if len(found) != 1:
         return None
     return next(iter(found))
+
+
+def dependencies_for_contract(contract: RecoveryContract) -> list[str]:
+    """Derive external dependency names from a sealed recovery contract."""
+    deps: list[str] = []
+    for line in contract.evidence:
+        prefix = "localized recovery scoped to: "
+        if line.startswith(prefix):
+            raw = line[len(prefix) :].strip()
+            deps.extend([d.strip() for d in raw.split(",") if d.strip()])
+    for action in contract.required_actions:
+        prefix = "revalidate_dependency:"
+        if action.startswith(prefix):
+            dep = action[len(prefix) :].strip()
+            if dep and dep not in deps:
+                deps.append(dep)
+    return deps
+
+
+def dependencies_for_action(action: Any) -> list[str]:
+    """Derive external dependency names from an action or action-like object."""
+    if action is None:
+        return []
+    dep = getattr(action, "dep_scope", None)
+    if isinstance(action, dict):
+        dep = action.get("dep_scope") or action.get("dependency")
+    if not dep or not isinstance(dep, str):
+        return []
+    if "," in dep:
+        return [d.strip() for d in dep.split(",") if d.strip()]
+    return [dep.strip()]
+
+
+def derive_recovery_dependencies(
+    *,
+    dependency: str | None = None,
+    dependencies: Iterable[str] | None = None,
+    contract: RecoveryContract | None = None,
+    action: Any | None = None,
+    scope: Iterable[str] | None = None,
+) -> list[str]:
+    """Derive external dependency names from explicit inputs, contract, action, or scope."""
+    out: list[str] = []
+    if dependency:
+        out.append(dependency)
+    if dependencies:
+        for d in dependencies:
+            if d and d not in out:
+                out.append(d)
+    if scope:
+        for s in scope:
+            if s and s not in out:
+                out.append(s)
+    if contract is not None:
+        for d in dependencies_for_contract(contract):
+            if d not in out:
+                out.append(d)
+    if action is not None:
+        for d in dependencies_for_action(action):
+            if d not in out:
+                out.append(d)
+    return out
 
 
 class LedgerError(RuntimeError):
@@ -597,28 +657,7 @@ class RecoveryLedger:
                     note=f"attempt {count} for scope {label} reached the escalation "
                     f"threshold {limit}",
                 )
-                count = (
-                    sum(
-                        1
-                        for e in entries
-                        if e.kind == LedgerEntryKind.ATTEMPT.value and e.dependency is None
-                    )
-                    + 1
-                )
-                escalated = any(
-                    e.kind == LedgerEntryKind.GATE.value and e.gate == HUMAN_REQUIRED
-                    for e in entries
-                )
-                if max_attempts is not None and count >= max_attempts and not escalated:
-                    self._seal_and_save(
-                        run_id,
-                        [*entries, sealed],
-                        kind=LedgerEntryKind.GATE,
-                        gate=HUMAN_REQUIRED,
-                        anchor=True,
-                        note=f"attempt {count} reached the escalation threshold {max_attempts}",
-                    )
-                return count
+            return count
 
     def attempts(self, run_id: str, *, scope: object = None) -> int:
         """The attempt count for ``scope``: how many of its ATTEMPT entries survive.

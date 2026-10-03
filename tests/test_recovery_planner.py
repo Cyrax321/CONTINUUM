@@ -150,6 +150,80 @@ def test_settled_actions_need_no_reconciliation() -> None:
         assert not plan_repairs(uncertain_actions=[action])
 
 
+# --- file reconciliation (#208) -------------------------------------------- #
+
+
+def test_a_drifted_file_becomes_an_automatic_reconcile() -> None:
+    from continuum.recovery.observations import ObservationDrift
+
+    plan = plan_repairs(
+        observation_drift=[
+            ObservationDrift(path="out/a.txt", status="changed", tool="Write", sequence=7)
+        ]
+    )
+    (step,) = plan.steps
+    assert step.kind is RepairKind.RECONCILE_FILE
+    assert step.target == "out/a.txt"
+    assert step.blocking
+    # Automatic: the file is local, so the resuming agent can re-read it
+    # without a person mediating.
+    assert not step.requires_human
+    assert "sequence 7" in step.reason
+    assert "changed" in step.reason
+
+
+def test_a_missing_file_reconciles_the_same_way() -> None:
+    from continuum.recovery.observations import ObservationDrift
+
+    plan = plan_repairs(
+        observation_drift=[
+            ObservationDrift(path="out/b.txt", status="missing", tool="Edit", sequence=9)
+        ]
+    )
+    (step,) = plan.steps
+    assert step.kind is RepairKind.RECONCILE_FILE
+    assert "missing" in step.reason
+
+
+def test_only_drifted_rows_produce_steps() -> None:
+    """verified/recorded rows stay contract evidence and never plan a repair."""
+    plan = plan_repairs()
+    assert not plan
+
+
+def test_drifted_files_sort_by_target_like_every_other_step() -> None:
+    """Reconciliation steps share the plan's single sort: kind first, then
+    target, so two drifted files read in a stable order regardless of the
+    sequence the observations happened to arrive in."""
+    from continuum.recovery.observations import ObservationDrift
+
+    plan = plan_repairs(
+        observation_drift=[
+            ObservationDrift(path="c.txt", status="changed", tool="Write", sequence=3),
+            ObservationDrift(path="a.txt", status="changed", tool="Write", sequence=1),
+        ]
+    )
+    assert [s.target for s in plan.steps] == ["a.txt", "c.txt"]
+
+
+def test_file_reconciliation_sits_with_action_reconciliation() -> None:
+    """Both reconciliations run before any validation repair, so nothing is
+    revalidated against a file or an action whose outcome is still unknown."""
+    from continuum.recovery.observations import ObservationDrift
+
+    plan = plan_repairs(
+        [finding(Component.EXTERNAL_DEPENDENCY, component_id="dataset")],
+        uncertain_actions=[uncertain()],
+        observation_drift=[
+            ObservationDrift(path="c.txt", status="changed", tool="Write", sequence=3)
+        ],
+    )
+    assert [s.kind for s in plan.steps[:2]] == [
+        RepairKind.RECONCILE_ACTION,
+        RepairKind.RECONCILE_FILE,
+    ]
+
+
 # --- ordering and determinism ---------------------------------------------- #
 
 

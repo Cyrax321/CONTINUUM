@@ -624,3 +624,70 @@ Also: `Registry.all_services()` added as an unfiltered view, because
 Verification: 34 new tests in `tests/test_reconcile_plugins.py` (four categories,
 every failure mode, ordering, provenance, no-op, registry resolution, real-ledger
 settlement, CLI); all 34 passed; ruff clean and formatted.
+
+## Session 20, 2026-10-03 (audit finding 4 / #208: observed digests never affected the verdict; plus restoring the 2026-09-30 merge losses)
+
+The audit finding: README guarantee #3 says resume "checks file digests ...
+before saying safe", but `recovery/engine.py` commented the opposite
+("informational evidence for the resuming agent, never a factor in the decision
+itself") and the comment was the one telling the truth. `observation_status()`
+already computed `verified`/`changed`/`missing` correctly and the contract
+surfaced it in `post_checkpoint_observations` — nothing could move the verdict.
+Ranked medium because the information *was* present, so the omission looked
+deliberate; the fix could have been a README correction instead. It was not
+deliberate: the hooks run outside model control precisely so a model cannot hide
+a change, and leaving that unenforced defeats their entire purpose.
+
+- `recovery/observations.py`: `ObservationDrift` (path, status, tool, sequence)
+  and `drifted_observations()`, lifting the `changed`/`missing` rows. Order
+  follows `collect_observations` (newest first) to match the contract section a
+  reader compares against; the plan applies its own sort afterwards.
+- `recovery/planner.py`: new `RepairKind.RECONCILE_FILE`. Automatic, not human:
+  unlike an external side effect, the file is local, re-readable and
+  re-checkpointable, so a human gate would be tripped constantly by noise from
+  unhooked tools. Sorted after `RECONCILE_ACTION` — an uncertain external effect
+  outranks a local file.
+- `recovery/engine.py`: drift proposes `REPAIR_AND_RESUME` with a rationale that
+  counts changed and missing separately and omits zero counts, so
+  `1 observed file(s) drifted since the checkpoint (1 missing)` rather than a
+  misleading "(0 changed, 1 missing)". Verified rows stay inert.
+- `recovery/guidance.py`: the new kind needs its own `human_steps_for` branch
+  (#1381's producer/consumer lockstep), naming the reconciliation rather than
+  implying a command exists: read the file, account for the change, re-checkpoint.
+
+Verified end-to-end, not just at the API: a real `continuum observe` hook payload
+(`tool_name`/`tool_input.file_path`, digest computed from disk), checkpoint, then
+tamper the file out of band. Clean run: `mode: resume`, exit 0. Tampered:
+`mode: repair_and_resume`, exit 10, `required_actions: ['reconcile_file:invoice.txt']`,
+`contract.reason` carrying the tally, and the guidance step rendered. The first
+two smoke attempts failed on payload shape and on sequencing — observations must
+fall *after* the latest checkpoint's `source_sequence` — which is itself the
+confirmation that the pre-existing machinery was never wired in.
+
+Prerequisite work, because the tree would not otherwise run: the 2026-09-30
+merge batch (#761/#744/#762/#1018, merged as #1271/#1272/#1018/#1273) dropped
+code from every branch the others had landed. Restored verbatim from the
+introducing commits: `StateValidator._latest_compaction`/
+`_apply_compaction_status` (7ceb8bf2), `Storage._validate_compaction_bound`
+(9e20e30a), `ActionLedger._settlement_authorization_id` (840b6c0c) and
+`resolve_prior` (e7978db2, plus 765e4bc8's live-or-undecided foreign fix),
+`Registry.all_services` (e99f3d1e), the #1049 `--env`-on-anchor threading
+(bf9ffe2e), three `recovery/ledger` dependency helpers and four `__all__`
+members. `RecoveryEngine` now translates #1459's dependency-based public API
+onto #744's scope-based ledger via `derive_recovery_dependencies` +
+`resolve_scope` + per-dependency ceilings, keeping #744's fail-closed marker rule
+(pinned by `test_scoped_escalation_still_answers_the_run_wide_query`) and its
+advisory-budget contract on ledger-read failure.
+
+Evidence the baseline was broken, and the fix did not cause the remainder:
+pristine `git archive upstream/main` cannot `import continuum` (166 test modules
+fail at collection), reports 469 `ruff` errors and 10 `mypy` errors in
+`actions/ledger.py` alone. This tree: 3,367 tests collect, 87 fail — all in
+modules the audit finding does not touch (docs count re-syncs, provider config,
+trajectory report, the #1459-vs-#744 ledger test suite) and each of which fails
+identically or harder on pristine upstream. My touched files are ruff- and
+mypy-clean.
+
+Verification: 125 tests across the five affected suites pass; `test_compaction`
+30/30 after the #1049 restore; `test_action_ledger` 113/113 after `resolve_prior`.
+Not pushed, per instruction.
