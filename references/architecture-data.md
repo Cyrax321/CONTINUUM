@@ -74,8 +74,7 @@ one per `@mcp.tool`-decorated function in `server.py`.
 | `continuum_compensate_action` | mutating | `server.py:1554` |
 
 Read-only annotation is `ToolAnnotations(read_only_hint=True)`
-(`server.py:618`); mutating is `read_only_hint=False` (`server.py:619`).
-Read-only count = 3, mutating count = 10.
+(`server.py:618`); mutating is `read_only_hint=False` (`server.py:619`).Read-only count = 3, mutating count = 10.
 
 Auth gate (allowlist for mutating tools):
 - Primary env var: `CONTINUUM_MCP_ALLOW` (`authz.py:72`, `POLICY_ENV_VAR`).

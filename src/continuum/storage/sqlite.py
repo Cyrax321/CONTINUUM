@@ -45,6 +45,13 @@ from continuum.storage.base import (
     RunNotFound,
     Storage,
 )
+from continuum.storage.blob import (
+    audit_blob_descriptor,
+    get_payload_offload_threshold,
+    is_offload_descriptor,
+    load_blob_payload,
+    maybe_offload_payload,
+)
 from continuum.storage.compaction import resolve_compaction_bound
 from continuum.storage.migrations import SCHEMA_VERSION, migrate_schema
 
@@ -454,7 +461,43 @@ class SQLiteStorage(Storage):
             prev_hash=head["hash"] if head else None,
         ).sealed()
         self._insert_event(conn, event, raw_payload=raw_payload)
+        if type is EventType.RUN_COMPLETED:
+            # The log is the source of truth: a recorded RUN_COMPLETED *is* the
+            # run finishing, so the run row must flip in the same transaction.
+            # Appending the event and flipping the row were two separate steps
+            # every caller had to remember to pair, and the one caller that
+            # cannot - an adapter or an agent closing its own run over MCP, with
+            # no access to update_run - left the row on "started" forever. A
+            # finished run then stayed get_active_run()'s answer, and the
+            # SessionStart banner advertised it as interrupted and pending on
+            # every fresh session, which is the hijack cmd_complete exists to
+            # prevent.
+            self._complete_run(conn, run_id, event.timestamp.isoformat())
         return event
+
+    def _complete_run(self, conn: sqlite3.Connection, run_id: str, at: str) -> None:
+        """Flip a run to COMPLETED and clear its SessionStart pointer.
+
+        Called only from :meth:`_append_chained` when the appended event is
+        ``RUN_COMPLETED``, so the row and the log agree no matter who appended
+        it. ``at`` is the event's own timestamp, so the row's ``updated_at``
+        names the moment the run finished rather than a clock read a few
+        microseconds later.
+
+        :func:`continuum.checkpoint.manager.clear_resume_pointer` is imported
+        here rather than at module scope for the same reason ``compact``
+        imports ``CheckpointManager`` here: the checkpoint layer imports this
+        one, so a top-level import would be circular. A pointer naming another
+        run is left alone, and a missing or unreadable file is not an error, so
+        this cannot fail the append it rides on.
+        """
+        conn.execute(
+            "UPDATE runs SET status = ?, updated_at = ? WHERE run_id = ?",
+            (RunStatus.COMPLETED.value, at, run_id),
+        )
+        from continuum.checkpoint.manager import clear_resume_pointer
+
+        clear_resume_pointer(run_id)
 
     def append_sealed(self, event: Event) -> Event:
         """Store a pre-sealed event as-is, preserving its chain."""
@@ -502,6 +545,12 @@ class SQLiteStorage(Storage):
                     f"run {event.run_id!r} seq {event.sequence}: hash does not match content"
                 )
             self._insert_event(conn, event)
+            if event.type is EventType.RUN_COMPLETED:
+                # Same invariant as _append_chained: a log that holds
+                # RUN_COMPLETED describes a finished run, and that must hold for
+                # a log copied in via append_sealed (import/export, replay) as
+                # much as for one appended live.
+                self._complete_run(conn, event.run_id, event.timestamp.isoformat())
         return event
 
     @staticmethod
@@ -557,10 +606,23 @@ class SQLiteStorage(Storage):
         rejected (issue #705) instead of silently deleting the anchor and
         every live row, which would leave the next append minting a fresh
         genesis and fork the hash chain away from the archive.
+        """
+        from continuum.checkpoint.manager import CheckpointManager
 
         lv = self.latest_version(run_id)
         head = self.last_sequence(run_id)
-        needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
+        # A caller-supplied environment has to land on a checkpoint, so it
+        # forces the fresh-anchor path whatever the log state. In practice the
+        # other terms already cover every reachable state (a version's
+        # STATE_CHECKPOINTED annotation sits one past its source_sequence, so
+        # head always outruns it); this term keeps the caller's request from
+        # depending on that invariant (#1049).
+        needs_fresh_anchor = (
+            lv is None
+            or through_sequence is not None
+            or lv.source_sequence < head
+            or environment is not None
+        )
         if needs_fresh_anchor:
             try:
                 manager = CheckpointManager(self)
@@ -570,17 +632,15 @@ class SQLiteStorage(Storage):
                 # never started (issue #648). Per-turn checkpoint evaluation
                 # deliberately keeps the cheaper live-tail read.
                 state = manager.project_current(run_id, full_history=True)
-                # The anchor becomes the newest checkpoint, so it inherits the
-                # environment the run validated against: writing it without one
-                # would leave a compacted run with no snapshot to diff a resumed
-                # capture against, and every resource would read as unknown
-                # (issue #762).
-                anchored = self.latest_checkpoint(run_id)
                 manager.checkpoint(
                     run_id,
                     state=state,
                     force_version=True,
-                    environment=anchored.environment if anchored is not None else None,
+                    # The anchor carries the environment the run's newest
+                    # checkpoint already recorded when none is supplied
+                    # (#1049): an environment-blind anchor makes every pinned
+                    # dependency UNKNOWN at the next assessment.
+                    environment=self._anchor_environment(run_id, environment),
                 )
             except Exception as exc:
                 raise ValueError(f"run {run_id!r} could not be anchored: {exc}") from exc

@@ -21,7 +21,6 @@ from __future__ import annotations
 from typing import Any
 
 from continuum.actions import ActionLedger
-from continuum.checkpoint import clear_resume_pointer
 from continuum.events import EventType
 from continuum.models import ActionStatus, Origin
 from continuum.runs import close_run
@@ -99,7 +98,6 @@ def complete_run(storage: Storage, run_id: str, summary: str = "") -> None:
     """
     storage.get_run(run_id)
     close_run(storage, run_id, closed_by="dashboard", summary=summary)
-
 
 def reconcile_action(
     storage: Storage,

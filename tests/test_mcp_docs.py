@@ -112,7 +112,6 @@ async def test_the_audit_coverage_table_lists_every_served_tool(server: Any) -> 
     assert set(covered) == served
     assert "All 13 tools were exercised" in text
 
-
 def test_the_page_carries_no_em_dashes() -> None:
     """House style forbids them (issue #266) and one had reached the table."""
     assert EM_DASH not in MCP_DOC.read_text(encoding="utf-8")

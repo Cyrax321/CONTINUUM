@@ -139,6 +139,80 @@ def test_get_active_run_returns_the_most_recent_non_terminal_run(storage: SQLite
     assert storage.get_active_run().run_id == active.run_id
 
 
+def test_run_completed_flips_the_run_row(storage: SQLiteStorage) -> None:
+    # ``append_event`` used to leave the run row alone, so a run closed by
+    # appending RUN_COMPLETED - the path adapters and the MCP tool take, with
+    # no access to ``update_run`` - stayed "started" forever and kept being
+    # returned as the active run. The log is the source of truth now: a
+    # recorded RUN_COMPLETED *is* the run finishing.
+    storage.create_run(Run(run_id="run_1", goal="g"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    assert storage.get_active_run() is not None
+
+    event = storage.append_event("run_1", EventType.RUN_COMPLETED, {"closed_by": "agent"})
+
+    row = storage.get_run("run_1")
+    assert row.status is RunStatus.COMPLETED
+    assert storage.get_active_run() is None
+    # The row names the moment the run finished, not a clock read later.
+    assert row.updated_at == event.timestamp
+
+
+def test_run_completed_is_idempotent_on_the_row(storage: SQLiteStorage) -> None:
+    # A second RUN_COMPLETED (a double-click, a retried tool call) must not
+    # un-finish the row, and must not raise: the run stays closed and stays out
+    # of get_active_run.
+    storage.create_run(Run(run_id="run_1", goal="g"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    storage.append_event("run_1", EventType.RUN_COMPLETED, {})
+
+    storage.append_event("run_1", EventType.RUN_COMPLETED, {})
+
+    again = storage.get_run("run_1")
+    assert again.status is RunStatus.COMPLETED
+    assert storage.get_active_run() is None
+
+
+def test_a_completed_run_does_not_clear_another_runs_pointer(
+    storage: SQLiteStorage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The pointer cleanup is scoped to the completing run: closing run B must
+    # not evict the pointer naming run A, which is the run a fresh session
+    # should actually be offered.
+    monkeypatch.chdir(tmp_path)
+    pointer = tmp_path / ".continuum" / "resume.json"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(json.dumps({"run_id": "other"}), encoding="utf-8")
+
+    storage.create_run(Run(run_id="run_1", goal="g"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    storage.append_event("run_1", EventType.RUN_COMPLETED, {})
+
+    assert json.loads(pointer.read_text(encoding="utf-8"))["run_id"] == "other"
+
+
+def test_append_sealed_run_completed_also_flips_the_row(storage: SQLiteStorage) -> None:
+    # ``append_sealed`` is the entry point for import/export and replay, and a
+    # log copied in through it holds the same truth: RUN_COMPLETED means
+    # finished, and the row must agree.
+    storage.create_run(Run(run_id="run_1", goal="g"))
+    before = storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+
+    from continuum.events import Event
+
+    storage.append_sealed(
+        Event(
+            run_id="run_1",
+            sequence=before.sequence + 1,
+            type=EventType.RUN_COMPLETED,
+            payload={"closed_by": "replay"},
+            prev_hash=before.hash,
+        ).sealed()
+    )
+
+    assert storage.get_run("run_1").status is RunStatus.COMPLETED
+
+
 # --- events ---------------------------------------------------------------- #
 
 

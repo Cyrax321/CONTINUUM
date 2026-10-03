@@ -86,8 +86,7 @@ A Model Context Protocol server exposing 13 tools. It is read-only by default.
 - Mutating tools (10): continuum_record_progress, continuum_checkpoint,
   continuum_record_summary, continuum_record_plan, continuum_confirm,
   continuum_intercept_action, continuum_complete_action, continuum_fail_action,
-  continuum_reconcile_action, continuum_compensate_action.
-(Every MCP tool name is prefixed with "continuum_" so it never collides
+  continuum_reconcile_action, continuum_compensate_action.(Every MCP tool name is prefixed with "continuum_" so it never collides
 with a host tool's own tool names.)
 An auth gate restricts mutating tools to an allowlist. The primary
 environment variable is CONTINUUM_MCP_ALLOW; CONTINUUM_MCP_MUTATING_CLIENTS

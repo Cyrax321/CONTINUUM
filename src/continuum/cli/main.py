@@ -92,7 +92,7 @@ from continuum.models import (
 from continuum.observability import render_dashboard
 from continuum.provenance.graph import build_provenance_graph, downstream_of
 from continuum.provenance_map import summarize
-from continuum.recovery import RecoveryEngine, render_contract
+from continuum.recovery import RecoveryDecision, RecoveryEngine, render_contract
 from continuum.runs import close_run
 from continuum.security.attestation import (
     generate_keypair,
@@ -2217,12 +2217,14 @@ def cmd_compact(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
 def cmd_complete(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Close a run as done, from the keyboard (the maintainer's escape hatch).
 
-    Found missing during live testing: MCP-driven runs close via
-    RUN_COMPLETED events from adapters, but there was no way to finish a run
-    from the CLI, so finished work kept surfacing as the active run and
-    hijacked every fresh session's resume. This appends REVIEW_CONFIRMED
-    plus RUN_COMPLETED (both Origin.HUMAN, so they clear self-certification
-    gates) and flips the run row to COMPLETED.
+    Appends REVIEW_CONFIRMED plus RUN_COMPLETED (both Origin.HUMAN, so they
+    clear self-certification gates). The RUN_COMPLETED append also flips the run
+    row to COMPLETED and clears the resume pointer in the same transaction
+    (``SQLiteStorage._complete_run``), so a closed run stops being
+    ``get_active_run``'s answer and stops hijacking fresh sessions' resume
+    banner no matter who appended it - the CLI, the dashboard button, the TUI,
+    or the ``continuum_complete_run`` MCP tool an agent uses to close its own
+    run.
     """
     run = storage.get_run(args.run_id)  # raises RunNotFound -> NOT_FOUND
     if run.status is RunStatus.COMPLETED:
@@ -2246,10 +2248,10 @@ def cmd_complete(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     # button (issue #1153): one helper, so the three surfaces cannot drift
     # apart and a run closed from any of them stops hijacking the next
     # session's resume.
-    updated = close_run(storage, args.run_id, closed_by="cli", summary=args.summary or "")
+    completed = close_run(storage, args.run_id, closed_by="cli", summary=args.summary or "")
     payload = {
         "run_id": args.run_id,
-        "status": updated.status.value,
+        "status": completed.status.value,
         "summary": args.summary or "",
     }
     _emit(

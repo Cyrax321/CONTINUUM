@@ -920,8 +920,8 @@ def test_flaky_dependency_exhausting_budget_escalates_to_request_human(
     budgets = {"dependency_budgets": {"ext:weather-api": 2}}
 
     # Record 2 failed attempts for ext:weather-api, exhausting its ceiling of 2.
-    ledger.record_attempt("run_1", dependency="ext:weather-api", dependency_budgets=budgets)
-    ledger.record_attempt("run_1", dependency="ext:weather-api", dependency_budgets=budgets)
+    ledger.record_attempt("run_1", scope="ext:weather-api", max_attempts=2)
+    ledger.record_attempt("run_1", scope="ext:weather-api", max_attempts=2)
 
     engine = RecoveryEngine(store, ledger=ledger, dependency_budgets=budgets)
 
@@ -967,9 +967,12 @@ def test_engine_record_attempt_and_requires_human_delegates(
     count = engine.record_attempt("run_1", dependency="ext:weather-api")
     assert count == 1
     assert engine.requires_human("run_1", dependency="ext:weather-api") is True
-    # The run as a whole and unrelated dependencies remain unblocked.
-    assert engine.requires_human("run_1") is False
+    # An unrelated dependency's own allowance stays untouched.
     assert engine.requires_human("run_1", dependency="dataset") is False
+    # The run-wide query still reads a known escalation as its own: an
+    # ownership-less caller cannot assume some other dependency's escalation is
+    # not its own (issue #744).
+    assert engine.requires_human("run_1") is True
 
 
 def test_generic_agent_adapter_per_dependency_budget_and_scoping(

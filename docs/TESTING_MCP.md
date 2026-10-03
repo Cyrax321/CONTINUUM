@@ -59,6 +59,7 @@ All 13 tools were exercised. None was covered by inspection alone.
 | `continuum_validate` | no `env`, matching `env`, drifted `env`, `expected_model`, unknown run |
 | `continuum_resume` | by id, no id (active-run path), unknown run, `expected_model`, both guidance branches |
 | `continuum_confirm` | refusal without an operator token |
+| `continuum_complete_run` | valid close, run already completed, summary carried, no `REVIEW_CONFIRMED` written |
 | `continuum_intercept_action` | fresh, dedup by key, varied arguments, blank `action_type`, at budget, beyond budget |
 | `continuum_complete_action` | valid, bogus key, with and without `external_id` |
 | `continuum_fail_action` | `certain=true`, `certain=false` |

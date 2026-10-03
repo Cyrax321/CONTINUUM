@@ -86,7 +86,7 @@ Registered in `.mcp.json` (project root):
   `continuum_record_progress`, `continuum_checkpoint`,
   `continuum_record_summary`, `continuum_intercept_action`,
   `continuum_complete_action`, `continuum_fail_action`,
-  `continuum_reconcile_action`, `continuum_confirm`
+  `continuum_reconcile_action`, `continuum_confirm`, `continuum_complete_run`
   (mutating), and `continuum_validate`, `continuum_resume`,
   `continuum_list_actions` (read-only).
 - **Authorization** (`authz.py`): mutating tools are gated by an allowlist
