@@ -113,10 +113,11 @@ For Claude Code, Gemini CLI, or Codex, you do not write Python and do not need a
 
 ```bash
 continuum start my-task --goal "What the agent should do"
+mkdir -p .continuum && echo '{"tools": {"Write": {"key_template": "{file_path}"}}}' > .continuum/gate.json
 continuum hooks install claude-code --with-gate   # also: gemini, codex
 ```
 
-From then on every file the agent writes is captured as hash-chained evidence, its session starts with an automatic status briefing, unclaimed side effects registered in `.continuum/gate.json` are refused before they fire, and a fresh session after any crash resumes with executable next steps. No CLAUDE.md required.
+The registry names the side-effecting tools and the key that identifies each operation; `hooks install --with-gate` refuses to run without one, because a gate with nothing registered allows every call. From then on every file the agent writes is captured as hash-chained evidence, its session starts with an automatic status briefing, unclaimed side effects registered in `.continuum/gate.json` are refused before they fire, and a fresh session after any crash resumes with executable next steps. No CLAUDE.md required.
 
 Minimal library example, record and recover:
 

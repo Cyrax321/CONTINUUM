@@ -26,6 +26,35 @@ def run(*argv: str) -> tuple[int, str, str]:
     return code, out.getvalue(), err.getvalue()
 
 
+def write_gate_registry(root: Path, tools: dict[str, dict[str, str]] | None = None) -> Path:
+    """Stand up the registry ``--with-gate`` now requires before it will install.
+
+    The installer refuses to wire a gate with no registry, since the gate reads
+    a missing file as "no gate configured" and would allow every call. Tests
+    that exercise an installed gate call this first. The registry path is
+    relative, resolved against the cwd the same way the gate hook resolves it
+    at runtime, so callers must also chdir to ``root``.
+    """
+    registry = root / ".continuum" / "gate.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"tools": tools if tools is not None else {"Write": {"key_template": "{file_path}"}}}
+    registry.write_text(json.dumps(payload), encoding="utf-8")
+    return registry
+
+
+@pytest.fixture
+def gate_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A project directory with a gate registry, installed as the cwd.
+
+    ``--with-gate`` fails without a registry and the registry path is relative,
+    so tests exercising an installed gate need both a registry on disk and the
+    cwd inside the project.
+    """
+    monkeypatch.chdir(tmp_path)
+    write_gate_registry(tmp_path)
+    return tmp_path
+
+
 import io  # noqa: E402
 
 
@@ -62,8 +91,8 @@ def test_install_is_idempotent_per_client(tmp_path: Path, client: str) -> None:
     assert len(data["hooks"][profile["start_event"]]) == 1
 
 
-def test_gemini_gate_uses_before_tool(tmp_path: Path) -> None:
-    settings = tmp_path / "settings.json"
+def test_gemini_gate_uses_before_tool(gate_project: Path) -> None:
+    settings = gate_project / "settings.json"
     code, out, _ = run(
         "--json", "hooks", "install", "gemini", "--with-gate", "--settings", str(settings)
     )
@@ -75,9 +104,103 @@ def test_gemini_gate_uses_before_tool(tmp_path: Path) -> None:
     assert before[0]["hooks"][0]["command"].split()[-1] == "gate"
 
 
-def test_remove_cleans_each_client(tmp_path: Path) -> None:
+def test_with_gate_refuses_when_no_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--with-gate`` with no registry installs a guard that disarms itself.
+
+    The gate reads a missing ``.continuum/gate.json`` as "no gate configured"
+    and returns exit 0 for an unclaimed side-effecting call, so wiring the hook
+    in that state would look armed while allowing everything -- the README's
+    onboarding promise would read as active when it was not. The install must
+    fail before touching settings, and say which file to create.
+    """
+    monkeypatch.chdir(tmp_path)
+    settings = tmp_path / "settings.json"
+
+    code, _, err = run(
+        "hooks", "install", "claude-code", "--with-gate", "--settings", str(settings)
+    )
+
+    assert code == ExitCode.ERROR
+    assert ".continuum/gate.json" in err
+    assert "does not exist" in err
+    # Nothing is wired: a half-installed settings file would leave the operator
+    # with observation hooks and a gate that silently allows, the exact belief
+    # this failure exists to break.
+    assert not settings.exists()
+
+
+def test_with_gate_names_the_starter_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal is actionable: the command it prints, run as-is, succeeds.
+
+    An operator who copies the suggested line should land on a working install
+    on the retry, so the error must be a recipe and not just a diagnosis.
+    """
+    monkeypatch.chdir(tmp_path)
+    settings = tmp_path / "settings.json"
+    code, _, err = run(
+        "hooks", "install", "claude-code", "--with-gate", "--settings", str(settings)
+    )
+    assert code == ExitCode.ERROR
+
+    # Pull the `mkdir -p ... && echo '...' > .continuum/gate.json` line out of
+    # the message and run it, then retry the install it blocked.
+    recipe = next(line.strip() for line in err.splitlines() if line.strip().startswith("mkdir "))
+    subprocess.run(["/bin/sh", "-c", recipe], check=True, cwd=tmp_path)
+    assert (tmp_path / ".continuum" / "gate.json").exists()
+
+    code, out, err = run(
+        "--json", "hooks", "install", "claude-code", "--with-gate", "--settings", str(settings)
+    )
+    assert code == ExitCode.OK, err
+    assert "gate" in _installed_kinds(settings)
+
+
+def test_with_gate_warns_when_registry_has_no_tools(gate_project: Path) -> None:
+    """A registry that registers nothing is installed, but loudly.
+
+    An empty ``{"tools": {}}`` still allows every call, but unlike a missing
+    file it is a choice someone wrote down; the gate honours it. The installer
+    wires it and warns, rather than refusing a file that exists on purpose.
+    """
+    write_gate_registry(gate_project, tools={})
+    settings = gate_project / "settings.json"
+
+    code, _, err = run(
+        "hooks", "install", "claude-code", "--with-gate", "--settings", str(settings)
+    )
+
+    assert code == ExitCode.OK
+    assert "registers no tools" in err
+    assert "gate" in _installed_kinds(settings)
+
+
+def test_with_gate_refuses_when_registry_is_broken(gate_project: Path) -> None:
+    """A malformed registry fails closed at install time, as it does at runtime.
+
+    ``load_gate_config`` raises rather than degrading to allow-everything; the
+    installer surfaces the same error instead of wiring a hook that would deny
+    every call until the file is fixed.
+    """
+    registry = gate_project / ".continuum" / "gate.json"
+    registry.write_text("{not json", encoding="utf-8")
+    settings = gate_project / "settings.json"
+
+    code, _, err = run(
+        "hooks", "install", "claude-code", "--with-gate", "--settings", str(settings)
+    )
+
+    assert code == ExitCode.ERROR
+    assert "gate registry" in err
+    assert not settings.exists()
+
+
+def test_remove_cleans_each_client(gate_project: Path) -> None:
     for client in ("claude-code", "gemini", "codex"):
-        settings = tmp_path / f"{client}.json"
+        settings = gate_project / f"{client}.json"
         run("--json", "hooks", "install", client, "--with-gate", "--settings", str(settings))
         code, out, _ = run("--json", "hooks", "remove", client, "--settings", str(settings))
         assert code == ExitCode.OK
@@ -222,6 +345,7 @@ def test_remove_defaults_to_the_same_file_install_wrote(
     write the path down.
     """
     monkeypatch.chdir(tmp_path)
+    write_gate_registry(tmp_path)
     settings = tmp_path / CLIENT_PROFILES[client]["settings"]
     code, _, err = run("--json", "hooks", "install", client, "--with-gate")
     assert code == ExitCode.OK, err
@@ -253,7 +377,9 @@ def test_remove_without_settings_is_quiet_when_nothing_is_installed(
     assert not (tmp_path / ".claude").exists()
 
 
-def test_remove_reports_hooks_not_just_the_observation_hook(tmp_path: Path) -> None:
+def test_remove_reports_hooks_not_just_the_observation_hook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The report has to cover what the removal actually does.
 
     ``remove_claude_code_hook`` takes out every kind in ``_INSTALLED_KINDS``,
@@ -262,6 +388,8 @@ def test_remove_reports_hooks_not_just_the_observation_hook(tmp_path: Path) -> N
     went, which is the wrong thing to believe about the file that decides
     whether their side effects are still guarded.
     """
+    monkeypatch.chdir(tmp_path)
+    write_gate_registry(tmp_path)
     settings = tmp_path / "settings.json"
     run("hooks", "install", "claude-code", "--with-gate", "--settings", str(settings))
     assert "gate" in _installed_kinds(settings)

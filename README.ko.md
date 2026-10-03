@@ -108,6 +108,7 @@ Claude Code, Gemini CLI 또는 Codex의 경우 Python을 작성할 필요도 없
 
 ```bash
 continuum start my-task --goal "에이전트가 해야 할 일"
+mkdir -p .continuum && echo '{"tools": {"Write": {"key_template": "{file_path}"}}}' > .continuum/gate.json
 continuum hooks install claude-code --with-gate   # 동일하게: gemini, codex
 ```
 

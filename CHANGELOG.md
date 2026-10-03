@@ -182,6 +182,19 @@ All notable changes to this project are documented here. The format follows
   findings. `DependencyGraph.impacted_by` now repeats until no new findings are
   tainted, restoring parity with the validator and preventing stale downstream
   findings and decisions from surviving localized repair plans.
+- **`hooks install --with-gate` no longer installs a gate that allows every
+  call.** The flag wired the `PreToolUse` gate hook but never created
+  `.continuum/gate.json`, and the gate reads a missing registry as "no gate
+  configured" and returns exit 0 for an unclaimed side-effecting call. The
+  hook therefore looked armed while disarming itself -- the README's
+  two-minute onboarding path promised enforcement that was inert until the
+  operator hand-wrote a file no error ever asked for. `cmd_hooks_install` now
+  loads the registry before wiring, fails without touching settings when it is
+  absent (printing a starter command), warns when it registers no tools, and
+  surfaces a malformed file the way the gate does at runtime. An empty
+  `{"tools": {}}` still allows every call by design; it is now a choice the
+  operator is told about rather than a silent default.
+
 - **The edit-precondition gate now raises the exception subclass matching the
   edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
   forks but the plain `EditPreconditionError` for every other edit type, so
