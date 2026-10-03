@@ -42,6 +42,24 @@ All notable changes to this project are documented here. The format follows
   evidence. See `docs/guides/environment-providers.md`.
 ### Fixed
 
+- **Code the 2026-09-30 merge batch dropped is restored.** Four long-lived
+  branches (#761 validation rules, #744 scoped budgets, #762 discoverable
+  providers, #1018 precompact adapter) merged into `main` together on 2026-09-30,
+  and each merge silently dropped pieces the others had landed: helper methods
+  (`StateValidator._latest_compaction`/`_apply_compaction_status`,
+  `Storage._validate_compaction_bound`/`_anchor_environment`,
+  `ActionLedger._settlement_authorization_id`/`resolve_prior`,
+  `Registry.all_services`), three `recovery/ledger` dependency helpers that
+  `__all__` still promised, the `--env` flag's effect on the compaction anchor
+  (#1049), and several `__all__` membership entries. The result imported on
+  Linux but not under the tarball export, `ruff` reported 469 errors, and 166
+  test modules failed at collection. Each piece is restored verbatim from the
+  commit that introduced it. `RecoveryEngine` reconciles the two ledger APIs the
+  merge left incompatible — #744's scope-based counting underneath #1459's
+  dependency-based callers — preserving #744's fail-closed marker semantics and
+  its "a ledger that cannot be read costs a line of evidence and nothing else"
+  advisory contract.
+
 - **The Level 4 MCP inspector walkthrough now names the config the repository
   ships (#1395).** `references/testing.md` pointed
   `@modelcontextprotocol/inspector --cli` at `mcp-config.json`, which has never

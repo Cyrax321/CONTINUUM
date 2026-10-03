@@ -45,6 +45,8 @@ __all__ = [
     "ContractVerification",
     "SUPPORTED_CONTRACT_VERSIONS",
     "build_contract",
+    "canonical_digest_input",
+    "contract_digest",
     "render_budget",
     "render_contract",
     "seal_contract",
@@ -198,20 +200,27 @@ def render_budget(budget: BudgetStatus) -> str:
     return line
 
 
-def _hashable_payload(contract: RecoveryContract) -> dict[str, Any]:
-    """Payload the integrity hash covers.
+def _namespaced(entry: ComponentValidationEntry) -> str:
+    """A validation entry's identifier, carrying its producing rule when it had one.
 
-    ``created_at`` is wall-clock metadata, not terms. ``liveness`` carries one
-    wall-clock reading too (``last_append_age``, seconds since the last append
-    at assessment time), so two assessments of an unchanged run would seal
-    different hashes without this: the age is display, while the verdict fields
-    (``breached``, ``threshold_seconds``, ``phase``, ``breaches``) stay covered.
-
-    ``excluded`` drops the additive fields of a contract sealed before they
-    existed, so an upgrade does not invalidate a stored contract.
+    Built-in findings name only their component; a rule's finding also carries
+    the rule's identifier, so the contract and every diagnostic surface
+    attribute it to the rule that produced it (issue #761).
     """
-    payload = contract.model_dump(mode="json", exclude={"integrity_hash", "created_at", *excluded})
-    liveness = payload.get("liveness")
+    name = _identifier(entry.component, entry.component_id)
+    if entry.rule:
+        name = f"{name} [rule:{entry.rule}]"
+    return name
+
+
+def _liveness_digest_value(liveness: Any) -> Any:
+    """Strip the one wall-clock reading ``liveness`` carries.
+
+    ``last_append_age`` is seconds since the last append at assessment time, so
+    two assessments of an unchanged run would seal different hashes without
+    this. The verdict fields (``breached``, ``threshold_seconds``, ``phase``,
+    ``breaches``) stay covered.
+    """
     if isinstance(liveness, dict):
         return {k: v for k, v in liveness.items() if k != "last_append_age"}
     return liveness
@@ -356,15 +365,12 @@ def verify_contract(contract: RecoveryContract) -> bool:
     """Whether a contract still matches the terms it was sealed with.
 
     Several digests are accepted so a contract sealed before an additive field
-    existed still verifies: its stored hash was computed over terms that lacked
-    that field's key, so the digest is recomputed without each group of them.
+    existed still verifies: its stored hash was computed under the older
+    version's rules, so the digest is recomputed under those rules rather than
+    the current ones. The compatibility policy and its reasons live in
+    :func:`verify_contract_detailed`; this is its boolean projection.
     """
-    if contract.integrity_hash is None:
-        return False
-    return any(
-        contract.integrity_hash == stable_hash(_hashable_payload(contract, excluded=group))
-        for group in _ADDITIVE_FIELDS
-    )
+    return verify_contract_detailed(contract).verified
 
 
 def build_contract(
