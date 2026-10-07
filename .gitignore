@@ -50,3 +50,8 @@ demo-run/*
 
 # Benchmark artifacts
 benchmarks/out/
+
+# git worktree metadata must never be tracked: a committed worktree
+# registers as a gitlink with no .gitmodules entry, which breaks
+# any `git submodule` walk for every consumer of this repo.
+.worktrees/
