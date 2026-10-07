@@ -505,9 +505,7 @@ def test_http_an_unknown_run_is_a_400_not_a_500(http_server: str) -> None:
 
 
 def test_http_a_batch_over_the_cap_reports_the_truncation(http_server: str) -> None:
-    status, body = post(
-        http_server, {"run_id": "r1", "risks": [GOOD] * 10, "limit": 3}
-    )
+    status, body = post(http_server, {"run_id": "r1", "risks": [GOOD] * 10, "limit": 3})
     assert status == 200, body
     assert body["accepted"] == 3
     assert body["truncated"] is True
@@ -638,7 +636,9 @@ def test_cli_text_mode_still_drops_a_torn_line(cli_db: str) -> None:
     assert "Imported 1 risk signal(s) into r1 (1 dropped, 0 blank)" in out
 
 
-def test_cli_corruption_is_exit_zero_so_the_pipeline_stays_green(cli_db: str, tmp_path: Path) -> None:
+def test_cli_corruption_is_exit_zero_so_the_pipeline_stays_green(
+    cli_db: str, tmp_path: Path
+) -> None:
     stream = tmp_path / "stream.jsonl"
     stream.write_text(TORN + "\n")
 
@@ -661,9 +661,7 @@ def test_cli_an_unknown_run_is_an_error(cli_db: str, tmp_path: Path) -> None:
     stream = tmp_path / "stream.jsonl"
     stream.write_text(json.dumps(GOOD) + "\n")
 
-    code, _out, err = _run_cli(
-        ["--db", cli_db, "import-risks", "ghost-run", "--file", str(stream)]
-    )
+    code, _out, err = _run_cli(["--db", cli_db, "import-risks", "ghost-run", "--file", str(stream)])
     assert code != 0
     assert "ghost-run" in err
 
