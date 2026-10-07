@@ -4864,6 +4864,16 @@ def build_parser() -> argparse.ArgumentParser:
         cmd_providers,
         "Configure the environment providers a run trusts at resume. Mutates storage.",
     )
+
+    # The analyser folds the archive alongside the live log, so it stays correct
+    # after compaction (issue #1427).
+    report = with_run(add("report", cmd_report, "Analyse a run's history. Read-only."))
+    report.add_argument(
+        "--trajectory",
+        action="store_true",
+        help="distil claims, uncertain side effects, scar rate and stall sites "
+        "from the archive and the active log.",
+    )
     # ``--json`` reaches this subparser through ``json_parent`` like every
     # other one; the #677 SUPPRESS default it needed already lives there, so
     # re-adding it here raised a conflicting-option error.
