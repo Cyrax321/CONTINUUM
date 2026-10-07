@@ -182,6 +182,20 @@ def _identifier(component: Component, component_id: str | None) -> str:
     return f"{component.value}:{component_id}" if component_id else component.value
 
 
+def _namespaced(entry: ComponentValidationEntry) -> str:
+    """The component identifier, with the rule that reported it (issue #761).
+
+    A rule's findings are namespaced by its identifier so an operator reading
+    ``invalidated`` or ``evidence`` can tell a built-in finding from a domain
+    one, and can see *which* domain rule spoke. Built-in findings carry no
+    suffix and read exactly as before.
+    """
+    ident = _identifier(entry.component, entry.component_id)
+    if not entry.rule:
+        return ident
+    return f"{ident} [rule:{entry.rule}]"
+
+
 def render_budget(budget: BudgetStatus) -> str:
     """One evidence line naming the budget scope and what it has left.
 
@@ -198,20 +212,14 @@ def render_budget(budget: BudgetStatus) -> str:
     return line
 
 
-def _hashable_payload(contract: RecoveryContract) -> dict[str, Any]:
-    """Payload the integrity hash covers.
+def _liveness_digest_value(liveness: Any) -> Any:
+    """The stable representation of ``liveness`` for digest computation.
 
-    ``created_at`` is wall-clock metadata, not terms. ``liveness`` carries one
-    wall-clock reading too (``last_append_age``, seconds since the last append
-    at assessment time), so two assessments of an unchanged run would seal
-    different hashes without this: the age is display, while the verdict fields
-    (``breached``, ``threshold_seconds``, ``phase``, ``breaches``) stay covered.
-
-    ``excluded`` drops the additive fields of a contract sealed before they
-    existed, so an upgrade does not invalidate a stored contract.
+    ``last_append_age`` is seconds since the last append at assessment time, so
+    two assessments of an unchanged run would seal different hashes without
+    this. The verdict fields (``breached``, ``threshold_seconds``, ``phase``,
+    ``breaches``) stay covered.
     """
-    payload = contract.model_dump(mode="json", exclude={"integrity_hash", "created_at", *excluded})
-    liveness = payload.get("liveness")
     if isinstance(liveness, dict):
         return {k: v for k, v in liveness.items() if k != "last_append_age"}
     return liveness
@@ -355,16 +363,10 @@ def seal_contract(contract: RecoveryContract) -> RecoveryContract:
 def verify_contract(contract: RecoveryContract) -> bool:
     """Whether a contract still matches the terms it was sealed with.
 
-    Several digests are accepted so a contract sealed before an additive field
-    existed still verifies: its stored hash was computed over terms that lacked
-    that field's key, so the digest is recomputed without each group of them.
+    Boolean wrapper over ``verify_contract_detailed`` for callers that only
+    need the verdict. Use the detailed form for diagnostics.
     """
-    if contract.integrity_hash is None:
-        return False
-    return any(
-        contract.integrity_hash == stable_hash(_hashable_payload(contract, excluded=group))
-        for group in _ADDITIVE_FIELDS
-    )
+    return verify_contract_detailed(contract).verified
 
 
 def build_contract(

@@ -261,6 +261,10 @@ class RecoveryEngine:
         validator: StateValidator | None = None,
         strict_unknown: bool = True,
         providers: ProviderRegistry | None = None,
+        ledger: RecoveryLedger | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
+        validation_rules: Iterable[ValidationRule] | None = None,
+        registry: Registry | None = None,
     ) -> None:
         """Build an engine.
 
@@ -279,11 +283,21 @@ class RecoveryEngine:
         self.validator = validator or StateValidator(strict_unknown=strict_unknown)
         self.strict_unknown = strict_unknown
         self.ledger = ledger
+        self._ledger = ledger
         self.dependency_budgets = dependency_budgets
         self._manager = CheckpointManager(storage)
         #: Providers a configuration may resolve by name. Built-ins need no
         #: registration; this is how a CallableProvider becomes discoverable.
         self.providers = providers or ProviderRegistry()
+        self._validation_rules: tuple[object, ...] = tuple(validation_rules or ())
+        if registry is not None:
+            # A seam is a Protocol: structural selection, then narrowing.
+            registered = tuple(
+                service
+                for service in registry.all_matching(ValidationRule)
+                if isinstance(service, ValidationRule)
+            )
+            self._validation_rules = (*self._validation_rules, *registered)
 
     def assess(
         self,
@@ -295,6 +309,9 @@ class RecoveryEngine:
         scope: Iterable[str] | None = None,
         source_graph: SourceDependencyGraph | None = None,
         provider_config: ProviderConfig | None = None,
+        validation_rules: Iterable[ValidationRule] | None = None,
+        ledger: RecoveryLedger | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
     ) -> RecoveryDecision:
         """Decide how ``run_id`` may resume, without changing anything.
 
@@ -477,6 +494,47 @@ class RecoveryEngine:
                 report=new_report,
                 environment_diff=validation.environment_diff,
             )
+
+        active_ledger = ledger if ledger is not None else self.ledger
+        active_budgets = (
+            dependency_budgets if dependency_budgets is not None else self.dependency_budgets
+        )
+        if active_budgets is None and active_ledger is not None:
+            try:
+                from pathlib import Path
+
+                from continuum.budgets import DEFAULT_BUDGETS_PATH, load_budgets
+
+                active_budgets = load_budgets(Path(DEFAULT_BUDGETS_PATH))
+            except Exception:
+                active_budgets = None
+
+        exhausted_dependencies: set[str] = set()
+        run_budget_exhausted = False
+        if active_ledger is not None:
+            global_limit = active_budgets.get("global") if active_budgets else None
+            run_budget_exhausted = active_ledger.requires_human(
+                run_id, scope=None, global_max_attempts=global_limit
+            )
+            candidate_deps: set[str] = set()
+            if scope is not None:
+                candidate_deps.update(scope)
+            else:
+                from continuum.models import Component
+
+                for entry in validation.report.statuses:
+                    if entry.component == Component.EXTERNAL_DEPENDENCY and entry.component_id:
+                        candidate_deps.add(entry.component_id)
+                for a in uncertain:
+                    if a.dep_scope:
+                        candidate_deps.add(a.dep_scope)
+
+            for dep in candidate_deps:
+                dep_limit = active_budgets.get(dep) if active_budgets else 3
+                if active_ledger.requires_human(
+                    run_id, scope=dep, max_attempts=dep_limit or 3, global_max_attempts=global_limit
+                ):
+                    exhausted_dependencies.add(dep)
 
         # Domain validation rules (issue #761). Built-in validation asks whether
         # the state still matches the environment; a domain rule knows
@@ -792,16 +850,17 @@ class RecoveryEngine:
         if self.ledger is None:
             raise RuntimeError("RecoveryEngine was initialized without a RecoveryLedger")
         budgets = dependency_budgets if dependency_budgets is not None else self.dependency_budgets
+        resolved_scope = resolve_scope(dependency, dependencies, scope)
+        limit = max_attempts
+        if limit is None and budgets and resolved_scope is not None and resolved_scope in budgets:
+            limit = budgets[resolved_scope]
+        global_limit = budgets.get("global") if budgets else None
         return self.ledger.record_attempt(
             run_id,
             note=note,
-            max_attempts=max_attempts,
-            dependency=dependency,
-            dependencies=dependencies,
-            contract=contract,
-            action=action,
-            scope=scope,
-            dependency_budgets=budgets,
+            max_attempts=limit,
+            global_max_attempts=global_limit,
+            scope=resolved_scope,
         )
 
     def requires_human(
@@ -820,15 +879,16 @@ class RecoveryEngine:
         if self.ledger is None:
             return False
         budgets = dependency_budgets if dependency_budgets is not None else self.dependency_budgets
+        resolved_scope = resolve_scope(dependency, dependencies, scope)
+        limit = max_attempts
+        if budgets and resolved_scope is not None and resolved_scope in budgets:
+            limit = budgets[resolved_scope]
+        global_limit = budgets.get("global") if budgets else None
         return self.ledger.requires_human(
             run_id,
-            max_attempts=max_attempts,
-            dependency=dependency,
-            dependencies=dependencies,
-            contract=contract,
-            action=action,
-            scope=scope,
-            dependency_budgets=budgets,
+            max_attempts=limit,
+            global_max_attempts=global_limit,
+            scope=resolved_scope,
         )
 
     def _decide(

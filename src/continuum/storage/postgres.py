@@ -57,7 +57,13 @@ from continuum.storage.base import (
     RunNotFound,
     Storage,
 )
-from continuum.storage.compaction import resolve_compaction_bound
+from continuum.storage.blob import (
+    audit_blob_descriptor,
+    get_payload_offload_threshold,
+    is_offload_descriptor,
+    load_blob_payload,
+    maybe_offload_payload,
+)
 
 __all__ = [
     "PostgresStorage",

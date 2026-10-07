@@ -485,6 +485,12 @@ class ActionLedger:
         """Registry path, overridable for tests via env."""
         return Path(os.environ.get("CONTINUUM_BUDGETS_PATH", DEFAULT_BUDGETS_PATH))
 
+    def _settlement_authorization_id(self, action: Action) -> str | None:
+        """The bucket a settlement of action draws from."""
+        if getattr(action, "budget_authorization_id", None) is not None:
+            return action.budget_authorization_id
+        return self._budget_authorization_id(action.action_type, None, dict(action.arguments), ())
+
     def _budget_authorization_id(
         self,
         action_type: str,
