@@ -546,6 +546,7 @@ class SQLiteStorage(Storage):
         *,
         through_sequence: int | None = None,
         environment: EnvironmentSnapshot | None = None,
+        constraints_path: Path | None = None,
     ) -> dict[str, int]:
         """Archive the pre-anchor prefix of a run's log (issue #239).
 
@@ -643,6 +644,10 @@ class SQLiteStorage(Storage):
                 "DELETE FROM events WHERE run_id = ? AND sequence <= ?",
                 (run_id, through),
             )
+
+        with suppress(Exception):
+            manager = CheckpointManager(self)
+            manager.reinject_constraints(run_id, constraints_path=constraints_path)
 
         return {"archived": max(archived, 0)}
 

@@ -669,6 +669,7 @@ class PostgresStorage(Storage):
         *,
         through_sequence: int | None = None,
         environment: EnvironmentSnapshot | None = None,
+        constraints_path: Path | None = None,
     ) -> dict[str, int]:
         """Archive the pre-anchor prefix of a run's log (issue #239).
 
@@ -714,6 +715,11 @@ class PostgresStorage(Storage):
                 "DELETE FROM events WHERE run_id = %s AND sequence <= %s",
                 (run_id, through),
             )
+
+        with suppress(Exception):
+            from continuum.checkpoint.manager import CheckpointManager
+
+            CheckpointManager(self).reinject_constraints(run_id, constraints_path=constraints_path)
 
         return {"archived": max(archived, 0)}
 
