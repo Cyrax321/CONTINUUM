@@ -45,7 +45,13 @@ from continuum.storage.base import (
     RunNotFound,
     Storage,
 )
-from continuum.storage.compaction import resolve_compaction_bound
+from continuum.storage.blob import (
+    audit_blob_descriptor,
+    get_payload_offload_threshold,
+    is_offload_descriptor,
+    load_blob_payload,
+    maybe_offload_payload,
+)
 from continuum.storage.migrations import SCHEMA_VERSION, migrate_schema
 
 __all__ = ["SQLiteStorage", "SCHEMA_VERSION"]
@@ -557,12 +563,15 @@ class SQLiteStorage(Storage):
         rejected (issue #705) instead of silently deleting the anchor and
         every live row, which would leave the next append minting a fresh
         genesis and fork the hash chain away from the archive.
+        """
 
         lv = self.latest_version(run_id)
         head = self.last_sequence(run_id)
         needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
         if needs_fresh_anchor:
             try:
+                from continuum.checkpoint.manager import CheckpointManager
+
                 manager = CheckpointManager(self)
                 # The anchor must project over full history: after an earlier
                 # compaction the live tail begins at the anchor markers with
