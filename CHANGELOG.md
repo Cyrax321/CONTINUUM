@@ -29,6 +29,20 @@ All notable changes to this project are documented here. The format follows
   the line carries counts and a dependency name only, never arguments, files
   or failure detail. `RecoveryEngine` takes an optional ledger and reads the
   budget read-only; without one every decision is unchanged.
+
+- **Recovery escalates to REQUIRES_REVIEW on dropped or violated hard constraint pins (#1414).**
+  If an operator enforces hard constraints via `.continuum/constraints.json` or
+  event logs, but an active or resuming run drops a hard pin or violates a
+  constraint predicate digest, resuming without review risks executing unauthorized
+  side effects. `StateValidator` now inspects active constraint pins against current
+  state and the event log, emitting `ComponentValidationEntry` with status
+  `REQUIRES_REVIEW` on dropped or unverified hard pins (while soft pins remain
+  advisory). `RecoveryEngine.assess()` escalates recovery proposals to `REQUEST_HUMAN`,
+  recording the violated pin in sealed `RecoveryContract.invalidated` and
+  `RecoveryContract.evidence` lists, alongside actionable human guidance and repair
+  steps. Operator confirmation is supported via `continuum confirm <run_id> --scope pin`
+  or `--scope constraints`.
+
 ### Fixed
 
 - **A probe that prints `occurred:false` is now told the separator is the
