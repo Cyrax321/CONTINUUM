@@ -125,7 +125,23 @@ def human_steps_for(
                     + (f"  (no probe registered in {reconcilers_path})")
                 )
         elif step.kind is RepairKind.HUMAN_REVIEW:
-            steps.append(f"verify {step.target} yourself, then run `continuum confirm {run_id}`")
+            statuses = ()
+            if hasattr(decision, "validation") and hasattr(
+                getattr(decision, "validation", None), "report"
+            ):
+                statuses = decision.validation.report.statuses
+            if step.target.startswith("pin:") or any(
+                e.component is Component.PIN and e.component_id == step.target for e in statuses
+            ):
+                cid = step.target.removeprefix("pin:")
+                steps.append(
+                    f"operator confirmation required for missing or unverified constraint pin {cid!r}: "
+                    f"inspect compliance, then run `continuum confirm {run_id}`"
+                )
+            else:
+                steps.append(
+                    f"verify {step.target} yourself, then run `continuum confirm {run_id}`"
+                )
         elif step.kind is RepairKind.REPAIR_LOG:
             # No automated surface can settle a refused event yet (that is the
             # repair/amend command, deliberately unbuilt), so name where to
