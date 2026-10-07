@@ -29,7 +29,7 @@ import re
 import sqlite3
 import stat
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -2530,6 +2530,105 @@ def cmd_observe(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     return ExitCode.OK
 
 
+def cmd_import_risks(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Ingest a newline-delimited risk-signal stream, fail-open (issue #1425).
+
+    Reads a SNAGLINE stream -- one JSON risk record per line -- and appends each
+    record that parses as a ``RISK_OBSERVED`` event. A monitoring feed is an
+    external witness, not a gatekeeper: torn lines, binary garbage and records
+    the schema refuses are counted and dropped without aborting the import, and
+    without ever touching the run's transaction, so a sick feed cannot degrade
+    the run it is reporting on.
+
+    The stream comes from ``--file`` or stdin, and the batch cap keeps a feed
+    faster than the fold from growing memory without bound. Corruption never
+    costs the exit code: a pipeline pulling a risk stream in the background
+    stays green while the drops are surfaced in the summary. Only operator
+    mistakes -- a missing file, a run that does not exist -- are exit codes.
+    """
+    from continuum.recovery.risk import DEFAULT_RISK_BATCH_LIMIT, ingest_risk_stream
+
+    # A stream for a run that does not exist has nowhere to go: the events would
+    # land on an event log with no RUN_STARTED, and every projecting surface for
+    # that run would then refuse it. The sidecar endpoint refuses the same call
+    # for the same reason.
+    storage.get_run(args.run_id)
+
+    if args.file is not None:
+        path = Path(args.file)
+        if not path.is_file():
+            raise FileNotFoundError(str(path))
+        stream: Iterator[Any] = _record_lines(path)
+    else:
+        stream = _stdin_lines(sys.stdin)
+
+    # ``--limit 0`` lifts the cap rather than refusing every record: an operator
+    # replaying an archived stream knows the batch is bounded by the file itself.
+    raw_limit = args.limit
+    if raw_limit is None:
+        limit: int | None = DEFAULT_RISK_BATCH_LIMIT
+    elif raw_limit <= 0:
+        limit = None
+    else:
+        limit = raw_limit
+
+    summary = ingest_risk_stream(storage, args.run_id, stream, limit=limit)
+
+    accepted = int(summary["accepted"])
+    dropped = int(summary["dropped"])
+    skipped = int(summary["skipped"])
+    _emit(
+        summary,
+        (
+            f"Imported {accepted} risk signal(s) into {args.run_id}"
+            f" ({dropped} dropped, {skipped} blank)"
+            + ("; batch capped, more records remain" if summary["truncated"] else "")
+        ),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    if dropped:
+        by_reason = summary["dropped_by_reason"]
+        breakdown = ", ".join(f"{k}={v}" for k, v in sorted(by_reason.items())) or "unclassified"
+        print(
+            f"warning: dropped {dropped} of {accepted + dropped} risk record(s): {breakdown}",
+            file=err,
+        )
+        for sample in summary["dropped_samples"]:
+            print(f"  {sample['reason']}: {sample['message']}", file=err)
+    return ExitCode.OK
+
+
+def _record_lines(path: Path) -> Iterator[bytes]:
+    """Yield a file's lines as bytes, so a bad byte kills its own line only.
+
+    Decoding the whole file at once lets one undecodable byte anywhere in a
+    million-line stream take the entire import down with it; decoding per line
+    keeps the failure local to the record that caused it, which is the whole
+    point of importing a feed fail-open (issue #1425).
+    """
+    with path.open("rb") as handle:
+        yield from handle
+
+
+def _stdin_lines(stdin: Any) -> Iterator[Any]:
+    """Yield stdin's lines lazily, as bytes when the binary view exists.
+
+    The binary view is what makes an undecodable byte a per-record problem: a
+    text-mode stdin decodes during iteration, so one bad byte takes the whole
+    loop down with it, while bytes let :func:`_decode_record` blame the line it
+    came from. Real stdin has ``.buffer``; a stream without it (a test double,
+    a redirected file) is iterated as text instead, and its lines take the same
+    path one level up.
+    """
+    buffer = getattr(stdin, "buffer", None)
+    if buffer is not None:
+        yield from buffer
+        return
+    yield from stdin
+
+
 def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Session-start context injection (no CLAUDE.md required).
 
@@ -4991,6 +5090,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--pid-file",
         default=None,
         help="PID file path (default: .continuum/daemon.pid).",
+    )
+
+    import_risks = with_run(
+        add(
+            "import-risks",
+            cmd_import_risks,
+            "Ingest a newline-delimited risk-signal stream. Mutates storage.",
+        )
+    )
+    import_risks.add_argument(
+        "--file",
+        default=None,
+        help="JSONL stream to read (default: stdin).",
+    )
+    import_risks.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="cap on records read from the batch (default: 10000; 0 for no cap).",
     )
 
     gateway_cmd = add(
