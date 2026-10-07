@@ -29,6 +29,40 @@ All notable changes to this project are documented here. The format follows
   the line carries counts and a dependency name only, never arguments, files
   or failure detail. `RecoveryEngine` takes an optional ledger and reads the
   budget read-only; without one every decision is unchanged.
+
+- **External risk-signal feeds can be ingested fail-open (#1425).** A monitoring
+  feed, a SNAGLINE sidecar, a webhook stream, or a background watchdog, is an
+  external witness rather than a gatekeeper, so a feed that crashes, drops its
+  connection, emits torn lines, or sends malformed JSON or undecodable bytes must
+  never crash the agent, wedge the transaction lock, or halt the active run. The
+  new sidecar method `ingest_risks` (`POST /ingest_risks`) and the new
+  `continuum import-risks <run_id> [--file <stream>]` command ingest a
+  newline-delimited stream of risk records, and every record is decoded, parsed,
+  schema-validated and written on its own. Each of those four can fail without
+  affecting the others or the run: the corrupt record is dropped and counted, and
+  the well-formed record after it still lands.
+
+  The drop is classified and reported rather than silent, because the two
+  alternatives the issue rejects are a feed that fails closed and becomes a
+  denial-of-service vector against the agent it monitors, and one that fails
+  silently and leaves operators with no observability into what it cost them.
+  Every call answers with the full accounting: accepted and dropped counts, a
+  per-reason breakdown (`invalid_json`, `not_an_object`, `undecodable_utf8`,
+  `oversized_record`, `schema_validation`, `write_failed`), bounded samples of
+  the first failures, and the sequence of the last record that landed, so a
+  caller can re-batch from there. The batch is capped (default 10000) so a feed
+  faster than the fold cannot grow memory without bound, and a blank line is
+  counted as a separator rather than a corrupt record.
+
+  Two boundaries are what keep a sick feed off the durability plane. Risk events
+  never project (#303) and are stamped `EXTERNAL_MONITOR` at write time, so no
+  volume of garbage a feed sends can leave the log unprojectable, and the
+  observation can never count as verification for the agent it describes. And the
+  HTTP transport now bounds its body read: a caller that declares a body it stops
+  writing is answered 408 and closed instead of holding its handler thread and
+  the write transaction it opened, and a body that is not UTF-8 is answered 400
+  rather than closing the connection with no response at all.
+
 ### Fixed
 
 - **A probe that prints `occurred:false` is now told the separator is the
@@ -1044,7 +1078,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~3,325 collected, ~3,325 passed, ~0 skipped on a minimal env).
+  (~3,374 collected, ~3,325 passed, ~0 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

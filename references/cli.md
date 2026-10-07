@@ -32,6 +32,7 @@ continuum compact <run_id>                       # archive pre-anchor log prefix
 continuum precompact <run_id>                    # checkpoint before context compaction. mutates
 continuum rewind <run_id> --to <checkpoint>      # revert workspace and projection [--force] [--dry-run]
 continuum observe                                # record one tool completion (hook). mutates
+continuum import-risks <run_id> [--file <stream>] # ingest a newline-delimited risk-signal stream, fail-open. mutates
 continuum notify-test [run_id]                  # probe webhook wiring without a blockage
 continuum gate                                   # pre-tool-use verdict: allow or deny
 continuum briefing                               # session-start context injection
@@ -46,6 +47,7 @@ continuum policy-review [run_id]                 # advisory recovery-history rep
 continuum impact <run_id> --evidence <id>        # downstream impact of an evidence item
 continuum provenance <run_id>                    # show provenance DAG
 continuum report --trajectory <run_id>           # claims, uncertain side effects, scar rate, stall sites
+continuum policy-review [run_id]                 # advisory report over recovery history. read-only
 continuum record-plan <run_id> --plan-id <id>    # record structured plan upsert. mutates
 continuum export-evidence <run_id>               # export evidence as JSON lines
 continuum forget --tenant <id> [--dry-run]       # tombstone memory records for a tenant. mutates
