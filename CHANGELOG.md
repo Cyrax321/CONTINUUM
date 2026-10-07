@@ -29,6 +29,14 @@ All notable changes to this project are documented here. The format follows
   the line carries counts and a dependency name only, never arguments, files
   or failure detail. `RecoveryEngine` takes an optional ledger and reads the
   budget read-only; without one every decision is unchanged.
+
+- **Trajectory reports locate stall sites at their enclosing plan steps (#1463).**
+  `TrajectoryReport.stall_sites` previously ranked stalling action types across
+  the run history but omitted where in the plan the stall occurred, requiring
+  an operator to search raw logs. The fold now derives plan step sequence spans
+  from `PLAN_UPSERT` events and joins stalling action events into `action_type@step`.
+  Runs with no plan recorded fall back to the bare action type, preserving backward
+  compatibility.
 ### Fixed
 
 - **A probe that prints `occurred:false` is now told the separator is the
