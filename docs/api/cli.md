@@ -31,6 +31,7 @@ continuum --json <command>                    # machine-readable output
 | `validate <run_id>` | Check state against the current environment. |
 | `resume [run_id]` | Assess and describe how the run may resume. Omit `run_id` to resume the most recently active run. Prints the run's `goal` so you know what to continue. |
 | `confirm <run_id>` | Confirm a human-approved recovery step. |
+| `review <run_id>` | Inspect or approve deferred low-risk confirmations and immediate blockers in the review queue. |
 | `complete <run_id>` | Close a run as done. Mutates storage. |
 | `budget <run_id>` | Retry-budget usage per action type. |
 | `tree <run_id> [--limit <n>]` | Show a parent run and its children. `--limit` shows only the newest `n` children. |
