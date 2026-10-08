@@ -64,7 +64,6 @@ from continuum.storage.blob import (
     load_blob_payload,
     maybe_offload_payload,
 )
-from continuum.storage.compaction import resolve_compaction_bound
 
 __all__ = [
     "PostgresStorage",
@@ -682,12 +681,55 @@ class PostgresStorage(Storage):
         earned. The connection runs in autocommit mode, so the explicit
         ``transaction()`` block is what makes the three writes atomic.
 
-        The bound is resolved by :func:`continuum.storage.compaction.
-        resolve_compaction_bound`, shared with the SQLite engine, so an
-        explicit ``through_sequence`` at or above the anchor marker is
-        rejected here too instead of archiving and deleting it (issue #1078).
+        The bound is computed in line with the SQLite engine so an explicit
+        ``through_sequence`` at or above the anchor marker is rejected here too
+        instead of archiving and deleting it (issue #1078).
         """
-        storage_version, through = resolve_compaction_bound(self, run_id, through_sequence)
+        from continuum.checkpoint.manager import CheckpointManager
+
+        lv = self.latest_version(run_id)
+        head = self.last_sequence(run_id)
+        # A caller-supplied environment has to land on a checkpoint, so it
+        # forces the fresh-anchor path whatever the log state (issue #1049).
+        needs_fresh_anchor = (
+            lv is None
+            or through_sequence is not None
+            or lv.source_sequence < head
+            or environment is not None
+        )
+        if needs_fresh_anchor:
+            try:
+                manager = CheckpointManager(self)
+                # The anchor must project over full history: after an earlier
+                # compaction the live tail begins at the anchor markers with
+                # no RUN_STARTED, so a live-only fold would conclude the run
+                # never started (issue #648).
+                state = manager.project_current(run_id, full_history=True)
+                manager.checkpoint(
+                    run_id,
+                    state=state,
+                    force_version=True,
+                    # The anchor carries the environment the run's newest
+                    # checkpoint already recorded when none is supplied
+                    # (#1049): an environment-blind anchor makes every pinned
+                    # dependency UNKNOWN at the next assessment.
+                    environment=self._anchor_environment(run_id, environment),
+                )
+            except Exception as exc:
+                raise ValueError(f"run {run_id!r} could not be anchored: {exc}") from exc
+            lv = self.latest_version(run_id)
+        storage_version = lv
+        if storage_version is None:
+            raise ValueError(f"run {run_id!r} could not be anchored: no projectable state")
+        anchor_sequence = self.last_sequence(run_id) + 1
+        self._validate_compaction_bound(through_sequence, anchor_sequence)
+        through = (
+            through_sequence
+            if through_sequence is not None
+            else min(storage_version.source_sequence, self.last_sequence(run_id))
+        )
+        if through < 1:
+            raise ValueError("nothing to compact: anchor would be empty")
 
         with self._write(), self._connection.transaction():
             self._append_chained(
