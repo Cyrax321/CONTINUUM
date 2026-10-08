@@ -217,6 +217,19 @@ def _hashable_payload(contract: RecoveryContract) -> dict[str, Any]:
     return liveness
 
 
+def _liveness_digest_value(liveness: Any) -> Any:
+    """Strip the one wall-clock reading ``liveness`` carries.
+
+    ``last_append_age`` is seconds since the last append at assessment time, so
+    two assessments of an unchanged run would seal different hashes without
+    this. The verdict fields (``breached``, ``threshold_seconds``, ``phase``,
+    ``breaches``) stay covered.
+    """
+    if isinstance(liveness, dict):
+        return {k: v for k, v in liveness.items() if k != "last_append_age"}
+    return liveness
+
+
 def canonical_digest_input(contract: RecoveryContract, version: int) -> str:
     """The canonical bytes the integrity hash covers, for one version.
 

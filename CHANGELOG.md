@@ -42,6 +42,22 @@ All notable changes to this project are documented here. The format follows
   evidence. See `docs/guides/environment-providers.md`.
 ### Fixed
 
+- **`import continuum` works again on `main`.** Two independent defects, neither in any
+  test, broke the package at import time. `SQLiteStorage.compact_run`'s docstring in
+  `storage/sqlite.py` ended mid-sentence ("...fork the hash chain away from the
+  archive.") and code began with no closing `"""`, so the triple-quoted string
+  swallowed the statements up to the next docstring and the module stopped parsing --
+  reported as a `SyntaxError` at the `foreign_action` docstring's apostrophe, 89 lines
+  away. The closing quote is restored. Separately, `recovery/contract.py` called
+  `_liveness_digest_value` from `canonical_digest_input` and `recovery/conformance.py`
+  imported it, but no definition existed anywhere in the tree, so closing the docstring
+  alone would have upgraded the `SyntaxError` to an `ImportError`. The helper is
+  restored where `canonical_digest_input` uses it, verbatim from the conformance suite
+  that introduced it (#764): it strips `last_append_age`, the one wall-clock reading
+  `liveness` carries, so two assessments of an unchanged run still seal the same hash.
+
+### Fixed
+
 - **The Level 4 MCP inspector walkthrough now names the config the repository
   ships (#1395).** `references/testing.md` pointed
   `@modelcontextprotocol/inspector --cli` at `mcp-config.json`, which has never

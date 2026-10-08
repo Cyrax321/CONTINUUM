@@ -557,6 +557,7 @@ class SQLiteStorage(Storage):
         rejected (issue #705) instead of silently deleting the anchor and
         every live row, which would leave the next append minting a fresh
         genesis and fork the hash chain away from the archive.
+        """
 
         lv = self.latest_version(run_id)
         head = self.last_sequence(run_id)
