@@ -52,6 +52,7 @@ from continuum.recovery.preconditions import (
     derive,
 )
 from continuum.recovery.restore import RestorePreconditionError, approve_restore
+from continuum.recovery.review_queue import ReviewItem, ReviewQueue
 from continuum.recovery.risk_policy import (
     DEFAULT_RISK_POLICY,
     DEFAULT_RISK_POLICY_PATH,
@@ -72,6 +73,8 @@ from continuum.recovery.rules import (
 )
 
 __all__ = [
+    "ReviewItem",
+    "ReviewQueue",
     "RecoveryTimeoutError",
     "CONTRACT_DIGEST_FIELDS",
     "CONTRACT_VERSIONS",
