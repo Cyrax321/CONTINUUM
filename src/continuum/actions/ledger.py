@@ -842,12 +842,13 @@ class ActionLedger:
         # A foreign record that completed, or that another run is still
         # mid-flight on, already settles this claim. A foreign failure only
         # means nothing stands in the way of this run's own slot, so the
-        # drift-tolerant lookup still gets its turn.
-        foreign_settles = foreign is not None and foreign.status not in (
+        # drift-tolerant lookup still gets its turn. The test is inlined rather
+        # than named so the narrowing holds into the return: a local variable
+        # would widen `foreign` back to `Action | None` for the tuple.
+        if foreign is not None and foreign.status not in (
             ActionStatus.FAILED,
             ActionStatus.COMPENSATED,
-        )
-        if foreign_settles:
+        ):
             return IdempotencyKey(idem), foreign
         if not explicit_key:
             matched = self._identity_match(action_type, arguments, volatile)
