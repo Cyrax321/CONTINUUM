@@ -1624,7 +1624,7 @@ async def test_an_unmatched_identifier_says_which_spaces_were_tried(
 
     server, _ = server_ctx
     await seed_run(server)
-    with pytest.raises(ToolError, match="idempotency key or an action_id"):
+    with pytest.raises(ToolError, match="idempotency key, an action_id, or a rendered_key"):
         await server.call_tool(
             "continuum_reconcile_action",
             {"run_id": "run_1", "action_key": "not-an-identifier", "occurred": False},

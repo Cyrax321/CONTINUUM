@@ -200,14 +200,15 @@ def test_a_compensated_action_may_be_performed_again(ledger: ActionLedger) -> No
 
 
 def test_completing_an_unknown_key_is_refused(ledger: ActionLedger) -> None:
-    """The refusal names both identifier spaces (issue #367).
+    """The refusal names every identifier space (issue #367).
 
-    Settle methods accept either an idempotency key or an ``action_id``, so a
-    failure means neither matched. The old wording said only "no action recorded
-    for key", which left a caller holding a valid identifier of the other kind
-    unable to tell a wrong-space mistake from a nonexistent action.
+    Settle methods accept an idempotency key, an ``action_id``, or a
+    ``rendered_key``, so a failure means none matched. The old wording said only
+    "no action recorded for key", which left a caller holding a valid identifier
+    of another kind unable to tell a wrong-space mistake from a nonexistent
+    action.
     """
-    with pytest.raises(LedgerError, match="idempotency key or an action_id"):
+    with pytest.raises(LedgerError, match="idempotency key, an action_id, or a rendered_key"):
         ledger.complete("nonexistent", external_id="1")
 
 
@@ -1570,3 +1571,107 @@ def test_a_terminal_foreign_record_does_not_bypass_the_drift_fallback(
     replay = local.claim("send.invoice", drifted, scoped_to_run=False)
     assert not replay.fresh, "the completed effect must not be re-performed"
     assert replay.external_id == "EXT-9"
+
+
+# --- issue #1536: settle methods resolve rendered_key ---------------------- #
+
+
+def test_resolve_key_matches_rendered_key(ledger: ActionLedger) -> None:
+    """Issue #1536: resolve_key matches rendered_key when passed."""
+    outcome = ledger.claim("fs.write", {"path": "/tmp/out.txt"}, key="write:/tmp/out.txt")
+    assert outcome.rendered_key == "write:/tmp/out.txt"
+    assert outcome.action.rendered_key == "write:/tmp/out.txt"
+
+    # Resolves via explicit rendered_key
+    assert ledger.resolve_key("write:/tmp/out.txt") == outcome.key
+    # Resolves via stored hash key
+    assert ledger.resolve_key(outcome.key) == outcome.key
+    # Resolves via action_id
+    assert ledger.resolve_key(outcome.action.action_id) == outcome.key
+
+
+def test_settle_methods_resolve_rendered_key(ledger: ActionLedger) -> None:
+    """Issue #1536: complete, fail, reconcile, compensate accept rendered_key."""
+    # 1. complete via rendered_key
+    claim1 = ledger.claim("fs.write", {"path": "/tmp/a.txt"}, key="write:/tmp/a.txt")
+    assert claim1.rendered_key == "write:/tmp/a.txt"
+    completed = ledger.complete("write:/tmp/a.txt", result={"bytes": 100})
+    assert completed.status is ActionStatus.COMPLETED
+    assert completed.result == {"bytes": 100}
+    assert completed.rendered_key == "write:/tmp/a.txt"
+    assert ledger.get(claim1.key) is not None
+
+    # compensate via rendered_key
+    compensated = ledger.compensate("write:/tmp/a.txt")
+    assert compensated.status is ActionStatus.COMPENSATED
+    assert compensated.rendered_key == "write:/tmp/a.txt"
+
+    # 2. fail via rendered_key
+    claim2 = ledger.claim("fs.write", {"path": "/tmp/b.txt"}, key="write:/tmp/b.txt")
+    assert claim2.rendered_key == "write:/tmp/b.txt"
+    failed = ledger.fail("write:/tmp/b.txt", error="permission denied")
+    assert failed.status is ActionStatus.FAILED
+    assert failed.last_error == "permission denied"
+    assert failed.rendered_key == "write:/tmp/b.txt"
+    assert ledger.get(claim2.key) is not None
+
+    # 3. reconcile via rendered_key
+    claim3 = ledger.claim("fs.write", {"path": "/tmp/c.txt"}, key="write:/tmp/c.txt")
+    assert claim3.rendered_key == "write:/tmp/c.txt"
+    reconciled = ledger.reconcile("write:/tmp/c.txt", occurred=True, external_id="inode-42")
+    assert reconciled.status is ActionStatus.COMPLETED
+    assert reconciled.external_id == "inode-42"
+    assert reconciled.rendered_key == "write:/tmp/c.txt"
+    assert ledger.get(claim3.key) is not None
+
+
+def test_resolve_key_rendered_key_ambiguity_raises_ledger_error(ledger: ActionLedger) -> None:
+    """Issue #1536: ambiguous rendered_key matches raise LedgerError directing caller to action_id."""
+    outcome1 = ledger.claim("fs.write", {"path": "/shared"}, key="shared:key")
+    outcome2 = ledger.claim("slack.post", {"channel": "#general"}, key="shared:key")
+    assert outcome1.key != outcome2.key
+
+    with pytest.raises(LedgerError) as exc_info:
+        ledger.resolve_key("shared:key")
+
+    err = str(exc_info.value)
+    assert "rendered key 'shared:key' is ambiguous in run 'run_1'" in err
+    assert "matches 2 actions" in err
+    assert outcome1.action.action_id in err
+    assert outcome2.action.action_id in err
+    assert "Settle by action_id instead." in err
+
+    # Ambiguity in settle method also fails with the same LedgerError
+    with pytest.raises(LedgerError, match="is ambiguous in run"):
+        ledger.complete("shared:key", result={"done": True})
+
+    # Settling by action_id disambiguates and succeeds
+    ledger.complete(outcome1.action.action_id, result={"done": True})
+    ledger.complete(outcome2.action.action_id, result={"done": True})
+
+
+def test_unmatched_rendered_key_raises_in_require(ledger: ActionLedger) -> None:
+    """Unmatched keys fail closed in _require with clear error message."""
+    with pytest.raises(
+        LedgerError,
+        match="matches 'missing-key' as an idempotency key, an action_id, or a rendered_key",
+    ):
+        ledger.complete("missing-key", result={})
+
+
+def test_reclaim_failed_or_compensated_preserves_rendered_key(ledger: ActionLedger) -> None:
+    """Re-claiming after FAILED or COMPENSATED preserves rendered_key."""
+    first = ledger.claim("fs.write", {"path": "/reclaim.txt"}, key="write:/reclaim.txt")
+    assert first.rendered_key == "write:/reclaim.txt"
+    ledger.fail("write:/reclaim.txt", error="temporary error")
+
+    reclaimed = ledger.claim("fs.write", {"path": "/reclaim.txt"}, key="write:/reclaim.txt")
+    assert reclaimed.fresh
+    assert reclaimed.rendered_key == "write:/reclaim.txt"
+    assert reclaimed.action.rendered_key == "write:/reclaim.txt"
+
+    # Can settle the reclaimed action using rendered_key
+    completed = ledger.complete("write:/reclaim.txt", result={"retried": True})
+    assert completed.status is ActionStatus.COMPLETED
+    assert completed.result == {"retried": True}
+    assert completed.rendered_key == "write:/reclaim.txt"

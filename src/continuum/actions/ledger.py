@@ -98,7 +98,17 @@ def fold_action_events(events: Any) -> dict[str, Action]:
         key = str(payload.get("key", ""))
         if not key:
             continue
-        actions[key] = Action.model_validate(payload["action"])
+        act_dict = dict(payload["action"])
+        if not act_dict.get("rendered_key"):
+            rendered = payload.get("rendered_key")
+            if not rendered and act_dict.get("arguments") and "record_key" in act_dict["arguments"]:
+                with suppress(Exception):
+                    rendered = str(act_dict["arguments"]["record_key"])
+            if rendered:
+                act_dict["rendered_key"] = rendered
+            elif key in actions and getattr(actions[key], "rendered_key", None):
+                act_dict["rendered_key"] = actions[key].rendered_key
+        actions[key] = Action.model_validate(act_dict)
     return actions
 
 
@@ -375,6 +385,11 @@ class ActionOutcome:
     def external_id(self) -> str | None:
         """The external system identifier associated with the action, if known."""
         return self.action.external_id
+
+    @property
+    def rendered_key(self) -> str | None:
+        """The un-hashed, caller-facing key from the claim (issue #1536)."""
+        return self.action.rendered_key
 
 
 class ActionLedger:
@@ -702,24 +717,27 @@ class ActionLedger:
         return self._replay().get(key)
 
     def resolve_key(self, identifier: str) -> str | None:
-        """The ledger key for ``identifier``, which may be a key or an ``action_id``.
+        """The ledger key for ``identifier``, which may be a key, an ``action_id``, or a ``rendered_key``.
 
         The ledger is keyed by idempotency key, but almost everything a caller
-        reads back is keyed by ``action_id``: ``Action.action_id`` itself, the
-        recovery plan's ``reconcile_action:<target>`` steps, the contract's
-        ``required_actions``, and the rendered report. So the identifier a
-        recovering caller has in hand is usually the one the settle methods did
-        not accept, and the two are indistinguishable by shape (issue #367).
+        reads back is keyed by ``action_id`` or instructed by ``rendered_key``:
+        ``Action.action_id`` itself, the recovery plan's ``reconcile_action:<target>``
+        steps, the contract's ``required_actions``, the intercept gate's claim
+        instructions, and the rendered report. So the identifier a recovering or
+        completing caller has in hand is usually the one the settle methods did
+        not accept (issues #367, #1536).
 
-        Resolving both here rather than at one call site means every settle
-        method inherits it, and the recovery guidance that names an ``action_id``
-        becomes executable as written instead of needing to be rewritten in terms
-        of an identifier no output exposes.
+        Resolving these here rather than at one call site means every settle
+        method inherits it, and the recovery guidance or intercept prompt
+        becomes executable as written instead of dead-ending.
 
-        The mapping is unambiguous: one key holds one action, and a re-claim after
-        FAILED or COMPENSATED copies the existing action, so ``action_id`` stays
-        with its key rather than being reissued. Returns ``None`` when neither
-        space matches.
+        The stored key and ``action_id`` mappings are unambiguous: one key holds
+        one action, and a re-claim after FAILED or COMPENSATED copies the existing
+        action, so ``action_id`` stays with its key rather than being reissued.
+        When neither matches, matches against ``rendered_key`` are resolved. If
+        multiple actions in this run match the same rendered key, raises
+        :class:`LedgerError` asking the caller to settle by ``action_id`` instead.
+        Returns ``None`` when no space matches.
         """
         folded = self._replay()
         if identifier in folded:
@@ -727,6 +745,21 @@ class ActionLedger:
         for stored_key, action in folded.items():
             if action.action_id == identifier:
                 return stored_key
+
+        matches = [
+            stored_key
+            for stored_key, action in folded.items()
+            if getattr(action, "rendered_key", None) == identifier
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            matching_ids = sorted(folded[k].action_id for k in matches)
+            raise LedgerError(
+                f"rendered key {identifier!r} is ambiguous in run {self.run_id!r}: "
+                f"matches {len(matches)} actions ({', '.join(matching_ids)}). "
+                f"Settle by action_id instead."
+            )
         return None
 
     def resolve_claim(
@@ -1022,6 +1055,8 @@ class ActionLedger:
                 payload["origin_digest"] = digest
         if rendered_key is not None:
             payload["rendered_key"] = rendered_key
+        elif getattr(action, "rendered_key", None) is not None:
+            payload["rendered_key"] = action.rendered_key
         elif action.arguments and "record_key" in action.arguments:
             # Fallback for callers that supplied record_key via arguments
             # rather than explicit key; keep forensic searchable.
@@ -1265,6 +1300,9 @@ class ActionLedger:
                     raise LedgerError(
                         f"origin_digest must be 64 lowercase hex, got {origin_digest!r}"
                     )
+            if rendered_key is None and arguments and "record_key" in arguments:
+                with suppress(Exception):
+                    rendered_key = str(arguments["record_key"])
             action = Action(
                 run_id=self.run_id,
                 action_type=action_type,
@@ -1275,6 +1313,7 @@ class ActionLedger:
                 started_at=utcnow(),
                 origin_digest=origin_digest,
                 budget_authorization_id=budget_auth_id,
+                rendered_key=rendered_key,
             )
             self._record(
                 key,
@@ -1306,9 +1345,10 @@ class ActionLedger:
                     "result_hash": None,
                     "external_id": None,
                     "budget_authorization_id": budget_auth_id,
+                    "rendered_key": rendered_key or existing.rendered_key,
                 }
             )
-            self._record(key, action)
+            self._record(key, action, rendered_key=action.rendered_key)
             if budget_auth_id is not None:
                 self._budget_commit_claim(action_type, budget_auth_id)
             self._count_claim()
@@ -1322,9 +1362,10 @@ class ActionLedger:
                     "status": ActionStatus.STARTED,
                     "started_at": utcnow(),
                     "budget_authorization_id": budget_auth_id,
+                    "rendered_key": rendered_key or existing.rendered_key,
                 }
             )
-            self._record(key, action)
+            self._record(key, action, rendered_key=action.rendered_key)
             if budget_auth_id is not None:
                 self._budget_commit_claim(action_type, budget_auth_id)
             self._count_claim()
@@ -1701,7 +1742,7 @@ class ActionLedger:
         to record its settlement under the key the fold uses, not under whatever
         identifier the caller happened to hold (issue #367).
 
-        The message names both identifier spaces. The previous wording,
+        The message names every identifier space. The previous wording,
         ``no action recorded for key <prefix>...``, left a caller that had passed
         a perfectly valid ``action_id`` with no way to tell that it had reached
         for the wrong identifier rather than a nonexistent action.
@@ -1710,8 +1751,9 @@ class ActionLedger:
         if resolved is None:
             known = len(self._replay())
             raise LedgerError(
-                f"no action in run {self.run_id!r} matches {key[:16]!r} as either an "
-                f"idempotency key or an action_id ({known} action(s) recorded). "
+                f"no action in run {self.run_id!r} matches {key[:16]!r} as an "
+                f"idempotency key, an action_id, or a rendered_key "
+                f"({known} action(s) recorded). "
                 f"List them with `continuum actions {self.run_id}` or "
                 f"continuum_list_actions, and pass the action_key or action_id from there."
             )

@@ -46,6 +46,30 @@ All notable changes to this project are documented here. The format follows
   `valid=` parser, which had the identical opaque message, gets the same
   diagnosis.
 
+- **Action ledger settle methods resolve rendered keys instructed at claim (#1536).**
+  The intercept gate instructs a caller to claim an un-claimed side effect using
+  its rendered key, but `claim(key=...)` hashes explicit keys into SHA-256
+  idempotency keys. When a caller attempted to settle the action via `complete`,
+  `fail`, `reconcile`, or `compensate` using the rendered key, `resolve_key`
+  only matched stored idempotency keys or `action_id`, raising `LedgerError` and
+  breaking the claim-to-complete loop. `resolve_key` now resolves rendered keys,
+  fails closed with an explanatory error when a rendered key is ambiguous across
+  multiple actions in the same run, and preserves `rendered_key` across event
+  payloads and re-claims.
+
+- **The Level 4 MCP inspector walkthrough now names the config the repository
+  ships (#1395).** `references/testing.md` pointed
+  `@modelcontextprotocol/inspector --cli` at `mcp-config.json`, which has never
+  existed anywhere in the tree (not tracked, never committed, absent on disk),
+  so the copy-pasted command failed at the exact step meant to exercise the
+  protocol boundary. It now points at the tracked `.mcp.json`, whose
+  `continuum-mcp` entry is the server the `--server continuum-mcp` flag names. A
+  guard in `tests/test_docs_mcp_inspector.py` folds the fenced command's
+  backslash continuations and asserts, for every inspector command in
+  `references/` and `docs/`, that its `--config` file is present in the tree and
+  its `--server` name is an entry in that file, so a walkthrough cannot drift
+  back out of sync with the shipped config.
+
 - **The gateway can finally reach a plain-HTTP upstream.** The transport was
   hardcoded: every route opened an `HTTPSConnection` and the recorded evidence
   stamped `https://` on the path, so an upstream that does not terminate TLS
