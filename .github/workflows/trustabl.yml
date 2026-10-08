@@ -28,7 +28,7 @@ jobs:
         with:
           persist-credentials: false
       - id: scanner
-        uses: trustabl/trustabl-action@973f666d20b5fbb2e6a4511bd3846e965a08c28b # v0.4.1
+        uses: trustabl/trustabl-action@d97575c864814bf4965fa2c72c044224d372723a # v0.4.3
         continue-on-error: true
         with:
           version: v0.1.6
