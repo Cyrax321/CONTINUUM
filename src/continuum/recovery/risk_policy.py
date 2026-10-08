@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -22,6 +22,7 @@ __all__ = [
     "DEFAULT_RISK_POLICY",
     "DEFAULT_RISK_POLICY_PATH",
     "KNOWN_TRIGGERS",
+    "PolicyMode",
     "RISK_POLICY_SCHEMA",
     "RiskPolicy",
     "RiskPolicyError",
@@ -54,8 +55,23 @@ BASELINE_RISK_POLICY: dict[str, str] = dict(DEFAULT_RISK_POLICY)
 #: Canonical set of recognised trigger names under the declarative policy.
 KNOWN_TRIGGERS: frozenset[str] = frozenset(DEFAULT_RISK_POLICY.keys())
 
+#: Valid policy modes for a trigger mapping. The eight RecoveryMode values plus
+#: 'annotate', which records the signal without interrupting recovery. Typed as
+#: a Literal so the generated JSON Schema restricts each field to this set
+#: (review of #1422), matching schemas/risk-policy.schema.json.
+PolicyMode = Literal[
+    "resume",
+    "repair_and_resume",
+    "replan",
+    "wait",
+    "request_human",
+    "rollback",
+    "abort",
+    "annotate",
+]
+
 #: Set of valid policy modes, including 'annotate' (watch-without-action).
-_VALID_POLICY_MODES: frozenset[str] = frozenset({m.value for m in RecoveryMode} | {"annotate"})
+_VALID_POLICY_MODES: frozenset[str] = frozenset(get_args(PolicyMode))
 
 #: Ascending caution severity ordering for conservative checks.
 _SEVERITY_ORDER: dict[str, int] = {
@@ -112,23 +128,23 @@ class RiskPolicySchema(BaseModel):
         alias="$schema",
         description="Optional URI to the JSON Schema definition.",
     )
-    loop: str = Field(
+    loop: PolicyMode = Field(
         default=RecoveryMode.REPLAN.value,
         description="Recovery mode for execution loop anomalies.",
     )
-    loop_persisting: str = Field(
+    loop_persisting: PolicyMode = Field(
         default=RecoveryMode.ROLLBACK.value,
         description="Recovery mode for persistent loop anomalies.",
     )
-    error_cascade: str = Field(
+    error_cascade: PolicyMode = Field(
         default=RecoveryMode.WAIT.value,
         description="Recovery mode for cascading errors.",
     )
-    latency_anomaly: str = Field(
+    latency_anomaly: PolicyMode = Field(
         default="annotate",
         description="Recovery mode for latency anomalies (annotate only).",
     )
-    token_runaway: str = Field(
+    token_runaway: PolicyMode = Field(
         default=RecoveryMode.WAIT.value,
         description="Base recovery mode for token runaway anomalies.",
     )
@@ -138,19 +154,19 @@ class RiskPolicySchema(BaseModel):
         le=1.0,
         description="Confidence score threshold for token runaway escalation to abort.",
     )
-    silent_abort: str = Field(
+    silent_abort: PolicyMode = Field(
         default=RecoveryMode.REPAIR_AND_RESUME.value,
         description="Recovery mode for silent abort anomalies.",
     )
-    meltdown: str = Field(
+    meltdown: PolicyMode = Field(
         default=RecoveryMode.ROLLBACK.value,
         description="Recovery mode for unhandled meltdown anomalies.",
     )
-    side_effect_duplicate: str = Field(
+    side_effect_duplicate: PolicyMode = Field(
         default=RecoveryMode.ABORT.value,
         description="Recovery mode for duplicate side-effect execution.",
     )
-    governance_decay: str = Field(
+    governance_decay: PolicyMode = Field(
         default=RecoveryMode.REQUEST_HUMAN.value,
         description="Recovery mode for governance decay anomalies.",
     )
@@ -172,17 +188,45 @@ class RiskPolicy(dict):  # type: ignore[type-arg]
         token_runaway_threshold: float = 0.8,
         **kwargs: Any,
     ) -> None:
+        """Build a policy from overrides, then fill every baseline trigger.
+
+        Mapping and keyword keys are normalised (trimmed and lowercased) before
+        the known-trigger membership check, so ``{"Meltdown": "abort"}`` and
+        ``Meltdown="abort"`` reach the same slot as ``meltdown``. Recognised
+        overrides are validated exactly as :func:`load_risk_policy` validates
+        them: the mode must be in the policy mode set and must not downgrade
+        the trigger below its baseline. Unrecognised keys are ignored rather
+        than rejected; file-level fail-closed handling belongs to the loader.
+        """
         super().__init__()
         self.token_runaway_threshold = float(token_runaway_threshold)
+
+        def set_override(key: str, value: Any) -> None:
+            """Normalise, validate, and store one recognised trigger override."""
+            normalized = key.strip().lower()
+            if normalized not in KNOWN_TRIGGERS:
+                return
+            if not isinstance(value, str) or value not in _VALID_POLICY_MODES:
+                raise RiskPolicyError(
+                    f"risk policy[{key!r}] must be one of "
+                    f"{sorted(_VALID_POLICY_MODES)}, got {value!r}"
+                )
+            baseline_mode = BASELINE_RISK_POLICY[normalized]
+            if not is_more_conservative(value, baseline_mode):
+                raise RiskPolicyError(
+                    f"risk policy[{key!r}] downgrades {baseline_mode!r} to "
+                    f"{value!r}; operators may only make actions more conservative"
+                )
+            self[normalized] = value
+
         if mapping:
             for k, v in mapping.items():
-                if k in KNOWN_TRIGGERS:
-                    self[k.strip().lower()] = v
+                set_override(k, v)
         for k, v in kwargs.items():
             if k == "token_runaway_threshold":
                 self.token_runaway_threshold = float(v)
-            elif k in KNOWN_TRIGGERS:
-                self[k.strip().lower()] = v
+            else:
+                set_override(k, v)
         # Ensure all baseline triggers are present with conservative defaults
         for dk, dv in DEFAULT_RISK_POLICY.items():
             if dk not in self:

@@ -25,13 +25,18 @@ class RiskFault:
     trigger: str
     expected_mode: str | None
     description: str
+    #: Confidence the injected observation reports. 0.9 by default so a fault
+    #: reads as a confident detection; ``token_runaway`` is below its escalation
+    #: threshold because its mapped mode is what this table documents, and the
+    #: escalation itself is covered by the engine tests.
+    score: float = 0.9
 
 
 RISK_FAULTS: list[RiskFault] = [
     RiskFault("loop", "replan", "loop collapses into repetition"),
     RiskFault("error_cascade", "wait", "transient cascade, backoff"),
     RiskFault("latency_anomaly", None, "benign slowness, annotate only"),
-    RiskFault("token_runaway", "wait", "token runaway, budget breach"),
+    RiskFault("token_runaway", "wait", "token runaway, budget breach", score=0.5),
     RiskFault("silent_abort", "repair_and_resume", "omissions recoverable"),
     RiskFault("meltdown", "rollback", "meltdown to last fact-gathering step"),
     RiskFault("side_effect_duplicate", "abort", "gate bypass, abort and reconcile"),
@@ -44,13 +49,17 @@ def _mode_for_trigger(trigger: str, policy: dict[str, str] | None = None) -> str
 
 
 def run_risk_fault_suite(
-    storage: Storage, run_id: str, trigger: str, policy: dict[str, str] | None = None
+    storage: Storage,
+    run_id: str,
+    trigger: str,
+    policy: dict[str, str] | None = None,
+    score: float = 0.9,
 ) -> dict[str, Any]:
     """Inject a single risk trigger and return the decision."""
     from continuum.recovery.risk import ingest_risk
 
     ingest_risk(
-        storage, run_id, {"trigger": trigger, "score": 0.9, "detail": f"bench inject {trigger}"}
+        storage, run_id, {"trigger": trigger, "score": score, "detail": f"bench inject {trigger}"}
     )
     engine = RecoveryEngine(storage)
     decision = engine.assess(run_id)
@@ -77,7 +86,7 @@ def run_all_risk_faults(db_path: str = ":memory:") -> list[dict[str, Any]]:
             with SQLiteStorage(db) as store:
                 run_id = f"run_risk_{fault.trigger}"
                 store.create_run_started(Run(run_id=run_id, goal="bench risk"))
-                result = run_risk_fault_suite(store, run_id, fault.trigger)
+                result = run_risk_fault_suite(store, run_id, fault.trigger, score=fault.score)
                 result["description"] = fault.description
                 results.append(result)
     return results
