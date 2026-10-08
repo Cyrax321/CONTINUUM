@@ -21,6 +21,7 @@ continuum show-contract <run_id>                 # the machine-readable contract
 continuum replay <run_id> [--upto N]             # re-derive state from events
 continuum reconcile <run_id> [--dry-run]         # settle uncertain effects with probes
 continuum confirm <run_id>                       # human blessing for self-reported state
+continuum review <run_id>                        # review queue: batch or approve deferred confirmations
 continuum complete <run_id> [--summary "..."]    # close a run as done. mutates
 continuum budget <run_id>                        # retry-budget usage per action type
 continuum tree <run_id> [--limit N]              # show parent run and child runs
@@ -54,6 +55,7 @@ continuum provenance <run_id>                    # show provenance DAG
 continuum evidence-chain <run_id>                # correlate actions with tool observations
       [--action-key <k>] [--correlation-id <id>] [--unmatched-only]
 continuum report --trajectory <run_id>           # claims, uncertain side effects, scar rate, stall sites
+continuum policy-review [run_id]                 # advisory recovery history report
 continuum record-plan <run_id> --plan-id <id>    # record structured plan upsert. mutates
 continuum export-evidence <run_id>               # export evidence as JSON lines
 continuum forget --tenant <id> [--dry-run]       # tombstone memory records for a tenant. mutates
