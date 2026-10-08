@@ -86,8 +86,30 @@ HOST_PROFILES: dict[str, dict[str, str]] = {
     "claude-code": {
         "project_settings": ".mcp.json",
         "local_settings": "~/.claude.json",
+        "user_settings": "~/.claude.json",
         "local_projects_key": "projects",
         "mutating_clients": "claude-code",
+    },
+    "gemini": {
+        "project_settings": ".mcp.json",
+        "local_settings": "~/.gemini/settings.json",
+        "user_settings": "~/.gemini/settings.json",
+        "local_projects_key": "mcpServers",
+        "mutating_clients": "gemini-cli",
+    },
+    "cursor": {
+        "project_settings": ".cursor/mcp.json",
+        "local_settings": "~/.cursor/mcp.json",
+        "user_settings": "~/.cursor/mcp.json",
+        "local_projects_key": "mcpServers",
+        "mutating_clients": "cursor",
+    },
+    "vscode": {
+        "project_settings": ".vscode/mcp.json",
+        "local_settings": "~/Library/Application Support/Code/User/settings.json",
+        "user_settings": "~/Library/Application Support/Code/User/settings.json",
+        "local_projects_key": "mcpServers",
+        "mutating_clients": "vscode",
     },
 }
 
@@ -222,8 +244,10 @@ def remove_server(
         removed = _remove_project_entry(data)
     elif scope == "local":
         removed = _remove_local_entry(data, project_root)
+    elif scope == "user":
+        removed = _remove_user_entry(data)
     else:
-        raise ValueError(f"unknown scope {scope!r} (expected 'local' or 'project')")
+        raise ValueError(f"unknown scope {scope!r} (expected 'local', 'project', or 'user')")
     if not removed:
         return False
     _save(settings_path, data)
@@ -261,6 +285,17 @@ def _remove_local_entry(data: dict[str, Any], project_root: Path) -> bool:
             del projects[str(project_root)]
         if not projects:
             del data["projects"]
+    return True
+
+
+def _remove_user_entry(data: dict[str, Any]) -> bool:
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict):
+        return False
+    if not _drop_managed(servers):
+        return False
+    if not servers:
+        del data["mcpServers"]
     return True
 
 
@@ -362,8 +397,16 @@ def _mcp_servers(
             raise ValueError("the settings file's 'mcpServers' is not an object")
         return servers
 
+    if scope == "user":
+        servers = data.get("mcpServers")
+        if servers is None:
+            servers = data["mcpServers"] = {}
+        if not isinstance(servers, dict):
+            raise ValueError("the settings file's 'mcpServers' is not an object")
+        return servers
+
     if scope != "local":
-        raise ValueError(f"unknown scope {scope!r} (expected 'local' or 'project')")
+        raise ValueError(f"unknown scope {scope!r} (expected 'local', 'project', or 'user')")
 
     projects = data.get("projects")
     if projects is None:

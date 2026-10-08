@@ -116,6 +116,68 @@ def resolve_scope(*candidates: object) -> str | None:
     return next(iter(found))
 
 
+def dependencies_for_contract(contract: RecoveryContract) -> list[str]:
+    """Derive external dependency names from a sealed recovery contract."""
+    deps: list[str] = []
+    for line in contract.evidence:
+        prefix = "localized recovery scoped to: "
+        if line.startswith(prefix):
+            raw = line[len(prefix) :].strip()
+            deps.extend([d.strip() for d in raw.split(",") if d.strip()])
+    for action in contract.required_actions:
+        prefix = "revalidate_dependency:"
+        if action.startswith(prefix):
+            dep = action[len(prefix) :].strip()
+            if dep and dep not in deps:
+                deps.append(dep)
+    return deps
+
+
+def dependencies_for_action(action: Any) -> list[str]:
+    """Derive external dependency names from an action or action-like object."""
+    if action is None:
+        return []
+    dep = getattr(action, "dep_scope", None)
+    if isinstance(action, dict):
+        dep = action.get("dep_scope") or action.get("dependency")
+    if not dep or not isinstance(dep, str):
+        return []
+    if "," in dep:
+        return [d.strip() for d in dep.split(",") if d.strip()]
+    return [dep.strip()]
+
+
+def derive_recovery_dependencies(
+    *,
+    dependency: str | None = None,
+    dependencies: Iterable[str] | None = None,
+    contract: RecoveryContract | None = None,
+    action: Any | None = None,
+    scope: Iterable[str] | None = None,
+) -> list[str]:
+    """Derive external dependency names from explicit inputs, contract, action, or scope."""
+    out: list[str] = []
+    if dependency:
+        out.append(dependency)
+    if dependencies:
+        for d in dependencies:
+            if d and d not in out:
+                out.append(d)
+    if scope:
+        for s in scope:
+            if s and s not in out:
+                out.append(s)
+    if contract is not None:
+        for d in dependencies_for_contract(contract):
+            if d not in out:
+                out.append(d)
+    if action is not None:
+        for d in dependencies_for_action(action):
+            if d not in out:
+                out.append(d)
+    return out
+
+
 class LedgerError(RuntimeError):
     """Base class for ledger failures."""
 
@@ -180,6 +242,11 @@ class RecoveryLedgerEntry:
         if self.scope is not None:
             content["scope"] = self.scope
         return content
+
+    @property
+    def dependency(self) -> str | None:
+        """Backward-compatible view of the scope a record charges."""
+        return self.scope
 
     def verify(self) -> bool:
         """Whether the entry's content hash still matches its content."""
@@ -543,6 +610,11 @@ class RecoveryLedger:
         note: str = "",
         max_attempts: int | None = None,
         global_max_attempts: int | None = None,
+        dependency: str | None = None,
+        dependencies: Iterable[str] | None = None,
+        contract: RecoveryContract | None = None,
+        action: Any | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
     ) -> int:
         """Record one recovery attempt and return the new count for its scope.
 
@@ -561,7 +633,75 @@ class RecoveryLedger:
         a per-dependency limit configured above it still escalates at the
         run-wide number, so a scope can never buy more attempts than the run
         was ever allowed (issue #744).
+
+        The older ``dependency``, ``dependencies``, ``contract``, ``action``,
+        and ``dependency_budgets`` spelling is accepted: every derived
+        dependency gets its own scoped attempt entry, and its own ceiling from
+        ``dependency_budgets`` when present.
         """
+        deps = (
+            derive_recovery_dependencies(
+                dependency=dependency,
+                dependencies=dependencies,
+                contract=contract,
+                action=action,
+            )
+            if (
+                dependency is not None
+                or dependencies is not None
+                or contract is not None
+                or action is not None
+            )
+            else []
+        )
+        if deps:
+            if dependency_budgets is None:
+                try:
+                    from continuum.budgets import DEFAULT_BUDGETS_PATH, load_budgets
+
+                    dependency_budgets = load_budgets(Path(DEFAULT_BUDGETS_PATH))
+                except Exception:
+                    dependency_budgets = None
+            total = 0
+            for dep in deps:
+                with self._locked(run_id):
+                    entries = self._backend.load(run_id)
+                    resolved = _normalize_scope(dep)
+                    sealed = self._seal_and_save(
+                        run_id, entries, kind=LedgerEntryKind.ATTEMPT, note=note, scope=resolved
+                    )
+                    total = (
+                        sum(
+                            1
+                            for e in entries
+                            if e.kind == LedgerEntryKind.ATTEMPT.value and e.scope == resolved
+                        )
+                        + 1
+                    )
+                    limit = max_attempts_for_dependency(
+                        dependency_budgets, dep, fallback=max_attempts
+                    )
+                    if limit is not None:
+                        limit = _ceiling(limit, global_max_attempts)
+                    escalated = any(
+                        e.kind == LedgerEntryKind.GATE.value
+                        and e.gate == HUMAN_REQUIRED
+                        and _marker_covers(e, resolved)
+                        for e in entries
+                    )
+                    if limit is not None and total >= limit and not escalated:
+                        self._seal_and_save(
+                            run_id,
+                            [*entries, sealed],
+                            kind=LedgerEntryKind.GATE,
+                            gate=HUMAN_REQUIRED,
+                            anchor=True,
+                            scope=resolved,
+                            note=f"attempt {total} for scope {resolved} reached the escalation "
+                            f"threshold {limit}",
+                        )
+            return total
+
         resolved = resolve_scope(scope)
         with self._locked(run_id):
             entries = self._backend.load(run_id)
@@ -601,7 +741,7 @@ class RecoveryLedger:
                     sum(
                         1
                         for e in entries
-                        if e.kind == LedgerEntryKind.ATTEMPT.value and e.dependency is None
+                        if e.kind == LedgerEntryKind.ATTEMPT.value and e.scope is None
                     )
                     + 1
                 )
@@ -620,7 +760,18 @@ class RecoveryLedger:
                     )
                 return count
 
-    def attempts(self, run_id: str, *, scope: object = None) -> int:
+        return count
+
+    def attempts(
+        self,
+        run_id: str,
+        *,
+        scope: object = None,
+        dependency: str | None = None,
+        dependencies: Iterable[str] | None = None,
+        contract: RecoveryContract | None = None,
+        action: Any | None = None,
+    ) -> int:
         """The attempt count for ``scope``: how many of its ATTEMPT entries survive.
 
         ``scope`` is reduced by :func:`resolve_scope`; without one this counts
@@ -629,6 +780,28 @@ class RecoveryLedger:
         recorded as an anchored GATE entry (see ``record_attempt``) rather than
         inferred from the number.
         """
+        deps = (
+            derive_recovery_dependencies(
+                dependency=dependency,
+                dependencies=dependencies,
+                contract=contract,
+                action=action,
+            )
+            if (
+                dependency is not None
+                or dependencies is not None
+                or contract is not None
+                or action is not None
+            )
+            else []
+        )
+        if deps:
+            return sum(
+                1
+                for e in self.entries(run_id)
+                if e.kind == LedgerEntryKind.ATTEMPT.value
+                and e.scope in {_normalize_scope(d) for d in deps}
+            )
         resolved = resolve_scope(scope)
         return sum(
             1
@@ -643,6 +816,11 @@ class RecoveryLedger:
         scope: object = None,
         max_attempts: int = 3,
         global_max_attempts: int | None = None,
+        dependency: str | None = None,
+        dependencies: Iterable[str] | None = None,
+        contract: RecoveryContract | None = None,
+        action: Any | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
     ) -> bool:
         """True once ``scope`` has reached the human-in-the-loop threshold.
 
@@ -652,6 +830,46 @@ class RecoveryLedger:
         answers the run-wide query, because an unknown-ownership caller cannot
         assume some other dependency's escalation is not its own (issue #744).
         """
+        deps = (
+            derive_recovery_dependencies(
+                dependency=dependency,
+                dependencies=dependencies,
+                contract=contract,
+                action=action,
+            )
+            if (
+                dependency is not None
+                or dependencies is not None
+                or contract is not None
+                or action is not None
+            )
+            else []
+        )
+        if deps:
+            if dependency_budgets is None:
+                try:
+                    from continuum.budgets import DEFAULT_BUDGETS_PATH, load_budgets
+
+                    dependency_budgets = load_budgets(Path(DEFAULT_BUDGETS_PATH))
+                except Exception:
+                    dependency_budgets = None
+            for dep in deps:
+                limit = max_attempts_for_dependency(dependency_budgets, dep, fallback=max_attempts)
+                if limit is not None:
+                    limit = _ceiling(limit, global_max_attempts)
+                resolved = _normalize_scope(dep)
+                entries = self.entries(run_id)
+                if any(
+                    e.kind == LedgerEntryKind.GATE.value
+                    and e.gate == HUMAN_REQUIRED
+                    and _marker_covers(e, resolved)
+                    for e in entries
+                ):
+                    return True
+                if limit is not None and self._attempt_count(entries, resolved) >= limit:
+                    return True
+            return False
+
         resolved = resolve_scope(scope)
         entries = self.entries(run_id)
         if any(

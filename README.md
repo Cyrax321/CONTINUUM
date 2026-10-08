@@ -52,7 +52,7 @@ Modern AI agents run long tasks (hundreds of LLM calls, tool invocations, file a
 CONTINUUM asks a narrower, harder question: can an agent resume from a compact semantic representation of its task state while independently verifying that state is still valid in the current environment? Its differentiator is three-part:
 
 - **Semantic checkpoints**: a compact, versioned representation of what the agent needs to continue, not a conversation dump.
-- **Independent environment revalidation**: every checkpoint component is verified against the current environment before resume, with staleness propagating through the dependency graph. A run can configure the observers it trusts (`continuum providers`) so resume captures the world by name instead of relying on a caller to remember to pass them; a provider that cannot report marks its resources unknown, never as unchanged.
+- **Independent environment revalidation**: every checkpoint component is verified against the current environment before resume, with staleness propagating through the dependency graph.
 - **Provenance-aware state**: every fact traces to its origin, so agent-reported progress is never self-certifying.
 
 ## Quick Start
@@ -100,7 +100,7 @@ Verify:
 ```bash
 continuum --help                 # CLI entrypoint
 continuum-mcp --help             # MCP server entrypoint (needs [mcp] or [dev])
-pytest -q                        # ~2,864 collected, ~2,825 passed, ~34 skipped on a minimal env (exact counts vary)
+pytest -q                        # ~3,325 collected, ~3,325 passed, ~0 skipped on a minimal env (exact counts vary)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # the three gates CI enforces
 ```
@@ -197,7 +197,7 @@ Full walkthrough with code is in `docs/recovery_walkthrough.md` (`examples/recov
 | Framework adapters | Generic Python, OpenAI Agents SDK, LangGraph, and LangChain integrations |
 | Secure planning loop | Two-signal observation verification escalates high-risk branches to REQUIRES_REVIEW |
 | Periodic revalidation | Environment re-checked on a schedule, catching mid-run drift within one cycle |
-| Tamper-evident log | Hash-chained event log (52 event types) with integrity verification |
+| Tamper-evident log | Hash-chained event log (55 event types) with integrity verification |
 | Enforcing gate | Unclaimed side-effect calls are refused before they fire; deny messages teach the claim protocol |
 | Observation hooks | Every file a coding CLI writes becomes digest-verified evidence, outside model control |
 | Session briefing | Fresh sessions learn run state deterministically at start, including the last session's reasoning summary |
@@ -235,7 +235,7 @@ CONTINUUM is verified against real LLM agents, live protocol boundaries, and har
 - **Third-party clients**: Gemini CLI and Kilo Code connected over stdio JSON-RPC against the live SQLite store, validating multi-agent co-existence and authorization isolation.
 - **Protocol compliance**: driven end to end with `@modelcontextprotocol/inspector --cli` across process deaths; mutating tools deny by default behind `CONTINUUM_MCP_MUTATING_CLIENTS`; external claims degrade to `REQUIRES_REVIEW` (`safe: false`).
 - **Self-healing**: hard-killed servers recover from orphaned SQLite `-wal`/`-shm` sidecars via single-retry cleanup at startup.
-- **Scale**: roughly 2,864 tests collected (~2,825 passing; ~34 skipped; other outcomes vary by environment) on Python 3.11, 3.12, and 3.13 (unit, `hypothesis` property-based, concurrency, adversarial). CONTINUUM-Bench runs five crash scenarios plus a dedicated argument-drift scenario, measuring 0 duplicate work and 0 duplicate side effects for CONTINUUM against full duplication for naive replay; a separate 14-scenario recovery-correctness suite (`continuum.benchmark.phase6`) encodes the crash points from the durable-execution survey as executable assertions, and a 7-fault risk-injection suite (`benchmarks/fault_injection/`) grades failure handling.
+- **Scale**: roughly 3,325 tests collected (~3,325 passing; ~0 skipped; other outcomes vary by environment) on Python 3.11, 3.12, and 3.13 (unit, `hypothesis` property-based, concurrency, adversarial). CONTINUUM-Bench runs five crash scenarios plus a dedicated argument-drift scenario, measuring 0 duplicate work and 0 duplicate side effects for CONTINUUM against full duplication for naive replay; a separate 14-scenario recovery-correctness suite (`continuum.benchmark.phase6`) encodes the crash points from the durable-execution survey as executable assertions, and a 7-fault risk-injection suite (`benchmarks/fault_injection/`) grades failure handling.
 - **Adversarial audit**: the full MCP surface was audited over the live protocol; three defects were found and fixed. Method and reproduction steps in [test.md](test.md).
 
 <!-- BENCH:START -->
@@ -418,7 +418,7 @@ Schema v6. SQLite is primary, Postgres is CI verified. One log, many projections
 
 | Table | Purpose |
 |:--|:--|
-| `events` | Hash chained append only log (52 event types) |
+| `events` | Hash chained append only log (55 event types in v0.2) |
 | `runs` | Run metadata with `parent_run_id` for multi agent |
 | `versions` | SemanticState snapshots per checkpoint |
 | `checkpoints` | Sealed checkpoint records with `RECOVERY` anchors |
@@ -428,7 +428,7 @@ Schema v6. SQLite is primary, Postgres is CI verified. One log, many projections
 
 ### Module map: one library, many surfaces
 
-CONTINUUM is one library (`src/continuum`, 132 modules) plus a large test suite (187 test files, ~2,906 tests). All modules append to and replay one hash chained event log:
+CONTINUUM is one library (`src/continuum`, 141 modules) plus a large test suite (203 test files, ~3,325 tests). All modules append to and replay one hash chained event log:
 
 | Module | Role |
 |:--|:--|
@@ -450,7 +450,7 @@ CONTINUUM is one library (`src/continuum`, 132 modules) plus a large test suite 
 | `mcp/` | 13 stdio tools plus authz `authz.py` token auth, allowlist, confirmation token |
 | `serve/` | Sidecar stdio JSON wire + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Web dashboard `app.py` `hitl.py` with HITL buttons confirm/reconcile/complete, prefix trust advisory, pins |
-| `cli/` | 49 argparse commands, exit codes as verdict: `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 52 argparse commands, exit codes as verdict: `runs, start, inspect, resume, verify, health, tree, benchmark, attest, lineage-issue, lineage-verify, dashboard` |
 | `otel.py` | OpenTelemetry span processor bridge |
 | `benchmark/` | CONTINUUM-Bench harness: 5 crash scenarios + argument drift + 14 scenario recovery suite + 7 fault risk injection |
 
@@ -550,7 +550,7 @@ CONTINUUM sits at the overlap of durable execution, idempotent side-effect track
 
 ## Status and limitations
 
-- **Tested**: 1,360 passed + 23 skipped in a full run at the 2026-08-24 audit of this tree; CI enforces the suite on Python 3.11, 3.12, and 3.13, and counts vary by platform and optional services such as Postgres (see [STATUS.md](STATUS.md)). The MCP surface has also been audited adversarially over the live protocol; see [test.md](test.md).
+- **Tested**: 3,325 collected, most passing; exact skips vary in a full run at the 2026-08-24 audit of this tree; CI enforces the suite on Python 3.11, 3.12, and 3.13, and counts vary by platform and optional services such as Postgres (see [STATUS.md](STATUS.md)). The MCP surface has also been audited adversarially over the live protocol; see [test.md](test.md).
 - **On PyPI as `continuum-agent` 0.1.2** (`pip install continuum-agent`; clone still works via `pip install .` see Quick Start).
 - **MCP caller authentication is opt-in per deployment.** When `CONTINUUM_MCP_TOKEN` is set, the server refuses every mutating tool unless the caller presents that shared secret in the `initialize` handshake's `_meta.authToken`; per-caller secrets are available via `CONTINUUM_MCP_CLIENT_TOKENS` (`name:secret` pairs). Without any token configured, authorization is by declared identity only (the historical default, preserved for local single-user use).
 - **Confirming self-reported state over MCP requires a separate secret.** `continuum_confirm` refuses every caller until the operator sets `CONTINUUM_MCP_CONFIRM_TOKEN`, because an agent allowed to record progress must not also be able to confirm it. The default path stays human-driven: run `continuum confirm <run_id>` on the host.
@@ -564,7 +564,7 @@ CONTINUUM sits at the overlap of durable execution, idempotent side-effect track
 
 In early 2026 I saw long running agents fail on recovery, not reasoning. Checkpoints were treated as proof to continue, not evidence to verify. Surveying Temporal, LangGraph, ACRFence 2603.20625 and self conditioning 2509.09677, I found the gap was a portable verification substrate that asks, given the state at time T and the world as it is now, is it still safe to continue.
 
-Over three weeks I built CONTINUUM from one invariant, every fact carries its origin. The result is a hash chained log with `verify()`, a ledger with stable key deduplication, a gate and gateway that block unclaimed effects, and a recovery engine that seals a contract. Five seams expose the same log to Claude Code, LangGraph, LangChain, OpenAI, HTTP and OpenTelemetry. Validated with real kills and ~2,864 tests, it prints `0 duplicates` where naive replay prints `50`.
+Over three weeks I built CONTINUUM from one invariant, every fact carries its origin. The result is a hash chained log with `verify()`, a ledger with stable key deduplication, a gate and gateway that block unclaimed effects, and a recovery engine that seals a contract. Five seams expose the same log to Claude Code, LangGraph, LangChain, OpenAI, HTTP and OpenTelemetry. Validated with real kills and ~3,325 tests, it prints `0 duplicates` where naive replay prints `50`.
 
 CONTINUUM was created by **Anandhu P Shaji** ([@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/)) and is maintained by the original creator. It is open source under the [Apache-2.0](LICENSE) license. Community contributions are welcome via [CONTRIBUTING.md](CONTRIBUTING.md) and are credited in [AUTHORS.md](AUTHORS.md) and [graphs/contributors](https://github.com/Cyrax321/CONTINUUM/graphs/contributors).
 
@@ -579,6 +579,24 @@ Open an issue before submitting large PRs. See [CONTRIBUTING.md](CONTRIBUTING.md
 <a href="https://github.com/Cyrax321/CONTINUUM/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=Cyrax321/CONTINUUM" />
 </a>
+
+Thanks to our community contributors, ordered by contributions:
+[@Adhi1-2](https://github.com/Adhi1-2), [@abyyxhek](https://github.com/abyyxhek),
+[@Amiirhosseini](https://github.com/Amiirhosseini), [@yuki-fuyutsuki](https://github.com/yuki-fuyutsuki),
+[@vjymisal0](https://github.com/vjymisal0), [@adity982](https://github.com/adity982),
+[@dchaudhari7177](https://github.com/dchaudhari7177), [@tasodoufu](https://github.com/tasodoufu),
+[@anya-research](https://github.com/anya-research), [@lesbass](https://github.com/lesbass),
+[@Parthipashok04](https://github.com/Parthipashok04), [@Samearth17](https://github.com/Samearth17),
+[@stoppo22](https://github.com/stoppo22),
+[@timothyanderson096-ocdealcheck](https://github.com/timothyanderson096-ocdealcheck),
+[@unmoha](https://github.com/unmoha), [@aastha-m22](https://github.com/aastha-m22),
+[@as950118](https://github.com/as950118), [@asarakhatun17-lgtm](https://github.com/asarakhatun17-lgtm),
+[@challenge456](https://github.com/challenge456),
+[@gouthamkrishnak2003](https://github.com/gouthamkrishnak2003), [@ItzSaurav](https://github.com/ItzSaurav),
+[@mhaye9545](https://github.com/mhaye9545), [@Newer1107](https://github.com/Newer1107),
+[@okestroHjJeong](https://github.com/okestroHjJeong), [@quangshuynh](https://github.com/quangshuynh), [@Rahul-pamula](https://github.com/Rahul-pamula),
+[@Shaisolaris](https://github.com/Shaisolaris), [@VedantMadane](https://github.com/VedantMadane),
+[@zynx-real](https://github.com/zynx-real).
 
 ## Sponsor
 

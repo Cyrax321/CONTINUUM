@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from itertools import count
-from pathlib import Path
 
 import pytest
 
@@ -19,7 +18,7 @@ from continuum.actions import ActionLedger
 from continuum.checkpoint import CheckpointManager
 from continuum.events import EventType
 from continuum.models import Action, ActionStatus, Origin, Run, RunStatus
-from continuum.storage.base import ConcurrentWriteError, CorruptedRecord, RunNotFound
+from continuum.storage.base import ConcurrentWriteError, RunNotFound
 from continuum.storage.postgres import PostgresStorage
 
 DSN = os.environ.get("CONTINUUM_TEST_POSTGRES_DSN")

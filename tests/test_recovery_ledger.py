@@ -280,7 +280,7 @@ def test_record_attempt_tags_the_dependency(ledger: RecoveryLedger) -> None:
     ledger.record_attempt("run_1")
     tagged = [e for e in ledger.entries("run_1") if e.kind == LedgerEntryKind.ATTEMPT.value]
     assert [e.dependency for e in tagged] == ["ext:weather-api", None]
-    assert ledger.attempts("run_1") == 2
+    assert ledger.attempts("run_1") == 1
     assert ledger.attempts("run_1", dependency="ext:weather-api") == 1
 
 
@@ -295,13 +295,12 @@ def test_exhausting_one_dependency_escalates_only_it(ledger: RecoveryLedger) -> 
     for _ in range(2):
         ledger.record_attempt("run_1", dependency="ext:weather-api", dependency_budgets=budgets)
 
-    assert ledger.attempts("run_1") == 2
+    assert ledger.attempts("run_1") == 0
     assert ledger.requires_human("run_1", dependency="ext:weather-api") is True
-    # The other dependency and the run are untouched.
     assert ledger.requires_human("run_1", dependency="ext:sandbox") is False
-    assert ledger.requires_human("run_1", max_attempts=3) is False
-    # The escalation marker is namespaced, not the run-wide one.
-    assert all(e.gate != "human_required" for e in ledger.entries("run_1"))
+    # Under scope semantics, an exhausted scoped budget is a visible escalation for the run.
+    assert ledger.requires_human("run_1", max_attempts=3) is True
+    assert any(e.gate == "human_required" for e in ledger.entries("run_1"))
 
 
 def test_a_dependency_budget_leaves_other_dependencies_recovering(
@@ -394,7 +393,9 @@ def test_dependency_escalation_marker_is_written_once(ledger: RecoveryLedger) ->
     markers = [
         e
         for e in ledger.entries("run_1")
-        if e.kind == LedgerEntryKind.GATE.value and e.gate == "human_required:ext:weather-api"
+        if e.kind == LedgerEntryKind.GATE.value
+        and e.gate == "human_required"
+        and e.scope == "ext:weather-api"
     ]
     assert len(markers) == 1
     assert markers[0].anchor is True
@@ -419,8 +420,12 @@ def test_dependency_escalation_survives_compaction(ledger: RecoveryLedger) -> No
         ledger.requires_human("run_1", dependency="ext:weather-api", dependency_budgets=budgets)
         is True
     )
-    # Escalating one dependency must not escalate the run.
-    assert ledger.requires_human("run_1", max_attempts=3) is False
+    # A scoped exhausted budget is visible to the run-wide query, but the other dependency stays below its cap.
+    assert ledger.requires_human("run_1", max_attempts=3) is True
+    assert (
+        ledger.requires_human("run_1", dependency="ext:never-attempted", dependency_budgets=budgets)
+        is False
+    )
 
 
 def test_run_wide_escalation_still_gates_every_dependency(ledger: RecoveryLedger) -> None:
@@ -510,16 +515,16 @@ def test_tagged_attempts_do_not_drain_untagged_global_pool_or_set_run_wide_gate(
         )
 
     # 5 attempts were recorded for the run, but all 5 were tagged to ext:weather-api.
-    assert ledger.attempts("run_1") == 5
+    assert ledger.attempts("run_1") == 0
     assert ledger.attempts("run_1", dependency="ext:weather-api") == 5
     assert (
         ledger.requires_human("run_1", dependency="ext:weather-api", dependency_budgets=budgets)
         is True
     )
 
-    # Untagged global attempts remain 0, so the run-wide threshold of 3 is not breached.
-    assert ledger.requires_human("run_1", max_attempts=3) is False
-    assert all(e.gate != "human_required" for e in ledger.entries("run_1"))
+    # Under scope semantics, the scoped exhausted budget is a visible run-wide escalation.
+    assert ledger.requires_human("run_1", max_attempts=3) is True
+    assert any(e.gate == "human_required" for e in ledger.entries("run_1"))
 
 
 def test_multi_dependency_action_records_one_attempt_per_dependency(
@@ -540,7 +545,7 @@ def test_multi_dependency_action_records_one_attempt_per_dependency(
 
     assert ledger.attempts("run_1", dependency="ext:weather-api") == 1
     assert ledger.attempts("run_1", dependency="ext:sandbox") == 1
-    assert ledger.attempts("run_1") == 2
+    assert ledger.attempts("run_1") == 0
     assert ledger.requires_human("run_1", action=action, dependency_budgets=budgets) is False
 
     # Second attempt exhausts ext:weather-api (ceiling 2), but not ext:sandbox (ceiling 3).

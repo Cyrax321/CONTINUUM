@@ -32,6 +32,15 @@ anywhere would be an open relay wearing CONTINUUM's name. The route prefix is
 enforced the same way -- a live claim for ``/v1/invoices`` does not authorise
 ``/v1/refunds`` on the same host, because the prefix is the only per-path
 scope a route has (issue #1051).
+
+A route's upstream scheme is ``https`` unless the route says otherwise, so a
+registry written before schemes existed keeps the transport it was built for.
+``http://`` on the host, or a ``scheme`` field naming it, reaches an upstream
+that does not terminate TLS itself: a local service, an internal address behind
+a TLS terminator. The scheme is kept off the host, which stays a bare authority,
+and it selects the connection the proxy opens -- an ``http`` route read as
+``https`` was unreachable at all, the TLS handshake to its cleartext port
+failing before a byte was forwarded.
 """
 
 from __future__ import annotations
@@ -39,10 +48,12 @@ from __future__ import annotations
 import json
 import posixpath
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from continuum.events import EventType
 from continuum.gate import is_memory_key, is_memory_template, normalize_key_value
@@ -122,6 +133,11 @@ class Route:
     prefix: str
     action_type: str
     key_template: str
+    #: ``https`` by default, so a registry written before schemes existed keeps
+    #: its meaning. ``http`` reaches an upstream that terminates TLS elsewhere
+    #: or never had it -- a local service on plain HTTP, an internal address
+    #: behind a TLS-terminating load balancer.
+    scheme: str = "https"
 
 
 @dataclass(frozen=True)
@@ -130,6 +146,57 @@ class Decision:
     reason: str
     route: Route | None = None
     key: str | None = None
+
+
+_ALLOWED_SCHEMES = ("http", "https")
+
+
+def _split_scheme(location: Path, entry: Mapping[str, Any]) -> tuple[str, str]:
+    """Read one entry's ``(host, scheme)``, accepting either spelling.
+
+    A registry written before schemes existed has a bare ``host`` and no
+    ``scheme``, and means https, which the module was built around. Both ways
+    of naming a plain-HTTP upstream are accepted because they read naturally to
+    different people: a ``scheme`` key beside the fields it belongs with, and a
+    ``http://`` prefix on the host, which is how the address is written
+    everywhere else it appears (a browser, ``curl``, an env var). An entry that
+    gives both has to agree with itself, or the file names two different
+    upstreams in one place and the operator cannot tell which one would run.
+
+    The host is stored bare either way: every consumer downstream -- the
+    collision check, ``match_route``, the connection's ``netloc`` -- splits or
+    compares ``host`` as a bare authority, and a scheme left on it would make
+    ``_normalize_host`` see ``http`` as the name.
+    """
+    host = str(entry["host"])
+    declared = entry.get("scheme")
+    if declared is not None:
+        declared = str(declared).strip().lower()
+        if declared not in _ALLOWED_SCHEMES:
+            raise GatewayConfigError(
+                f"{location}: upstream scheme {declared!r} is not one of {list(_ALLOWED_SCHEMES)}"
+            )
+    # Only a ``scheme://`` prefix is read as one. ``urlsplit`` would read
+    # ``a.com:8443`` as scheme ``a.com``, so a bare host that spells its port --
+    # the ordinary way to name a non-default upstream -- would be refused as an
+    # unknown scheme for naming a destination.
+    prefix, sep, rest = host.partition("://")
+    if not sep:
+        return host, declared if declared is not None else "https"
+    found = prefix.strip().lower()
+    if found not in _ALLOWED_SCHEMES:
+        raise GatewayConfigError(
+            f"{location}: upstream host {host!r} uses scheme {found!r}, "
+            f"which is not one of {list(_ALLOWED_SCHEMES)}"
+        )
+    if declared is not None and declared != found:
+        raise GatewayConfigError(
+            f"{location}: upstream {host!r} says scheme {found!r} while its "
+            f"'scheme' field says {declared!r}"
+        )
+    if not rest:
+        raise GatewayConfigError(f"{location}: upstream host {host!r} names a scheme but no host")
+    return rest, found
 
 
 def load_gateway_config(path: Path) -> list[Route]:
@@ -168,13 +235,15 @@ def load_gateway_config(path: Path) -> list[Route]:
                     raise GatewayConfigError(
                         f"{location}: upstream key template {kt!r} missing required placeholder(s): {', '.join(missing)}"
                     )
+            host, scheme = _split_scheme(location, entry)
             routes.append(
                 Route(
-                    host=str(entry["host"]),
+                    host=host,
                     methods=tuple(m.upper() for m in entry.get("methods", ("POST",))),
                     prefix=str(entry.get("prefix", "/")),
                     action_type=str(entry["action_type"]),
                     key_template=kt,
+                    scheme=scheme,
                 )
             )
         except KeyError as exc:
@@ -195,7 +264,7 @@ def _reject_colliding_routes(location: Path, routes: list[Route]) -> None:
     """
     seen: dict[tuple[str, str | None, str, str], str] = {}
     for route in routes:
-        name, port = _normalize_host(route.host)
+        name, port = _normalize_host(route.host, route.scheme)
         for method in route.methods:
             key = (name, port, _normalize_path(route.prefix), method)
             earlier = seen.get(key)
@@ -287,7 +356,7 @@ def _normalize_path(raw: str) -> str:
     request line without a leading slash is made absolute so the comparison is
     always between two absolute paths.
     """
-    from urllib.parse import unquote, urlsplit
+    from urllib.parse import unquote
 
     path = unquote(urlsplit(raw).path)
     if not path.startswith("/"):
@@ -298,7 +367,18 @@ def _normalize_path(raw: str) -> str:
     return collapsed or "/"
 
 
-def _normalize_host(host: str) -> tuple[str, str | None]:
+#: The port each scheme treats as its default. A route registered without a
+#: port and a client that spells the default explicitly are one destination,
+#: whichever side omits it.
+_DEFAULT_PORTS = {"http": "80", "https": "443"}
+
+#: Both schemes' defaults, for the request side: a ``Host`` header carries no
+#: scheme, so a client's explicit ``:80`` and ``:443`` must both fold to reach
+#: whichever upstream the route turned out to be.
+_ANY_DEFAULT_PORT = frozenset(_DEFAULT_PORTS.values())
+
+
+def _normalize_host(host: str, scheme: str = "https") -> tuple[str, str | None]:
     """Canonical ``(name, port)`` for route matching: name case-folded, port kept.
 
     Two rules, one from each half of issue #1342.
@@ -314,15 +394,29 @@ def _normalize_host(host: str) -> tuple[str, str | None]:
     would decide between them again, which is the selection bug #1341 closed.
     So the port stays in the comparison: a request carrying ``:8443`` matches
     only a route registered with that port, and a request with no port matches
-    only a route registered without one. The one fold left is ``:443`` to
-    absent, since the gateway's only upstream scheme is https and 443 is its
-    default port -- ``a.com`` and ``a.com:443`` really are one destination, and
-    a client that spells the default port explicitly must still reach it.
-    IPv6 literals are out of scope, matching the port handling the request side
-    already does.
+    only a route registered without one. The one fold left is the *scheme's*
+    default port to absent -- ``a.com`` and ``https://a.com:443`` really are one
+    destination, and a client that spells the default port explicitly must still
+    reach it. ``scheme`` defaults to https for a caller that has no route in
+    hand yet. IPv6 literals are out of scope, matching the port handling the
+    request side already does.
     """
     name, sep, port = host.partition(":")
-    return name.casefold(), None if not sep or port == "443" else port
+    default_port = _DEFAULT_PORTS.get(scheme, "443")
+    return name.casefold(), None if not sep or port == default_port else port
+
+
+def _normalize_request_host(host: str) -> tuple[str, str | None]:
+    """:func:`_normalize_host` for a request, whose scheme the header cannot name.
+
+    A ``Host`` header is a bare authority, so a request cannot say whether its
+    explicit port is http's default or https's. Fold either, the way the route
+    side folded its own, or a client writing ``http://a.com:80`` against a route
+    registered as ``http://a.com`` is refused as unregistered for spelling a
+    port the scheme does not consider one.
+    """
+    name, port = _normalize_host(host)
+    return name, None if port in _ANY_DEFAULT_PORT else port
 
 
 def _path_under_prefix(path: str, prefix: str) -> bool:
@@ -377,8 +471,8 @@ def match_route(
                 route=None,
             )
 
-    request_host = _normalize_host(host)
-    candidates = [r for r in routes if _normalize_host(r.host) == request_host]
+    request_host = _normalize_request_host(host)
+    candidates = [r for r in routes if _normalize_host(r.host, r.scheme) == request_host]
     if not candidates:
         return Decision(False, f"no upstream registered for host {host!r}")
 
@@ -808,15 +902,24 @@ class GatewayServer:
                         )
                         return
 
-                    from urllib.parse import urlsplit
-
                     from continuum.actions.ledger import ActionLedger
 
-                    parts = urlsplit(f"https://{decision.route.host}{self.path}")
+                    # The route's scheme picks the transport: an http upstream
+                    # gets a plain connection, an https one the TLS one. Hardcoded
+                    # https, a plain-HTTP upstream -- a local service, an internal
+                    # address behind a TLS terminator -- was unreachable at all:
+                    # the handshake to its cleartext port failed as
+                    # WRONG_VERSION_NUMBER before any byte was forwarded, the
+                    # claim settled UNKNOWN, and nothing was recorded.
+                    scheme = decision.route.scheme
+                    parts = urlsplit(f"{scheme}://{decision.route.host}{self.path}")
                     import http.client as http_client
 
-                    scheme = "https"
-                    conn: Any = http_client.HTTPSConnection(parts.netloc, timeout=30)
+                    conn: Any = (
+                        http_client.HTTPConnection(parts.netloc, timeout=30)
+                        if scheme == "http"
+                        else http_client.HTTPSConnection(parts.netloc, timeout=30)
+                    )
                     headers = {
                         k: v
                         for k, v in self.headers.items()

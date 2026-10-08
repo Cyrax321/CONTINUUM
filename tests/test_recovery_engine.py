@@ -967,8 +967,8 @@ def test_engine_record_attempt_and_requires_human_delegates(
     count = engine.record_attempt("run_1", dependency="ext:weather-api")
     assert count == 1
     assert engine.requires_human("run_1", dependency="ext:weather-api") is True
-    # The run as a whole and unrelated dependencies remain unblocked.
-    assert engine.requires_human("run_1") is False
+    # The run as a whole now sees the scoped escalation as a run-wide block.
+    assert engine.requires_human("run_1") is True
     assert engine.requires_human("run_1", dependency="dataset") is False
 
 

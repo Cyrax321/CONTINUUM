@@ -69,7 +69,7 @@ Inside, a 3x3 grid of cards:
 
 Row 1:
 - Extractors  (subtitle: Deterministic, LLM optional)
-- Event Log   (subtitle: hash-chained, 51 event types)  <- HIGHLIGHT this card
+- Event Log   (subtitle: hash-chained, 55 event types)  <- HIGHLIGHT this card
   with an orange border; it is the source of truth
 - Action Ledger (subtitle: claim, perform, complete)
 
@@ -128,7 +128,7 @@ Do not draw arrows between every pair of cards; only the relationships above.
   SemanticPolicy, ContextPressurePolicy, HybridPolicy (Hybrid is the default).
 - The 3 reconcilers: ProbeReconciler, ManualReconciler, AssumeNotOccurredReconciler.
   There is no "AssumeOccurred".
-- The 51 event types (do not list them all on the diagram; this is just to
+- The 55 event types (do not list them all on the diagram; this is just to
   prevent invention): RUN_STARTED, RUN_COMPLETED, RUN_ABORTED, TASK_UPDATED,
   RUN_FORKED, RUN_RESTORED, RUN_MERGED, TOOL_CALLED,
   TOOL_COMPLETED, TOOL_FAILED, DECISION_CREATED,
@@ -145,7 +145,8 @@ Do not draw arrows between every pair of cards; only the relationships above.
   LIVENESS_RECOVERED, RISK_OBSERVED, AUTHORITY_CONSUMED,
   AUTHORITY_RECONCILED, ATTEMPT_LESSON, TRAJECTORY_REPORT,
   PLAN_UPSERT, MEMORY_TOMBSTONED, NOTIFICATION_SENT,
-  NOTIFICATION_FAILED.
+  NOTIFICATION_FAILED, PRECOMPACT_HOOK, SUBAGENT_SPAWNED,
+  SUBAGENT_COMPLETED, SUBAGENT_FAILED.
 - The SemanticState fields (do not all need to appear; for correctness): goal,
   progress, plan, decisions, findings, evidence, pending_work, approvals,
   external_dependencies, model.
