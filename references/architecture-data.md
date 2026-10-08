@@ -304,7 +304,7 @@ set, alphabetically:
 `actions`, `attest`, `attest-keygen`, `attest-verify`, `benchmark`,
 `briefing`, `budget`, `checkpoint`, `compact`, `complete`, `confirm`,
 `daemon`, `dashboard`, `diff`, `events`, `export-evidence`, `forget`, `fork`, `gate`,
-`gateway`, `health`, `history`, `hooks`, `impact`, `init`, `inspect`,
+`gateway`, `health`, `history`, `hooks`, `impact`, `import-risks`, `init`, `inspect`,
 `lineage-issue`, `lineage-verify`, `mcp`, `merge`, `notify-test`, `observe`,
 `policy-review`, `precompact`, `provenance`, `reconcile`, `record-plan`,
 `replay`, `report`, `restore`, `resume`, `rewind`, `runs`, `serve`,
