@@ -27,7 +27,7 @@ Every term here is used in issues and in code. Definitions point to the implemen
   The append only, tamper evident `RecoveryLedger` (`src/continuum/recovery/ledger.py:494`) over a `LedgerBackend` (memory or JSONL file). Entries are hash chained from `GENESIS`. `verify` reports the last trusted index. `record_attempt` tracks retry counts and writes an anchored `human_required` gate when a threshold is reached. `compact` drops a prefix while re sealing the chain. Reconciliation (`reconcile`) detects drift between the ledger chain and the live state version.
 
 - **Repair plan**  
-  `RepairPlan` in `src/continuum/recovery/planner.py:121` listing ordered `RepairStep`s derived from validation statuses and uncertain actions (`plan_repairs`). Steps are ordered so inputs are re-derived before consumers.
+  `RepairPlan` in `src/continuum/recovery/planner.py:129` listing ordered `RepairStep`s derived from validation statuses and uncertain actions (`plan_repairs`). Steps are ordered so inputs are re-derived before consumers.
 
 - **Adapter action**  
   `AdapterAction` (`src/continuum/adapters/actions.py:31`) is the uniform `name + params + dep_scope` operation that every adapter emits. `AdapterResult` carries the outcome. `run_action` is the facade over `AgentAdapter.intercept_action` where the ledger provides idempotency and the telemetry hook (`on_event`, issue 162) can observe each execution.
@@ -39,7 +39,7 @@ Every term here is used in issues and in code. Definitions point to the implemen
   Silence as a recovery signal. Cadence contracts in `src/continuum/recovery/health.py` declare how long each phase may go quiet; `continuum watch` evaluates the log against them, appending `LIVENESS_SILENCE_DETECTED` on breach and `LIVENESS_RECOVERED` on recovery (`src/continuum/events.py`). Breach is advisory: it informs the engine decision without replacing validation.
 
 - **Admissibility**
-  Whether a restore point is safe to resume from. `check_admissibility` in `src/continuum/state/validator.py` verifies the checkpoint against ledger history, and the engine refuses an inadmissible anchor (`src/continuum/recovery/engine.py:434`) instead of resuming into a commitment the log contradicts.
+  Whether a restore point is safe to resume from. `check_admissibility` in `src/continuum/state/validator.py` verifies the checkpoint against ledger history, and the engine refuses an inadmissible anchor (`src/continuum/recovery/engine.py:442`) instead of resuming into a commitment the log contradicts.
 
 - **Risk policy**
   The `.continuum/risk-policy.json` mapping from external risk names to recovery modes, loaded by `load_risk_policy` in `src/continuum/recovery/risk.py`. Operators may only tighten defaults, never loosen them. Matching risks arrive as `RISK_OBSERVED` events and land in the contract's `triggering_risks` section.

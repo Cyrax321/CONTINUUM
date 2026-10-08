@@ -60,8 +60,16 @@ from continuum.models import (
 )
 from continuum.plugins import Registry, ValidationRule
 from continuum.recovery.contract import build_contract
-from continuum.recovery.ledger import BudgetStatus, RecoveryLedger, resolve_scope
-from continuum.recovery.observations import collect_observations
+from continuum.recovery.ledger import (
+    BudgetStatus,
+    RecoveryLedger,
+    resolve_scope,
+)
+from continuum.recovery.observations import (
+    ObservationDrift,
+    collect_observations,
+    drifted_observations,
+)
 from continuum.recovery.planner import RepairPlan, plan_repairs
 from continuum.recovery.rules import active_rules, apply_rule_findings, run_validation_rules
 from continuum.recovery.summary import build_informed_retry
@@ -524,6 +532,19 @@ class RecoveryEngine:
                 run_budget_exhausted = False
                 exhausted_dependencies.clear()
 
+        # Post-checkpoint file observations (#208): every file a hooked tool
+        # wrote after the checkpoint, re-checked against disk right now. A row
+        # that no longer matches is a file that moved after the recorded write
+        # by something the event log does not describe -- exactly the tamper the
+        # hooks run outside model control to catch (#210) -- so it feeds both
+        # the plan and the verdict below instead of decorating the contract.
+        after_sequence = 0
+        latest_version = self.storage.latest_version(run_id)
+        if latest_version is not None:
+            after_sequence = latest_version.source_sequence
+        observations = collect_observations(self.storage, run_id, after_sequence=after_sequence)
+        observation_drift = drifted_observations(observations)
+
         plan = plan_repairs(
             validation.report.statuses,
             uncertain_actions=uncertain,
@@ -531,6 +552,7 @@ class RecoveryEngine:
             unprojectable=unprojectable,
             exhausted_dependencies=exhausted_dependencies,
             run_budget_exhausted=run_budget_exhausted,
+            observation_drift=observation_drift,
         )
         liveness_advisory = None
         liveness_breaches = 0
@@ -630,6 +652,7 @@ class RecoveryEngine:
             risk_rationale=risk_rationale,
             exhausted_dependencies=exhausted_dependencies,
             run_budget_exhausted=run_budget_exhausted,
+            observation_drift=observation_drift,
         )
 
         # Authority lifecycle (issue #289c): consumed authorities block resume
@@ -875,6 +898,7 @@ class RecoveryEngine:
         risk_rationale: str | None = None,
         exhausted_dependencies: Collection[str] = (),
         run_budget_exhausted: bool = False,
+        observation_drift: Sequence[ObservationDrift] = (),
     ) -> tuple[RecoveryMode, tuple[str, ...]]:
         """Collect a proposal per signal and return the most cautious."""
         proposals: list[tuple[RecoveryMode, str]] = []
@@ -943,6 +967,30 @@ class RecoveryEngine:
                 (
                     RecoveryMode.REPAIR_AND_RESUME,
                     f"{len(needs_repair)} component(s) need repair before continuing",
+                )
+            )
+
+        # A file the hooks recorded no longer matches disk (#208): something
+        # changed it after the recorded write and outside the event log, so
+        # content whose provenance the log cannot explain would underlie any
+        # further work. REPAIR_AND_RESUME, not REQUEST_HUMAN: unlike an external
+        # side effect, the file is right here and can be re-read and
+        # re-checkpointed locally, so an automatic step is an honest offer
+        # rather than a human gate that noise from unhooked tools would trip
+        # constantly.
+        if observation_drift:
+            changed = sum(1 for d in observation_drift if d.status == "changed")
+            missing = len(observation_drift) - changed
+            tally = ", ".join(
+                f"{count} {label}"
+                for count, label in ((changed, "changed"), (missing, "missing"))
+                if count
+            )
+            proposals.append(
+                (
+                    RecoveryMode.REPAIR_AND_RESUME,
+                    f"{len(observation_drift)} observed file(s) drifted since the "
+                    f"checkpoint ({tally})",
                 )
             )
 

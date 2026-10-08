@@ -30,6 +30,7 @@ from continuum.models import (
     ComponentValidationEntry,
     StateStatus,
 )
+from continuum.recovery.observations import ObservationDrift
 
 __all__ = ["RepairKind", "RepairStep", "RepairPlan", "plan_repairs"]
 
@@ -39,6 +40,12 @@ class RepairKind(StrEnum):
 
     RECONCILE_ACTION = "reconcile_action"
     """Determine whether an external side effect actually happened."""
+
+    RECONCILE_FILE = "reconcile_file"
+    """Re-examine a file whose on-disk content no longer matches the digest the
+    observation hook recorded for it (issue #208). Automatic: the resuming
+    agent re-reads the file and re-checkpoints once the change is accounted
+    for, or escalates it if it cannot explain the difference."""
 
     REPAIR_LOG = "repair_log"
     """Correct or authorise the event whose refusal stopped the log folding
@@ -74,13 +81,14 @@ class RepairKind(StrEnum):
 _ORDER: dict[RepairKind, int] = {
     RepairKind.REPAIR_LOG: 0,
     RepairKind.RECONCILE_ACTION: 1,
-    RepairKind.HUMAN_REVIEW: 2,
-    RepairKind.RENEW_APPROVAL: 3,
-    RepairKind.REVALIDATE_DEPENDENCY: 4,
-    RepairKind.REVALIDATE_MODEL_STATE: 5,
-    RepairKind.REDERIVE_EVIDENCE: 6,
-    RepairKind.REDERIVE_FINDING: 7,
-    RepairKind.REVIEW_DECISION: 8,
+    RepairKind.RECONCILE_FILE: 2,
+    RepairKind.HUMAN_REVIEW: 3,
+    RepairKind.RENEW_APPROVAL: 4,
+    RepairKind.REVALIDATE_DEPENDENCY: 5,
+    RepairKind.REVALIDATE_MODEL_STATE: 6,
+    RepairKind.REDERIVE_EVIDENCE: 7,
+    RepairKind.REDERIVE_FINDING: 8,
+    RepairKind.REVIEW_DECISION: 9,
 }
 
 
@@ -256,6 +264,7 @@ def plan_repairs(
     unprojectable: tuple[int, str, str] | None = None,
     exhausted_dependencies: Collection[str] = (),
     run_budget_exhausted: bool = False,
+    observation_drift: Sequence[ObservationDrift] = (),
 ) -> RepairPlan:
     """Build an ordered repair plan from validation findings and ledger state.
 
@@ -270,6 +279,13 @@ def plan_repairs(
     renders ``next_allowed: continue`` over a verdict of requires_human: prose
     and structure disagreeing, with a machine reader most likely to act on the
     structure. The break becomes a step so required_actions names real work.
+
+    ``observation_drift`` names files the hooks recorded whose content no longer
+    matches that record (issue #208). Unlike an uncertain *external* side
+    effect, a local file can be re-read and re-checked here, so the step is
+    automatic rather than human-bound and blocks resume until the change is
+    accounted for: work performed on top of content whose provenance the log
+    cannot explain is exactly what the observation hooks exist to prevent.
     """
     steps: list[RepairStep] = []
 
@@ -281,6 +297,18 @@ def plan_repairs(
                 target=f"sequence_{sequence}",
                 reason=f"{event_type} refuses to fold: {reason}",
                 requires_human=True,
+            )
+        )
+
+    for drift in observation_drift:
+        steps.append(
+            RepairStep(
+                kind=RepairKind.RECONCILE_FILE,
+                target=drift.path,
+                reason=(
+                    f"{drift.tool} recorded this file at sequence {drift.sequence}; "
+                    f"it is {drift.status} on disk now"
+                ),
             )
         )
 

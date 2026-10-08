@@ -15,27 +15,80 @@ This module projects those observations into contract-visible evidence:
   ``missing``. The absence or drift is itself evidence, honestly labelled
   rather than silently dropped.
 
-Deliberately informational: these entries never change ``recovery_status``,
-``next_allowed_action`` or any repair step. Observations are asserted by the
-client harness, so they inform a resuming agent but do not certify anything,
-consistent with the provenance rules established in issue #207.
+Drift is a verdict signal, not decoration. The hooks run outside model control
+precisely so a model cannot hide a change (#210); an observation records what a
+hooked tool wrote, so a file that no longer matches it moved *after* the
+recorded write, by something the event log does not describe. That is the exact
+threat the observations exist to catch, so :func:`drifted_observations` lifts
+those rows out for the planner to turn into a repair step and the engine to let
+escalate the verdict (#208). ``recorded`` and ``unresolvable`` rows carry no
+digest to compare against and stay informational, consistent with the
+provenance rules established in issue #207.
 """
 
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from continuum.events import Event, EventType
 from continuum.storage.base import Storage
 
-__all__ = ["MAX_CONTRACT_OBSERVATIONS", "collect_observations", "observation_status"]
+__all__ = [
+    "MAX_CONTRACT_OBSERVATIONS",
+    "DRIFT_STATUSES",
+    "ObservationDrift",
+    "collect_observations",
+    "drifted_observations",
+    "observation_status",
+]
 
 #: Upper bound on entries embedded in one contract, newest last kept first.
 #: A run that wrote ten thousand files should not produce a ten-thousand-line
 #: contract; the marker row says so explicitly.
 MAX_CONTRACT_OBSERVATIONS = 50
+
+#: Statuses that prove the file moved after the hook recorded it. ``verified``
+#: matched the recorded digest; ``recorded`` and ``unresolvable`` carry no
+#: digest to compare against, so none of the three is evidence of tampering.
+DRIFT_STATUSES: frozenset[str] = frozenset({"changed", "missing"})
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationDrift:
+    """A post-checkpoint observation that no longer matches disk.
+
+    Carries only what the planner needs to name the repair; the full row stays
+    in the contract's ``post_checkpoint_observations`` for the resuming agent.
+    """
+
+    path: str
+    status: str
+    tool: str
+    sequence: int
+
+
+def drifted_observations(observations: Iterable[dict[str, Any]]) -> list[ObservationDrift]:
+    """Lift the ``changed``/``missing`` rows out of a collected observation set.
+
+    Order follows :func:`collect_observations` (newest first), matching the
+    contract section a reader compares them against; the plan applies its own
+    kind-then-target sort afterwards. The trailing truncation marker row
+    carries no ``status`` and is skipped.
+    """
+    return [
+        ObservationDrift(
+            path=str(entry["path"]),
+            status=str(entry["status"]),
+            tool=str(entry["tool"]),
+            sequence=int(entry["sequence"]),
+        )
+        for entry in observations
+        if entry.get("status") in DRIFT_STATUSES
+    ]
 
 
 def observation_status(path: str, expected_sha: str | None, expected_bytes: int | None) -> str:

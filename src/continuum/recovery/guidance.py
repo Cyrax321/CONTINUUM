@@ -124,6 +124,15 @@ def human_steps_for(
                     f"world, then {_RECONCILE_HINT.format(run=run_id, key=action_id)}"
                     + (f"  (no probe registered in {reconcilers_path})")
                 )
+        elif step.kind is RepairKind.RECONCILE_FILE:
+            # No command re-checkpoints a file yet, so the guidance names the
+            # reconciliation itself rather than implying one exists: read the
+            # file, account for the change the log does not explain, then let a
+            # normal checkpoint pick the new digest up.
+            steps.append(
+                f"{step.target} no longer matches the digest recorded for it ({step.reason}); "
+                f"read it, account for the change, then re-checkpoint {run_id}"
+            )
         elif step.kind is RepairKind.HUMAN_REVIEW:
             steps.append(f"verify {step.target} yourself, then run `continuum confirm {run_id}`")
         elif step.kind is RepairKind.REPAIR_LOG:

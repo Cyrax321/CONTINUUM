@@ -31,6 +31,193 @@ All notable changes to this project are documented here. The format follows
   budget read-only; without one every decision is unchanged.
 ### Fixed
 
+- **Post-checkpoint file drift now moves the recovery verdict (#208).** A
+  `TOOL_COMPLETED` event records the `sha256` a hooked tool saw, but
+  `collect_observations` re-checks the file against disk and the result only
+  reached `post_checkpoint_observations` in the contract. A file that no longer
+  matched the recorded digest left `mode: resume` and the reason "all state
+  verified against the environment" standing — the exact out-of-band tamper the
+  observation hooks run outside model control to catch, reported but never
+  enforced. A drifted row is now a verdict signal: it proposes
+  `REPAIR_AND_RESUME` (so a changed or missing observed file can never read as
+  safe-to-resume) and becomes a blocking, automatic `reconcile_file` repair step
+  the contract names in `required_actions`. It stays below a human gate: unlike
+  an external side effect, the file is local and can be re-read and
+  re-checkpointed, so an automatic step is an honest offer rather than a gate
+  that noise from unhooked tools would trip constantly. A verified row remains
+  inert, so a clean run still resumes with no repairs.
+
+- **Code the 2026-09-30 merge batch dropped is restored.** Four long-lived
+  branches (#761 validation rules, #744 scoped budgets, #762 discoverable
+  providers, #1018 precompact adapter) merged into `main` together on 2026-09-30,
+  and each merge silently dropped pieces the others had landed: helper methods
+  (`StateValidator._latest_compaction`/`_apply_compaction_status`,
+  `Storage._validate_compaction_bound`/`_anchor_environment`,
+  `ActionLedger._settlement_authorization_id`/`resolve_prior`,
+  `Registry.all_services`), three `recovery/ledger` dependency helpers that
+  `__all__` still promised, the `--env` flag's effect on the compaction anchor
+  (#1049), and several `__all__` membership entries. The result imported on
+  Linux but not under the tarball export, `ruff` reported 469 errors, and 166
+  test modules failed at collection. Each piece is restored verbatim from the
+  commit that introduced it. `RecoveryEngine` reconciles the two ledger APIs the
+  merge left incompatible — #744's scope-based counting underneath #1459's
+  dependency-based callers — preserving #744's fail-closed marker semantics and
+  its "a ledger that cannot be read costs a line of evidence and nothing else"
+  advisory contract.
+
+- **The Level 4 MCP inspector walkthrough now names the config the repository
+  ships (#1395).** `references/testing.md` pointed
+  `@modelcontextprotocol/inspector --cli` at `mcp-config.json`, which has never
+  existed anywhere in the tree (not tracked, never committed, absent on disk),
+  so the copy-pasted command failed at the exact step meant to exercise the
+  protocol boundary. It now points at the tracked `.mcp.json`, whose
+  `continuum-mcp` entry is the server the `--server continuum-mcp` flag names. A
+  guard in `tests/test_docs_mcp_inspector.py` folds the fenced command's
+  backslash continuations and asserts, for every inspector command in
+  `references/` and `docs/`, that its `--config` file is present in the tree and
+  its `--server` name is an entry in that file, so a walkthrough cannot drift
+  back out of sync with the shipped config.
+
+- **File-derived progress no longer bloats the log on a compacted run.**
+  `record_file_progress` gates its mirror on a projection of the log, but folded
+  the live tail (`read_events`) alone. Once a run has been compacted the
+  goal-bearing prefix, `RUN_STARTED` included, lives in `events_archive`, so the
+  fold raised `ProjectionError` and the except branch fell through to "changed",
+  appending a redundant `TASK_UPDATED` and a duplicate-evidence tail on every call
+  over an unchanged file — the documented no-op contract was silently void. The
+  fold now reads the full history (`read_all_events`); a run with no goal yet
+  still raises against the merged history, so the "not yet projectable" behaviour
+  is unchanged. The reproject inside `GenericAgentAdapter.capture_state`'s auto
+  branch had the same live-tail read and rejected the checkpoint outright with
+  `TASK_UPDATED before the run was started` — the mirror's own appended event
+  could not fold against the archived start. It now reads the archive too.
+
+
+  merges.** Several branches each synced the documented collected total on its
+  own base, so once merged the tree collected more tests than every doc stated
+  and the docs-count guard failed; README, the translated READMEs, CHANGELOG,
+  `docs/CONTRIBUTING_ONBOARDING.md`, `references/testing.md` and
+  `references/install.md` now all read the live total. `README.md` and
+  `docs/api/mcp.md` still counted twelve MCP tools after #1260 added a
+  thirteenth (`continuum_compensate_action`), so the tool-count guard read 12
+  against the server's 13. The MCP doc guard
+  also tripped because `curate_briefing` reads `contract.triggering_risks`
+  while the wiring test's contract stand-in predated that field, and the
+  pre-#1262 trajectory-render label test still asserted the old inline
+  `"unverified (derived)"` string against the shared `derived_label`. Two mypy
+  errors from the recovery-anchor wiring (`anchor_seq` narrowing and a `payload`
+  redefinition in `cmd_actions`) are fixed. No behavior changes.
+
+- **PostgresStorage action-index fold skips malformed JSON payloads (#1386).**
+  `PostgresStorage._canonical_index_rows` decoded raw payload strings without
+  guarding against decode errors, so an event with a malformed JSON payload
+  raised an unhandled `json.JSONDecodeError` during `action_index_drift()` and
+  `rebuild_action_index()`. `SQLiteStorage` already wrapped the parse in
+  `try/except json.JSONDecodeError: continue` to skip corrupt rows and complete
+  the fold. The Postgres fold now guards payload decoding with matching
+  skip-not-crash semantics, allowing `continuum verify --index` to complete
+  consistently across backends on partially corrupted stores.
+
+- **GenericAgentAdapter records dependency declarations as deterministic (#1391).**
+  `GenericAgentAdapter._declare_dependencies` previously hardcoded
+  `source=Origin.EXTERNAL_AGENT`, which contradicted its documented contract as
+  a trusted in-process facade writing `Origin.DETERMINISTIC` state. This dropped
+  the advisory prefix trust score on runs with pinned environments. The adapter
+  now stamps `DEPENDENCY_DECLARED` events with `source=Origin.DETERMINISTIC` to
+  match its checkpoint and action ledger writes.
+
+- **`ensure_run` now checks archived history so compaction does not inject a duplicate `RUN_STARTED` (#1436).**
+  `ContinuumMCP.ensure_run` and `SidecarServer._ensure_run` checked `read_events(run_id, upto=1)`
+  to decide whether a run needed its genesis event backfilled. On a compacted run, events up to
+  the anchor sequence reside in `events_archive`, so the live query returned an empty list,
+  causing both servers to append a second `RUN_STARTED` event into the live tail. The duplicate
+  event wiped initial goal constraints, reset progress counters, and corrupted projected state.
+  Both entry points now inspect archived events first, recognizing that a compacted run was
+  already started properly.
+
+- **Compaction no longer mints an environment-blind anchor checkpoint (#1049).**
+  `compact_run` took its forced anchor checkpoint without an `environment`
+  argument, so the anchor's `StateCheckpoint.environment` was always `None`.
+  That anchor becomes the run's newest checkpoint, and `RecoveryEngine.assess`
+  hands `None` to the validator, which marks every pinned dependency `UNKNOWN`
+  for want of a snapshot to compare against. A run that resumed cleanly one
+  moment before compaction downgraded to `REQUEST_HUMAN` one moment after,
+  with nothing about the world having changed. Both engines now thread an
+  optional `environment` through `compact_run`: `continuum compact` captures
+  one from `--env` the way `continuum validate` does, and when the caller
+  supplies none, the anchor carries forward the environment the run's newest
+  checkpoint already recorded, because compaction observes the world rather
+  than changing it. A run with no recorded checkpoint still anchors with
+  `None` rather than inventing a snapshot.
+
+- **Path canonicalization in idempotency hashing is now platform-independent (#1437).**
+  `_canonicalize_paths` previously used `os.path.normpath`, which converted separators
+  to backslashes on Windows while leaving forward slashes on POSIX. Because `stable_hash`
+  hashes canonical JSON strings, equivalent path arguments hashed differently on Windows
+  versus Linux, causing shared ledgers or cross-platform replays to generate mismatched
+  idempotency keys and fail deduplication. Normalization now standardizes Windows path
+  separators to forward slashes using `posixpath.normpath` across all operating systems,
+  while preserving backslashes in POSIX filenames and regex-like strings. Note that
+  existing ledger entries recorded on Windows with backslash paths will compute new
+  idempotency keys under the normalized representation.
+
+- **Agent adapters now check archived history so compaction does not inject a duplicate `RUN_STARTED` (#1453).**
+  `LangChainAgentAdapter.start_run`, `LangGraphAgentAdapter.start_run`, and `OpenAIAgentAdapter._ensure_run_exists`
+  checked `read_events(run_id, upto=1)` to decide whether a run needed its genesis event recorded. On a compacted run,
+  events up to the anchor sequence reside in `events_archive`, so the live query returned an empty list, causing
+  the adapters to append a second `RUN_STARTED` event into the live tail. The duplicate event wiped initial goal
+  constraints, reset progress counters, and corrupted projected state. All three adapters now inspect archived
+  events first, recognizing that a compacted run was already started properly.
+
+- **ActionLedger.compensate() now enforces a completed status precondition (#1387).**
+  The method accepted any existing record and transitioned it to `COMPENSATED`
+  while clearing `side_effect_uncertain`, mirroring the gap #366 and #733 fixed
+  for `complete()` and `fail()`. Because `claim()` deliberately treats a
+  compensated action as re-fireable, compensating an interrupted or uncertain
+  (`UNKNOWN`) action laundered the recovery blocker away and allowed duplicate
+  execution of an external effect that may have already run. `compensate()` now
+  verifies the action is in `(ActionStatus.COMPLETED, ActionStatus.COMPENSATED)`,
+  raising `LedgerError` for any in-flight or un-reconciled record.
+
+- **`record-plan` now succeeds on compacted runs (#1438).** `cmd_record_plan`
+  queried `read_events` for its preflight projection check and post-write
+  emission, which on a compacted run reads only the post-anchor live tail.
+  Because `RUN_STARTED` lives in `events_archive`, projecting the candidate
+  against that truncated history raised `ProjectionError` and refused valid
+  plans with exit code 1. The command now queries `read_all_events` so the
+  preflight fold and state emission see the full merged event history.
+
+- **The MCP candidate fold now reads the full history, so `continuum_record_progress`
+  and `continuum_record_plan` keep working on a compacted run (#1133).**
+  `_project_candidate` folded only the live tail; once compaction moved
+  `RUN_STARTED` into `events_archive`, the goal no longer projected and both
+  write tools refused every payload as "unprojectable" -- exactly the
+  long-running runs they exist for. It now folds `read_all_events`, so the goal
+  still projects and the head sequence it validates against is unchanged. The
+  original fix (PR #1219) was dropped in a merge-of-main and never landed.
+
+- **`DependencyGraph.impacted_by` now cascades taint along finding-to-finding
+  citation edges to a fixpoint (#1475).** Findings may cite other findings
+  (blessed by `SemanticState.dangling_evidence`), and `StateValidator._propagate`
+  iterated to a fixpoint so stale findings cascade down the derivation graph.
+  `impacted_by` previously only checked citations against the initial evidence
+  set in a single pass, missing findings and decisions that depended on tainted
+  findings. `DependencyGraph.impacted_by` now repeats until no new findings are
+  tainted, restoring parity with the validator and preventing stale downstream
+  findings and decisions from surviving localized repair plans.
+- **The edit-precondition gate now raises the exception subclass matching the
+  edit type it refused (#1114).** The gate picked `ForkPreconditionError` for
+  forks but the plain `EditPreconditionError` for every other edit type, so
+  `MergePreconditionError` and `RestorePreconditionError` -- both exported
+  through `recovery/__init__.py` -- were never raised anywhere and a caller
+  could not distinguish a merge refusal from a restore refusal by exception
+  type. `check_preconditions` now maps `edit_type` to its subclass, and the
+  two-sided `check_merge_preconditions` path raises `MergePreconditionError`
+  as well. The three subclasses are defined once in `gate.py` and re-exported
+  by `fork.py`, `merge.py` and `restore.py` as before, so existing imports and
+  `except EditPreconditionError` handlers are unaffected; only `type(exc)`
+  becomes observable.
+
 - **A probe that prints `occurred:false` is now told the separator is the
   problem.** A command probe's verdict contract was documented only in the
   module docstring, so the place an operator met it was the error, and the
@@ -1044,7 +1231,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~3,325 collected, ~3,325 passed, ~0 skipped on a minimal env).
+  (~3,334 collected, ~3,334 passed, ~0 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
