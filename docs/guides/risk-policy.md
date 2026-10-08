@@ -65,22 +65,24 @@ returned `False` and changed nothing.
 
 ## Writing policy
 
-Copy the example and edit the mapping; unknown trigger names are ignored until
-a signal arrives bearing them, so extra keys are harmless but dead:
+Copy the example and edit the mapping. Unknown trigger names and downgrade
+attempts below safe baseline defaults fail closed at load time:
 
 ```json
 {
   "loop": "replan",
+  "loop_persisting": "rollback",
   "error_cascade": "wait",
   "meltdown": "rollback",
   "governance_decay": "request_human"
 }
 ```
 
-A file that is not a JSON object, or a value outside the mode set plus
-`annotate`, fails validation at load. To preview a custom file without
-installing it, load it explicitly (`load_risk_policy(path)`) or point the
-working directory at it; assessment reads `.continuum/risk-policy.json` and
+A file that is not a JSON object, contains unknown trigger keys, specifies a
+value outside the mode set plus `annotate`, or attempts to downgrade a severe
+trigger below its baseline default, fails validation at load. To preview a custom
+file without installing it, load it explicitly (`load_risk_policy(path)`) or point
+the working directory at it; assessment reads `.continuum/risk-policy.json` and
 falls back to the built-in default when absent.
 
 ## Rules worth knowing

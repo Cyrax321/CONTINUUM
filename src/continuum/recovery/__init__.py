@@ -52,6 +52,17 @@ from continuum.recovery.preconditions import (
     derive,
 )
 from continuum.recovery.restore import RestorePreconditionError, approve_restore
+from continuum.recovery.risk_policy import (
+    DEFAULT_RISK_POLICY,
+    DEFAULT_RISK_POLICY_PATH,
+    KNOWN_TRIGGERS,
+    RiskPolicy,
+    RiskPolicyError,
+    evaluate_risk,
+    evaluate_risk_action,
+    is_more_conservative,
+    load_risk_policy,
+)
 from continuum.recovery.rules import (
     STATUS_CAUTION,
     active_rules,
@@ -117,4 +128,13 @@ __all__ = [
     "apply_rule_findings",
     "merge_validation_entries",
     "run_validation_rules",
+    "DEFAULT_RISK_POLICY",
+    "DEFAULT_RISK_POLICY_PATH",
+    "KNOWN_TRIGGERS",
+    "RiskPolicy",
+    "RiskPolicyError",
+    "evaluate_risk",
+    "evaluate_risk_action",
+    "is_more_conservative",
+    "load_risk_policy",
 ]

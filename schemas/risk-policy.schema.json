@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RiskPolicySchema",
+  "description": "Strict JSON schema specification for .continuum/risk-policy.json.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional URI to the JSON Schema definition."
+    },
+    "loop": {
+      "type": "string",
+      "enum": ["resume", "repair_and_resume", "replan", "wait", "request_human", "rollback", "abort", "annotate"],
+      "default": "replan",
+      "description": "Recovery mode for execution loop anomalies."
+    },
+    "loop_persisting": {
+      "type": "string",
+      "enum": ["resume", "repair_and_resume", "replan", "wait", "request_human", "rollback", "abort", "annotate"],
+      "default": "rollback",
+      "description": "Recovery mode for persistent loop anomalies."
+    },
+    "error_cascade": {
+      "type": "string",
+      "enum": ["resume", "repair_and_resume", "replan", "wait", "request_human", "rollback", "abort", "annotate"],
+      "default": "wait",
+      "description": "Recovery mode for cascading errors."
+    },
+    "latency_anomaly": {
+      "type": "string",
+      "enum": ["resume", "repair_and_resume", "replan", "wait", "request_human", "rollback", "abort", "annotate"],
+      "default": "annotate",
+      "description": "Recovery mode for latency anomalies (annotate only)."
+    },
+    "token_runaway": {
+      "type": "string",
+      "enum": ["resume", "repair_and_resume", "replan", "wait", "request_human", "rollback", "abort", "annotate"],
+      "default": "wait",
+      "description": "Base recovery mode for token runaway anomalies."
+    },
+    "token_runaway_threshold": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.8,
+      "description": "Confidence score threshold for token runaway escalation to abort."
+    },
+    "silent_abort": {
+      "type": "string",
+      "enum": ["resume", "repair_and_resume", "replan", "wait", "request_human", "rollback", "abort", "annotate"],
+      "default": "repair_and_resume",
+      "description": "Recovery mode for silent abort anomalies."
+    },
+    "meltdown": {
+      "type": "string",
+      "enum": ["resume", "repair_and_resume", "replan", "wait", "request_human", "rollback", "abort", "annotate"],
+      "default": "rollback",
+      "description": "Recovery mode for unhandled meltdown anomalies."
+    },
+    "side_effect_duplicate": {
+      "type": "string",
+      "enum": ["resume", "repair_and_resume", "replan", "wait", "request_human", "rollback", "abort", "annotate"],
+      "default": "abort",
+      "description": "Recovery mode for duplicate side-effect execution."
+    },
+    "governance_decay": {
+      "type": "string",
+      "enum": ["resume", "repair_and_resume", "replan", "wait", "request_human", "rollback", "abort", "annotate"],
+      "default": "request_human",
+      "description": "Recovery mode for governance decay anomalies."
+    }
+  },
+  "additionalProperties": false
+}

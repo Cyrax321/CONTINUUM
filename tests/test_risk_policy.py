@@ -127,6 +127,7 @@ def test_policy_file_validation(tmp_path: Path) -> None:
 def test_evaluate_risk_mapping(tmp_path: Path) -> None:
     policy = load_risk_policy(tmp_path / "missing.json")
     assert evaluate_risk("loop", policy) == "replan"
+    assert evaluate_risk("loop_persisting", policy) == "rollback"
     assert evaluate_risk("error_cascade", policy) == "wait"
     assert evaluate_risk("latency_anomaly", policy) is None
     assert evaluate_risk("meltdown", policy) == "rollback"
