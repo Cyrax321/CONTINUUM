@@ -117,7 +117,6 @@ Test counts: ~3950 collected on a minimal env.
   scorer is shipped and tested on its own rather than arriving with a heuristic
   that moves while the queue is built.
 
-<<<<<<< HEAD
 - **Scalability stress harness, fault injection resilience suite, and action ledger caching (#1583).**
   Adds reproducible interleaved stress test workloads across 1,000 and 10,000 steps in
   `benchmarks/scalability/stress_workload.py`, comprehensive fault injection tests covering 7 failure

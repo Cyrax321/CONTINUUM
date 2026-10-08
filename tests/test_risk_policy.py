@@ -159,7 +159,9 @@ def test_risk_rationale_names_every_trigger_of_the_winning_mode(tmp_path: Path) 
         run_id = "run_risk_multi"
         store.create_run_started(Run(run_id=run_id, goal="multi trigger"))
         ingest_risk(store, run_id, {"trigger": "error_cascade", "score": 0.9})
-        ingest_risk(store, run_id, {"trigger": "token_runaway", "score": 0.8})
+        # Sub-threshold on purpose: at 0.8 token_runaway escalates to abort and
+        # stops being a wait-severity contributor to this rationale.
+        ingest_risk(store, run_id, {"trigger": "token_runaway", "score": 0.5})
         decision = RecoveryEngine(store).assess(run_id, replay=False)
 
     assert decision.mode.value == "wait"
@@ -285,3 +287,71 @@ def test_risk_step_id_ignored_when_blank_or_absent(tmp_path: Path) -> None:
         decision = RecoveryEngine(store).assess(run_id, replay=False)
 
     assert decision.contract.reason == ("risk loop triggers replan; repeating steps to avoid: 42")
+
+
+def test_engine_escalates_token_runaway_at_the_configured_threshold(tmp_path: Path) -> None:
+    # The engine used to look up the mapped mode only, so a token_runaway the
+    # monitor was 0.95 confident about still proposed wait and an operator's
+    # token_runaway_threshold never reached a decision. Assessment now reads
+    # the event's score (review of #1422).
+    from continuum.recovery import RecoveryEngine
+
+    db = str(tmp_path / "risk_escalate.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_escalate"
+        store.create_run_started(Run(run_id=run_id, goal="escalation"))
+        ingest_risk(store, run_id, {"trigger": "token_runaway", "score": 0.95})
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    assert decision.mode.value == "abort"
+    assert decision.contract.reason == "risk token_runaway triggers abort"
+
+
+def test_engine_keeps_a_subthreshold_token_runaway_at_wait(tmp_path: Path) -> None:
+    # The escalation is threshold-gated: below 0.8 the mapped mode stands.
+    from continuum.recovery import RecoveryEngine
+
+    db = str(tmp_path / "risk_no_escalate.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_no_escalate"
+        store.create_run_started(Run(run_id=run_id, goal="no escalation"))
+        ingest_risk(store, run_id, {"trigger": "token_runaway", "score": 0.4})
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    assert decision.mode.value == "wait"
+
+
+def test_engine_falls_back_to_defaults_on_an_invalid_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An invalid policy file used to raise out of the whole risk block, which
+    # the broad handler answered by clearing every recorded risk: an unhandled
+    # meltdown could then read as safe to resume. Loading now fails over to the
+    # conservative defaults instead, so the severe-trigger protections survive a
+    # misconfiguration (review of #1422).
+    from continuum.observability import RISK_POLICY_LOAD_FALLBACK, get_metrics, reset_metrics
+    from continuum.recovery import RecoveryEngine
+
+    # A policy file that the loader must reject: an unknown trigger.
+    policy_dir = tmp_path / "policy-cwd"
+    policy_dir.mkdir()
+    (policy_dir / ".continuum").mkdir()
+    (policy_dir / ".continuum" / "risk-policy.json").write_text(
+        json.dumps({"meltdown": "rollback", "typo_trigger": "wait"}),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(policy_dir)
+    reset_metrics()
+
+    db = str(tmp_path / "risk_fallback.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_fallback"
+        store.create_run_started(Run(run_id=run_id, goal="invalid policy"))
+        ingest_risk(store, run_id, {"trigger": "meltdown", "score": 0.9})
+        ingest_risk(store, run_id, {"trigger": "side_effect_duplicate", "score": 0.9})
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    # The duplicate-side-effect abort survived the rejected policy, and the
+    # fallback is visible as a counter rather than silent.
+    assert decision.mode.value == "abort"
+    assert get_metrics().snapshot()["counters"].get(RISK_POLICY_LOAD_FALLBACK) == 1
