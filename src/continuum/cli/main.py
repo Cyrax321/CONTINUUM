@@ -111,7 +111,25 @@ from continuum.storage import (
 
 __all__ = ["main", "build_parser"]
 
-_DEFAULT_DB = "continuum.db"
+#: Filename of the store used when ``--db`` is not given. It is deliberately a
+#: bare name, not a path: the default is resolved against the current directory
+#: by :func:`_default_db` before it reaches a parser.
+_DEFAULT_DB_NAME = "continuum.db"
+
+
+def _default_db() -> str:
+    """The store ``--db`` defaults to, resolved against the current directory.
+
+    A bare ``continuum.db`` is read relative to the process cwd, so the same
+    command opened a *different* store from a different directory -- silently,
+    because the help text, ``init``'s report, and the error paths all repeated
+    the bare filename and named no directory (issue #1575). Resolving it here
+    moves no data: ``cwd/continuum.db`` is the same file ``continuum.db`` has
+    always opened. It only makes the file an operator is shown the one that
+    will actually be opened. Mirrors what ``mcp install`` already did for its
+    own path (``Path(args.db or Path.cwd() / "continuum.db").resolve()``).
+    """
+    return str(Path.cwd().joinpath(_DEFAULT_DB_NAME).resolve())
 
 
 # --------------------------------------------------------------------------- #
@@ -339,7 +357,7 @@ def cmd_runs(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> 
     runs = storage.list_runs(limit=args.limit)
     if not runs:
         _emit(
-            {"runs": []},
+            {"database": args.db, "runs": []},
             "No runs recorded.",
             as_json=args.json,
             stream=out,
@@ -363,7 +381,7 @@ def cmd_runs(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> 
         for r in runs
     ]
     _emit(
-        {"runs": payload},
+        {"database": args.db, "runs": payload},
         "\n".join(lines),
         as_json=args.json,
         stream=out,
@@ -4647,7 +4665,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the version and exit.",
     )
     parser.add_argument(
-        "--db", default=_DEFAULT_DB, help=f"storage URL or path (default: {_DEFAULT_DB})."
+        "--db",
+        default=_default_db(),
+        help=f"storage URL or path (default: {_default_db()}).",
     )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON.")
     colour = parser.add_mutually_exclusive_group()

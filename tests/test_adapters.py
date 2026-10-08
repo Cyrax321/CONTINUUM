@@ -330,3 +330,61 @@ def test_a_non_canonical_result_does_not_break_recovery(store: SQLiteStorage) ->
     # Recovery reads the recorded result; a sanitized one must not crash it.
     decision = adapter.resume("run_108")
     assert decision.mode is not None
+
+
+def test_start_run_records_the_run_started_a_resume_folds(store: SQLiteStorage) -> None:
+    """A run created through the adapter must be resumable on its own.
+
+    ``start_run`` used to call only ``create_run``, so the run row existed
+    while the event log stayed empty. Projection folds the log, not the row,
+    so it raised ``ProjectionError`` and the run was indistinguishable from one
+    that crashed before writing anything.
+    """
+    from continuum.state.semantic import project
+
+    adapter = GenericAgentAdapter(store)
+    run = adapter.start_run(goal="Ship the thing", run_id="run_120")
+
+    events = [e.type.value for e in store.read_events(run.run_id)]
+    assert events == ["RUN_STARTED"]
+
+    folded = project(run.run_id, store.read_all_events(run.run_id))
+    assert folded.goal.description == "Ship the thing"
+
+
+def test_start_run_is_idempotent_on_an_existing_run(store: SQLiteStorage) -> None:
+    """Calling ``start_run`` twice on the same id does not append twice.
+
+    The run row is fetched when it already exists, and the event is backfilled
+    only for an empty log, so a caller re-entering ``start_run`` after a crash
+    lands on the same run with one ``RUN_STARTED``.
+    """
+    from continuum.events import EventType
+
+    adapter = GenericAgentAdapter(store)
+    first = adapter.start_run(goal="Re-entrant", run_id="run_121")
+    second = adapter.start_run(goal="Re-entrant", run_id="run_121")
+
+    assert second.run_id == first.run_id
+    events = [e.type for e in store.read_events("run_121")]
+    assert events.count(EventType.RUN_STARTED) == 1
+
+
+def test_start_run_refuses_a_log_that_begins_without_run_started(store: SQLiteStorage) -> None:
+    """A log whose first event is not ``RUN_STARTED`` is rejected, not misordered.
+
+    Backfilling the start after events that supposedly preceded it would make
+    every state projected from that log quietly wrong, so the adapter raises
+    rather than guessing.
+    """
+    from continuum.events import EventType
+    from continuum.models import Run
+
+    adapter = GenericAgentAdapter(store)
+    # A run row exists but its log begins with the wrong event, which is the
+    # shape a misordered hand-written integration leaves behind.
+    store.create_run(Run(run_id="run_122", goal="Original"))
+    store.append_event("run_122", EventType.TASK_UPDATED, {"note": "out of order"})
+
+    with pytest.raises(ValueError, match="does not begin with RUN_STARTED"):
+        adapter.start_run(goal="Original", run_id="run_122")
