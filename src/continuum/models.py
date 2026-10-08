@@ -968,11 +968,12 @@ class RiskObservedPayload(BaseModel):
     model_config = Frozen
 
     trigger: str = Field(min_length=1, max_length=128)
-    """Risk class the monitor detected: ``loop``, ``error_cascade``,
-    ``latency_anomaly``, ``token_runaway``, ``silent_abort``, ``meltdown``,
-    ``side_effect_duplicate`` or ``governance_decay`` under the default policy.
-    Not restricted to that set: a monitor may name a class the installed policy
-    has not mapped yet, and the signal is recorded and ignored until it does."""
+    """Risk class the monitor detected: ``loop``, ``loop_persisting``,
+    ``error_cascade``, ``latency_anomaly``, ``token_runaway``, ``silent_abort``,
+    ``meltdown``, ``side_effect_duplicate`` or ``governance_decay`` under the
+    default policy. Not restricted to that set: a monitor may name a class the
+    installed policy has not mapped yet, and the signal is recorded and ignored
+    until it does."""
     score: float = Field(default=0.0, ge=0.0, le=1.0)
     """Confidence the monitor assigns to the observation, clamped to [0, 1]."""
     episode_id: str | None = Field(default=None, max_length=128)

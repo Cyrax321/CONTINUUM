@@ -29,6 +29,18 @@ All notable changes to this project are documented here. The format follows
   the line carries counts and a dependency name only, never arguments, files
   or failure detail. `RecoveryEngine` takes an optional ledger and reads the
   budget read-only; without one every decision is unchanged.
+
+- **Declarative risk policy schema and parser (#1422).**
+  CONTINUUM now provides a declarative schema and validator in
+  `src/continuum/recovery/risk_policy.py` for `.continuum/risk-policy.json`.
+  The policy maps failure triggers (`loop`, `loop_persisting`, `error_cascade`,
+  `latency_anomaly`, `token_runaway`, `silent_abort`, `meltdown`,
+  `side_effect_duplicate`, `governance_decay`) to recovery actions with safe,
+  conservative defaults when the configuration file is absent. Validation fails
+  closed against invalid JSON, unknown triggers, and attempts to downgrade severe
+  triggers below baseline safe thresholds. The `evaluate_risk_action` helper
+  resolves triggers and confidence scores into recovery modes, including
+  threshold-based escalations for token runaway.
 ### Fixed
 
 - **A probe that prints `occurred:false` is now told the separator is the

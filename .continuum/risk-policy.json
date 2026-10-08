@@ -1,5 +1,6 @@
 {
   "loop": "replan",
+  "loop_persisting": "rollback",
   "error_cascade": "wait",
   "latency_anomaly": "annotate",
   "token_runaway": "wait",
