@@ -94,7 +94,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI 入口
 continuum-mcp --help             # MCP 服务器入口（需要 [mcp] 或 [dev]）
-pytest -q                        # 最小环境中约 4400 个收集，约 4,100 个通过，约 0 个跳过（具体数量因环境而异）
+pytest -q                        # 最小环境中约 3950 个收集，约 3,636 个通过，约 41 个跳过（具体数量因环境而异）
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI 强制的三扇门禁
 ```
@@ -411,7 +411,7 @@ Schema v6。SQLite 为主，Postgres 经 CI 验证。单一日志，多重投影
 
 ### 模块映射，一库多面
 
-CONTINUUM 是一个库（`src/continuum`，153 个模块）加上大型测试套件（242 个测试文件，约 4400 个测试）。所有模块追加并重放同一个哈希链事件日志：
+CONTINUUM 是一个库（`src/continuum`，150 个模块）加上大型测试套件（230 个测试文件，约 2,809 个测试）。所有模块追加并重放同一个哈希链事件日志：
 
 | 模块 | 职责 |
 |:--|:--|
@@ -433,7 +433,7 @@ CONTINUUM 是一个库（`src/continuum`，153 个模块）加上大型测试套
 | `mcp/` | 12 个 stdio 工具加上鉴权 `authz.py` token 鉴权、allowlist、确认 token |
 | `serve/` | Sidecar stdio JSON 线路 + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Web 仪表板 `app.py` `hitl.py` 带 HITL 按钮确认、对账和完成，前缀信任建议，钉扎 |
-| `cli/` | 56 个 argparse 命令，退出码即裁决，`runs、start、inspect、resume、verify、health、tree、benchmark、attest、dashboard` |
+| `cli/` | 56 个 argparse 命令，退出码即裁决，`runs、start、inspect、resume、verify、health、tree、benchmark、attest、review、dashboard` |
 | `otel.py` | OpenTelemetry 跨度处理器桥 |
 | `benchmark/` | CONTINUUM-Bench  harness，5 个崩溃场景 + 参数漂移 + 14 场景恢复套件 |
 
