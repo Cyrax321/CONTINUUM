@@ -275,6 +275,8 @@ class ReviewQueue:
         item = self.get_item(run_id, review_id)
         if item is None:
             raise KeyError(f"no review item with id {review_id!r} in run {run_id!r}")
+        if not item.is_pending:
+            raise ValueError(f"review item {review_id!r} is already {item.status}")
 
         payload: dict[str, Any] = {
             "approval_id": review_id,
@@ -304,7 +306,8 @@ class ReviewQueue:
         """Bulk-approve all pending items at or below the risk threshold.
 
         If max_risk is not specified, the policy blast_radius_threshold is used
-        and immediate blockers are never bulk-approved.
+        and immediate blockers are never bulk-approved. Immediate blockers
+        always require individual review even if a custom threshold is passed.
         """
         threshold = (
             max_risk
@@ -316,8 +319,12 @@ class ReviewQueue:
 
         approved: list[ReviewItem] = []
         for item in pending:
-            # Immediate blockers are skipped when using policy default threshold
-            if max_risk is None and item.immediate:
+            # Immediate blockers always require individual review. A caller
+            # passing a custom threshold must not be able to widen the batch
+            # over the blast radius threshold and clear high-risk items nobody
+            # looked at, so the guard is unconditional rather than only in the
+            # default-threshold path (issue #1410 review).
+            if item.immediate:
                 continue
             if item.risk_score <= threshold:
                 payload: dict[str, Any] = {

@@ -205,3 +205,59 @@ def test_approval_revocation_marks_item_revoked(queue: ReviewQueue) -> None:
     assert reloaded.status == "revoked"
     assert reloaded.is_pending is False
     assert len(queue.list_pending("run_1")) == 0
+
+
+def test_approve_revoked_item_refused(queue: ReviewQueue) -> None:
+    # Approving a revoked item would flip it back to granted and silently undo
+    # the revocation, so it must be refused rather than recorded.
+    item = queue.enqueue("run_1", "read_query")
+    queue.storage.append_event(
+        "run_1",
+        EventType.APPROVAL_REVOKED,
+        {"approval_id": item.review_id, "review_id": item.review_id},
+    )
+
+    with pytest.raises(ValueError, match="already revoked"):
+        queue.approve("run_1", item.review_id, reviewer="eve")
+
+    # No grant event was appended, so replay still reads the item as revoked
+    granted = [
+        e for e in queue.storage.read_all_events("run_1") if e.type is EventType.APPROVAL_GRANTED
+    ]
+    assert granted == []
+    reloaded = queue.get_item("run_1", item.review_id)
+    assert reloaded is not None
+    assert reloaded.status == "revoked"
+
+
+def test_approve_already_approved_item_refused(queue: ReviewQueue) -> None:
+    item = queue.enqueue("run_1", "read_query")
+    queue.approve("run_1", item.review_id, reviewer="alice")
+
+    with pytest.raises(ValueError, match="already approved"):
+        queue.approve("run_1", item.review_id, reviewer="alice")
+
+    granted = [
+        e for e in queue.storage.read_all_events("run_1") if e.type is EventType.APPROVAL_GRANTED
+    ]
+    assert len(granted) == 1
+
+
+def test_approve_low_risk_custom_threshold_never_approves_immediate_blocker(
+    queue: ReviewQueue,
+) -> None:
+    # A custom threshold at or above the blast radius threshold must not turn
+    # bulk low-risk approval into bulk blocker approval.
+    queue.enqueue("run_1", "read_query")  # risk 0.1
+    queue.enqueue("run_1", "mem_delete")  # risk 0.9 (immediate)
+
+    approved = queue.approve_low_risk("run_1", max_risk=1.0, reviewer="bob")
+
+    approved_types = {it.action_type for it in approved}
+    assert approved_types == {"read_query"}
+
+    # The immediate blocker survives and is still pending
+    remaining = queue.list_pending("run_1")
+    assert len(remaining) == 1
+    assert remaining[0].action_type == "mem_delete"
+    assert remaining[0].immediate is True

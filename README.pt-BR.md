@@ -96,7 +96,7 @@ Verifique:
 ```bash
 continuum --help                 # ponto de entrada CLI
 continuum-mcp --help             # ponto de entrada do servidor MCP (precisa de [mcp] ou [dev])
-pytest -q                        # ~4400 coletados, ~4,100 passando, ~0 pulados em um ambiente mínimo (as contagens exatas variam)
+pytest -q                        # ~3950 coletados, ~3,636 passando, ~41 pulados em um ambiente mínimo (as contagens exatas variam)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # os três portões que o CI exige
 ```
@@ -397,7 +397,7 @@ Esquema v6. SQLite é primário, Postgres verificado por CI. Um log, muitas proj
 
 ### Mapa de módulos, uma biblioteca, muitas superfícies
 
-O CONTINUUM é uma biblioteca (`src/continuum`, 153 módulos) mais uma suíte de testes grande (242 arquivos de teste, ~4400 testes). Todos os módulos acrescentam e reproduzem um log de eventos encadeado:
+O CONTINUUM é uma biblioteca (`src/continuum`, 150 módulos) mais uma suíte de testes grande (230 arquivos de teste, ~2,809 testes). Todos os módulos acrescentam e reproduzem um log de eventos encadeado:
 
 | Módulo | Papel |
 |:--|:--|
@@ -419,7 +419,7 @@ O CONTINUUM é uma biblioteca (`src/continuum`, 153 módulos) mais uma suíte de
 | `mcp/` | 12 ferramentas stdio mais autorização `authz.py` autenticação por token, allowlist, token de confirmação |
 | `serve/` | Sidecar stdio fio JSON + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Dashboard web `app.py` `hitl.py` com botões HITL confirmar/reconciliar/completar, aviso de confiança de prefixo, fixações |
-| `cli/` | 56 comandos argparse, códigos de saída como veredito, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 56 comandos argparse, códigos de saída como veredito, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, review, dashboard` |
 | `otel.py` | Ponte de processador de spans do OpenTelemetry |
 | `benchmark/` | Harness do CONTINUUM-Bench, 5 cenários de queda + deriva de argumentos + suíte de recuperação de 14 cenários |
 

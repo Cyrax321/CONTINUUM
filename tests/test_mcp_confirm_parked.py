@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
-from continuum.mcp.authz import AuthorizationPolicy, ConfirmPolicy
+from continuum.mcp.authz import AuthorizationPolicy, AuthPolicy, ConfirmPolicy
 from continuum.mcp.server import build_server
 from continuum.models import Run
 from continuum.recovery.review_queue import ReviewQueue
@@ -83,10 +83,13 @@ async def test_low_risk_action_buffers_as_parked_without_confirm_token(
 
 @pytest.mark.asyncio
 async def test_high_risk_action_fails_immediately_without_confirm_token(
-    server_no_token: tuple[Any, Any],
+    store: SQLiteStorage,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    server, _ = server_no_token
-    # Set up escalation policy where mem_delete is 0.9 (>= 0.8)
+    # Isolate the escalation policy in the test's own directory so the run
+    # never touches (or unlinks) an operator's real policy file.
+    monkeypatch.chdir(tmp_path)
     policy_path = Path(".continuum/escalation.json")
     policy_path.parent.mkdir(parents=True, exist_ok=True)
     policy_path.write_text(
@@ -98,20 +101,19 @@ async def test_high_risk_action_fails_immediately_without_confirm_token(
         ),
         encoding="utf-8",
     )
-    try:
-        with pytest.raises(ToolError, match="CONTINUUM_MCP_CONFIRM_TOKEN"):
-            await server.call_tool(
-                "continuum_confirm",
-                {
-                    "run_id": "run_1",
-                    "action_type": "mem_delete",
-                    "arguments": {"key": "secret"},
-                },
-                context=fake_context(ALLOWED_CLIENT),
-            )
-    finally:
-        if policy_path.exists():
-            policy_path.unlink()
+    policy = AuthorizationPolicy([ALLOWED_CLIENT])
+    confirm_policy = ConfirmPolicy()
+    server, _ = build_server(storage=store, policy=policy, confirm_auth=confirm_policy)
+    with pytest.raises(ToolError, match="CONTINUUM_MCP_CONFIRM_TOKEN"):
+        await server.call_tool(
+            "continuum_confirm",
+            {
+                "run_id": "run_1",
+                "action_type": "mem_delete",
+                "arguments": {"key": "secret"},
+            },
+            context=fake_context(ALLOWED_CLIENT),
+        )
 
 
 @pytest.mark.asyncio
@@ -137,4 +139,83 @@ async def test_missing_run_raises_tool_error(
             "continuum_confirm",
             {"run_id": "missing", "action_type": "read_query"},
             context=fake_context(ALLOWED_CLIENT),
+        )
+
+
+@pytest.mark.asyncio
+async def test_low_risk_action_still_requires_shared_secret_when_configured(
+    store: SQLiteStorage,
+) -> None:
+    # When the server has a shared mutating secret configured, the low-risk
+    # parked path must not become an unauthenticated mutating route: a
+    # caller that cannot prove the secret is refused even for a low-risk action
+    # (issue #1410 review).
+    policy = AuthorizationPolicy([ALLOWED_CLIENT])
+    srv, _ = build_server(
+        storage=store,
+        policy=policy,
+        auth=AuthPolicy(expected="shared-secret"),
+        confirm_auth=ConfirmPolicy(),
+    )
+
+    with pytest.raises(ToolError, match="shared secret"):
+        await srv.call_tool(
+            "continuum_confirm",
+            {
+                "run_id": "run_1",
+                "action_type": "read_query",
+                "arguments": {"sql": "SELECT 1"},
+            },
+            context=fake_context(ALLOWED_CLIENT),
+        )
+
+    # Nothing was buffered: the refusal precedes the write.
+    queue = ReviewQueue(store)
+    assert queue.list_pending("run_1") == []
+
+
+@pytest.mark.asyncio
+async def test_low_risk_action_succeeds_with_shared_secret(
+    store: SQLiteStorage,
+) -> None:
+    # The same caller, now presenting the shared secret, parks the low-risk
+    # action without needing the confirmation secret.
+    policy = AuthorizationPolicy([ALLOWED_CLIENT])
+    srv, ctx = build_server(
+        storage=store,
+        policy=policy,
+        auth=AuthPolicy(expected="shared-secret"),
+        confirm_auth=ConfirmPolicy(),
+    )
+
+    result = await srv.call_tool(
+        "continuum_confirm",
+        {
+            "run_id": "run_1",
+            "action_type": "read_query",
+            "arguments": {"sql": "SELECT 1"},
+        },
+        context=fake_context(ALLOWED_CLIENT, auth_token="shared-secret"),
+    )
+
+    data = json.loads(result.content[0].text)
+    assert data["status"] == "parked"
+    queue = ReviewQueue(ctx.storage)
+    assert len(queue.list_pending("run_1")) == 1
+
+
+@pytest.mark.asyncio
+async def test_action_type_cannot_be_combined_with_scope(
+    server_with_token: tuple[Any, Any],
+) -> None:
+    server, _ = server_with_token
+    with pytest.raises(ToolError, match="action_type cannot be combined with scope"):
+        await server.call_tool(
+            "continuum_confirm",
+            {
+                "run_id": "run_1",
+                "action_type": "read_query",
+                "scope": ["goal"],
+            },
+            context=fake_context(ALLOWED_CLIENT, auth_token="secret-token"),
         )
