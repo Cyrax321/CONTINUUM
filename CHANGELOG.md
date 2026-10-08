@@ -171,7 +171,11 @@ Test counts: ~3950 collected on a minimal env.
   closed against invalid JSON, unknown triggers, and attempts to downgrade severe
   triggers below baseline safe thresholds. The `evaluate_risk_action` helper
   resolves triggers and confidence scores into recovery modes, including
-  threshold-based escalations for token runaway.
+  threshold-based escalations for token runaway. Assessment reads the event's
+  score, so a token runaway at or above the configured threshold escalates to
+  abort in the decision itself, and a policy file that fails validation falls
+  back to the conservative defaults and counts a `risk_policy.load_fallback`
+  marker rather than dropping every recorded risk.
 
 ### Fixed
 
