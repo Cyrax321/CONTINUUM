@@ -198,6 +198,21 @@ def render_budget(budget: BudgetStatus) -> str:
     return line
 
 
+def _liveness_digest_value(liveness: Any) -> Any:
+    """The hashable form of a ``liveness`` block.
+
+    ``last_append_age`` is wall-clock display (seconds since the last append at
+    assessment time), not a term: two assessments of an unchanged run would seal
+    different hashes if it were covered. The verdict fields (``breached``,
+    ``threshold_seconds``, ``phase``, ``breaches``) stay covered. A non-dict is
+    returned as-is, so a contract sealed before a liveness block existed still
+    hashes the way it did then.
+    """
+    if isinstance(liveness, dict):
+        return {k: v for k, v in liveness.items() if k != "last_append_age"}
+    return liveness
+
+
 def _hashable_payload(contract: RecoveryContract) -> dict[str, Any]:
     """Payload the integrity hash covers.
 
@@ -211,10 +226,7 @@ def _hashable_payload(contract: RecoveryContract) -> dict[str, Any]:
     existed, so an upgrade does not invalidate a stored contract.
     """
     payload = contract.model_dump(mode="json", exclude={"integrity_hash", "created_at", *excluded})
-    liveness = payload.get("liveness")
-    if isinstance(liveness, dict):
-        return {k: v for k, v in liveness.items() if k != "last_append_age"}
-    return liveness
+    return _liveness_digest_value(payload.get("liveness"))
 
 
 def canonical_digest_input(contract: RecoveryContract, version: int) -> str:
