@@ -557,9 +557,36 @@ class RecoveryEngine:
         risk_mode = None
         risk_rationale = None
         try:
-            from continuum.recovery.risk import evaluate_risk, load_risk_policy
+            from continuum.recovery.risk import (
+                DEFAULT_RISK_POLICY,
+                RiskPolicy,
+                RiskPolicyError,
+                evaluate_risk_action,
+                load_risk_policy,
+            )
 
-            policy = load_risk_policy()
+            # Policy loading is deliberately separate from evaluation. A
+            # rejected policy file must not take the whole risk assessment
+            # down with it: without this split, a RiskPolicyError raised here
+            # fell into the broad handler below, cleared every recorded risk,
+            # and an unhandled meltdown or duplicate side effect could read as
+            # safe-to-resume. Failing open to the conservative built-in
+            # defaults keeps the severe-trigger protections alive, and the
+            # fallback is counted so the misconfiguration is still visible
+            # (review of #1422).
+            policy_load_failed = False
+            try:
+                policy = load_risk_policy()
+            except RiskPolicyError:
+                policy_load_failed = True
+                policy = RiskPolicy(DEFAULT_RISK_POLICY)
+            if policy_load_failed:
+                try:
+                    from continuum.observability import RISK_POLICY_LOAD_FALLBACK, get_metrics
+
+                    get_metrics().increment(RISK_POLICY_LOAD_FALLBACK)
+                except Exception:
+                    pass
             # Archive-aware: the shared fetch walks the archived prefix too, so
             # compaction cannot empty triggering_risks by sealing the only
             # RISK_OBSERVED events away from this scan.
@@ -579,12 +606,16 @@ class RecoveryEngine:
                 trig = risk_ev.payload.get("trigger")
                 if not isinstance(trig, str):
                     continue
-                mode_str = evaluate_risk(trig, policy)
-                if mode_str is None:
-                    continue
-                try:
-                    candidate = RecoveryMode(mode_str)
-                except Exception:
+                # Score-aware evaluation: the event's confidence feeds the
+                # decision, so a token_runaway at or above the configured
+                # threshold escalates to ABORT instead of staying at WAIT. The
+                # plain mode lookup ignored both the score and the threshold,
+                # so an operator's token_runaway_threshold never applied to a
+                # real decision (review of #1422).
+                raw_score = risk_ev.payload.get("score", 0.0)
+                score = raw_score if isinstance(raw_score, (int, float)) else 0.0
+                candidate = evaluate_risk_action(trig, float(score), policy)
+                if candidate is None:
                     continue
                 if best_mode is None or SEVERITY[candidate] > SEVERITY[best_mode]:
                     best_mode = candidate

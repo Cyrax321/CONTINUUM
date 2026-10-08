@@ -49,6 +49,7 @@ __all__ = [
 
 
 def _now_iso() -> str:
+    """Current UTC time as an ISO 8601 string, used when a monitor omits its own clock."""
     return datetime.now(UTC).isoformat()
 
 

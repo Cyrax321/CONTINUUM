@@ -30,6 +30,7 @@ __all__ = [
     "UNKNOWN_SIDE_EFFECTS",
     "RECOVERIES_RESUMED",
     "RECOVERIES_BLOCKED",
+    "RISK_POLICY_LOAD_FALLBACK",
 ]
 
 
@@ -41,6 +42,9 @@ ACTIONS_COMPLETED = "actions.completed"
 UNKNOWN_SIDE_EFFECTS = "actions.unknown_side_effects"
 RECOVERIES_RESUMED = "recoveries.resumed"
 RECOVERIES_BLOCKED = "recoveries.blocked"
+#: A .continuum/risk-policy.json failed validation, so assessment fell back to
+#: the conservative built-in defaults instead of dropping risk signals.
+RISK_POLICY_LOAD_FALLBACK = "risk_policy.load_fallback"
 
 
 class _Timer:

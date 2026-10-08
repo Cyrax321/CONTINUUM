@@ -247,3 +247,87 @@ def test_json_schema_validates_and_matches_model() -> None:
     assert validated.loop == "replan"
     assert validated.loop_persisting == "rollback"
     assert validated.meltdown == "rollback"
+
+
+def test_generated_schema_matches_shipped_file() -> None:
+    # The generated and checked-in schemas drifted apart when the model typed
+    # every trigger as a plain str, so the file restricted modes to an enum the
+    # model did not enforce. Generated and shipped must agree on what a valid
+    # policy looks like (review of #1422).
+    from pathlib import Path
+
+    repo_schema = Path(__file__).resolve().parent.parent / "schemas" / "risk-policy.schema.json"
+    shipped = json.loads(repo_schema.read_text(encoding="utf-8"))
+    generated = RISK_POLICY_SCHEMA
+
+    assert generated["type"] == shipped["type"]
+    assert generated.get("additionalProperties") == shipped.get("additionalProperties") is False
+    assert set(generated["properties"]) == set(shipped["properties"])
+
+    for name, shipped_prop in shipped["properties"].items():
+        gen_prop = generated["properties"][name]
+        # Pydantic renders a nullable field as anyOf rather than a bare type,
+        # so compare the accepted type sets instead of the exact spelling.
+        gen_types = (
+            {gen_prop["type"]}
+            if "type" in gen_prop
+            else {sub.get("type") for sub in gen_prop.get("anyOf", [])}
+        )
+        shipped_types = (
+            {shipped_prop["type"]}
+            if "type" in shipped_prop
+            else {sub.get("type") for sub in shipped_prop.get("anyOf", [])}
+        )
+        assert shipped_types <= gen_types, name
+        assert gen_prop.get("default") == shipped_prop.get("default"), name
+        if "enum" in shipped_prop:
+            # Same permitted modes in the same order, so the file a validator
+            # downloads and the schema the model generates are interchangeable.
+            assert gen_prop.get("enum") == shipped_prop["enum"], name
+        if "minimum" in shipped_prop:
+            assert gen_prop.get("minimum") == shipped_prop.get("minimum"), name
+        if "maximum" in shipped_prop:
+            assert gen_prop.get("maximum") == shipped_prop.get("maximum"), name
+
+
+def test_schema_rejects_a_mode_outside_the_enum() -> None:
+    # With the fields typed as a Literal, a bogus mode is a validation error
+    # rather than a value the model happily stores.
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        RiskPolicySchema.model_validate({"meltdown": "banana"})
+    with pytest.raises(ValidationError):
+        RiskPolicySchema.model_validate({"side_effect_duplicate": "probably-fine"})
+
+
+def test_risk_policy_init_normalizes_trigger_keys() -> None:
+    # load_risk_policy normalizes before its membership check, but the direct
+    # constructor used to test the raw key, so {"Meltdown": "abort"} was
+    # discarded and the default silently stayed in force (review of #1422).
+    assert RiskPolicy({"Meltdown": "abort"})["meltdown"] == "abort"
+    assert RiskPolicy({" Meltdown ": "abort"})["meltdown"] == "abort"
+    assert RiskPolicy(meltdown="abort")["meltdown"] == "abort"
+    assert RiskPolicy(**{"LOOP": "wait"})["loop"] == "wait"
+
+
+def test_risk_policy_init_rejects_invalid_mode_and_downgrades() -> None:
+    # The constructor is the other public entry point, so it must enforce the
+    # same rules as the loader instead of trusting its caller.
+    with pytest.raises(RiskPolicyError, match="must be one of"):
+        RiskPolicy({"meltdown": "banana"})
+
+    with pytest.raises(RiskPolicyError, match="downgrades 'abort' to 'rollback'"):
+        RiskPolicy({"side_effect_duplicate": "rollback"})
+
+    with pytest.raises(RiskPolicyError, match="downgrades 'rollback' to 'replan'"):
+        RiskPolicy(meltdown="replan")
+
+
+def test_risk_policy_init_ignores_unknown_keys() -> None:
+    # The loader fails closed on unknown triggers; the constructor only
+    # normalizes, so an unrecognized key is skipped and the baseline defaults
+    # remain in force.
+    policy = RiskPolicy({"not_a_trigger": "abort"})
+    assert "not_a_trigger" not in policy
+    assert policy["meltdown"] == "rollback"
