@@ -431,7 +431,7 @@ CONTINUUM 是一个库（`src/continuum`，132 个模块）加上大型测试套
 | `mcp/` | 12 个 stdio 工具加上鉴权 `authz.py` token 鉴权、allowlist、确认 token |
 | `serve/` | Sidecar stdio JSON 线路 + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Web 仪表板 `app.py` `hitl.py` 带 HITL 按钮确认、对账和完成，前缀信任建议，钉扎 |
-| `cli/` | 52 个 argparse 命令，退出码即裁决，`runs、start、inspect、resume、verify、health、tree、benchmark、attest、dashboard` |
+| `cli/` | 53 个 argparse 命令，退出码即裁决，`runs、start、inspect、resume、verify、health、tree、benchmark、attest、dashboard` |
 | `otel.py` | OpenTelemetry 跨度处理器桥 |
 | `benchmark/` | CONTINUUM-Bench  harness，5 个崩溃场景 + 参数漂移 + 14 场景恢复套件 |
 

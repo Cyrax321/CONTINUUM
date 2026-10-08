@@ -197,3 +197,18 @@ def test_review_missing_run_returns_not_found(storage: SQLiteStorage) -> None:
 
     with pytest.raises(RunNotFound):
         args.func(args, storage, io.StringIO(), io.StringIO())
+
+
+def test_review_approve_already_approved_item_returns_error(storage: SQLiteStorage) -> None:
+    queue = ReviewQueue(storage)
+    item = queue.enqueue("run_1", "read_query")
+    queue.approve("run_1", item.review_id, reviewer="operator")
+
+    out = io.StringIO()
+    err = io.StringIO()
+    parser = build_parser()
+    args = parser.parse_args(["review", "run_1", "--approve", item.review_id])
+
+    code = args.func(args, storage, out, err)
+    assert code == ExitCode.ERROR
+    assert "already approved, nothing to approve" in err.getvalue()

@@ -417,7 +417,7 @@ CONTINUUM es una librería (`src/continuum`, 124 módulos) más una suite de tes
 | `mcp/` | 12 herramientas stdio más autorización `authz.py` autenticación por token, allowlist, token de confirmación |
 | `serve/` | Sidecar stdio cable JSON + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Dashboard web `app.py` `hitl.py` con botones HITL confirmar/reconciliar/completar, aviso de confianza de prefijo, fijaciones |
-| `cli/` | 52 comandos argparse, códigos de salida como veredicto, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 53 comandos argparse, códigos de salida como veredicto, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | Puente de procesador de spans de OpenTelemetry |
 | `benchmark/` | Harness de CONTINUUM-Bench, 5 escenarios de caída + deriva de argumentos + suite de recuperación de 14 escenarios |
 

@@ -1772,6 +1772,13 @@ def cmd_review(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         if item is None:
             print(f"error: review item {approve_id!r} not found for run {args.run_id!r}", file=err)
             return ExitCode.NOT_FOUND
+        if not item.is_pending:
+            print(
+                f"error: review item {approve_id!r} is already {item.status}, "
+                f"nothing to approve for run {args.run_id!r}",
+                file=err,
+            )
+            return ExitCode.ERROR
         approved = queue.approve(args.run_id, approve_id, reviewer=reviewer)
         payload = {
             "run_id": args.run_id,
