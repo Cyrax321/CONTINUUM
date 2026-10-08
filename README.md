@@ -450,7 +450,7 @@ CONTINUUM is one library (`src/continuum`, 141 modules) plus a large test suite 
 | `mcp/` | 13 stdio tools plus authz `authz.py` token auth, allowlist, confirmation token |
 | `serve/` | Sidecar stdio JSON wire + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Web dashboard `app.py` `hitl.py` with HITL buttons confirm/reconcile/complete, prefix trust advisory, pins |
-| `cli/` | 52 argparse commands, exit codes as verdict: `runs, start, inspect, resume, verify, health, tree, benchmark, attest, lineage-issue, lineage-verify, dashboard` |
+| `cli/` | 53 argparse commands, exit codes as verdict: `runs, start, inspect, resume, verify, health, tree, benchmark, attest, lineage-issue, lineage-verify, review, dashboard` |
 | `otel.py` | OpenTelemetry span processor bridge |
 | `benchmark/` | CONTINUUM-Bench harness: 5 crash scenarios + argument drift + 14 scenario recovery suite + 7 fault risk injection |
 

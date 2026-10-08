@@ -679,6 +679,21 @@ def build_server(
         @functools.wraps(fn)
         def wrapper(*args: Any, ctx: Context | None = None, **kwargs: Any) -> str:
             caller = caller_name(ctx)
+            action_type = kwargs.get("action_type")
+            if action_type:
+                from continuum.recovery.escalation import (
+                    evaluate_action_risk,
+                    load_escalation_policy,
+                )
+
+                risk = evaluate_action_risk(
+                    action_type, kwargs.get("arguments"), load_escalation_policy()
+                )
+                if not risk.immediate:
+                    # Low-risk action buffers in ReviewQueue without requiring operator confirmation secret
+                    with _refusal_reaches_the_caller():
+                        policy.require(caller, fn.__name__)
+                        return fn(*args, **kwargs)
             # Authenticate before authorizing (CodeRabbit review, PR #206):
             # a caller that cannot present the confirmation secret must not
             # be able to probe the allowlist, or receive its contents in the
@@ -1181,8 +1196,47 @@ def build_server(
         run_id: str,
         expected_model: str | None = None,
         scope: list[str] | str | None = None,
+        action_type: str | None = None,
+        arguments: dict[str, Any] | None = None,
+        dependency: str | None = None,
+        dependency_depth: int = 0,
+        batch_id: str | None = None,
     ) -> str:
-        """Record a human confirmation of self-reported state."""
+        """Record a human confirmation or buffer a low-risk action into the review queue."""
+        ctx.storage.get_run(run_id)
+        if action_type is not None:
+            from continuum.recovery.review_queue import ReviewQueue
+
+            queue = ReviewQueue(ctx.storage)
+            item = queue.enqueue(
+                run_id,
+                action_type,
+                arguments=arguments,
+                dependency=dependency,
+                dependency_depth=dependency_depth,
+                batch_id=batch_id,
+            )
+            if item.parked:
+                return _json(
+                    {
+                        "status": "parked",
+                        "batch_id": item.batch_id or item.review_id,
+                        "review_id": item.review_id,
+                        "actionable": False,
+                        "risk_score": item.risk_score,
+                        "message": "Action buffered in deferred review queue.",
+                    }
+                )
+            return _json(
+                {
+                    "status": "requires_immediate_review",
+                    "review_id": item.review_id,
+                    "actionable": True,
+                    "risk_score": item.risk_score,
+                    "message": "Action exceeds blast radius threshold and requires immediate human confirmation.",
+                }
+            )
+
         # Scope handling (issue #394): normalize to a list of lowercased
         # component names; None or empty means full confirm of both.
         if scope is None:
