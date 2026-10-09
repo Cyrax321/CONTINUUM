@@ -1297,15 +1297,16 @@ class StateValidator:
                 if cid in state.pins:
                     pin = state.pins[cid]
                     expected_sha = spec.digest
-                    if pin.sha256 == expected_sha:
-                        entries.append(
-                            ComponentValidationEntry(
-                                component=Component.PIN,
-                                component_id=cid,
-                                status=StateStatus.VALID,
-                                detail="active soft constraint",
-                            )
+                    entries.append(
+                        ComponentValidationEntry(
+                            component=Component.PIN,
+                            component_id=cid,
+                            status=StateStatus.VALID,
+                            detail="active soft constraint"
+                            if pin.sha256 == expected_sha
+                            else "soft constraint digest mismatch (advisory)",
                         )
+                    )
             return
 
         # 2. When no operator registry exists on disk

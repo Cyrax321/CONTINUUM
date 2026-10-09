@@ -489,3 +489,76 @@ def test_validator_confirmed_unconditional_reset(tmp_path: Path, monkeypatch) ->
     outcome2 = validator.validate(state, events=events, confirmed=False)
     pin_entry2 = next(e for e in outcome2.report.statuses if e.component is Component.PIN)
     assert pin_entry2.status is StateStatus.REQUIRES_REVIEW
+
+
+def test_soft_pin_digest_mismatch_creates_advisory_entry(tmp_path: Path, monkeypatch) -> None:
+    """Soft pin with mismatched digest creates VALID entry with advisory detail."""
+    constraints_path = tmp_path / ".continuum" / "constraints.json"
+    constraints_path.parent.mkdir(parents=True, exist_ok=True)
+    spec_data = [
+        {
+            "id": "soft_audit",
+            "level": "soft",
+            "predicate": "audit advisory",
+            "scope": ["*"],
+        }
+    ]
+    constraints_path.write_text(json.dumps({"constraints": spec_data}), encoding="utf-8")
+    monkeypatch.setattr("continuum.security.constraints.DEFAULT_CONSTRAINTS_PATH", constraints_path)
+
+    db = str(tmp_path / "soft.db")
+    storage = SQLiteStorage(db)
+    run_id = "run_soft_1"
+    storage.create_run(Run(run_id=run_id, goal="test soft"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test soft"})
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        {
+            "constraint_id": "soft_audit",
+            "sha256": _sha256("different predicate"),
+        },
+    )
+    events = list(storage.read_events(run_id))
+    state = project(run_id, events)
+    validator = StateValidator()
+    outcome = validator.validate(state, events=events)
+    entry = next(
+        e for e in outcome.report.statuses if e.component is Component.PIN and e.component_id == "soft_audit"
+    )
+    assert entry.status is StateStatus.VALID
+    assert "advisory" in entry.detail
+
+
+def test_pin_confirmation_invalidated_by_subsequent_pin_event(tmp_path: Path) -> None:
+    """A subsequent constraint pin mutation clears previous human pin confirmation."""
+    from continuum.recovery.engine import RecoveryEngine
+
+    db = str(tmp_path / "confirm_invalidation.db")
+    storage = SQLiteStorage(db)
+    run_id = "run_inval_1"
+    storage.create_run(Run(run_id=run_id, goal="test pin confirmation invalidation"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test inval"})
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PIN_DROPPED,
+        {"constraint_id": "pin_1", "level": "hard", "reason": "first drop"},
+    )
+    # Human confirms the pin
+    storage.append_event(
+        run_id,
+        EventType.REVIEW_CONFIRMED,
+        {"scope": "pin"},
+        source=Origin.HUMAN,
+    )
+    # Later event drops another pin or mutates
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PIN_DROPPED,
+        {"constraint_id": "pin_2", "level": "hard", "reason": "second drop"},
+    )
+
+    engine = RecoveryEngine(storage)
+    decision = engine.assess(run_id)
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    assert any("pin_2" in item for item in decision.contract.invalidated)
