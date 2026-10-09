@@ -87,6 +87,12 @@ Test counts: ~3950 collected on a minimal env.
   and the reviewer fatigue telemetry (#1411) are its wired consumers, so the
   scorer is shipped and tested on its own rather than arriving with a heuristic
   that moves while the queue is built.
+
+- **Scalability stress harness, fault injection resilience suite, and action ledger caching (#1583).**
+  Adds reproducible interleaved stress test workloads across 1,000 and 10,000 steps in
+  `benchmarks/scalability/stress_workload.py`, comprehensive fault injection tests covering 7 failure
+  scenarios in `tests/test_scalability_fault_injection.py`, and in-memory folded action caching
+  with storage head invalidation in `ActionLedger` to avoid quadratic scan overhead during action claims.
 ### Fixed
 
 - **Benchmark report timestamps are timezone-aware UTC (#1823).** The Phase 6,
