@@ -1184,7 +1184,7 @@ def _h_ingest_risks(server: SidecarServer, params: dict[str, Any]) -> dict[str, 
     if stream is not None:
         if not isinstance(stream, str):
             raise BadParams("'stream' must be a newline-delimited JSON string")
-        records.extend(stream.splitlines())
+        records.extend([line.rstrip("\r") for line in stream.split("\n")])
     limit = params.get("limit")
     if limit is None:
         limit = DEFAULT_RISK_BATCH_LIMIT

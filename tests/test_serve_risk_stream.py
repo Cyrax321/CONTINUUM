@@ -378,19 +378,16 @@ def test_bad_param_shapes_are_protocol_errors(params: dict[str, object]) -> None
 
 # --- the HTTP transport: torn lines, truncation, timeouts ------------------- #
 
-_PORT = {"n": 9500}
-
 
 @pytest.fixture
 def http_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     # The read timeout is patched low so a stalled body is answered in the time a
     # test can wait, rather than the 30s a production caller gets.
     monkeypatch.setattr(serve_module, "SIDECAR_BODY_TIMEOUT_SECONDS", 1.0)
-    _PORT["n"] += 1
     db = str(tmp_path / "risk-stream.db")
     sidecar = SidecarServer(database=db)
     sidecar.dispatch("record_progress", {"run_id": "r1", "completed": 0, "total": 1, "goal": "g"})
-    http = SidecarHTTP(sidecar, port=_PORT["n"])
+    http = SidecarHTTP(sidecar, port=0)
     import threading
 
     thread = threading.Thread(target=http.serve_forever, daemon=True)

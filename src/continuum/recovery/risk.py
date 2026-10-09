@@ -43,6 +43,7 @@ __all__ = [
 #: is unconfigured by default and silent until an operator points logging at it;
 #: the drop summary on the returned record is what stays visible by default.
 _logger = logging.getLogger("continuum.recovery.risk")
+_logger.addHandler(logging.NullHandler())
 
 DEFAULT_RISK_POLICY_PATH = Path(".continuum/risk-policy.json")
 
