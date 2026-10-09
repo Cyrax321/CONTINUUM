@@ -38,6 +38,7 @@ continuum --json <command>                    # machine-readable output
 | `compact <run_id>` | Archive the pre-anchor log prefix. Mutates storage. |
 | `checkpoint <run_id>` | Force a state checkpoint. |
 | `observe` | Record one observed tool completion. Mutates storage. |
+| `import-risks <run_id> [--file <stream>]` | Ingest a newline-delimited risk-signal stream from a monitoring feed (SNAGLINE sidecar, webhook stream, watchdog). Fail-open: torn lines, binary garbage and malformed unicode are counted and dropped without aborting the import or touching the run's transaction. Mutates storage. |
 | `gateway` | Run the enforcing HTTP proxy for registered upstreams. Mutates storage. |
 | `briefing [--run-id <id>] [--raw-summary]` | Session-start context, curated by provenance: verified contract facts and system-derived lessons before agent-authored summaries, stale items quarantined with reasons. Read-only; `--raw-summary` is the diagnostic path to the verbatim agent summary (#742). |
 | `gate` | Decide whether a tool call may proceed (pre-tool-use hook). Read-only. |

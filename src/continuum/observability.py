@@ -30,6 +30,8 @@ __all__ = [
     "UNKNOWN_SIDE_EFFECTS",
     "RECOVERIES_RESUMED",
     "RECOVERIES_BLOCKED",
+    "RISKS_INGESTED",
+    "RISKS_DROPPED",
 ]
 
 
@@ -41,6 +43,11 @@ ACTIONS_COMPLETED = "actions.completed"
 UNKNOWN_SIDE_EFFECTS = "actions.unknown_side_effects"
 RECOVERIES_RESUMED = "recoveries.resumed"
 RECOVERIES_BLOCKED = "recoveries.blocked"
+#: Risk-signal ingestion (issue #1425): what landed, and what a sick feed cost.
+#: The dropped counter is the one that moves when a monitoring stream goes bad,
+#: which is exactly when it must not take the run it is watching down with it.
+RISKS_INGESTED = "risks.ingested"
+RISKS_DROPPED = "risks.dropped"
 
 
 class _Timer:
