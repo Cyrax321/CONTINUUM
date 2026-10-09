@@ -1857,8 +1857,9 @@ def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         try:
             ledger_instance = RecoveryLedger(FileLedgerBackend(str(ledger_dir)))
             ledger_entries = ledger_instance.entries(args.run_id)
-        except Exception:
+        except Exception as exc:
             ledger_entries = []
+            print(f"warning: recovery ledger unreadable: {exc}", file=err)
     else:
         candidates: list[Path] = []
         if getattr(args, "config", None):
