@@ -22,7 +22,7 @@ def test_risk_faults_choose_correct_mode(tmp_path: Path) -> None:
         with SQLiteStorage(db) as store:
             run_id = f"run_{fault.trigger}"
             store.create_run_started(Run(run_id=run_id, goal="bench"))
-            result = run_risk_fault_suite(store, run_id, fault.trigger)
+            result = run_risk_fault_suite(store, run_id, fault.trigger, score=fault.score)
             expected = fault.expected_mode
             if expected is None:
                 assert result["actual_mode"] == "resume"

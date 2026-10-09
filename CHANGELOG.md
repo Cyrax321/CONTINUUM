@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Declarative risk policy schema and parser (#1422).**
+  CONTINUUM now provides a declarative schema and validator in
+  `src/continuum/recovery/risk_policy.py` for `.continuum/risk-policy.json`.
+  The policy maps failure triggers (`loop`, `loop_persisting`, `error_cascade`,
+  `latency_anomaly`, `token_runaway`, `silent_abort`, `meltdown`,
+  `side_effect_duplicate`, `governance_decay`) to recovery actions with safe,
+  conservative defaults when the configuration file is absent. Validation fails
+  closed against invalid JSON, unknown triggers, and attempts to downgrade severe
+  triggers below baseline safe thresholds. The `evaluate_risk_action` helper
+  resolves triggers and confidence scores into recovery modes, including
+  threshold-based escalations for token runaway. Assessment reads the event's
+  score, so a token runaway at or above the configured threshold escalates to
+  abort in the decision itself, and a policy file that fails validation falls
+  back to the conservative defaults and counts a `risk_policy.load_fallback`
+  marker rather than dropping every recorded risk.
+
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a
   repeatedly failing integration spends its own allowance instead of the run's:
@@ -29,6 +45,18 @@ All notable changes to this project are documented here. The format follows
   the line carries counts and a dependency name only, never arguments, files
   or failure detail. `RecoveryEngine` takes an optional ledger and reads the
   budget read-only; without one every decision is unchanged.
+
+- **Declarative risk policy schema and parser (#1422).**
+  CONTINUUM now provides a declarative schema and validator in
+  `src/continuum/recovery/risk_policy.py` for `.continuum/risk-policy.json`.
+  The policy maps failure triggers (`loop`, `loop_persisting`, `error_cascade`,
+  `latency_anomaly`, `token_runaway`, `silent_abort`, `meltdown`,
+  `side_effect_duplicate`, `governance_decay`) to recovery actions with safe,
+  conservative defaults when the configuration file is absent. Validation fails
+  closed against invalid JSON, unknown triggers, and attempts to downgrade severe
+  triggers below baseline safe thresholds. The `evaluate_risk_action` helper
+  resolves triggers and confidence scores into recovery modes, including
+  threshold-based escalations for token runaway.
 ### Fixed
 
 - **A probe that prints `occurred:false` is now told the separator is the
