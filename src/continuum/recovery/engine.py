@@ -360,7 +360,18 @@ class RecoveryEngine:
             archive_aware_events = self.storage.read_all_events(run_id)
         except Exception:
             archive_aware_events = self.storage.read_events(run_id)
-        for _ev in archive_aware_events:
+        for _ev in sorted(archive_aware_events, key=lambda event: event.sequence):
+            if _ev.type in (
+                EventType.CONSTRAINT_PINNED,
+                EventType.CONSTRAINT_PIN_DROPPED,
+                EventType.CONSTRAINT_RETRACTED,
+            ):
+                confirmed_components.discard("pin")
+                confirmed_components.discard("constraints")
+                pin_id = _ev.payload.get("constraint_id") if isinstance(_ev.payload, dict) else None
+                if pin_id:
+                    confirmed_components.discard(str(pin_id).strip().lower())
+                continue
             if _ev.type is not EventType.REVIEW_CONFIRMED:
                 continue
             # Only human confirmations clear self-certification; an agent
