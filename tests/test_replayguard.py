@@ -274,7 +274,9 @@ def test_a_non_canonical_result_completes_instead_of_refiring(db: str) -> None:
     )
     assert kind2 is GuardKind.SKIP_DUPLICATE
     assert len(fired) == 1, "the replay must answer from the record, not re-fire the effect"
-    assert result2 == repr(result1), "the journal degrades to a description of the real result"
+    assert result2 == {"amount": "Decimal('19.99')", "currency": "USD"}, (
+        "the journal degrades to a replayable description of the real result"
+    )
 
 
 def test_a_non_canonical_result_degrades_only_the_journal(db: str) -> None:
@@ -301,7 +303,9 @@ def test_a_non_canonical_result_degrades_only_the_journal(db: str) -> None:
         fn=lambda: {"SHOULD_NOT_RUN": True},
     )
     assert kind2 is GuardKind.SKIP_DUPLICATE
-    assert result2 == repr(result)
+    assert result2 == {"ids": "{1, 2, 3}"}, (
+        "the journal degrades to a replayable description of the real result"
+    )
 
 
 def test_exception_marks_uncertain_failure_and_reraises(db: str) -> None:

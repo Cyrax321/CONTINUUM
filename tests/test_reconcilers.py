@@ -18,12 +18,17 @@ from continuum import reconcilers
 from continuum.actions import ActionLedger
 from continuum.cli import ExitCode, main
 from continuum.events import EventType
-from continuum.models import ActionStatus, Origin, Run
+from continuum.models import Action, ActionStatus, Origin, Run
 from continuum.reconcilers import (
+    _AUTHORITY_VERDICT_CONTRACT,
     _DEFAULT_TIMEOUT,
+    _VERDICT_CONTRACT,
     ReconcilerConfigError,
     _parse_verdict,
+    _verdict_hint,
     load_reconcilers,
+    probe_authority_verdict,
+    probe_verdict,
     settle_run,
 )
 from continuum.storage import SQLiteStorage
@@ -141,6 +146,83 @@ def test_verdict_parsing(line: str, expected: bool | str) -> None:
 
 def test_last_line_wins() -> None:
     assert _parse_verdict("noise\nmore noise\noccurred=false") is False
+
+
+@pytest.mark.parametrize("line", ["occurred:false", "occurred:true", "OCCURRED:FALSE"])
+def test_a_colon_separated_verdict_is_not_a_verdict(line: str) -> None:
+    """``occurred:false`` is the shape a shell ``echo`` suggests, not an answer.
+
+    The contract's separator is ``=``; accepting a colon would be generous in
+    the wrong direction, since a probe printing ``occurred:false`` in a config
+    dialect means something the caller should state explicitly. It reads as
+    unknown, and the diagnostic -- not the parse -- is what has to save the
+    operator's time.
+    """
+    assert _parse_verdict(line) == "unknown"
+
+
+def test_the_diagnostic_names_the_colon_not_the_probe() -> None:
+    """``occurred:false`` used to report generic unparseable output.
+
+    That sends an operator hunting in their probe's logic when the cause is one
+    character away. The message now names the separator and shows the line to
+    print instead.
+    """
+    hint = _verdict_hint(
+        "checking outbox...\noccurred:false", "occurred", "occurred=true or occurred=false"
+    )
+    assert hint is not None
+    assert ":" in hint
+    assert "occurred=false" in hint
+    assert "occurred:false" in hint
+
+
+def test_the_diagnostic_stays_silent_on_output_that_is_not_an_attempted_verdict() -> None:
+    """A colon in unrelated output, or the other parser's field, is not a miss."""
+    assert _verdict_hint("invoice I-42 not found", "occurred", _VERDICT_CONTRACT) is None
+    assert _verdict_hint("", "occurred", _VERDICT_CONTRACT) is None
+    # An authority verdict line is not an action verdict near-miss, and vice versa.
+    assert _verdict_hint("valid:false", "occurred", _VERDICT_CONTRACT) is None
+    assert _verdict_hint("occurred:false", "valid", _AUTHORITY_VERDICT_CONTRACT) is None
+
+
+def test_probe_verdict_names_the_colon_in_its_detail() -> None:
+    action = Action(
+        run_id="run_1",
+        action_type="send_invoice",
+        arguments={},
+        status=ActionStatus.STARTED,
+    )
+    verdict, detail = probe_verdict({"command": "echo occurred:false", "timeout": 5}, action)
+    assert verdict is None
+    assert "the verdict uses ':'" in detail
+    assert "occurred=false" in detail
+
+
+def test_probe_verdict_states_the_contract_on_any_other_miss() -> None:
+    action = Action(
+        run_id="run_1",
+        action_type="send_invoice",
+        arguments={},
+        status=ActionStatus.STARTED,
+    )
+    verdict, detail = probe_verdict({"command": "echo not a verdict", "timeout": 5}, action)
+    assert verdict is None
+    assert "could not determine the outcome" in detail
+    for form in ("occurred=true", "occurred=false", "occurred=unknown"):
+        assert form in detail
+
+
+def test_an_authority_probes_colon_verdict_names_the_colon_too() -> None:
+    """``probe_authority_verdict`` parses ``valid=`` with the same shape and had
+    the same opaque message; the diagnosis is not action-probe specific.
+    """
+    verdict, detail = probe_authority_verdict(
+        {"command": "echo valid:false", "timeout": 5}, {"authority_id": "approval-7"}
+    )
+    assert verdict is None
+    assert "the verdict uses ':'" in detail
+    assert "valid=false" in detail
 
 
 # --- settle loop -------------------------------------------------------------------- #

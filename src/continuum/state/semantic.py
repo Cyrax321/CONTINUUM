@@ -806,8 +806,6 @@ _NON_PROJECTING = frozenset(
         # liveness (issue #302): silence detection and recovery, never state
         EventType.LIVENESS_SILENCE_DETECTED,
         EventType.LIVENESS_RECOVERED,
-        # risk (issue #303): real-time risk signal, never state
-        EventType.RISK_OBSERVED,
         # restore/merge lineage (issue #1169): markers that a run's history was
         # spliced, read by the CLI lineage views; the splice itself replays
         # events that carry the state change, the marker carries none.
@@ -833,9 +831,17 @@ _NON_PROJECTING = frozenset(
         # observer. Success or failure of a side channel is not state.
         EventType.NOTIFICATION_SENT,
         EventType.NOTIFICATION_FAILED,
-        # environment (issue #762): the provider configuration is append-only
-        # audit the resume path replays; it is not a field of run state.
-        EventType.ENVIRONMENT_PROVIDERS_CONFIGURED,
+        # subagent spanning: delegation-chain trace the provenance and adapter
+        # surfaces read back; a span records what happened, not run state.
+        EventType.SUBAGENT_SPAWNED,
+        EventType.SUBAGENT_COMPLETED,
+        EventType.SUBAGENT_FAILED,
+        # context compaction: a marker the validator reads to report what a
+        # compaction kept; the fold reads its effect off the log boundary.
+        EventType.PRECOMPACT_HOOK,
+        # memory: a tombstone records that something was deleted from the
+        # projected memory index, not that the assistant's state changed.
+        EventType.MEMORY_TOMBSTONED,
     }
 )
 

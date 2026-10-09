@@ -271,7 +271,11 @@ def test_complete_button_confirms_before_completing(db: str, addr: str) -> None:
     assert status == 200
     with SQLiteStorage(db) as store:
         types = [event.type for event in store.read_events("run_1")]
-        review = [event for event in store.read_events("run_1") if event.type is EventType.REVIEW_CONFIRMED]
+        review = [
+            event
+            for event in store.read_events("run_1")
+            if event.type is EventType.REVIEW_CONFIRMED
+        ]
     assert types[-2:] == [EventType.REVIEW_CONFIRMED, EventType.RUN_COMPLETED]
     assert review and review[-1].source is Origin.HUMAN
     assert set(review[-1].payload.get("components", [])) == {"goal", "progress"}

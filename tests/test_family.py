@@ -17,6 +17,7 @@ import pytest
 from continuum.actions import ActionLedger
 from continuum.actions.idempotency import idempotency_key
 from continuum.cli import ExitCode, main
+from continuum.models import RunStatus
 from continuum.recovery.family import children_of
 from continuum.storage import SQLiteStorage
 

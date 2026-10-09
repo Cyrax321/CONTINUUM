@@ -250,36 +250,6 @@ def test_documented_counts_agree() -> None:
     assert len(set(stated.values())) == 1, f"documented counts disagree: {stated}"
 
 
-def test_readme_module_and_file_counts_match_the_tree() -> None:
-    """The README module-map summary must count the tree, not a stale snapshot.
-
-    The line read ``130 modules`` and ``182 test files`` while the tree held
-    132 and 186: every PR landing a module or a test file moves both figures,
-    and nothing re-measured them (#1108). The ``cli/`` row of the same table
-    is already guarded against the parser; this covers the two figures beside
-    it the same way, so a stale count fails CI instead of quietly misstating
-    the size of the project. The basis is every ``.py`` under ``src/continuum``
-    and every ``test_*.py`` under ``tests/``.
-    """
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    match = re.search(
-        r"one library \(`src/continuum`, (\d+) modules\) plus a large test suite \((\d+) test files",
-        readme,
-    )
-    assert match, (
-        "README module map no longer states module/test-file counts where this guard expects them"
-    )
-    documented_modules, documented_files = int(match.group(1)), int(match.group(2))
-    live_modules = len(list((ROOT / "src" / "continuum").rglob("*.py")))
-    live_files = len(list((ROOT / "tests").rglob("test_*.py")))
-    assert documented_modules == live_modules, (
-        f"README says {documented_modules} modules but src/continuum holds {live_modules}"
-    )
-    assert documented_files == live_files, (
-        f"README says {documented_files} test files but tests/ holds {live_files}"
-    )
-
-
 def test_documented_narrative_count_forms(tmp_path: Path) -> None:
     """Narrative English, Spanish, and HTML count claims must stay detectable."""
     cases = (

@@ -523,6 +523,19 @@ class ActionLedger:
         except Exception:
             return None
 
+    def _settlement_authorization_id(self, action: Action) -> str | None:
+        """The bucket a settlement of ``action`` draws from.
+
+        The claim that opened the slot pinned its bucket onto the record
+        (issue #1052), so the settlement reads it back and the two share one
+        counter whatever the caller sends between them. A record written before
+        the field existed carries ``None`` and is re-derived from its stored
+        arguments with no volatile declaration, which is the pre-#1052 rule.
+        """
+        if action.budget_authorization_id is not None:
+            return action.budget_authorization_id
+        return self._budget_authorization_id(action.action_type, None, dict(action.arguments), ())
+
     def _budget_refuse_if_exhausted(
         self,
         action_type: str,
@@ -778,6 +791,69 @@ class ActionLedger:
                 # deferred to, not the freshly-derived one.
                 return ClaimResolution(matched[0], matched[1], foreign)
         return ClaimResolution(resolved, existing, foreign)
+
+    def resolve_prior(
+        self,
+        action_type: str,
+        arguments: Mapping[str, Any] | None = None,
+        *,
+        volatile: Sequence[str] = (),
+        scoped_to_run: bool = True,
+        key: str | None = None,
+    ) -> tuple[IdempotencyKey, Action] | None:
+        """The record a claim for these inputs would defer to, or None.
+
+        The three lookups :meth:`claim` performs, extracted so a gate that runs
+        *before* claim answers the same question claim will act on. The run-level
+        retry budget (issue #240) is evaluated at the intercept site, before
+        claim opens a slot; resolving under the derived key while claim answers
+        from another one let an exhausted budget suppress the very dedup and
+        reconciliation answers the gate exists to pass through (issue #1080).
+
+        In order: the exact idempotency key; then, for an unscoped claim, another
+        run's record under the same run-global key (issue 34); then, only when the
+        caller asserted no identity of its own, the drift-tolerant
+        :meth:`_identity_match`. An explicit key *is* the identity, so the
+        fallbacks are skipped for it: no drift is possible, and the derived key is
+        the stored key.
+
+        Returns ``(stored_key, action)``. For an identity match the key is the
+        *stored* key rather than the freshly-derived one, because that is the key
+        claim records and the caller settles against. None when nothing
+        identifies a prior attempt, which is the only case a fresh slot opens.
+        """
+        explicit_key = key is not None
+        idem = idempotency_key(
+            action_type,
+            arguments,
+            scope=self.run_id if scoped_to_run else None,
+            volatile=volatile,
+            key=key,
+        )
+        existing = self.get(idem)
+        if existing is not None:
+            return IdempotencyKey(idem), existing
+
+        foreign: Action | None = None
+        if not scoped_to_run:
+            # The local log has no such action, but an unscoped key claims
+            # global identity, so another run may already hold it.
+            foreign = self._foreign_action(idem)
+        # A foreign record that completed, or that another run is still
+        # mid-flight on, already settles this claim. A foreign failure only
+        # means nothing stands in the way of this run's own slot, so the
+        # drift-tolerant lookup still gets its turn.
+        foreign_settles = foreign is not None and foreign.status not in (
+            ActionStatus.FAILED,
+            ActionStatus.COMPENSATED,
+        )
+        if foreign is not None and foreign_settles:
+            return IdempotencyKey(idem), foreign
+        if not explicit_key:
+            matched = self._identity_match(action_type, arguments, volatile)
+            if matched is not None:
+                return matched
+        return None
 
     def _identity_match(
         self,
@@ -1256,13 +1332,15 @@ class ActionLedger:
 
         # STARTED or UNKNOWN: a previous attempt was interrupted.
         if on_unknown is not None:
-            resolved = on_unknown(existing)
-            if resolved is not None:
+            resolved_outcome = on_unknown(existing)
+            if resolved_outcome is not None:
                 # The resolution is a real decision and must outlive this call:
                 # persist it so the next claim (or intercept_action) and
                 # ledger.pending() reflect it instead of re-raising UnknownSideEffect.
-                self._record(resolved.key, resolved.action, EventType.ACTION_RECONCILED)
-                return resolved
+                self._record(
+                    resolved_outcome.key, resolved_outcome.action, EventType.ACTION_RECONCILED
+                )
+                return resolved_outcome
 
         uncertain = existing.model_copy(
             update={"status": ActionStatus.UNKNOWN, "side_effect_uncertain": True}

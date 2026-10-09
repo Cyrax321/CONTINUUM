@@ -15,7 +15,7 @@ jobs:
     name: Markdown lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: DavidAnson/markdownlint-cli2-action@v24
         with:
           globs: |

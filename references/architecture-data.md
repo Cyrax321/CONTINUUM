@@ -125,7 +125,7 @@ source of truth, and events persist to storage.
 - Append-only, hash-chained: each event stores the digest of the prior event.
 - `EventLog.verify()` re-walks the chain and localizes the first corrupted
   event (`events.py:304`).
-- 51 event types (`EventType` StrEnum, `events.py:46`). Complete list:
+- 55 event types (`EventType` StrEnum, `events.py:46`). Complete list:
 
 ```text
 RUN_STARTED, RUN_COMPLETED, RUN_ABORTED, TASK_UPDATED,
@@ -143,6 +143,7 @@ BRANCH_RESOLVED, ACTION_RECORDED, ACTION_RECONCILED,
 ACTION_COMPENSATED, GRANT_DENIED, LIVENESS_SILENCE_DETECTED,
 LIVENESS_RECOVERED, RISK_OBSERVED, AUTHORITY_CONSUMED,
 AUTHORITY_RECONCILED, ATTEMPT_LESSON, TRAJECTORY_REPORT, PLAN_UPSERT,
+PRECOMPACT_HOOK, SUBAGENT_SPAWNED, SUBAGENT_COMPLETED, SUBAGENT_FAILED,
 MEMORY_TOMBSTONED, NOTIFICATION_SENT, NOTIFICATION_FAILED
 ```
 
@@ -294,7 +295,7 @@ gap.
 
 ---
 
-## 15. CLI commands (47) `src/continuum/cli/main.py`
+## 15. CLI commands (52) `src/continuum/cli/main.py`
 
 Every subcommand is registered in `build_parser()` (`cli/main.py:4028`), which
 is the single registry — a verb that is not there is not a command. The full
@@ -302,11 +303,12 @@ set, alphabetically:
 
 `actions`, `attest`, `attest-keygen`, `attest-verify`, `benchmark`,
 `briefing`, `budget`, `checkpoint`, `compact`, `complete`, `confirm`,
-`dashboard`, `diff`, `events`, `export-evidence`, `forget`, `fork`, `gate`,
-`gateway`, `health`, `history`, `hooks`, `impact`, `init`, `inspect`, `merge`,
-`notify-test`, `observe`, `precompact`, `provenance`, `reconcile`,
-`record-plan`, `replay`, `report`, `restore`, `resume`, `rewind`, `runs`,
-`serve`, `show-contract`, `start`, `status`, `tree`, `tui`, `validate`,
+`daemon`, `dashboard`, `diff`, `events`, `export-evidence`, `forget`, `fork`, `gate`,
+`gateway`, `health`, `history`, `hooks`, `impact`, `init`, `inspect`,
+`lineage-issue`, `lineage-verify`, `mcp`, `merge`, `notify-test`, `observe`,
+`policy-review`, `precompact`, `provenance`, `reconcile`, `record-plan`,
+`replay`, `report`, `restore`, `resume`, `rewind`, `runs`, `serve`,
+`show-contract`, `start`, `status`, `tree`, `tui`, `validate`,
 `verify`, `watch`.
 
 All accept `--json`, which is a flag on the top-level parser (`cli/main.py:4047`)

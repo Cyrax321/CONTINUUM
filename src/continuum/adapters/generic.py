@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 from continuum.actions.ledger import ActionLedger, ActionOutcome
 from continuum.adapters.base import AgentAdapter
 from continuum.checkpoint.manager import CheckpointManager
-from continuum.events import EventType
+from continuum.events import Event, EventType
 from continuum.models import (
     EnvironmentSnapshot,
     Origin,
@@ -23,7 +23,7 @@ from continuum.models import (
 )
 from continuum.recovery.engine import RecoveryDecision, RecoveryEngine
 from continuum.state.semantic import ProjectionError, project
-from continuum.storage.base import Storage
+from continuum.storage.base import RunNotFound, Storage
 
 #: Key under which a non-dict action result is stored, since the ledger records
 #: results as mappings. A caller's own dict is wrapped in the same envelope when
@@ -64,13 +64,61 @@ class GenericAgentAdapter(AgentAdapter):
         run_id: str | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> Run:
-        """Helper to create and initialize a new task run."""
+        """Create a run and record the ``RUN_STARTED`` event that anchors it.
+
+        The run row and the ``RUN_STARTED`` event are separate facts: the row
+        is a lookup key, but projection, replay, and restore fold the event
+        log, and a log that never recorded ``RUN_STARTED`` has no goal to fold
+        (``SemanticStateBuilder._build`` raises ``ProjectionError``). A run
+        whose row exists without the event is therefore unresumable: ``resume``
+        finds no state to restore, and the run is indistinguishable from one
+        that crashed before writing anything. Recording both here keeps the
+        adapter's documented contract, that a caller "does not need to interact
+        directly with event log streams", honest.
+
+        The event is backfilled only when the log is empty. A non-empty log
+        whose first event is not ``RUN_STARTED`` is refused rather than
+        misordered: appending the run's start after events that supposedly
+        preceded it would make every state projected from that log quietly
+        wrong, which is worse than an error naming the problem. Mirrors
+        ``ContinuumMCP.ensure_run`` and ``OpenAIAgentAdapter._ensure_run_exists``.
+        """
         run = (
             Run(goal=goal, metadata=dict(metadata or {}))
             if run_id is None
             else Run(run_id=run_id, goal=goal, metadata=dict(metadata or {}))
         )
-        return self.storage.create_run(run)
+        try:
+            run = self.storage.get_run(run.run_id)
+        except RunNotFound:
+            run = self.storage.create_run(run)
+
+        archived = self.storage.read_archived_events(run.run_id)
+        if archived:
+            first: Event | None = archived[0]
+        else:
+            live = self.storage.read_events(run.run_id, upto=1)
+            if live:
+                first = live[0]
+            else:
+                all_live = self.storage.read_events(run.run_id)
+                first = all_live[0] if all_live else None
+
+        if not first:
+            self.storage.append_event(
+                run.run_id,
+                EventType.RUN_STARTED,
+                {"goal": run.goal},
+                source=Origin.DETERMINISTIC,
+            )
+        elif first.type is not EventType.RUN_STARTED:
+            raise ValueError(
+                f"run {run.run_id!r} does not begin with RUN_STARTED "
+                f"(first event is {first.type.value}). CONTINUUM cannot backfill "
+                "it after the fact without misordering the run's history; recreate "
+                "the run, or record RUN_STARTED before any other event."
+            )
+        return run
 
     def capture_state(
         self,
@@ -368,9 +416,7 @@ class GenericAgentAdapter(AgentAdapter):
         result_summary: str | None = None,
     ) -> None:
         """Record SUBAGENT_COMPLETED or SUBAGENT_FAILED for a subagent run."""
-        event_type = (
-            EventType.SUBAGENT_COMPLETED if success else EventType.SUBAGENT_FAILED
-        )
+        event_type = EventType.SUBAGENT_COMPLETED if success else EventType.SUBAGENT_FAILED
         payload: dict[str, Any] = {"subagent_run_id": subagent_run_id}
         if result_summary:
             payload["result_summary"] = result_summary

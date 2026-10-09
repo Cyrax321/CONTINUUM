@@ -199,7 +199,8 @@ def _step_for(
                 # nobody knows what is true. Callers who opted into tolerating
                 # uncertainty get an automatic step instead: the policy has to
                 # hold here too, or the setting would be silently ignored.
-                requires_human=entry.status is StateStatus.UNKNOWN and strict_unknown,
+                requires_human=is_exhausted
+                or (entry.status is StateStatus.UNKNOWN and strict_unknown),
                 # The finding names the dependency that moved, so the attempt
                 # is chargeable to it (issue #744). A finding with no component
                 # id names no owner and stays run-wide.

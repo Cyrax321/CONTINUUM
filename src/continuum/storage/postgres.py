@@ -57,6 +57,13 @@ from continuum.storage.base import (
     RunNotFound,
     Storage,
 )
+from continuum.storage.blob import (
+    audit_blob_descriptor,
+    get_payload_offload_threshold,
+    is_offload_descriptor,
+    load_blob_payload,
+    maybe_offload_payload,
+)
 from continuum.storage.compaction import resolve_compaction_bound
 
 __all__ = [
@@ -680,52 +687,9 @@ class PostgresStorage(Storage):
         explicit ``through_sequence`` at or above the anchor marker is
         rejected here too instead of archiving and deleting it (issue #1078).
         """
-        from continuum.checkpoint.manager import CheckpointManager
-
-        lv = self.latest_version(run_id)
-        head = self.last_sequence(run_id)
-        needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
-        if needs_fresh_anchor:
-            try:
-                manager = CheckpointManager(self)
-                # The anchor must project over full history: after an earlier
-                # compaction the live tail begins at the anchor markers with
-                # no RUN_STARTED, so a live-only fold would conclude the run
-                # never started (issue #648). Per-turn checkpoint evaluation
-                # deliberately keeps the cheaper live-tail read.
-                state = manager.project_current(run_id, full_history=True)
-                # The anchor becomes the newest checkpoint, so it inherits the
-                # environment the run validated against: writing it without one
-                # would leave a compacted run with no snapshot to diff a resumed
-                # capture against, and every resource would read as unknown
-                # (issue #762).
-                anchored = self.latest_checkpoint(run_id)
-                manager.checkpoint(
-                    run_id,
-                    state=state,
-                    force_version=True,
-                    environment=anchored.environment if anchored is not None else None,
-                )
-            except Exception as exc:
-                raise ValueError(f"run {run_id!r} could not be anchored: {exc}") from exc
-            lv = self.latest_version(run_id)
-        storage_version = lv
-        if storage_version is None:
-            raise ValueError(f"run {run_id!r} could not be anchored: no projectable state")
-        # The anchor marker is appended at the head of the log in the
-        # transaction below, so its sequence is the current head + 1. Without
-        # this bound the DELETE below would take the marker and every live
-        # row after it, and the next append would mint a fresh genesis that
-        # forks the live chain from the archive.
-        anchor_sequence = self.last_sequence(run_id) + 1
-        self._validate_compaction_bound(through_sequence, anchor_sequence)
-        through = (
-            through_sequence
-            if through_sequence is not None
-            else min(storage_version.source_sequence, self.last_sequence(run_id))
+        storage_version, through = resolve_compaction_bound(
+            self, run_id, through_sequence, environment=environment
         )
-        if through < 1:
-            raise ValueError("nothing to compact: anchor would be empty")
 
         with self._write(), self._connection.transaction():
             self._append_chained(
@@ -753,7 +717,13 @@ class PostgresStorage(Storage):
 
         return {"archived": max(archived, 0)}
 
-    def read_archived_events(self, run_id: str, *, upto: int | None = None) -> Sequence[Event]:
+    def read_archived_events(
+        self,
+        run_id: str,
+        *,
+        upto: int | None = None,
+        rehydrate: bool = True,
+    ) -> Sequence[Event]:
         """Compacted events from the archive, oldest first."""
         query = "SELECT * FROM events_archive WHERE run_id = %s"
         params: list[Any] = [run_id]
@@ -763,7 +733,7 @@ class PostgresStorage(Storage):
         query += " ORDER BY sequence ASC"
         with self._read():
             rows = self._connection.execute(query, params).fetchall()
-        return [self._row_to_event(row) for row in rows]
+        return [self._row_to_event(row, rehydrate=rehydrate) for row in rows]
 
     def foreign_action(self, key: str, *, exclude_run: str) -> Action | None:
         """Indexed cross-run ledger lookup (issue #216)."""

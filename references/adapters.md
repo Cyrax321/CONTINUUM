@@ -389,6 +389,35 @@ reconciliation first. An unclaimed request gets `403` with a reason that names
 rather than just being blocked. Unknown hosts are refused rather than forwarded:
 a proxy that forwards anywhere would be an open relay wearing CONTINUUM's name.
 
+A route's `host` may carry its scheme, and a route without one still means
+`https`, so a registry written before schemes existed keeps the transport it was
+built for. A plain-HTTP upstream is `http://` -- a local service on `localhost`,
+an internal address behind a TLS-terminating load balancer, anything that does
+not terminate TLS itself:
+
+```json
+{
+  "upstreams": [
+    {"host": "http://localhost:8000", "methods": ["POST"],
+     "prefix": "/v1/invoices", "action_type": "send_invoice",
+     "key_template": "invoice:{id}"}
+  ]
+}
+```
+
+The same upstream can be named with a `scheme` field beside the host instead
+(`"host": "localhost:8000", "scheme": "http"`), which reads more naturally next
+to the fields it belongs with. The two spellings must agree; an entry naming two
+upstreams is rejected at load time, as is a scheme other than `http` or `https`.
+The scheme is stored off the host, which stays a bare authority: a `Host`
+header never carries one, so two routes that agree on host, port, prefix and
+method collide even when their schemes differ -- the request cannot carry the
+information to tell them apart, so the registry refuses the pair at load time
+rather than letting registry order pick one. The port is read the same way
+either spelling writes it, and the scheme's default port (`80` for http, `443`
+for https) folds to absent, so a client that spells it explicitly still reaches
+the route.
+
 `prefix` is enforced, not just recorded: the request path must fall within it,
 on a whole-segment boundary, so a claim for `/v1/invoices` covers
 `/v1/invoices/49` but not `/v1/refunds` or `/v1/invoices-archived`. It is the

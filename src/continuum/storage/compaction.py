@@ -17,6 +17,7 @@ shared.
 
 from __future__ import annotations
 
+from continuum.environment.snapshot import EnvironmentSnapshot
 from continuum.models import SemanticState
 from continuum.storage.base import Storage
 
@@ -24,7 +25,10 @@ __all__ = ["resolve_compaction_bound"]
 
 
 def resolve_compaction_bound(
-    storage: Storage, run_id: str, through_sequence: int | None
+    storage: Storage,
+    run_id: str,
+    through_sequence: int | None,
+    environment: EnvironmentSnapshot | None = None,
 ) -> tuple[SemanticState, int]:
     """Anchor the run if needed, then return ``(version, through)``.
 
@@ -32,7 +36,8 @@ def resolve_compaction_bound(
     the anchor marker's own sequence, so the live log keeps its anchor. Raises
     ``ValueError`` when the run cannot be anchored, when an explicit
     ``through_sequence`` would reach the anchor, or when there is nothing to
-    archive.
+    archive. The anchor inherits the newest checkpoint's environment unless
+    the caller supplies one.
     """
     # Local import: checkpoint.manager imports storage, so a module-level
     # import here would cycle.
@@ -40,10 +45,22 @@ def resolve_compaction_bound(
 
     lv = storage.latest_version(run_id)
     head = storage.last_sequence(run_id)
-    needs_fresh_anchor = lv is None or through_sequence is not None or lv.source_sequence < head
+    needs_fresh_anchor = (
+        lv is None
+        or through_sequence is not None
+        or lv.source_sequence < head
+        or environment is not None
+    )
     if needs_fresh_anchor:
         try:
-            CheckpointManager(storage).checkpoint(run_id, force_version=True)
+            manager = CheckpointManager(storage)
+            state = manager.project_current(run_id, full_history=True)
+            manager.checkpoint(
+                run_id,
+                state=state,
+                force_version=True,
+                environment=storage._anchor_environment(run_id, environment),
+            )
         except Exception as exc:
             raise ValueError(f"run {run_id!r} could not be anchored: {exc}") from exc
         lv = storage.latest_version(run_id)

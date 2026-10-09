@@ -130,7 +130,7 @@ scoped to the same five directories CI lints (`src/`, `tests/`, `examples/`,
 ```yaml
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.5
+    rev: v0.16.10
     hooks:
       - id: ruff-check
         args: [--fix]

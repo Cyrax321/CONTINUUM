@@ -42,8 +42,10 @@ continuum --json <command>                    # machine-readable output
 | `briefing [--run-id <id>] [--raw-summary]` | Session-start context, curated by provenance: verified contract facts and system-derived lessons before agent-authored summaries, stale items quarantined with reasons. Read-only; `--raw-summary` is the diagnostic path to the verbatim agent summary (#742). |
 | `gate` | Decide whether a tool call may proceed (pre-tool-use hook). Read-only. |
 | `hooks` | Manage host-side observation hooks. |
+| `daemon` | Run CONTINUUM as a background gateway daemon. Mutates storage if detached. |
 | `mcp install` | Register the MCP server with a host, baking resolved absolute paths (issue #834). Mutates host config. |
 | `mcp remove` | Remove the registration `mcp install` wrote. Mutates host config. |
+| `mcp doctor` | Diagnose why a host cannot connect to the MCP server. Read-only. |
 | `verify <run_id>` | Re-audit the event chain for tampering. |
 | `reconcile <run_id>` | Settle uncertain actions with registered probes. Mutates storage. |
 | `actions <run_id>` | List recorded side effects and flag uncertain outcomes. |
@@ -72,7 +74,6 @@ continuum --json <command>                    # machine-readable output
 | `rewind` | Rewind workspace and projection to a checkpoint. |
 | `watch` | Watch a run for liveness breach, optionally notify via webhook. See [liveness watch](../guides/liveness-watch.md). |
 | `notify-test [run_id]` | POST a test notification to every endpoint in the webhook registry. Verifies wiring without a real blockage. See [webhooks](../guides/webhooks.md). |
-| `providers <ACTION> <run_id>` | Configure the environment providers a run trusts at resume (`add`, `remove`, `list`, `check`). `add`/`remove` mutate storage; `check` resolves exactly as resume would. See [configured providers](../guides/environment-providers.md). |
 
 ## Examples
 
@@ -140,6 +141,37 @@ number is refused rather than clamped, and the `probes` wrapper is required: a
 file that maps action types at the top level registers nothing, so `reconcile`
 reports every uncertain action as having no probe rather than saying the registry
 was wrong (issue #322).
+
+### What a command probe must print
+
+The probe receives the full `Action` record as JSON on stdin (a probe that needs
+no context can ignore it) and answers on its **last stdout line**, in exactly one
+of these forms:
+
+```text
+occurred=true      # the effect happened; the action is settled completed
+occurred=false     # the effect did not happen; the action is settled failed
+occurred=unknown   # could not tell; the action stays pending
+```
+
+A JSON object or a bare JSON boolean also works -- `{"occurred": true}`,
+`{"occurred": null}`, a bare `true` or `false`. The exit code must be 0, or the
+run is an error rather than a verdict and settles nothing. Case is ignored, and
+only the last non-empty line is read, so a probe may print diagnostics above its
+verdict.
+
+The separator is `=`, not `:`. A probe that prints `occurred:false` has not
+answered false: it has answered nothing, because that line is not one of the
+forms above, and the action stays pending. This is the shape a shell `echo` and
+most config formats suggest, so `reconcile` names the colon when it sees one
+rather than reporting generic unparseable output:
+
+```text
+send_invoice: probe printed 'occurred:false'; the verdict uses ':' where a
+probe prints '=' -- print occurred=false rather than 'occurred:false'. A
+probe's last stdout line must be occurred=true, occurred=false or
+occurred=unknown (a JSON object like {"occurred": true} also works)
+```
 
 A probe may also be one of the built-in evidence types, selected by `type`
 (issue #268). A spec with no `type` is a command probe, so an existing registry

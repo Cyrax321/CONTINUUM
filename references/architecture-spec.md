@@ -106,7 +106,7 @@ Turn agent output into structured state deltas.
 - Append-only, hash-chained: each event stores the digest of the prior event,
   so tampering is detectable.
 - verify() re-walks the chain and localizes the first corrupted event.
-- 51 event types span the full lifecycle. The complete set:
+- 55 event types span the full lifecycle. The complete set:
   RUN_STARTED, RUN_COMPLETED, RUN_ABORTED, TASK_UPDATED,
   RUN_FORKED, RUN_RESTORED, RUN_MERGED, TOOL_CALLED,
   TOOL_COMPLETED, TOOL_FAILED, DECISION_CREATED,
@@ -123,7 +123,8 @@ Turn agent output into structured state deltas.
   LIVENESS_RECOVERED, RISK_OBSERVED, AUTHORITY_CONSUMED,
   AUTHORITY_RECONCILED, ATTEMPT_LESSON, TRAJECTORY_REPORT,
   PLAN_UPSERT, MEMORY_TOMBSTONED, NOTIFICATION_SENT,
-  NOTIFICATION_FAILED.
+  NOTIFICATION_FAILED, PRECOMPACT_HOOK, SUBAGENT_SPAWNED,
+  SUBAGENT_COMPLETED, SUBAGENT_FAILED.
 - Every state component traces to its origin event (provenance).
 
 ### 3.6 State Engine (semantic projection)

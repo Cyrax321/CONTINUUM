@@ -32,7 +32,10 @@ an error rather than a verdict, so its action stays in the human queue
 A command probe receives the full Action record as JSON on stdin and prints
 exactly one verdict on its last stdout line: ``occurred=true``,
 ``occurred=false`` or ``occurred=unknown`` (a JSON object with an
-``occurred`` field also works, with true/false/null/unknown). The verdict is
+``occurred`` field also works, with true/false/null/unknown). The separator is
+``=`` specifically: ``occurred:false`` is the natural shape for a shell
+``echo`` or a config file, and it reads as unknown rather than as a verdict,
+so the diagnostic names the colon instead of the probe's logic. The verdict is
 applied through :meth:`ActionLedger.reconcile`, so it lands in the log like
 any other reconciliation and is auditable there.
 
@@ -56,6 +59,7 @@ look at; it never widens what an agent may certify on its own.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -211,6 +215,52 @@ def _parse_verdict(text: str) -> bool | Literal["unknown"]:
     return "unknown"
 
 
+#: The verdict forms a command probe may print, in the phrasing the diagnostic
+#: message uses. Kept in one place because that message is the only place an
+#: operator who has never read the docstring learns the contract from.
+_VERDICT_CONTRACT = (
+    "occurred=true, occurred=false or occurred=unknown "
+    '(a JSON object like {"occurred": true} also works)'
+)
+
+#: The authority probe's equivalent, which has no ``valid=unknown`` form:
+#: anything other than true or false is unknown, so the message names the two
+#: answers rather than three.
+_AUTHORITY_VERDICT_CONTRACT = (
+    'valid=true or valid=false (a JSON object like {"valid": true} also works)'
+)
+
+
+def _verdict_hint(text: str, field: str, forms: str) -> str | None:
+    """Name the probable cause when a probe's output is not a readable verdict.
+
+    :func:`_parse_verdict` reports *that* it could not read a verdict; an
+    operator holding ``occurred:false`` has no reason to suspect a colon,
+    because nothing in that message points at the separator. The shape an
+    attempted verdict takes is recognisable, so this returns the clause that
+    names it -- the one the docs never show and the only one worth guessing at,
+    since a colon is what a shell ``echo`` and most config formats suggest.
+    ``field`` is the verdict name (``occurred`` for actions, ``valid`` for
+    authorities) and ``forms`` the accepted shapes, so the same diagnosis serves
+    both parsers. ``None`` when the output does not look like an attempted
+    verdict, in which case the generic message stands on its own.
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return None
+    last = lines[-1]
+    # The verdict name then a colon then a value: a verdict in every respect
+    # except the separator. ``=`` parses above, so a colon reaching here is the
+    # miss, and the field name is what the message has to name it with.
+    if re.match(rf"^{field}\s*:\s*\S+", last, re.IGNORECASE):
+        return (
+            f"the verdict uses ':' where a probe prints '=' -- "
+            f"print {field}=false rather than '{last.strip()}'. "
+            f"A probe's last stdout line must be {forms}"
+        )
+    return None
+
+
 def probe_verdict(
     spec: Mapping[str, Any], action: Action
 ) -> tuple[bool | None | Literal["error"], str]:
@@ -253,9 +303,17 @@ def probe_verdict(
         return "error", f"probe exited {completed.returncode}: {detail}"
     verdict = _parse_verdict(completed.stdout)
     if verdict == "unknown":
+        output = (completed.stdout or "").strip()
+        # A colon-separated ``occurred:false`` is the natural reading of the
+        # only format the docs ever show, and the generic message sends an
+        # operator hunting in their probe's logic instead of at the separator.
+        # Name it when the output looks like that attempt.
+        hint = _verdict_hint(completed.stdout, "occurred", _VERDICT_CONTRACT)
+        if hint is not None:
+            return None, f"probe printed {output[:120]!r}; {hint}"
         return None, (
-            f"probe could not determine the outcome from output "
-            f"{(completed.stdout or '').strip()[:120]!r}"
+            f"probe could not determine the outcome from output {output[:120]!r}. "
+            f"A probe's last stdout line must be {_VERDICT_CONTRACT}"
         )
     return verdict, (completed.stderr or "").strip()[:200]
 
@@ -468,6 +526,10 @@ def probe_authority_verdict(
         return "error", f"authority probe exited {completed.returncode}: {detail}"
     verdict = _parse_authority_verdict(completed.stdout)
     if verdict == "unknown":
+        hint = _verdict_hint(completed.stdout, "valid", _AUTHORITY_VERDICT_CONTRACT)
+        if hint is not None:
+            output = (completed.stdout or "").strip()
+            return None, f"authority probe printed {output[:120]!r}; {hint}"
         return None, (
             f"authority probe could not determine validity from output "
             f"{(completed.stdout or '').strip()[:120]!r}"

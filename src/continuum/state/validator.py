@@ -320,19 +320,9 @@ class StateValidator:
         # Only this frame knows which it was, so the distinction is passed down.
         observed = current_environment is not None
 
-        # Which observer supplied each resource's evidence (issue #762), so a
-        # validation entry names the provider that vouched for it. Resources a
-        # provider could not report carry their status in metadata instead.
-        provider_of: dict[str, str] = {}
-        if current_environment is not None:
-            for key, resource in current_environment.resources.items():
-                name = resource.metadata.get("provider")
-                if isinstance(name, str) and name:
-                    provider_of[key] = name
-
         if scope is None:
             state = self._apply_dependency_status(
-                state, environment_diff, entries, observed=observed, provider_of=provider_of
+                state, environment_diff, entries, observed=observed
             )
             state = self._propagate(state, broken, entries)
             if events is not None:
@@ -365,12 +355,7 @@ class StateValidator:
             scope_set = set(scope)
             broken = {r: c for r, c in broken.items() if r in scope_set}
             state = self._apply_dependency_status(
-                state,
-                environment_diff,
-                entries,
-                scope=scope_set,
-                observed=observed,
-                provider_of=provider_of,
+                state, environment_diff, entries, scope=scope_set, observed=observed
             )
             state = self._propagate(state, broken, entries)
             if events is not None:
@@ -405,7 +390,6 @@ class StateValidator:
         entries: list[ComponentValidationEntry],
         scope: set[str] | None = None,
         observed: bool = True,
-        provider_of: Mapping[str, str] | None = None,
     ) -> SemanticState:
         if not state.external_dependencies:
             return state
@@ -459,30 +443,95 @@ class StateValidator:
                     component=Component.EXTERNAL_DEPENDENCY,
                     component_id=dependency.resource,
                     status=status,
-                    detail=self._label_provenance(detail, dependency.resource, provider_of),
+                    detail=detail,
                 )
             )
 
         return state.model_copy(update={"external_dependencies": updated})
 
     @staticmethod
-    def _label_provenance(
-        detail: str,
-        resource: str,
-        provider_of: Mapping[str, str] | None,
-    ) -> str:
-        """Name the observer behind one resource's evidence (issue #762).
+    def _latest_compaction(events: list[Event] | None) -> Event | None:
+        """Return the most recent PRECOMPACT_HOOK event, if any."""
+        if not events:
+            return None
+        latest: Event | None = None
+        for event in events:
+            # Local import avoids a module cycle: continuum.events re-exports
+            # model helpers, while validator is imported from state paths.
+            from continuum.events import EventType
 
-        A validation entry that says "verified unchanged" is answerable only if
-        it also says who vouched for it, so a reader can tell a configured
-        provider's observation from a caller's assertion.
+            if event.type is EventType.PRECOMPACT_HOOK:
+                latest = event
+        return latest
+
+    @staticmethod
+    def _apply_compaction_status(
+        state: SemanticState,
+        events: list[Event] | None,
+        entries: list[ComponentValidationEntry],
+    ) -> SemanticState:
+        """Mark evidence folded before a compaction as PARTIAL.
+
+        A PRECOMPACT_HOOK records how many events the compaction kept versus
+        compacted away. Evidence whose source sequence predates the latest
+        compaction still represents what the summary retained, but its full
+        trail is gone, so it cannot be fully verified. Mark those components
+        PARTIAL rather than letting them read as authoritative.
+
+        Components already unusable keep their existing, more severe status:
+        PARTIAL downgrades VALID components only.
         """
-        if not provider_of:
-            return detail
-        provider = provider_of.get(resource)
-        if not provider:
-            return detail
-        return f"{detail} (provider: {provider})"
+        latest = StateValidator._latest_compaction(events)
+        if latest is None:
+            return state
+        payload = latest.payload if isinstance(latest.payload, dict) else {}
+        retained = payload.get("retained_events")
+        compacted = payload.get("compacted_events")
+        try:
+            retained = int(retained) if retained is not None else 0
+        except (TypeError, ValueError):
+            retained = 0
+        try:
+            compacted = int(compacted) if compacted is not None else 0
+        except (TypeError, ValueError):
+            compacted = 0
+        if retained <= 0 or compacted <= 0:
+            return state
+
+        detail = (
+            f"context compacted at sequence {latest.sequence}: "
+            f"{compacted} event(s) summarised, {retained} retained"
+        )
+        summary = payload.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            detail = f"{detail}; summary: {summary.strip()[:160]}"
+
+        evidence = []
+        changed = False
+        for item in state.evidence:
+            provenance = getattr(item, "provenance", None)
+            source_sequence = getattr(provenance, "source_sequence", None)
+            if (
+                item.status is StateStatus.VALID
+                and isinstance(source_sequence, int)
+                and source_sequence <= int(latest.sequence)
+                and source_sequence >= int(latest.sequence) - compacted
+            ):
+                evidence.append(item.model_copy(update={"status": StateStatus.PARTIAL}))
+                entries.append(
+                    ComponentValidationEntry(
+                        component=Component.EVIDENCE,
+                        component_id=item.evidence_id,
+                        status=StateStatus.PARTIAL,
+                        detail=detail,
+                    )
+                )
+                changed = True
+            else:
+                evidence.append(item)
+        if changed:
+            return state.model_copy(update={"evidence": evidence})
+        return state
 
     # -- propagation ------------------------------------------------------ #
 
