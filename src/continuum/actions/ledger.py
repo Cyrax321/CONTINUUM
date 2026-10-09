@@ -446,6 +446,8 @@ class ActionLedger:
         self._lease = lease
         self._holder_id = holder_id or ""
         self._ttl = ttl
+        self._folded_cache: dict[str, Action] | None = None
+        self._cache_head: int = 0
 
     # -- single-writer ---------------------------------------------------- #
 
@@ -532,7 +534,7 @@ class ActionLedger:
         the field existed carries ``None`` and is re-derived from its stored
         arguments with no volatile declaration, which is the pre-#1052 rule.
         """
-        if action.budget_authorization_id is not None:
+        if getattr(action, "budget_authorization_id", None) is not None:
             return action.budget_authorization_id
         return self._budget_authorization_id(action.action_type, None, dict(action.arguments), ())
 
@@ -664,7 +666,7 @@ class ActionLedger:
             key=lambda e: e.sequence,
         )
 
-    def _replay(self) -> dict[str, Action]:
+    def _replay(self, *, refresh: bool = False) -> dict[str, Action]:
         """Rebuild the ledger by folding action events. Cheap and verifiable.
 
         Archived events (compaction, issue #239) fold too: a claim settled
@@ -674,7 +676,12 @@ class ActionLedger:
         sorted, so they merge linearly instead of paying a re-sort on this
         hot path.
         """
-        return fold_action_events(self._merged_events())
+        head = self.storage.last_sequence(self.run_id)
+        if self._folded_cache is not None and not refresh and head == self._cache_head:
+            return self._folded_cache
+        self._folded_cache = fold_action_events(self._merged_events())
+        self._cache_head = head
+        return self._folded_cache
 
     def folded(self) -> dict[str, Action]:
         """Public view of the ``key -> newest action`` fold, archive included."""
@@ -789,6 +796,40 @@ class ActionLedger:
             return next(iter(candidates))
         return None
 
+    def resolve_prior(
+        self,
+        action_type: str,
+        arguments: Mapping[str, Any] | None = None,
+        *,
+        volatile: Sequence[str] = (),
+        scoped_to_run: bool = True,
+        key: str | None = None,
+    ) -> tuple[IdempotencyKey, Action] | None:
+        """The record a claim for these inputs would defer to, or None."""
+        explicit_key = key is not None
+        idem = idempotency_key(
+            action_type,
+            arguments,
+            scope=self.run_id if scoped_to_run else None,
+            volatile=volatile,
+            key=key,
+        )
+        existing = self.get(idem)
+        if existing is None and not scoped_to_run:
+            foreign = self._foreign_action(idem)
+            if foreign is not None and foreign.status not in (
+                ActionStatus.FAILED,
+                ActionStatus.COMPENSATED,
+            ):
+                return IdempotencyKey(idem), foreign
+        if existing is not None:
+            return IdempotencyKey(idem), existing
+        if not explicit_key:
+            matched = self._identity_match(action_type, arguments, volatile)
+            if matched is not None:
+                return matched
+        return None
+
     def resolve_claim(
         self,
         action_type: str,
@@ -851,69 +892,6 @@ class ActionLedger:
                 # deferred to, not the freshly-derived one.
                 return ClaimResolution(matched[0], matched[1], foreign)
         return ClaimResolution(resolved, existing, foreign)
-
-    def resolve_prior(
-        self,
-        action_type: str,
-        arguments: Mapping[str, Any] | None = None,
-        *,
-        volatile: Sequence[str] = (),
-        scoped_to_run: bool = True,
-        key: str | None = None,
-    ) -> tuple[IdempotencyKey, Action] | None:
-        """The record a claim for these inputs would defer to, or None.
-
-        The three lookups :meth:`claim` performs, extracted so a gate that runs
-        *before* claim answers the same question claim will act on. The run-level
-        retry budget (issue #240) is evaluated at the intercept site, before
-        claim opens a slot; resolving under the derived key while claim answers
-        from another one let an exhausted budget suppress the very dedup and
-        reconciliation answers the gate exists to pass through (issue #1080).
-
-        In order: the exact idempotency key; then, for an unscoped claim, another
-        run's record under the same run-global key (issue 34); then, only when the
-        caller asserted no identity of its own, the drift-tolerant
-        :meth:`_identity_match`. An explicit key *is* the identity, so the
-        fallbacks are skipped for it: no drift is possible, and the derived key is
-        the stored key.
-
-        Returns ``(stored_key, action)``. For an identity match the key is the
-        *stored* key rather than the freshly-derived one, because that is the key
-        claim records and the caller settles against. None when nothing
-        identifies a prior attempt, which is the only case a fresh slot opens.
-        """
-        explicit_key = key is not None
-        idem = idempotency_key(
-            action_type,
-            arguments,
-            scope=self.run_id if scoped_to_run else None,
-            volatile=volatile,
-            key=key,
-        )
-        existing = self.get(idem)
-        if existing is not None:
-            return IdempotencyKey(idem), existing
-
-        foreign: Action | None = None
-        if not scoped_to_run:
-            # The local log has no such action, but an unscoped key claims
-            # global identity, so another run may already hold it.
-            foreign = self._foreign_action(idem)
-        # A foreign record that completed, or that another run is still
-        # mid-flight on, already settles this claim. A foreign failure only
-        # means nothing stands in the way of this run's own slot, so the
-        # drift-tolerant lookup still gets its turn.
-        foreign_settles = foreign is not None and foreign.status not in (
-            ActionStatus.FAILED,
-            ActionStatus.COMPENSATED,
-        )
-        if foreign is not None and foreign_settles:
-            return IdempotencyKey(idem), foreign
-        if not explicit_key:
-            matched = self._identity_match(action_type, arguments, volatile)
-            if matched is not None:
-                return matched
-        return None
 
     def _identity_match(
         self,
@@ -1087,7 +1065,13 @@ class ActionLedger:
             # rather than explicit key; keep forensic searchable.
             with suppress(Exception):
                 payload["rendered_key"] = str(action.arguments.get("record_key"))
-        self.storage.append_event(self.run_id, event_type, payload, source=self._source)
+        evt = self.storage.append_event(self.run_id, event_type, payload, source=self._source)
+        if self._folded_cache is not None and evt.sequence == self._cache_head + 1:
+            self._folded_cache[key] = action
+            self._cache_head = evt.sequence
+        else:
+            self._folded_cache = None
+            self._cache_head = evt.sequence
         return action
 
     @staticmethod
