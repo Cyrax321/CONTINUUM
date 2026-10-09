@@ -1317,6 +1317,7 @@ def test_cli_budget_unreadable_ledger_handled_gracefully(db: str, tmp_path: Path
         str(ledger_dir),
     )
     assert code == ExitCode.OK, err
+    assert "warning: recovery ledger unreadable" in err
     payload = json.loads(out)
     assert "dependency_budgets" in payload
     dep_entry = payload["dependency_budgets"][0]
