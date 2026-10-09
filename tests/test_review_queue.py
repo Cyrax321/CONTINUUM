@@ -261,3 +261,16 @@ def test_approve_low_risk_custom_threshold_never_approves_immediate_blocker(
     assert len(remaining) == 1
     assert remaining[0].action_type == "mem_delete"
     assert remaining[0].immediate is True
+
+
+def test_legacy_approval_events_ignored_by_review_queue(queue: ReviewQueue) -> None:
+    # Legacy APPROVAL_REQUESTED events containing only approval_id must not be
+    # treated as review-queue items.
+    queue.storage.append_event(
+        "run_1",
+        EventType.APPROVAL_REQUESTED,
+        {"approval_id": "appr_legacy_123", "subject": "legacy_op"},
+    )
+    items = queue.list_all("run_1")
+    assert len(items) == 0
+    assert len(queue.list_pending("run_1")) == 0

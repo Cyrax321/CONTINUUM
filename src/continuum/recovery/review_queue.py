@@ -184,7 +184,7 @@ class ReviewQueue:
         for event in events:
             payload = event.payload or {}
             if event.type is EventType.APPROVAL_REQUESTED:
-                review_id = str(payload.get("review_id") or payload.get("approval_id") or "")
+                review_id = str(payload.get("review_id") or "")
                 if not review_id:
                     continue
                 action_type = str(payload.get("action_type") or payload.get("subject") or "unknown")
@@ -212,14 +212,14 @@ class ReviewQueue:
                     batch_id=str(batch_id) if batch_id is not None else None,
                 )
             elif event.type is EventType.APPROVAL_GRANTED:
-                review_id = str(payload.get("review_id") or payload.get("approval_id") or "")
+                review_id = str(payload.get("review_id") or "")
                 if review_id in items:
                     target = items[review_id]
                     target.status = "approved"
                     target.approved_by = str(payload.get("granted_by") or "operator")
                     target.approved_at = event.timestamp
             elif event.type is EventType.APPROVAL_REVOKED:
-                review_id = str(payload.get("review_id") or payload.get("approval_id") or "")
+                review_id = str(payload.get("review_id") or "")
                 if review_id in items:
                     target = items[review_id]
                     target.status = "revoked"
