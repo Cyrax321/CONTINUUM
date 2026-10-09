@@ -62,8 +62,8 @@ def test_review_empty_queue(storage: SQLiteStorage) -> None:
 def test_review_table_output_ranked(storage: SQLiteStorage, policy_path: Path) -> None:
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
     queue = ReviewQueue(storage, policy=policy)
-    queue.enqueue("run_1", "mem_write")  # low/medium risk (parked)
-    queue.enqueue("run_1", "mem_delete")  # high risk (immediate blocker)
+    item_parked = queue.enqueue("run_1", "mem_write")  # low/medium risk (parked)
+    item_imm = queue.enqueue("run_1", "mem_delete")  # high risk (immediate blocker)
 
     out = io.StringIO()
     err = io.StringIO()
@@ -76,6 +76,8 @@ def test_review_table_output_ranked(storage: SQLiteStorage, policy_path: Path) -
     assert "Pending reviews for run 'run_1' (2 items):" in output
     assert "mem_delete" in output
     assert "mem_write" in output
+    assert item_imm.review_id in output
+    assert item_parked.review_id in output
     # Immediate item appears before parked item in table
     imm_pos = output.find("mem_delete")
     park_pos = output.find("mem_write")

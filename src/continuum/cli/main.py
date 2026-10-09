@@ -1853,8 +1853,8 @@ def cmd_review(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         lines = [
             f"Pending reviews for run '{args.run_id}' ({len(pending)} item{'s' if len(pending) != 1 else ''}):",
             "",
-            f"{'ID':<16} {'ACTION':<15} {'RISK':<6} {'TYPE':<10} {'DEPTH':<6} {'STATUS':<8} {'CREATED'}",
-            f"{'-' * 16} {'-' * 15} {'-' * 6} {'-' * 10} {'-' * 6} {'-' * 8} {'-' * 20}",
+            f"{'ID':<36} {'ACTION':<15} {'RISK':<6} {'TYPE':<10} {'DEPTH':<6} {'STATUS':<8} {'CREATED'}",
+            f"{'-' * 36} {'-' * 15} {'-' * 6} {'-' * 10} {'-' * 6} {'-' * 8} {'-' * 20}",
         ]
         for it in pending:
             item_type = "immediate" if it.immediate else "parked"
@@ -1863,9 +1863,9 @@ def cmd_review(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
                 if isinstance(it.created_at, datetime)
                 else str(it.created_at)[:19]
             )
-            disp_id = it.review_id if len(it.review_id) <= 16 else it.review_id[:13] + "..."
+            disp_id = it.review_id
             lines.append(
-                f"{disp_id:<16} {it.action_type:<15} {it.risk_score:<6.2f} {item_type:<10} "
+                f"{disp_id:<36} {it.action_type:<15} {it.risk_score:<6.2f} {item_type:<10} "
                 f"{it.dependency_depth:<6} {it.status:<8} {created_str}"
             )
         text = "\n".join(lines)
