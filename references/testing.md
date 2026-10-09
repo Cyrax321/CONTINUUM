@@ -14,11 +14,11 @@ ruff format --check src/ tests/ examples/ scripts/ demo-run/
 mypy src/continuum                     # strict type check
 ```
 
-On the current main branch, collection reports approximately 3,325 tests; the
+On the current main branch, collection reports approximately 3,329 tests; the
 exact count and pass/skip totals vary with Python version, platform, optional
 dependencies, and external services.
 
-What those ~3,325 tests cover without any SDK or network: event-chain
+What those ~3,329 tests cover without any SDK or network: event-chain
 integrity and tamper detection, semantic projection, checkpoint policy and
 restore, ledger claim/dedup/fail/reconcile (including cross-run unscoped
 claims through the action index), validator staleness propagation, recovery
@@ -56,10 +56,12 @@ continuum verify <run_id> --index           # add --repair-index to rebuild
 mkdir demo && cd demo
 continuum init
 continuum start demo-run --goal "<your task>"
+mkdir -p .continuum && echo '{"tools": {"Write": {"key_template": "{file_path}"}}}' > .continuum/gate.json
 continuum hooks install claude-code --with-gate
-echo '{"tools": {"Write": {"key_template": "{file_path}"}}}' > .continuum/gate.json
 claude    # then give the task; say "hi" in a fresh session to see the briefing
 ```
+
+The registry must exist first: `--with-gate` refuses to install without one, since a gate with nothing registered allows every call.
 
 Watch from another terminal:
 

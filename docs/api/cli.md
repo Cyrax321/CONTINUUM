@@ -243,7 +243,10 @@ When `--with-gate` is passed, an additional entry is installed:
   example `continuum --db /abs/path.db observe`), ensuring hook processes running
   from the project root resolve the intended database without ambiguity.
 - **`--with-gate`**: installs the `PreToolUse` gate hook in addition to the default
-  hooks.
+  hooks. Requires an existing `.continuum/gate.json` registry: the gate reads a
+  missing registry as "no gate configured" and allows every call, so the install
+  refuses rather than wire a guard that disarms itself. Create one first, then
+  re-run -- the failure message prints a starter command.
 - **`--no-precompact`**: skips installing the `PreCompact` checkpoint hook, and
   removes one if an earlier install wrote it.
 - **`--settings <path>`**: writes to a custom settings file path instead of the
@@ -259,6 +262,7 @@ The installed commands are baked in at install time and take one of two shapes:
 To inspect what was installed, view the target settings file:
 
 ```bash
+mkdir -p .continuum && echo '{"tools": {"Write": {"key_template": "{file_path}"}}}' > .continuum/gate.json
 continuum hooks install claude-code --db /tmp/test.db --with-gate
 cat .claude/settings.json
 ```

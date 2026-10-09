@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI 진입점
 continuum-mcp --help             # MCP 서버 진입점 ([mcp] 또는 [dev] 필요)
-pytest -q                        # 최소 환경에서 약 3,325개 수집, 약 3,325개 통과, 약 41개 스킵 (정확한 수는 환경에 따라 다름)
+pytest -q                        # 최소 환경에서 약 3,329개 수집, 약 3,329개 통과, 약 41개 스킵 (정확한 수는 환경에 따라 다름)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI가 강제하는 세 가지 게이트
 ```
@@ -108,6 +108,7 @@ Claude Code, Gemini CLI 또는 Codex의 경우 Python을 작성할 필요도 없
 
 ```bash
 continuum start my-task --goal "에이전트가 해야 할 일"
+mkdir -p .continuum && echo '{"tools": {"Write": {"key_template": "{file_path}"}}}' > .continuum/gate.json
 continuum hooks install claude-code --with-gate   # 동일하게: gemini, codex
 ```
 

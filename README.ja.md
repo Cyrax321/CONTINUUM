@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI エントリーポイント
 continuum-mcp --help             # MCP サーバーエントリーポイント（[mcp] または [dev] が必要）
-pytest -q                        # 最小環境で約 3,325 件収集、約 3,325 件通過、約 41 件スキップ（正確な数は異なる）
+pytest -q                        # 最小環境で約 3,329 件収集、約 3,329 件通過、約 41 件スキップ（正確な数は異なる）
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI が強制する三つのゲート
 ```
@@ -108,6 +108,7 @@ Claude Code、Gemini CLI、または Codex の場合、Python を書く必要も
 
 ```bash
 continuum start my-task --goal "エージェントにやらせたいこと"
+mkdir -p .continuum && echo '{"tools": {"Write": {"key_template": "{file_path}"}}}' > .continuum/gate.json
 continuum hooks install claude-code --with-gate   # 同様に：gemini、codex
 ```
 
