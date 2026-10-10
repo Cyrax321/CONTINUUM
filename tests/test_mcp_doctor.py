@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import sys
 import sysconfig
 from pathlib import Path
@@ -36,6 +37,7 @@ from continuum.mcp.doctor import (
     render_doctor,
     run_doctor,
 )
+from continuum.mcp.observation import read_observed_clients, record_observed_client
 
 #: The ``src`` directory of whichever copy of continuum this session imported.
 #: Pinned onto PYTHONPATH for the live-server tests below so the spawned child
@@ -699,21 +701,124 @@ def _answering_server(answer: str) -> list[str]:
     return _fake_server(body)
 
 
+def _observe(directory: Path, *names: str) -> None:
+    """Record what host connections declared against a written registration.
+
+    Stands in for real hosts having connected through this project's
+    database, which is the only way the doctor learns a name the registration
+    did not already predict.
+    """
+    for name in names:
+        record_observed_client(str(directory / "continuum.db"), name)
+
+
+def _observe_via_a_real_connection(database: Path, client_name: str, allow: str) -> str:
+    """Spawn the real server, connect as ``client_name``, and leave its record.
+
+    The other observation helpers write the file directly. This one goes
+    through a real stdio handshake so the end-to-end claim holds: the value
+    the doctor reads is the one the server itself took off the wire.
+    """
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(SRC_DIR)
+    env["CONTINUUM_MCP_MUTATING_CLIENTS"] = allow
+    process = subprocess.Popen(
+        [sys.executable, "-u", "-m", "continuum.mcp", "--db", str(database)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    assert process.stdin is not None and process.stdout is not None
+
+    def send(payload: dict[str, Any]) -> None:
+        process.stdin.write(json.dumps(payload) + "\n")
+        process.stdin.flush()
+
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": client_name, "version": "1.0"},
+            },
+        }
+    )
+    assert json.loads(process.stdout.readline())["result"]
+    send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "continuum_record_progress",
+                "arguments": {"run_id": "no-such-run-xyz", "completed": 1},
+            },
+        }
+    )
+    answer = json.loads(process.stdout.readline())
+    process.stdin.close()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:  # pragma: no cover - the server always exits here
+        process.kill()
+    return answer["result"]["content"][0]["text"]
+
+
+def test_a_real_host_connection_is_what_the_doctor_ends_up_reporting(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The whole chain, with nothing simulated: a host connects, the doctor sees it.
+
+    The registration bakes ``cursor``, the same command the host would run. A
+    real Cursor-style connection declares ``cursor-vscode``, the server records
+    it and refuses the call, and the doctor then reports the two names against
+    each other. Every other test in this area writes one side of that directly;
+    this one has the server take the name off the wire.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    _write_registration(tmp_path, "cursor")
+    monkeypatch.setenv("PYTHONPATH", str(SRC_DIR))
+    registration = find_registration(tmp_path)
+    assert registration is not None
+
+    # The host connects for real and is refused, because install baked the
+    # wrong name for it. That refusal is the whole silent failure.
+    refused = _observe_via_a_real_connection(
+        tmp_path / "continuum.db", "cursor-vscode", allow="cursor"
+    )
+    assert "is not permitted to use the mutating tool" in refused, refused
+
+    client_name, _ = _check_mutation_access(_live_server(), registration, 20.0)
+
+    assert client_name["status"] == "warn"
+    assert client_name["baked_client"] == "cursor"
+    assert client_name["observed_clients"] == ["cursor-vscode"]
+    assert "cursor-vscode" in client_name["detail"]
+
+
 def _live_server() -> list[str]:
     """The real server, resolved the way a host without a script on PATH gets it."""
     return [sys.executable, "-u", "-m", "continuum.mcp"]
 
 
 def test_the_baked_client_name_is_reported_and_verified(monkeypatch: Any, tmp_path: Path) -> None:
-    """A registration that grants mutation must be reported as doing exactly that.
+    """A registration that grants mutation is reported as doing exactly that.
 
     This is the acceptance case for the check: the operator reads which client
-    name the registration bakes, and a live server agrees that name may mutate.
-    Nothing here inspects the policy source; the verdict comes from a guarded
-    tool actually being reached over the wire.
+    name the registration bakes, a live server agrees that name may mutate,
+    and a real host has connected under that same name. Nothing here inspects
+    the policy source; the verdict comes from a guarded tool actually being
+    reached over the wire.
     """
     _isolated_home(monkeypatch, tmp_path)
     _write_registration(tmp_path, "cursor")
+    _observe(tmp_path, "cursor")
     monkeypatch.setenv("PYTHONPATH", str(SRC_DIR))
     registration = find_registration(tmp_path)
     assert registration is not None
@@ -724,9 +829,129 @@ def test_the_baked_client_name_is_reported_and_verified(monkeypatch: Any, tmp_pa
     assert client_name["status"] == "pass", client_name["detail"]
     assert client_name["baked_client"] == "cursor"
     assert client_name["observed_client"] == "cursor"
+    assert client_name["observed_clients"] == ["cursor"]
     assert permission["status"] == "pass", permission["detail"]
     assert permission["authorized"] is True
     assert permission["tool"] == "continuum_record_progress"
+
+
+def test_a_host_name_that_differs_from_the_baked_name_is_a_warning(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The bug, non-tautologically: the two strings come from different places.
+
+    The registration bakes ``cursor`` and a real host connected as
+    ``cursor-vscode``. Neither value can be derived from the other: the baked
+    name comes from the registration file, the observed one from the server's
+    own record of a connection the doctor had no part in. Before the server
+    kept that record, this check could only compare the baked name with
+    itself and reported pass whatever the host would really send.
+
+    It warns rather than fails on purpose. The observed name is asserted by
+    whoever connected, so treating it as proof of anything but a mismatch
+    would let any client claim to be a host and have the doctor agree.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    _write_registration(tmp_path, "cursor")
+    _observe(tmp_path, "cursor-vscode")
+    monkeypatch.setenv("PYTHONPATH", str(SRC_DIR))
+    registration = find_registration(tmp_path)
+
+    client_name, permission = _check_mutation_access(_live_server(), registration, 20.0)
+
+    assert client_name["status"] == "warn"
+    assert client_name["baked_client"] == "cursor"
+    assert client_name["observed_client"] == "cursor-vscode"
+    assert client_name["observed_clients"] == ["cursor-vscode"]
+    assert "cursor-vscode" in client_name["detail"] and "cursor" in client_name["detail"]
+    assert "CONTINUUM_MCP_MUTATING_CLIENTS" in client_name["fix"]
+    # The authorized side is unaffected by what was observed.
+    assert permission["authorized"] is True
+
+
+def test_nothing_observed_is_a_warning_rather_than_a_pass(monkeypatch: Any, tmp_path: Path) -> None:
+    """Before any host connects, agreement is unverified and must read as such.
+
+    The probe declares the name read from the registration, and that same
+    registration seeds the allowlist the probe runs against, so with no
+    observation the check compares the baked name with itself. Calling that a
+    pass would claim a verification that never happened, which is how the
+    original bug stayed invisible.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    _write_registration(tmp_path, "cursor")
+    monkeypatch.setenv("PYTHONPATH", str(SRC_DIR))
+    registration = find_registration(tmp_path)
+
+    client_name, permission = _check_mutation_access(_live_server(), registration, 20.0)
+
+    assert client_name["status"] == "warn"
+    assert client_name["observed_clients"] == []
+    assert "no host has connected" in client_name["detail"]
+    assert permission["status"] == "pass", "the authorized side was still verified"
+
+
+def test_an_observed_name_can_never_rescue_a_refused_caller(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """A recorded name does not authorize, even when it is the allowlisted one.
+
+    The registration names ``cursor`` but grants nothing the server accepts,
+    so the live call is refused. The observation file now says a host
+    connected as ``cursor``. The finding must stay a failure: letting the
+    observation override a refusal would hand authorization to a file any
+    client can write by connecting.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    _write_registration(tmp_path, "cursor")
+    _observe(tmp_path, "cursor")
+    monkeypatch.setenv("PYTHONPATH", str(SRC_DIR))
+    registration = find_registration(tmp_path)
+    # An empty env in the registration: the file names a client, but the
+    # server is handed no allowlist at all, so default-deny applies.
+    entry = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]["continuum-mcp"]
+    entry.pop("env")
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"continuum-mcp": entry}}), encoding="utf-8"
+    )
+    assert find_registration(tmp_path) is None, "without an env the entry names no client"
+
+    # With the name still in the file but the allowlist emptied out, the
+    # observed name must not carry the check.
+    registration = dict(registration or {}, baked_client="cursor")
+    client_name, permission = _check_mutation_access(_live_server(), registration, 20.0)
+
+    assert permission["authorized"] is False
+    assert client_name["status"] in ("fail", "warn")
+    assert client_name["status"] != "pass"
+
+
+def test_the_doctor_reads_observations_beside_the_registration_database(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The observations come from the host's database, not the probe's.
+
+    The doctor probes against a throwaway database, so if it read or wrote that
+    one it would only ever see the name it declared itself. The ``--db`` the
+    registration points the host at names the project directory real
+    connections open, so that is where the record is read from and where the
+    real history has to survive the probe.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    _write_registration(tmp_path, "cursor")
+    _observe(tmp_path, "cursor-vscode")
+    monkeypatch.setenv("PYTHONPATH", str(SRC_DIR))
+    registration = find_registration(tmp_path)
+    assert registration is not None
+    assert registration["database"] == str(tmp_path / "continuum.db")
+
+    client_name, _ = _check_mutation_access(_live_server(), registration, 20.0)
+
+    assert client_name["observed_clients"] == ["cursor-vscode"], (
+        "the probe declared 'cursor'; if it had written its own handshake into "
+        "the project's record, that name would now be in there too"
+    )
+    assert sorted(read_observed_clients(str(tmp_path / "continuum.db"))) == ["cursor-vscode"]
 
 
 def test_a_registration_the_server_refuses_fails_and_names_both_strings(
