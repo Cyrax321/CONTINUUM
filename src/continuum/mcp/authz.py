@@ -30,6 +30,13 @@ would be read as two standalone entries: a client literally named
 ``cursor=cursor-vscode``, plus a grant to ``cursor-vscode`` that the
 declaration beside it never referred to. That is the operator's intent applied,
 misread, with nothing to say so, so an inline ``=`` is refused outright.
+
+``CONTINUUM_MCP_ALLOW_ANY_CLIENT`` waives the comparison entirely, for an
+operator who genuinely runs many MCP clients against one database. It is
+opt-in, never inferred, never a default, and it reports itself in
+``policy.source``. It grants every caller that *asserts a name*: an
+unidentified connection still refuses, so the wildcard cannot be used to wave
+through a caller that named nothing.
 """
 
 from __future__ import annotations
@@ -51,6 +58,8 @@ __all__ = [
     "POLICY_ENV_VAR_ALIAS",
     "POLICY_FILENAME",
     "ALIASES_ENV_VAR",
+    "ALLOW_ANY_CLIENT",
+    "ALLOW_ANY_CLIENT_ENV_VAR",
     "AUTH_ENV_VAR",
     "CONFIRM_ENV_VAR",
     "load_policy",
@@ -78,6 +87,17 @@ POLICY_FILENAME = ".continuum/mcp-policy.json"
 #: second spelling of itself gets one grant rather than two policies to keep in
 #: step. See "Names hosts actually send" in the module docstring.
 ALIASES_ENV_VAR = "CONTINUUM_MCP_CLIENT_ALIASES"
+
+#: The wildcard token, recognised only as a whole allowlist entry. It grants
+#: every *named* client, which is to say every client that asserts any name at
+#: all, so the isolation this layer exists to provide is deliberately switched
+#: off. It is honoured when an operator writes it and is never inferred.
+ALLOW_ANY_CLIENT = "*"
+
+#: The opt-in that turns the wildcard on. Named for what it does rather than
+#: for the token it contains, so that finding it in an environment dump or a
+#: committed registration is itself the warning.
+ALLOW_ANY_CLIENT_ENV_VAR = "CONTINUUM_MCP_ALLOW_ANY_CLIENT"
 
 #: Used when the handshake supplied no client name at all.
 UNKNOWN_CALLER = "<unidentified>"
@@ -405,6 +425,12 @@ def _parse_aliases(value: str | Iterable[str] | None) -> dict[str, list[str]]:
                     f"alias declaration {part!r} declares no alternative name; the "
                     f"form is 'canonical:alias' ({ALIASES_ENV_VAR})"
                 )
+            if alias == ALLOW_ANY_CLIENT:
+                raise ValueError(
+                    f"alias declaration {part!r} would make one client's grant "
+                    f"universal; write {ALLOW_ANY_CLIENT!r} as the whole allowlist "
+                    f"entry, or set {ALLOW_ANY_CLIENT_ENV_VAR} to say so deliberately"
+                )
             current = groups.setdefault(canonical, [])
             current.append(alias)
     return groups
@@ -438,7 +464,7 @@ class AuthorizationPolicy:
     rather than resolving in its own favour.
     """
 
-    __slots__ = ("allowed", "aliases", "source", "_identities", "_labels")
+    __slots__ = ("allowed", "aliases", "allow_any", "source", "_identities", "_labels")
 
     def __init__(
         self,
@@ -447,11 +473,13 @@ class AuthorizationPolicy:
         aliases: str | Iterable[str] | None = None,
         source: str = "default",
     ) -> None:
-        names = [n.strip() for n in allowed if n and n.strip()]
+        declared = [n.strip() for n in allowed if n and n.strip()]
         # Folded so the allowlist answers the same identity the per-client token
         # map does: a grant written as ``Cursor`` covers a caller calling itself
         # ``cursor`` (#1598). Blank names still grant nothing, folded or not.
-        _reject_inline_alias_syntax(names)
+        _reject_inline_alias_syntax(declared)
+        self.allow_any = ALLOW_ANY_CLIENT in declared
+        names = [n for n in declared if n != ALLOW_ANY_CLIENT]
         self.allowed = frozenset(_fold(name) for name in names)
         self.source = source
 
@@ -471,14 +499,20 @@ class AuthorizationPolicy:
         self._labels = tuple(dict.fromkeys([*names, *(a for e in live.values() for a in e)]))
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        listed = ", ".join(sorted(self.allowed)) or "(none)"
-        return f"AuthorizationPolicy(allowed=[{listed}], source={self.source!r})"
+        listed = ", ".join(self._labels) or "(none)"
+        wildcard = f", {ALLOW_ANY_CLIENT} (every named client)" if self.allow_any else ""
+        return f"AuthorizationPolicy(allowed=[{listed}{wildcard}], source={self.source!r})"
 
     @property
     def denies_everything(self) -> bool:
-        """Whether the empty allow-list refuses every mutating caller."""
+        """Whether no caller is permitted to make changes.
 
-        return not self.allowed
+        True for the empty allowlist and for the unconfigured default. False
+        once the wildcard is on, because a server that permits everything does
+        not deny everything however short its list of names is.
+        """
+
+        return not self.allow_any and not self.allowed
 
     def permits(self, caller: str | None) -> bool:
         """Whether ``caller`` may invoke mutating tools.
@@ -495,6 +529,8 @@ class AuthorizationPolicy:
         name = _fold(caller)
         if not name:
             return False
+        if self.allow_any:
+            return True
         return name in self._identities
 
     def require(self, caller: str | None, tool: str) -> None:
@@ -583,11 +619,20 @@ def load_policy(
     from either allowlist variable, and the policy file's ``aliases`` key
     alongside an allowlist from the file. An alias never grants by itself, so a
     stale aliases variable beside an emptied allowlist grants nothing.
+
+    ``CONTINUUM_MCP_ALLOW_ANY_CLIENT`` is resolved after the explicit ``allow``
+    argument and ahead of the allowlist variables. An argument is a more
+    specific statement than an environment, and this particular one is a
+    deliberately blunt statement, so a caller that passes its own allowlist
+    keeps exactly the callers it named.
     """
     if allow is not None:
         return AuthorizationPolicy(allow, aliases=aliases, source="argument")
 
     environ = os.environ if env is None else env
+    if environ.get(ALLOW_ANY_CLIENT_ENV_VAR):
+        return AuthorizationPolicy([ALLOW_ANY_CLIENT], source=ALLOW_ANY_CLIENT_ENV_VAR)
+
     declared = environ.get(ALIASES_ENV_VAR)
     for var in (POLICY_ENV_VAR_ALIAS, POLICY_ENV_VAR):
         from_env = _from_env(environ.get(var))
