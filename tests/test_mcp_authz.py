@@ -183,6 +183,43 @@ def test_the_allowlist_folds_unicode_not_just_ascii() -> None:
     assert not AuthorizationPolicy(["Straße"]).permits("strass")
 
 
+
+
+# --- the names real hosts send (issue #1595) -------------------------------- #
+#
+# `continuum mcp install --host cursor` bakes
+# CONTINUUM_MCP_MUTATING_CLIENTS=cursor. Probed against the live server, the
+# clientInfo.name it actually presented was one of the four rows in
+# OBSERVED_NAMES, and on an exact-match allowlist the three that were not the
+# baked string silently lost 10 of the 13 MCP tools. No error at install time,
+# no diagnostic, the agent looked connected, and the loss only surfaced at the
+# first thing the agent tried to write.
+
+INSTALL_BAKED = "cursor"
+
+OBSERVED_NAMES = ("cursor", "cursor-vscode", "Cursor", "visual-studio-code")
+
+#: One host profile declaring every name that client is known to send.
+DECLARED_ALIASES = f"{INSTALL_BAKED}:cursor-vscode,Cursor,visual-studio-code"
+
+
+def test_the_baked_name_is_still_an_exact_match() -> None:
+    """The row of the probe that already worked must keep working."""
+    assert AuthorizationPolicy([INSTALL_BAKED]).permits(INSTALL_BAKED)
+
+
+def test_a_case_variant_is_the_same_client() -> None:
+    """Cursor and cursor are one client, and both are granted.
+
+    A host is free to capitalise its own product name, and a comparison that
+    calls ``Cursor`` a stranger to ``cursor`` has isolated nothing.
+    """
+    policy = AuthorizationPolicy([INSTALL_BAKED])
+    assert policy.permits("Cursor")
+    assert policy.permits("CURSOR")
+    # Padding is stripped rather than turned into a second identity.
+    assert policy.permits("  Cursor  ")
+
 # --- resolving the policy --------------------------------------------------- #
 
 
