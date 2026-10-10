@@ -71,6 +71,10 @@ from continuum.mcp.authz import (
     load_policy,
     token_from,
 )
+from continuum.mcp.observation import (
+    declared_client_name,
+    record_observed_client,
+)
 from continuum.models import (
     ActionStatus,
     EnvironmentSnapshot,
@@ -541,6 +545,37 @@ class ContinuumMCP:
         return ActionLedger(self.storage, run_id, source=AGENT_SOURCE)
 
 
+class _ClientNameObserver:
+    """Record the ``clientInfo.name`` every connection declares.
+
+    The server already reads that name to authorize a mutating call and then
+    throws it away, which is why a wrong guess in a registration stays
+    invisible. This wraps the inbound message chain so the value is captured
+    on the one message where it first exists, the ``initialize`` request.
+
+    The SDK documents that ``initialize`` is observed but not rewritable by
+    middleware, which is precisely the property needed here: this records what
+    a host said and structurally cannot change what the server does with it.
+    Authorization continues to be decided by ``policy.require`` from the
+    session's own handshake, and nothing in this class is consulted there.
+
+    It is deliberately not where authorization happens. A recorded name is a
+    claim by whoever connected, so honoring one would let any client claim to
+    be an allowlisted host and become one.
+    """
+
+    __slots__ = ("_database",)
+
+    def __init__(self, database: str) -> None:
+        self._database = database
+
+    async def __call__(self, ctx: Any, call_next: Any) -> Any:
+        """Observe one inbound message, then hand it on unchanged."""
+        if ctx.method == "initialize":
+            record_observed_client(self._database, declared_client_name(ctx.params) or "")
+        return await call_next(ctx)
+
+
 def build_server(
     database: str | None = None,
     *,
@@ -620,6 +655,11 @@ def build_server(
             "confirm the work really happened rather than trusting the counter."
         ),
     )
+
+    # Observation only. It records the name each connection declares so the
+    # doctor can compare what a host sends against what the registration
+    # authorizes; it never contributes to an authorization decision.
+    server.middleware.append(_ClientNameObserver(ctx.database))
 
     read_only = ToolAnnotations(read_only_hint=True)
     mutating = ToolAnnotations(read_only_hint=False)

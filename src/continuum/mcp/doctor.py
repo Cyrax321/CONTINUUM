@@ -39,6 +39,7 @@ from typing import Any
 
 from continuum.mcp.authz import POLICY_ENV_VAR, POLICY_ENV_VAR_ALIAS
 from continuum.mcp.install import HOST_PROFILES, SERVER_NAME
+from continuum.mcp.observation import read_observed_clients
 
 __all__ = ["run_doctor", "render_doctor"]
 
@@ -686,7 +687,8 @@ def find_registration(cwd: Path) -> dict[str, Any] | None:
     check declares and then verifies.
     """
     for host, settings_path, container_key, container_id, servers in _registration_sites(cwd):
-        baked = _baked_client(servers.get(SERVER_NAME))
+        entry = servers.get(SERVER_NAME)
+        baked = _baked_client(entry)
         if baked is None:
             continue
         return {
@@ -695,7 +697,27 @@ def find_registration(cwd: Path) -> dict[str, Any] | None:
             "container_key": container_key,
             "container_id": container_id,
             "baked_client": baked,
+            "database": _registration_database(entry),
         }
+    return None
+
+
+def _registration_database(entry: Any) -> str | None:
+    """The ``--db`` a registration points the host at, when it names one.
+
+    This is the database real host connections open, so it is where their
+    declared client names are recorded. Read from the registration rather than
+    guessed, because the doctor's own probe runs against a throwaway database
+    and would otherwise observe only the name the doctor itself declared.
+    """
+    args = entry.get("args") if isinstance(entry, dict) else None
+    if not isinstance(args, list):
+        return None
+    for index, arg in enumerate(args):
+        if arg == "--db" and index + 1 < len(args):
+            candidate = args[index + 1]
+            if isinstance(candidate, str) and candidate:
+                return candidate
     return None
 
 
@@ -759,6 +781,50 @@ def _tool_text(result: dict[str, Any]) -> str:
     return " ".join(str(part.get("text", "")) for part in content if isinstance(part, dict)).strip()
 
 
+def _observation_finding(
+    observed: dict[str, dict[str, Any]], baked: str, host: str
+) -> tuple[str, str, str | None]:
+    """Compare what hosts actually sent against what the registration authorizes.
+
+    Returns ``(status, detail, fix)``. This can only ever produce ``warn``, and
+    only about the observation side: a recorded name is a claim by whoever
+    connected, so treating it as evidence of anything but a mismatch would
+    make a doctor that reads it able to launder that claim into a verdict. The
+    server keeps refusing such a caller, which is the invariant this whole
+    comparison rests on.
+
+    Nothing observed is also a ``warn`` rather than a pass. The registration
+    seeds the allowlist the probe runs against and the probe declares the name
+    read from that same registration, so with no observation the check is
+    comparing the baked name with itself, and reporting that as agreement
+    would overstate what has been verified.
+    """
+    if not observed:
+        return (
+            "warn",
+            "no host has connected through this database yet, so no client name has been "
+            "observed; the registration is currently only verified against itself, which "
+            "cannot detect a name the host would not send",
+            f"re-run {INSTALL_SERVER_COMMAND} after the host has connected once, or call "
+            f"a tool from the host and re-run this check",
+        )
+    if baked in observed:
+        return (
+            "pass",
+            f"a host has connected as {baked!r}, the name the registration authorizes",
+            "",
+        )
+    names = ", ".join(repr(name) for name in sorted(observed))
+    return (
+        "warn",
+        f"hosts have connected as {names}, but the registration authorizes {baked!r}: "
+        "those connections are refused as mutating callers, so the agent keeps only the "
+        "read-only tools while install reported success",
+        f"confirm which host you use, then set {POLICY_ENV_VAR_ALIAS} in the registration "
+        f"to that name and re-run: {INSTALL_SERVER_COMMAND} --host {host}",
+    )
+
+
 def _check_mutation_access(
     command: list[str], registration: dict[str, Any] | None, timeout: float
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -806,6 +872,8 @@ def _check_mutation_access(
     baked = str(registration["baked_client"])
     host = str(registration["host"])
     settings_path = registration["settings_path"]
+    database = registration.get("database")
+    observed_clients = read_observed_clients(database) if isinstance(database, str) else {}
     with tempfile.TemporaryDirectory(prefix="continuum-mcp-doctor-authz-") as tmp:
         db_path = str(Path(tmp) / "authz-probe.db")
         try:
@@ -892,16 +960,22 @@ def _check_mutation_access(
         )
 
     if _DOWNSTREAM_MARKER in text or not result.get("isError"):
+        observation_status, observation_detail, observation_fix = _observation_finding(
+            observed_clients, baked, host
+        )
+        detail = (
+            f"the registration bakes client name {baked!r} and the server authorizes it: "
+            f"{PERMISSION_PROBE_TOOL} was reached as a mutating caller. {observation_detail}"
+        )
         return (
             _client_name_check(
-                "pass",
-                f"the registration bakes client name {baked!r} and the server authorizes it: "
-                f"{PERMISSION_PROBE_TOOL} was reached as a mutating caller. Authorization "
-                f"matched {baked!r} exactly, so this is only as good as the host sending "
-                "that name byte for byte",
+                observation_status,
+                detail,
                 registration,
                 baked,
                 baked,
+                observed_clients=observed_clients,
+                fix=observation_fix or None,
             ),
             _permission_check(
                 "pass",
@@ -921,6 +995,7 @@ def _check_mutation_access(
             registration,
             baked,
             None,
+            observed_clients=observed_clients,
         ),
         _permission_check(
             "warn",
@@ -938,19 +1013,30 @@ def _client_name_check(
     observed: str | None,
     permitted: str | None,
     *,
+    observed_clients: dict[str, dict[str, Any]] | None = None,
     fix: str | None = None,
 ) -> dict[str, Any]:
     """Build the ``client-name`` finding.
 
-    Carries the observed name beside the baked one so a consumer reading the
-    payload can compare the strings itself rather than parsing prose.
+    ``observed`` is the client name the server authorized the probe as.
+    ``observed_clients`` are the names real host connections declared, read
+    from the server's own side file; they come from a different place entirely
+    from the registration the probe runs against, which is what stops this
+    check from only ever comparing the baked name with itself.
     """
+    declared = sorted(observed_clients or {})
+    newest = max(
+        declared,
+        key=lambda name: str((observed_clients or {}).get(name, {}).get("last_seen", "")),
+        default=None,
+    )
     check: dict[str, Any] = {
         "check": "client-name",
         "status": status,
         "detail": detail,
         "baked_client": registration["baked_client"],
-        "observed_client": observed,
+        "observed_client": newest,
+        "observed_clients": declared,
         "permitted_clients": permitted,
     }
     if fix:
