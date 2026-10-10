@@ -99,7 +99,9 @@ def test_stale_baked_path_is_reported_stale(env: tuple[Path, Path]) -> None:
     """A virtualenv that has been deleted is the classic stale registration."""
 
     root, _ = env
-    write_mcp(root / ".mcp.json", command="/nonexistent/venv/bin/continuum-mcp", clients="claude-code")
+    write_mcp(
+        root / ".mcp.json", command="/nonexistent/venv/bin/continuum-mcp", clients="claude-code"
+    )
 
     report = scan(env)
     row = ide_for(report, "claude-code", "mcp")
@@ -216,7 +218,10 @@ def test_hook_client_wired_and_current(env: tuple[Path, Path]) -> None:
             {
                 "hooks": {
                     "PostToolUse": [
-                        {"matcher": "*", "hooks": [{"type": "command", "command": "continuum observe"}]}
+                        {
+                            "matcher": "*",
+                            "hooks": [{"type": "command", "command": "continuum observe"}],
+                        }
                     ]
                 }
             }
@@ -254,7 +259,9 @@ def test_hook_client_with_dead_command_is_stale(env: tuple[Path, Path]) -> None:
     assert "/gone/venv/bin/continuum" in row.summary
 
 
-def test_instruction_target_drift_shows_in_the_doctor(env: tuple[Path, Path], tmp_path: Path) -> None:
+def test_instruction_target_drift_shows_in_the_doctor(
+    env: tuple[Path, Path], tmp_path: Path
+) -> None:
     """The doctor covers the instruction surface too, not only the wired ones."""
 
     from continuum.agents import generator
@@ -315,9 +322,7 @@ def test_unparseable_config_is_reported_not_fatal(
     assert any("could not be parsed" in d for d in row.details)
 
 
-def test_toml_config_is_scanned(
-    env: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_toml_config_is_scanned(env: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch) -> None:
     """Format support is data, not code: toml is read without a new branch.
 
     The profile is pointed at a toml file because that is the shape a toml
@@ -382,7 +387,9 @@ def test_a_yaml_host_is_read_not_reported_unconfigured(env: tuple[Path, Path]) -
     yaml_hosts = [
         host
         for host, profile in HOST_PROFILES.items()
-        if any(str(v).endswith((".yaml", ".yml")) for k, v in profile.items() if k.endswith("settings"))
+        if any(
+            str(v).endswith((".yaml", ".yml")) for k, v in profile.items() if k.endswith("settings")
+        )
     ]
     assert yaml_hosts, "no yaml host profile exists, so this guard would pass vacuously"
 

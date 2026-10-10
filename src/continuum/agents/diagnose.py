@@ -280,9 +280,7 @@ class DoctorReport:
 # --------------------------------------------------------------------------- #
 
 
-def _scan_mcp_host(
-    host: str, *, root: Path, home: Path, policy: AuthorizationPolicy
-) -> IdeReport:
+def _scan_mcp_host(host: str, *, root: Path, home: Path, policy: AuthorizationPolicy) -> IdeReport:
     """Check one MCP host across every scope its profile names."""
 
     profile = HOST_PROFILES[host]
@@ -448,11 +446,7 @@ def _scan_instructions(root: Path) -> list[IdeReport]:
                 config_paths=(str(result.path),),
                 found_in=(str(result.path),) if (wired or unmanaged) else (),
                 details=(result.detail,),
-                remedy=(
-                    f"run `continuum agents install --target {target.id}`"
-                    if stale
-                    else None
-                ),
+                remedy=(f"run `continuum agents install --target {target.id}`" if stale else None),
             )
         )
     return reports
@@ -477,7 +471,9 @@ def scan(
     user_home = Path(os.path.expanduser("~")) if home is None else home
     policy = load_policy(root=base)
 
-    reports = [_scan_mcp_host(host, root=base, home=user_home, policy=policy) for host in HOST_PROFILES]
+    reports = [
+        _scan_mcp_host(host, root=base, home=user_home, policy=policy) for host in HOST_PROFILES
+    ]
     reports += [_scan_hook_client(client, root=base, home=user_home) for client in CLIENT_PROFILES]
     reports += _scan_instructions(base)
 
@@ -517,7 +513,11 @@ def render_report(report: DoctorReport) -> str:
     if report.server is not None:
         lines.append(
             "server: "
-            + ("handshake ok." if report.server.get("healthy") else "handshake failed; see `continuum mcp doctor`.")
+            + (
+                "handshake ok."
+                if report.server.get("healthy")
+                else "handshake failed; see `continuum mcp doctor`."
+            )
         )
     unconfigured = [i.ide for i in report.ides if not i.wired]
     if unconfigured:

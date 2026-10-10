@@ -78,7 +78,10 @@ TARGETS: dict[str, InstructionTarget] = {
             id="cursor",
             path=".cursor/rules/continuum.mdc",
             summary="Cursor's current rules format",
-            frontmatter=(("description", "CONTINUUM project instructions"), ("alwaysApply", "true")),
+            frontmatter=(
+                ("description", "CONTINUUM project instructions"),
+                ("alwaysApply", "true"),
+            ),
         ),
         InstructionTarget(
             id="cursor-legacy",

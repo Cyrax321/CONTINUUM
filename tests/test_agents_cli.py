@@ -239,7 +239,10 @@ def test_help_lists_both_new_commands() -> None:
         [sys.executable, "-m", "continuum.cli", "--help"],
         capture_output=True,
         text=True,
-        env={"PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"), "PATH": "/usr/bin:/bin"},
+        env={
+            "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+            "PATH": "/usr/bin:/bin",
+        },
     )
     assert "agents" in out.stdout
     assert "doctor" in out.stdout

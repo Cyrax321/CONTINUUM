@@ -616,7 +616,11 @@ def _scope_for(host: str) -> str:
     A host with no project-level file cannot have one registered, so those
     profiles are exercised through the scope they do document.
     """
-    return "project" if not mcp_install.HOST_PROFILES[host]["project_settings"].startswith("~") else "user"
+    return (
+        "project"
+        if not mcp_install.HOST_PROFILES[host]["project_settings"].startswith("~")
+        else "user"
+    )
 
 
 def _read(host: str, path: Path) -> dict[str, Any]:
@@ -636,7 +640,9 @@ def test_every_host_installs_reads_back_reinstalls_and_removes(
     rather than a docstring.
     """
     if not _FORMAT_AVAILABLE[mcp_install.host_format(host)]:
-        pytest.skip(f"{host} writes {mcp_install.host_format(host)}, whose parser is an optional extra")
+        pytest.skip(
+            f"{host} writes {mcp_install.host_format(host)}, whose parser is an optional extra"
+        )
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
@@ -699,7 +705,9 @@ def test_removing_twice_is_a_quiet_noop(
     script has to guard for, on every host and not only the JSON ones.
     """
     if not _FORMAT_AVAILABLE[mcp_install.host_format(host)]:
-        pytest.skip(f"{host} writes {mcp_install.host_format(host)}, whose parser is an optional extra")
+        pytest.skip(
+            f"{host} writes {mcp_install.host_format(host)}, whose parser is an optional extra"
+        )
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
@@ -726,7 +734,9 @@ def test_no_host_writes_outside_the_file_it_was_pointed_at(
     create a directory literally named ``~`` inside the user's repository.
     """
     if not _FORMAT_AVAILABLE[mcp_install.host_format(host)]:
-        pytest.skip(f"{host} writes {mcp_install.host_format(host)}, whose parser is an optional extra")
+        pytest.skip(
+            f"{host} writes {mcp_install.host_format(host)}, whose parser is an optional extra"
+        )
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     project = tmp_path / "proj"

@@ -339,11 +339,17 @@ def test_reading_toml_never_needs_a_writer() -> None:
 #: profile is dict-keyed with an argv array, but a YAML host being list-shaped
 #: and a TOML host being dict-keyed both are, so the axes are exercised
 #: independently rather than only in the combinations that happen to ship.
-DICT_SPLIT = configfmt.Shape(servers_key="mcpServers", nesting_key="projects", type_key="type", type_value="stdio")
+DICT_SPLIT = configfmt.Shape(
+    servers_key="mcpServers", nesting_key="projects", type_key="type", type_value="stdio"
+)
 LIST_SPLIT = configfmt.Shape(servers_key="mcpServers", container="list")
 DICT_ARRAY = configfmt.Shape(
-    servers_key="mcp", container="dict", argv_style="array", env_key="environment",
-    type_key="type", type_value="local",
+    servers_key="mcp",
+    container="dict",
+    argv_style="array",
+    env_key="environment",
+    type_key="type",
+    type_value="local",
 )
 
 SPEC = configfmt.ServerSpec(
@@ -436,7 +442,9 @@ def test_a_nested_registration_prunes_every_container_it_emptied() -> None:
     """
     data: dict[str, Any] = {}
     DICT_SPLIT.put(data, "local", Path("/proj"), SPEC)
-    assert data == {"projects": {"/proj": {"mcpServers": {"continuum-mcp": DICT_SPLIT.entry(SPEC)}}}}
+    assert data == {
+        "projects": {"/proj": {"mcpServers": {"continuum-mcp": DICT_SPLIT.entry(SPEC)}}}
+    }
 
     DICT_SPLIT.drop(data, "local", Path("/proj"), SPEC.name)
 
@@ -530,18 +538,30 @@ from continuum.mcp import install as mcp_install  # noqa: E402
 #: tests prove the layer works, the fixtures prove the profile is right.
 HOST_FIXTURES: dict[str, dict[str, Any]] = {
     # https://zed.dev/docs/ai/mcp
-    "zed": {"context_servers": {"local-mcp-server": {"command": "some-command", "args": ["a", "b"], "env": {}}}},
+    "zed": {
+        "context_servers": {
+            "local-mcp-server": {"command": "some-command", "args": ["a", "b"], "env": {}}
+        }
+    },
     # https://opencode.ai/docs/mcp-servers/
-    "opencode": {"$schema": "https://opencode.ai/config.json", "mcp": {"jira": {"type": "remote", "url": "https://jira/mcp"}}},
+    "opencode": {
+        "$schema": "https://opencode.ai/config.json",
+        "mcp": {"jira": {"type": "remote", "url": "https://jira/mcp"}},
+    },
     # https://github.com/continuedev/continue/blob/main/docs/customize/deep-dives/mcp.mdx
     "continue": {
         "name": "My assistant",
         "version": "0.0.1",
         "schema": "v1",
-        "mcpServers": [{"name": "SQLite MCP", "type": "stdio", "command": "npx", "args": ["mcp-sqlite", "/db"]}],
+        "mcpServers": [
+            {"name": "SQLite MCP", "type": "stdio", "command": "npx", "args": ["mcp-sqlite", "/db"]}
+        ],
     },
     # https://developers.openai.com/codex/config-reference
-    "codex": {"model": "gpt-5", "mcp_servers": {"github": {"command": "npx", "args": ["-y", "gh-mcp"]}}},
+    "codex": {
+        "model": "gpt-5",
+        "mcp_servers": {"github": {"command": "npx", "args": ["-y", "gh-mcp"]}},
+    },
 }
 
 #: Formats that need an optional parser, so a run without it reports the

@@ -284,7 +284,6 @@ HOST_PROFILES: dict[str, dict[str, str]] = {
         "type_key": "",
         "type_value": "",
     },
-
 }
 
 
@@ -550,6 +549,8 @@ def _infer_host(settings_path: Path, scope: str) -> str:
     # still says how to parse it; what it cannot say is which container holds
     # the servers, and a wrong answer there would delete the wrong thing.
     return "claude-code"
+
+
 def display_command(command: list[str]) -> str:
     """Quote an argv for display, the way the host's shell would need it.
 

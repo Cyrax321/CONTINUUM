@@ -81,7 +81,10 @@ def render(target: InstructionTarget, source_text: str, *, command: str) -> str:
     blocks: list[str] = []
     if target.frontmatter:
         blocks.append(
-            _FENCE + "\n" + "".join(f"{key}: {value}\n" for key, value in target.frontmatter) + _FENCE
+            _FENCE
+            + "\n"
+            + "".join(f"{key}: {value}\n" for key, value in target.frontmatter)
+            + _FENCE
         )
     blocks.append(
         "\n".join(

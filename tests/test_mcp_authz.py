@@ -185,9 +185,6 @@ def test_the_allowlist_folds_unicode_not_just_ascii() -> None:
     assert AuthorizationPolicy(["STRASSE"]).permits("straße")
     assert not AuthorizationPolicy(["Straße"]).permits("strass")
 
-
-
-
 # --- the names real hosts send (issue #1595) -------------------------------- #
 #
 # `continuum mcp install --host cursor` bakes
@@ -466,6 +463,7 @@ def test_a_malformed_alias_key_in_the_policy_file_raises(tmp_path: Path) -> None
     path.write_text(json.dumps({"allow": [INSTALL_BAKED], "aliases": {"cursor": "x"}}))
     with pytest.raises(ValueError, match="aliases"):
         load_policy(root=tmp_path, env={})
+
 
 # --- resolving the policy --------------------------------------------------- #
 

@@ -3575,8 +3575,10 @@ def cmd_agents_check(args: argparse.Namespace, storage: Storage, out: Any, err: 
             for r in results
         ],
     }
-    lines = [f"{r.target.path}: {r.state}" + (f" ({r.detail})" if r.state != "current" else "")
-             for r in results]
+    lines = [
+        f"{r.target.path}: {r.state}" + (f" ({r.detail})" if r.state != "current" else "")
+        for r in results
+    ]
     _emit(
         payload,
         "\n".join(lines),
@@ -3594,9 +3596,7 @@ def cmd_agents_list(args: argparse.Namespace, storage: Storage, out: Any, err: A
 
     payload = {
         "command": "continuum agents list",
-        "targets": [
-            {"id": t.id, "path": t.path, "summary": t.summary} for t in TARGETS.values()
-        ],
+        "targets": [{"id": t.id, "path": t.path, "summary": t.summary} for t in TARGETS.values()],
     }
     lines = ["Instruction targets:"]
     lines += [f"  {t.id:<15} {t.path:<34} {t.summary}" for t in TARGETS.values()]
@@ -5256,7 +5256,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     agents_options(agents_check, cmd_agents_check)
 
-    agents_list = agents_sub.add_parser("list", help="List the instruction targets and their files.")
+    agents_list = agents_sub.add_parser(
+        "list", help="List the instruction targets and their files."
+    )
     agents_list.set_defaults(func=cmd_agents_list)
 
     doctor_cmd = add(

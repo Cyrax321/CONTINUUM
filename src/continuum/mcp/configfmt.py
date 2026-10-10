@@ -166,7 +166,9 @@ def _parse(fmt: str, text: str, path: Path) -> dict[str, Any]:
             except yaml.YAMLError as exc:
                 raise ConfigError(f"{path} is not valid YAML ({exc}); refusing to edit it") from exc
         else:
-            raise ConfigError(f"unknown config format {fmt!r} (expected one of {', '.join(FORMATS)})")
+            raise ConfigError(
+                f"unknown config format {fmt!r} (expected one of {', '.join(FORMATS)})"
+            )
     except ConfigError:
         raise
     except Exception as exc:  # tomllib.TOMLDecodeError, json.JSONDecodeError
@@ -480,9 +482,7 @@ class Shape:
         container[spec.name] = entry
         return "updated", previous
 
-    def drop(
-        self, data: dict[str, Any], scope: str, project_root: Path, name: str
-    ) -> bool:
+    def drop(self, data: dict[str, Any], scope: str, project_root: Path, name: str) -> bool:
         """Take ``name`` out, pruning every container the entry emptied.
 
         A per-project registration sits three containers deep, so removing it
