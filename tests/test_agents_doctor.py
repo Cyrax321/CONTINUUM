@@ -351,18 +351,54 @@ def test_toml_config_is_scanned(
 
 
 def test_config_reader_handles_each_format(tmp_path: Path) -> None:
-    """The reader covers json and toml, and returns nothing for the rest."""
+    """The reader covers every format the profiles use, via the format layer."""
 
     (tmp_path / "a.json").write_text('{"k": 1}', encoding="utf-8")
     (tmp_path / "a.toml").write_text("[t]\nk = 1\n", encoding="utf-8")
+    (tmp_path / "a.yaml").write_text("k: 1\n", encoding="utf-8")
     (tmp_path / "broken.json").write_text("{", encoding="utf-8")
     (tmp_path / "a.md").write_text("# not a config", encoding="utf-8")
 
     assert diagnose._read_config(tmp_path / "a.json") == {"k": 1}
     assert diagnose._read_config(tmp_path / "a.toml") == {"t": {"k": 1}}
+    assert diagnose._read_config(tmp_path / "a.yaml") == {"k": 1}
     assert diagnose._read_config(tmp_path / "broken.json") is None
     assert diagnose._read_config(tmp_path / "a.md") is None
     assert diagnose._read_config(tmp_path / "missing.json") is None
+
+
+def test_a_yaml_host_is_read_not_reported_unconfigured(env: tuple[Path, Path]) -> None:
+    """The regression this whole coupling is about.
+
+    ``continue`` registers at ``.continue/config.yaml``. A reader that parses
+    only json and toml returns nothing for it, so the doctor calls a
+    configured IDE ``not-configured``. That is a wrong answer, not a missing
+    one, and it would survive every test that only exercises json hosts.
+    """
+
+    root, _ = env
+    from continuum.mcp.install import HOST_PROFILES
+
+    yaml_hosts = [
+        host
+        for host, profile in HOST_PROFILES.items()
+        if any(str(v).endswith((".yaml", ".yml")) for k, v in profile.items() if k.endswith("settings"))
+    ]
+    assert yaml_hosts, "no yaml host profile exists, so this guard would pass vacuously"
+
+    host = yaml_hosts[0]
+    profile = HOST_PROFILES[host]
+    config = root / profile["project_settings"]
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f'mcpServers:\n  "{SERVER_NAME}":\n    command: "{live_command()}"\n'
+        f'    env:\n      {POLICY_ENV_VAR_ALIAS}: "{profile["mutating_clients"]}"\n',
+        encoding="utf-8",
+    )
+
+    row = ide_for(scan(env), host, "mcp")
+    assert row.wired is True, f"{host} reads YAML and must be seen as wired: {row.details}"
+    assert row.state == diagnose.WIRED, row.details
 
 
 def test_local_scope_registration_is_found(env: tuple[Path, Path], monkeypatch) -> None:

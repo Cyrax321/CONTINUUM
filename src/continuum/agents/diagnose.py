@@ -26,7 +26,6 @@ being approximated here.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 from collections.abc import Iterator, Mapping, Sequence
@@ -35,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from ..clienthooks import CLIENT_PROFILES
+from ..mcp import configfmt
 from ..mcp.authz import (
     POLICY_ENV_VAR,
     POLICY_ENV_VAR_ALIAS,
@@ -73,46 +73,39 @@ _HOOK_KINDS = ("observe", "gate", "briefing", "precompact")
 # --------------------------------------------------------------------------- #
 
 
-def _read_config(path: Path) -> Any | None:
-    """Parse a host config file, or ``None`` when it cannot be read.
+#: File suffix to the format token ``configfmt.read_document`` expects. The
+#: suffix decides because that is the only thing the profile path gives us.
+_SUFFIX_FORMATS = {".json": "json", ".toml": "toml", ".yaml": "yaml", ".yml": "yaml"}
+
+
+def _read_config(path: Path) -> dict[str, Any] | None:
+    """Parse a host config file through ``mcp.configfmt``, or ``None``.
 
     Unreadable is deliberately not an error: a doctor that dies because one
     IDE's settings file has a stray comma is worse than one that reports the
     file as unparseable. The caller records that as a detail.
 
-    Format handling is json and toml, because both are reachable from the
-    standard library and neither is optional. yaml is deliberately absent:
-    every host profile in the tree today is json, and multi-format reading
-    belongs to ``mcp.configfmt`` beside the profiles that will need it. A yaml
-    branch here would mean a lazy optional import in the doctor, and a
-    dependency to own, for a format nothing reads yet.
+    Reading is delegated to the format layer rather than reimplemented here,
+    because the profiles now carry formats this module cannot parse on its own.
+    ``continue`` is registered at ``.continue/config.yaml``: a reader that
+    handles only json and toml returns nothing for it, and the doctor then
+    reports a configured IDE as ``not-configured``. That is not a gap, it is a
+    wrong answer, and a wrong answer is the failure this program exists to
+    prevent. One reader means a ninth host needs a profile, not a branch here.
     """
 
     if not path.is_file():
         return None
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
+    fmt = _SUFFIX_FORMATS.get(path.suffix.lower())
+    if fmt is None and not path.suffix:
+        # The extensionless settings files the profiles carry are all JSON.
+        fmt = "json"
+    if fmt is None:
         return None
-
-    suffix = path.suffix.lower()
     try:
-        if suffix == ".json":
-            return json.loads(text)
-        if suffix == ".toml":
-            import tomllib
-
-            return tomllib.loads(text)
-    except Exception:
+        return configfmt.read_document(fmt, path)
+    except configfmt.ConfigError:
         return None
-    # A settings file with no extension (Codex's hooks.json aside) is JSON in
-    # every profile this project carries.
-    if not suffix:
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return None
-    return None
 
 
 def _walk(node: Any, path: str = "") -> Iterator[tuple[str, Any]]:
