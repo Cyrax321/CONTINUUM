@@ -147,6 +147,42 @@ def test_blank_names_are_ignored_not_treated_as_a_grant() -> None:
     assert not policy.permits("   ")
 
 
+def test_a_caller_name_folds_to_the_grant_it_is_written_as() -> None:
+    """One spelling of a client name is one identity (#1598).
+
+    Clients do not agree with each other -- or with themselves across releases
+    -- on capitalisation, so the allowlist compares folded names. Before the
+    fold the token map accepted a name the allowlist refused and vice versa,
+    and the caller's only symptom was a refusal blaming an unregistered name.
+    """
+    policy = AuthorizationPolicy(["Cursor"])
+    assert policy.permits("Cursor")
+    assert policy.permits("cursor")
+    assert policy.permits("CURSOR")
+    assert policy.permits(" Cursor ")  # trailing space in a config is not a client
+    assert not policy.permits("vscode")
+    # A stranger is still a stranger folded or not.
+    assert AuthorizationPolicy([ALLOWED]).permits(ALLOWED.upper())
+    assert not AuthorizationPolicy(["cursor"]).permits("vscode")
+
+
+def test_require_folds_the_caller_before_checking_the_allowlist() -> None:
+    # `permits` and `require` are the two entry points; both must fold, or the
+    # refusal path would answer a different identity than the boolean one.
+    AuthorizationPolicy(["Cursor"]).require("cursor", "continuum_checkpoint")
+    with pytest.raises(NotAuthorized, match="not permitted"):
+        AuthorizationPolicy(["Cursor"]).require("Vscode", "continuum_checkpoint")
+
+
+def test_the_allowlist_folds_unicode_not_just_ascii() -> None:
+    # `str.lower` is not the fold: "Straße".lower() == "straße" while
+    # "STRASSE".lower() == "strasse", so a lower-only comparison would keep the
+    # two spellings apart. casefold maps both to "strasse".
+    assert AuthorizationPolicy(["Straße"]).permits("STRASSE")
+    assert AuthorizationPolicy(["STRASSE"]).permits("straße")
+    assert not AuthorizationPolicy(["Straße"]).permits("strass")
+
+
 # --- resolving the policy --------------------------------------------------- #
 
 
@@ -361,6 +397,51 @@ async def test_identity_cannot_be_forged_through_tool_arguments(
         )
 
 
+@pytest.mark.asyncio
+async def test_both_halves_of_the_handshake_agree_on_a_folded_name(
+    store: SQLiteStorage,
+) -> None:
+    """The allowlist and the per-client token map answer one identity (#1598).
+
+    The reporter's case: a host sending ``Cursor`` while its secret is
+    registered under ``cursor`` passed authorization and then failed
+    authentication, so the first mutating tool landed and the second was
+    refused with a message blaming the name as unregistered. Both halves now
+    fold, so both tools land.
+    """
+    srv, _ = build_server(
+        storage=store,
+        policy=AuthorizationPolicy(["cursor"]),
+        auth=AuthPolicy(tokens={"cursor": "tok-cursor"}),
+    )
+
+    for tool, kwargs in (
+        ("continuum_record_progress", {"run_id": "r", "completed": 1, "total": 2, "goal": "g"}),
+        ("continuum_checkpoint", {"run_id": "r"}),
+    ):
+        result = await srv.call_tool(
+            tool, kwargs, context=fake_context("Cursor", auth_token="tok-cursor")
+        )
+        assert not result.is_error, f"{tool} was refused for a folded name"
+
+    # Failing closed is untouched: the same caller with a wrong secret is
+    # refused, and a caller holding a real secret it never registered is too.
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    with pytest.raises(ToolError, match="registered for this caller"):
+        await srv.call_tool(
+            "continuum_checkpoint",
+            {"run_id": "r"},
+            context=fake_context("Cursor", auth_token="tok-other"),
+        )
+    with pytest.raises(ToolError, match="not registered"):
+        await srv.call_tool(
+            "continuum_checkpoint",
+            {"run_id": "r"},
+            context=fake_context("Vscode", auth_token="tok-cursor"),
+        )
+
+
 # --- authentication (issue #1) ---------------------------------------------- #
 
 
@@ -421,6 +502,39 @@ def test_argument_auth_names_the_matching_client_field() -> None:
         auth.verify(ALLOWED, "nope")
     assert "CONTINUUM_MCP_TOKEN" not in str(exc_info.value)
     assert "_meta.authToken" in str(exc_info.value)
+
+
+def test_per_client_tokens_fold_the_caller_name() -> None:
+    """A secret answers every spelling of the name it is registered under (#1598).
+
+    The allowlist folds; the token map did not, so a caller the allowlist had
+    just accepted hit ``caller 'Cursor' is not registered for authentication``
+    while holding exactly the right secret.
+    """
+    auth = AuthPolicy(tokens={"cursor": "tok-cursor"})
+    for spelling in ("Cursor", "cursor", "CURSOR", " Cursor "):
+        auth.verify(spelling, "tok-cursor")
+
+    # Failing closed survives the fold: the right name with a wrong secret is
+    # still refused, and so is an unregistered caller holding a real secret.
+    with pytest.raises(NotAuthenticated, match="registered for this caller"):
+        auth.verify("Cursor", "tok-other")
+    with pytest.raises(NotAuthenticated, match="not registered"):
+        auth.verify("Vscode", "tok-cursor")
+
+
+def test_per_client_tokens_fold_the_registered_names() -> None:
+    # The fold is on the map's keys, not only on the incoming caller: an entry
+    # written in one case answers a caller spelled in another.
+    auth = AuthPolicy(tokens={"Cursor": "tok-cursor"})
+    auth.verify("cursor", "tok-cursor")
+
+
+def test_load_auth_folds_per_client_token_names() -> None:
+    auth = load_auth(env={CLIENT_TOKENS_ENV_VAR: "Cursor:tok-cursor"})
+    auth.verify("cursor", "tok-cursor")
+    with pytest.raises(NotAuthenticated):
+        auth.verify("cursor", "wrong")
 
 
 def test_load_auth_reads_the_env_var() -> None:
