@@ -46,6 +46,8 @@ continuum --json <command>                    # machine-readable output
 | `mcp install` | Register the MCP server with a host, baking resolved absolute paths (issue #834). Mutates host config. |
 | `mcp remove` | Remove the registration `mcp install` wrote. Mutates host config. |
 | `mcp doctor` | Diagnose why a host cannot connect to the MCP server. Read-only. |
+| `agents` | Render the instruction files each coding IDE reads, from one hashed source. Refuses to overwrite a file it did not write. |
+| `doctor` | Report, per IDE, whether CONTINUUM is wired up, current and authorized. Read-only. |
 | `verify <run_id>` | Re-audit the event chain for tampering. |
 | `reconcile <run_id>` | Settle uncertain actions with registered probes. Mutates storage. |
 | `actions <run_id>` | List recorded side effects and flag uncertain outcomes. |
