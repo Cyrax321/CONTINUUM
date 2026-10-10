@@ -750,3 +750,114 @@ def test_no_host_writes_outside_the_file_it_was_pointed_at(
     assert len(created) == 1, (host, created)
     assert "~" not in created[0], (host, created)
     assert not created[0].endswith(".db"), (host, created)
+
+
+def test_resolve_vscode_settings_path_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows, resolve to %APPDATA%\\Code\\User\\settings.json (#1604).
+
+    Expected paths are built from the same components the resolver joins, not
+    written as backslash literals: monkeypatching ``sys.platform`` does not
+    turn ``Path`` into ``WindowsPath``, so a literal Windows path compares
+    unequal on a POSIX runner.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+    appdata = r"C:\Users\tester\AppData\Roaming"
+    monkeypatch.setenv("APPDATA", appdata)
+    resolved = mcp_install.resolve_vscode_settings_path()
+    assert resolved == Path(appdata) / "Code" / "User" / "settings.json"
+
+    # Fallback when APPDATA is unset
+    monkeypatch.delenv("APPDATA", raising=False)
+    resolved_fallback = mcp_install.resolve_vscode_settings_path()
+    assert (
+        resolved_fallback == Path.home() / "AppData" / "Roaming" / "Code" / "User" / "settings.json"
+    )
+
+
+def test_resolve_vscode_settings_path_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On macOS, resolve to ~/Library/Application Support/Code/User/settings.json (#1604)."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    resolved = mcp_install.resolve_vscode_settings_path()
+    assert (
+        resolved
+        == Path.home() / "Library" / "Application Support" / "Code" / "User" / "settings.json"
+    )
+
+
+def test_resolve_vscode_settings_path_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Linux, resolve to ~/.config or XDG_CONFIG_HOME (#1604)."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/custom/config")
+    resolved = mcp_install.resolve_vscode_settings_path()
+    assert resolved == Path("/custom/config") / "Code" / "User" / "settings.json"
+
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    resolved_fallback = mcp_install.resolve_vscode_settings_path()
+    assert resolved_fallback == Path.home() / ".config" / "Code" / "User" / "settings.json"
+
+
+def test_vscode_profile_points_at_the_platforms_settings_path() -> None:
+    """The vscode profile's per-user files are the resolved path, not macOS's (#1604).
+
+    The profile is evaluated at import time, so this asserts agreement with
+    the resolver for the platform the suite is actually running on rather than
+    monkeypatching one in.
+    """
+    profile = mcp_install.HOST_PROFILES["vscode"]
+    expected = str(mcp_install.resolve_vscode_settings_path())
+    assert profile["local_settings"] == expected
+    assert profile["user_settings"] == expected
+
+
+def test_mcp_settings_path_vscode_host_resolution() -> None:
+    """``_mcp_settings_path`` hands the vscode profile's resolved path through (#1604)."""
+    import argparse
+
+    from continuum.cli.main import _mcp_settings_path
+
+    expected = Path(mcp_install.resolve_vscode_settings_path())
+
+    user_path = _mcp_settings_path(argparse.Namespace(host="vscode", scope="user", settings=None))
+    assert user_path == expected
+
+    local_path = _mcp_settings_path(argparse.Namespace(host="vscode", scope="local", settings=None))
+    assert local_path == expected
+
+    project_path = _mcp_settings_path(
+        argparse.Namespace(host="vscode", scope="project", settings=None)
+    )
+    assert project_path == Path(".vscode/mcp.json")
+
+    custom_path = _mcp_settings_path(
+        argparse.Namespace(host="vscode", scope="user", settings="my_settings.json")
+    )
+    assert custom_path == Path("my_settings.json")
+
+
+def test_importing_the_module_does_not_need_a_home_directory() -> None:
+    """``HOST_PROFILES`` is built at import time, so import must survive a
+    process that cannot resolve a home directory (#1604).
+
+    ``Path.home()`` raises ``RuntimeError`` when neither ``HOME`` nor
+    ``USERPROFILE`` is present, which is a real state for a subprocess whose
+    ``env`` was replaced rather than inherited. Before the fallback, importing
+    this module crashed and took ``continuum --help`` down with it.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from continuum.mcp.install import HOST_PROFILES;"
+            "print(HOST_PROFILES['vscode']['user_settings'])",
+        ],
+        capture_output=True,
+        text=True,
+        # Replacing ``env`` instead of updating it is the point: nothing is
+        # inherited, so no variable names a home directory.
+        env={
+            "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+            "PATH": os.environ["PATH"],
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip()
