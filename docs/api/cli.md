@@ -201,8 +201,8 @@ filesystem makes the command exit 20 with the finding named.
 ## hooks
 
 `continuum hooks install` writes host-side observation hooks into agent
-settings files (for example `.claude/settings.json`, `.gemini/settings.json`, or
-`.codex/hooks.json`).
+settings files (for example `.claude/settings.json`, `.gemini/settings.json`,
+`.codex/hooks.json`, or `.qwen/settings.json`).
 
 Supported clients (`CLIENT_PROFILES` in `src/continuum/clienthooks.py`):
 
@@ -211,6 +211,7 @@ Supported clients (`CLIENT_PROFILES` in `src/continuum/clienthooks.py`):
 | `claude-code` | `.claude/settings.json` | `SessionStart`, `PostToolUse`, `PreToolUse`, `PreCompact` | `Write|Edit|MultiEdit|NotebookEdit` | `*` |
 | `gemini` | `.gemini/settings.json` | `SessionStart`, `AfterTool`, `BeforeTool` | `write_file|replace` | `.*` |
 | `codex` | `.codex/hooks.json` | `SessionStart`, `PostToolUse`, `PreToolUse` | `^Bash$|^shell$` | `^Bash$|^shell$` |
+| `qwen-code` | `.qwen/settings.json` | `SessionStart`, `PostToolUse`, `PreToolUse`, `PreCompact` | `write_file|edit` | `*` |
 
 By default, `hooks install` configures up to three entries (depending on the
 client profile; event names and matchers below are Claude Code's, see the
