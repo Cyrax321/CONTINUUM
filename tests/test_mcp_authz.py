@@ -301,6 +301,38 @@ def test_a_wildcard_alias_is_rejected() -> None:
     with pytest.raises(ValueError, match=ALLOW_ANY_CLIENT_ENV_VAR):
         AuthorizationPolicy([INSTALL_BAKED], aliases=[f"{INSTALL_BAKED}:{ALLOW_ANY_CLIENT}"])
 
+
+def test_the_refusal_names_what_was_observed_and_how_to_fix_it() -> None:
+    """The part the operator cannot work out alone.
+
+    The registration they wrote and the clientInfo.name the host sent can
+    disagree for reasons no configuration file records. Quoting the observed
+    name back turns a silent loss of tools into a one-line fix.
+    """
+    policy = AuthorizationPolicy([INSTALL_BAKED], aliases=["cursor:cursor-vscode"])
+    with pytest.raises(NotAuthorized) as excinfo:
+        policy.require("visual-studio-code", "continuum_checkpoint")
+    message = str(excinfo.value)
+    assert "'visual-studio-code'" in message  # the observed name, quoted
+    assert INSTALL_BAKED in message  # the accepted names
+    assert "cursor-vscode" in message  # including the declared aliases
+    assert POLICY_ENV_VAR_ALIAS in message  # the exact variable to set
+    assert POLICY_FILENAME in message  # or the file to edit
+    assert ALIASES_ENV_VAR in message  # how to declare a second name
+    # The advertised alias form is the colon form, not an inline '='.
+    assert "<canonical>:<alias>" in message
+    assert "canonical=" not in message
+    assert "Read-only tools remain available" in message
+
+
+def test_an_unidentified_connection_still_gets_a_remedy() -> None:
+    with pytest.raises(UnknownCaller) as excinfo:
+        AuthorizationPolicy([INSTALL_BAKED]).require(None, "continuum_checkpoint")
+    message = str(excinfo.value)
+    assert POLICY_ENV_VAR_ALIAS in message
+    assert POLICY_FILENAME in message
+    assert "Read-only tools remain available" in message
+
 # --- resolving the policy --------------------------------------------------- #
 
 
