@@ -110,6 +110,7 @@ __all__ = [
     "ClaimLockError",
     "fold_action_events",
     "forensic_join_across_runs",
+    "get_memory_provenance",
 ]
 
 
@@ -993,6 +994,7 @@ class ActionLedger:
         pinning: dict[str, str] | None = None,
         grant: dict[str, str] | None = None,
         origin_digest: str | None = None,
+        origin_observation_digest: str | None = None,
         rendered_key: str | None = None,
     ) -> Action:
         payload: dict[str, Any] = {
@@ -1013,13 +1015,19 @@ class ActionLedger:
             # time; terminal records inherit it via the shared payload keys,
             # so scan_grants can mark consumption from either event type.
             payload["grant"] = dict(grant)
-        if origin_digest is not None or action.origin_digest is not None:
-            # Origin digest (issue #304, #566): hash of the originating
+        od = origin_digest if origin_digest is not None else getattr(action, "origin_digest", None)
+        ood = (
+            origin_observation_digest
+            if origin_observation_digest is not None
+            else getattr(action, "origin_observation_digest", None)
+        )
+        digest = ood if ood is not None else od
+        if digest is not None:
+            # Origin digest (issue #304, #566, #1416): hash of the originating
             # observation that motivated this write. Stored both top-level
             # for forensic filtering and inside the action for round-trip.
-            digest = origin_digest if origin_digest is not None else action.origin_digest
-            if digest is not None:
-                payload["origin_digest"] = digest
+            payload["origin_digest"] = digest
+            payload["origin_observation_digest"] = digest
         if rendered_key is not None:
             payload["rendered_key"] = rendered_key
         elif action.arguments and "record_key" in action.arguments:
@@ -1065,6 +1073,7 @@ class ActionLedger:
         pinning: dict[str, str] | None = None,
         grant: Mapping[str, str] | None = None,
         origin_digest: str | None = None,
+        origin_observation_digest: str | None = None,
     ) -> ActionOutcome:
         """Register intent to perform an action, or report it already happened.
 
@@ -1255,7 +1264,18 @@ class ActionLedger:
             # the log disagree on how many attempts exist (issue #1168).
             if budget_auth_id is not None:
                 self._budget_refuse_if_exhausted(action_type, budget_auth_id)
-            # Origin digest (issue #566): optional 64 hex, validated by Action.
+            if origin_observation_digest is not None and origin_digest is None:
+                origin_digest = origin_observation_digest
+            elif (
+                origin_observation_digest is not None
+                and origin_digest is not None
+                and origin_observation_digest != origin_digest
+            ):
+                raise LedgerError(
+                    "origin_digest and origin_observation_digest disagree: "
+                    f"{origin_digest!r} != {origin_observation_digest!r}"
+                )
+            # Origin digest (issue #566, #1416): optional 64 hex, validated by Action.
             # Fail closed on bad digest rather than storing garbage that
             # forensic joins would then misattribute.
             if origin_digest is not None:
@@ -1274,6 +1294,7 @@ class ActionLedger:
                 status=ActionStatus.STARTED,
                 started_at=utcnow(),
                 origin_digest=origin_digest,
+                origin_observation_digest=origin_digest,
                 budget_authorization_id=budget_auth_id,
             )
             self._record(
@@ -1282,6 +1303,7 @@ class ActionLedger:
                 pinning=pinning,
                 grant=grant_clean,
                 origin_digest=origin_digest,
+                origin_observation_digest=origin_digest,
                 rendered_key=rendered_key,
             )
             if budget_auth_id is not None:
@@ -1694,6 +1716,13 @@ class ActionLedger:
             )
         return hits
 
+    def get_memory_provenance(self, record_key: str) -> dict[str, Any] | None:
+        """Forensic lookup walking ``record_key`` back to its originating observation (issue #1416).
+
+        Calls :func:`get_memory_provenance` scoped to this ledger's run.
+        """
+        return get_memory_provenance(self.storage, record_key, run_id=self.run_id)
+
     def _require(self, key: str) -> tuple[str, Action]:
         """Resolve ``key`` to its stored key and action, or explain what is wrong.
 
@@ -1787,3 +1816,170 @@ def forensic_join_across_runs(storage: Storage, record_key: str) -> list[dict[st
                 }
             )
     return hits
+
+
+def get_memory_provenance(
+    storage: Storage,
+    record_key: str,
+    *,
+    run_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Forensic lookup walking a memory record key back to its originating observation (issue #1416).
+
+    Walks backward from a memory record key to the initiating observation event
+    in the hash-chained log. Also identifies sibling records generated from the
+    same contaminated observation across runs.
+
+    When ``run_id`` is supplied, the primary record search is scoped to that run.
+    Otherwise, all runs in ``storage`` are searched.
+
+    Returns a dict with:
+        - ``record_key``: the searched record key
+        - ``rendered_key``: full stored rendered key
+        - ``run_id``: run where the target record was found
+        - ``action``: Action instance of the target record
+        - ``origin_digest``: SHA-256 digest of the originating observation (or None)
+        - ``origin_observation_digest``: alias for origin_digest
+        - ``observation_event``: initiating Event (PERCEPTION_OBSERVED, etc.) or None
+        - ``sibling_records``: list of other rendered keys sharing this origin_digest
+        - ``sibling_actions``: list of other Action instances sharing this origin_digest
+
+    Returns ``None`` when no action matches ``record_key``.
+    """
+    from continuum.security.hashing import stable_hash as _sh
+
+    runs_to_scan = [run_id] if run_id is not None else [r.run_id for r in storage.list_runs()]
+
+    target_hit: dict[str, Any] | None = None
+    actions_by_id: dict[str, tuple[str, str, Action, str | None]] = {}
+    all_observations: dict[str, Any] = {}
+
+    def _scan_run(rid: str) -> None:
+        try:
+            events = list(storage.read_all_events(rid))
+        except Exception:
+            return
+
+        for ev in events:
+            if ev.type == EventType.PERCEPTION_OBSERVED:
+                with suppress(Exception):
+                    all_observations[_sh(dict(ev.payload))] = ev
+                ch = ev.payload.get("content_hash")
+                if isinstance(ch, str):
+                    all_observations[ch] = ev
+                if getattr(ev, "event_id", None):
+                    all_observations[ev.event_id] = ev
+
+            if ev.type in _ACTION_EVENT_TYPES:
+                payload = dict(ev.payload)
+                raw_rendered = payload.get("rendered_key")
+                raw_key = payload.get("key") or ""
+                try:
+                    act = Action.model_validate(payload["action"])
+                except Exception:
+                    continue
+                digest = (
+                    payload.get("origin_observation_digest")
+                    or payload.get("origin_digest")
+                    or getattr(act, "origin_observation_digest", None)
+                    or getattr(act, "origin_digest", None)
+                )
+
+                existing = actions_by_id.get(act.action_id)
+                if isinstance(raw_rendered, str) and raw_rendered:
+                    rendered = raw_rendered
+                elif existing and existing[1]:
+                    rendered = existing[1]
+                else:
+                    rendered = str(raw_key)
+
+                actions_by_id[act.action_id] = (rid, rendered, act, digest)
+
+    for rid in runs_to_scan:
+        _scan_run(rid)
+
+    # Resolve target action from folded actions
+    for rid, rendered, act, digest in actions_by_id.values():
+        match = (
+            record_key == rendered
+            or record_key in rendered
+            or record_key == act.action_id
+            or (act.arguments and record_key in str(act.arguments))
+        )
+        if match:
+            target_hit = {
+                "run_id": rid,
+                "rendered_key": rendered,
+                "action": act,
+                "origin_digest": digest,
+            }
+            break
+
+    # Fallback: check action_index if storage supports it
+    if target_hit is None and hasattr(storage, "foreign_action"):
+        try:
+            foreign = storage.foreign_action(record_key, exclude_run="")
+            if foreign is not None:
+                digest = foreign.origin_observation_digest or foreign.origin_digest
+                target_hit = {
+                    "run_id": foreign.run_id,
+                    "rendered_key": record_key,
+                    "action": foreign,
+                    "origin_digest": digest,
+                }
+        except Exception:
+            pass
+
+    if target_hit is None:
+        return None
+
+    target_digest = target_hit["origin_digest"]
+    target_action = target_hit["action"]
+    target_rendered = target_hit["rendered_key"]
+    target_rid = target_hit["run_id"]
+
+    if not target_digest:
+        return {
+            "record_key": record_key,
+            "rendered_key": target_rendered,
+            "run_id": target_rid,
+            "action": target_action,
+            "origin_digest": None,
+            "origin_observation_digest": None,
+            "observation_event": None,
+            "sibling_records": [],
+            "sibling_actions": [],
+        }
+
+    # If run_id was provided, scan all other runs for cross-run observations and siblings
+    all_runs = [r.run_id for r in storage.list_runs()]
+    for rid in all_runs:
+        if rid not in runs_to_scan:
+            _scan_run(rid)
+
+    # Locate originating observation event
+    obs_ev = all_observations.get(target_digest)
+
+    # Collect sibling actions across all scanned runs
+    sibling_records: list[str] = []
+    sibling_actions: list[Action] = []
+    seen_action_ids: set[str] = {target_action.action_id}
+
+    for _rid, rend, act, d in actions_by_id.values():
+        if d == target_digest and act.action_id not in seen_action_ids:
+            seen_action_ids.add(act.action_id)
+            if rend:
+                sibling_records.append(rend)
+            sibling_actions.append(act)
+
+    return {
+        "record_key": record_key,
+        "rendered_key": target_rendered,
+        "run_id": target_rid,
+        "action": target_action,
+        "origin_digest": target_digest,
+        "origin_observation_digest": target_digest,
+        "observation_event": obs_ev,
+        "sibling_records": sorted(set(sibling_records)),
+        "sibling_actions": sibling_actions,
+    }
