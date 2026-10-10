@@ -84,6 +84,27 @@ POLICY_FILENAME = ".continuum/mcp-policy.json"
 UNKNOWN_CALLER = "<unidentified>"
 
 
+def _fold(name: str) -> str:
+    """Normalise a client name so one identity has one spelling.
+
+    Both halves of the handshake key on ``clientInfo.name`` -- the allowlist
+    decides whether a caller may mutate, the per-client token map decides which
+    secret it must present -- and MCP clients do not agree on the casing of
+    their own names (``Cursor`` and ``cursor`` are the same host). Comparing
+    one half case-sensitively and the other case-insensitively lets a caller
+    through authorization only to be refused by authentication for presenting
+    the right secret under a one-letter-case-different name (issue #1598).
+
+    Case-folding (not ``lower``) is used because it is the Unicode-correct
+    comparison for identifiers: ``str.lower`` misses cases such as the Turkish
+    dotted/dotless i, and a name that folds two ways would mean two identities
+    in one half and one in the other -- the exact inconsistency this exists to
+    remove. Both the stored key and the presented name are folded, so a caller
+    can neither widen nor narrow a registered identity by changing case.
+    """
+    return name.casefold()
+
+
 class NotAuthorized(PermissionError):
     """A caller attempted a mutating tool it is not permitted to use."""
 
@@ -122,7 +143,10 @@ class AuthPolicy:
         source: str = "default",
     ) -> None:
         self.expected = expected
-        self.tokens = dict(tokens) if tokens else None
+        # Per-client keys are folded at construction, so the lookup below can
+        # fold the presented name once and be sure of hitting the same key the
+        # allowlist just admitted (#1598).
+        self.tokens = {_fold(k): v for k, v in tokens.items()} if tokens else None
         self.source = source
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
@@ -147,9 +171,15 @@ class AuthPolicy:
             return
         expected: str | None
         if self.tokens is not None:
-            if caller not in self.tokens:
+            # Folded on both sides (issue #1598): a caller whose secret is
+            # registered under one casing of its name is the same caller the
+            # allowlist just admitted under another, and refusing it here is
+            # the inconsistency this fix removes. The refusal below still
+            # fires for a name that is genuinely not registered.
+            key = _fold(caller) if caller else ""
+            if key not in self.tokens:
                 raise NotAuthenticated(f"caller {caller!r} is not registered for authentication")
-            expected = self.tokens[caller]
+            expected = self.tokens[key]
         else:
             expected = self.expected
         # An empty expected secret cannot be presented, so it must refuse.
@@ -338,7 +368,11 @@ class AuthorizationPolicy:
     __slots__ = ("allowed", "source")
 
     def __init__(self, allowed: Iterable[str] = (), *, source: str = "default") -> None:
-        self.allowed = frozenset(n.strip() for n in allowed if n and n.strip())
+        # Names are folded before storing so the allowlist and the per-client
+        # token map cannot disagree about what a client name is (#1598). An
+        # operator who registers ``cursor`` is naming one host; ``Cursor`` is
+        # the same host's own spelling of it.
+        self.allowed = frozenset(_fold(n.strip()) for n in allowed if n and n.strip())
         self.source = source
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
@@ -355,12 +389,12 @@ class AuthorizationPolicy:
         """Whether ``caller`` may invoke mutating tools."""
         if not caller:
             return False
-        return caller in self.allowed
+        return _fold(caller) in self.allowed
 
     def require(self, caller: str | None, tool: str) -> None:
         """Raise unless ``caller`` may invoke the mutating tool ``tool``."""
         if caller:
-            if caller in self.allowed:
+            if self.permits(caller):
                 return
             raise NotAuthorized(
                 f"caller {caller!r} is not permitted to use the mutating tool "

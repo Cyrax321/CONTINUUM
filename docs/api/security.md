@@ -71,6 +71,12 @@ on any failure. `disabled` is `True` only when no secret is configured.
 `"claude-code:tok-a,kilo:tok-k"` form. Each caller presents its secret in the
 handshake's `_meta.authToken`; a replayed or unknown secret is refused.
 
+Client names are compared case-insensitively on both halves of the handshake:
+the allowlist and the per-client token map fold case the same way, so a host
+registered as `cursor` is the same caller whether it announces `Cursor` or
+`CURSOR`. One identity has one spelling; the secret itself is still compared
+exactly.
+
 ### `load_policy(allow=None, *, root=None, env=None) -> AuthorizationPolicy`
 
 Resolve the allowlist: explicit argument, then `CONTINUUM_MCP_MUTATING_CLIENTS`

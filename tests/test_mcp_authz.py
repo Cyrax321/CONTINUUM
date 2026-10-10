@@ -898,3 +898,100 @@ async def test_confirm_handler_refusal_carries_its_reason(store: SQLiteStorage) 
             {"run_id": "missing"},
             context=fake_context(ALLOWED, auth_token="confirm-secret"),
         )
+
+
+# --- case folding: one client name is one identity (#1598) ------------------ #
+
+
+def test_the_allowlist_admits_a_differently_cased_spelling() -> None:
+    """A host registered as ``cursor`` may present ``Cursor`` (#1598).
+
+    MCP clients do not agree on the casing of their own names, so matching the
+    allowlist case-sensitively would refuse a caller the operator named.
+    """
+    policy = AuthorizationPolicy(["cursor"])
+    assert policy.permits("Cursor")
+    assert policy.permits("CURSOR")
+    assert policy.permits("cursor")
+
+
+def test_the_allowlist_still_denies_an_unrelated_name() -> None:
+    """Folding case does not widen the allowlist to every name."""
+    policy = AuthorizationPolicy(["cursor"])
+    assert not policy.permits("vscode")
+    assert not policy.permits("cursor-io")
+    assert not policy.permits("")
+    assert not policy.permits(None)
+
+
+def test_require_folds_case_before_refusing() -> None:
+    """``require`` admits a differently-cased caller instead of raising."""
+    policy = AuthorizationPolicy(["trusted-agent"])
+    policy.require("Trusted-Agent", "continuum_checkpoint")
+    policy.require("TRUSTED-AGENT", "continuum_checkpoint")
+
+
+def test_a_per_client_token_resolves_a_differently_cased_caller() -> None:
+    """The token map folds case the same way the allowlist does (#1598).
+
+    Before the fix a caller passed authorization and then failed
+    authentication for presenting the right secret under a differently-cased
+    name; the two halves of the handshake disagreed about what a name is.
+    """
+    auth = AuthPolicy(tokens={"cursor": "tok-cursor"}, source=CLIENT_TOKENS_ENV_VAR)
+    auth.verify("Cursor", "tok-cursor")
+    auth.verify("CURSOR", "tok-cursor")
+
+
+def test_a_per_client_token_still_refuses_the_wrong_secret() -> None:
+    """Folding the caller name never folds the secret itself."""
+    auth = AuthPolicy(tokens={"cursor": "tok-cursor"}, source=CLIENT_TOKENS_ENV_VAR)
+    with pytest.raises(NotAuthenticated):
+        auth.verify("cursor", "TOK-CURSOR")
+    with pytest.raises(NotAuthenticated):
+        auth.verify("Cursor", "tok-vscode")
+
+
+def test_a_per_client_token_refuses_an_unregistered_caller() -> None:
+    """An unknown caller is still refused, whatever case it sends."""
+    auth = AuthPolicy(tokens={"cursor": "tok-cursor"}, source=CLIENT_TOKENS_ENV_VAR)
+    with pytest.raises(NotAuthenticated, match="not registered"):
+        auth.verify("vscode", "tok-cursor")
+    with pytest.raises(NotAuthenticated, match="not registered"):
+        auth.verify("VSCode", "tok-vscode")
+
+
+@pytest.mark.asyncio
+async def test_the_server_accepts_a_differently_cased_allowed_caller(
+    store: SQLiteStorage,
+) -> None:
+    """End to end: one spelling of a name passes both halves of the handshake."""
+    server, _ = build_server(
+        storage=store,
+        policy=AuthorizationPolicy(["cursor"]),
+        auth=AuthPolicy(tokens={"cursor": "tok-cursor"}, source=CLIENT_TOKENS_ENV_VAR),
+    )
+    result = await server.call_tool(
+        "continuum_record_progress",
+        {"run_id": "r", "completed": 1, "total": 2, "goal": "g"},
+        context=fake_context("Cursor", auth_token="tok-cursor"),
+    )
+    assert not result.is_error
+
+
+@pytest.mark.asyncio
+async def test_the_server_refuses_a_differently_cased_stranger(store: SQLiteStorage) -> None:
+    """Folding does not let an unlisted caller through with a listed name's secret."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, _ = build_server(
+        storage=store,
+        policy=AuthorizationPolicy(["cursor"]),
+        auth=AuthPolicy(tokens={"cursor": "tok-cursor"}, source=CLIENT_TOKENS_ENV_VAR),
+    )
+    with pytest.raises(ToolError):
+        await server.call_tool(
+            "continuum_record_progress",
+            {"run_id": "r", "completed": 1, "total": 2, "goal": "g"},
+            context=fake_context("vscode", auth_token="tok-cursor"),
+        )

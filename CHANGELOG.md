@@ -53,6 +53,19 @@ Test counts: ~3,361 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **MCP per-client tokens no longer refuse a caller over the casing of its own
+  name (#1598).** `clientInfo.name` keys both halves of the handshake: the
+  allowlist decides whether a caller may mutate, and `CONTINUUM_MCP_CLIENT_TOKENS`
+  decides which secret it must present. MCP clients do not agree on the casing
+  of their own names, and only the allowlist folded case, so a host registered
+  as `cursor` passed authorization and then failed authentication for presenting
+  the right secret as `Cursor` -- the two halves disagreed about what a client
+  name is. Both now fold through one shared `_fold` helper (casefold, not
+  `lower`, which misses the Turkish dotted/dotless i), so one identity has one
+  spelling on both sides and the two cannot drift apart again. The secret is
+  still compared exactly, and an unregistered name is still refused whatever
+  case it sends.
+
 - **A probe that prints `occurred:false` is now told the separator is the
   problem.** A command probe's verdict contract was documented only in the
   module docstring, so the place an operator met it was the error, and the
