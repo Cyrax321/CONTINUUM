@@ -44,19 +44,44 @@ jobs:
             type=semver,pattern={{version}}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push
+      # The gate before the publish (issue #1567): this used to push :latest
+      # first and smoke-test it afterwards, so every failing main build still
+      # replaced the public image -- 13 consecutive failing runs each shipped
+      # the broken image and then reported the breakage. Build to the local
+      # daemon instead, run the demo against that local image, and only the
+      # publish step below makes it reachable from the registry.
+      #
+      # ``tags`` here is deliberately a fixed local tag rather than the
+      # metadata tags: on a release-tag push ``latest`` is not among them (it
+      # is gated on is_default_branch), so smoke-testing ``:latest`` would test
+      # whichever image the previous main build left behind instead of the one
+      # being released.
+      - name: Build the image (not yet published)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          # provenance: false keeps the local image a plain single-arch image
+          # so `docker run` resolves it. The published build below keeps its
+          # provenance attestation; this local copy is discarded after the gate.
+          provenance: false
+          tags: ${{ env.IMAGE }}:smoke
+
+      - name: Smoke-test the image before it is published
+        run: |
+          docker run --rm ${{ env.IMAGE }}:smoke continuum --version
+          # The default CMD runs the crash-recovery demo; it is hermetic
+          # (the GitHub issue is a local log append) and finishes in about
+          # a minute. A nonzero exit or a missing verdict line fails the gate,
+          # which now blocks the publish instead of following it.
+          docker run --rm ${{ env.IMAGE }}:smoke > /tmp/demo.log
+          grep -q "No work repeated. No side effect duplicated." /tmp/demo.log
+
+      - name: Publish the verified image
         uses: docker/build-push-action@v7
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-
-      - name: Smoke-test the image
-        run: |
-          docker run --rm ${{ env.IMAGE }}:latest continuum --version
-          # The default CMD runs the crash-recovery demo; it is hermetic
-          # (the GitHub issue is a local log append) and finishes in about
-          # a minute. A nonzero exit or a missing verdict line fails the gate.
-          docker run --rm ${{ env.IMAGE }}:latest > /tmp/demo.log
-          grep -q "No work repeated. No side effect duplicated." /tmp/demo.log
