@@ -1766,6 +1766,114 @@ def cmd_confirm(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     return exit_code_for(decision.mode)
 
 
+def cmd_review(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Deferred review queue and priority batching for confirmations (issue #1410).
+
+    Lists ranked pending reviews, bulk-approves low-risk parked items,
+    or clears individual review items.
+    """
+    from continuum.recovery.escalation import load_escalation_policy
+    from continuum.recovery.review_queue import ReviewQueue
+
+    storage.get_run(args.run_id)  # raises RunNotFound -> ExitCode.NOT_FOUND
+
+    policy_path = Path(args.policy) if getattr(args, "policy", None) else None
+    policy = load_escalation_policy(policy_path)
+    queue = ReviewQueue(storage, policy=policy)
+
+    approve_id = getattr(args, "approve", None)
+    approve_low_risk = getattr(args, "approve_low_risk", False)
+    reviewer = getattr(args, "reviewer", None) or "operator"
+
+    if approve_id:
+        item = queue.get_item(args.run_id, approve_id)
+        if item is None:
+            print(f"error: review item {approve_id!r} not found for run {args.run_id!r}", file=err)
+            return ExitCode.NOT_FOUND
+        if not item.is_pending:
+            print(
+                f"error: review item {approve_id!r} is already {item.status}, "
+                f"nothing to approve for run {args.run_id!r}",
+                file=err,
+            )
+            return ExitCode.ERROR
+        approved = queue.approve(args.run_id, approve_id, reviewer=reviewer)
+        payload = {
+            "run_id": args.run_id,
+            "review_id": approve_id,
+            "status": "approved",
+            "approved_by": reviewer,
+            "item": approved.to_dict(),
+        }
+        text = (
+            f"Approved review item '{approve_id}' for run '{args.run_id}' (reviewer: {reviewer})."
+        )
+        _emit(payload, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
+        return ExitCode.OK
+
+    if approve_low_risk:
+        threshold = getattr(args, "threshold", None)
+        effective_threshold = (
+            threshold if threshold is not None else float(policy.get("blast_radius_threshold", 0.8))
+        )
+        approved_items = queue.approve_low_risk(args.run_id, max_risk=threshold, reviewer=reviewer)
+        payload = {
+            "run_id": args.run_id,
+            "approved_count": len(approved_items),
+            "threshold": effective_threshold,
+            "items": [it.to_dict() for it in approved_items],
+        }
+        if approved_items:
+            ids_str = ", ".join(it.review_id for it in approved_items)
+            text = (
+                f"Approved {len(approved_items)} low-risk review items for run '{args.run_id}' "
+                f"(threshold <= {effective_threshold:.2f}): {ids_str}"
+            )
+        else:
+            text = (
+                f"No pending low-risk review items to approve for run '{args.run_id}' "
+                f"(threshold <= {effective_threshold:.2f})."
+            )
+        _emit(payload, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
+        return ExitCode.OK
+
+    # Default: display ranked table of pending reviews with risk scores
+    pending = queue.list_pending(args.run_id)
+    payload = {
+        "run_id": args.run_id,
+        "pending_count": len(pending),
+        "immediate_count": sum(1 for it in pending if it.immediate),
+        "parked_count": sum(1 for it in pending if not it.immediate),
+        "items": [it.to_dict() for it in pending],
+    }
+
+    if not pending:
+        text = f"No pending reviews for run '{args.run_id}'."
+    else:
+        lines = [
+            f"Pending reviews for run '{args.run_id}' ({len(pending)} item{'s' if len(pending) != 1 else ''}):",
+            "",
+            f"{'ID':<36} {'ACTION':<15} {'RISK':<6} {'TYPE':<10} {'DEPTH':<6} {'STATUS':<8} {'CREATED'}",
+            f"{'-' * 36} {'-' * 15} {'-' * 6} {'-' * 10} {'-' * 6} {'-' * 8} {'-' * 20}",
+        ]
+        for it in pending:
+            item_type = "immediate" if it.immediate else "parked"
+            created_str = (
+                it.created_at.strftime("%Y-%m-%d %H:%M:%S")
+                if isinstance(it.created_at, datetime)
+                else str(it.created_at)[:19]
+            )
+            disp_id = it.review_id
+            lines.append(
+                f"{disp_id:<36} {it.action_type:<15} {it.risk_score:<6.2f} {item_type:<10} "
+                f"{it.dependency_depth:<6} {it.status:<8} {created_str}"
+            )
+        text = "\n".join(lines)
+
+    _emit(payload, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
+    return ExitCode.OK
+
+
 def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Report retry-budget usage per action type (issue #240) and per
     authorization (issue #413). Read-only."""
@@ -4773,6 +4881,42 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["goal", "progress"],
         default=None,
         help="confirm only these components (default: goal and progress).",
+    )
+
+    review = with_run(
+        add(
+            "review",
+            cmd_review,
+            "Deferred review queue and priority batching for confirmations.",
+        )
+    )
+    review.add_argument(
+        "--approve",
+        metavar="REVIEW_ID",
+        default=None,
+        help="approve an individual review item by id.",
+    )
+    review.add_argument(
+        "--approve-low-risk",
+        action="store_true",
+        dest="approve_low_risk",
+        help="bulk-approve all pending items at or below the risk threshold.",
+    )
+    review.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="maximum risk score for --approve-low-risk (default: blast radius threshold).",
+    )
+    review.add_argument(
+        "--reviewer",
+        default="operator",
+        help="reviewer identity to record on approval (default: operator).",
+    )
+    review.add_argument(
+        "--policy",
+        default=None,
+        help="path to escalation policy file (default: .continuum/escalation.json).",
     )
 
     complete = with_run(add("complete", cmd_complete, "Close a run as done. Mutates storage."))

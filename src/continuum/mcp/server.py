@@ -590,6 +590,12 @@ def build_server(
     auth = load_auth() if auth is None else auth
     confirm_auth = load_confirm() if confirm_auth is None else confirm_auth
     _reject_reused_confirmation_secret(auth, confirm_auth)
+    # Loaded once per server and shared by confirm_gate and ReviewQueue:
+    # scoring the same action twice against two reads of the file could classify
+    # it differently if the policy changed between reads (issue #1410 review).
+    from continuum.recovery.escalation import load_escalation_policy
+
+    escalation_policy = load_escalation_policy()
     ctx = ContinuumMCP(database, storage=storage)
     server = MCPServer(
         name="continuum-mcp",
@@ -679,6 +685,31 @@ def build_server(
         @functools.wraps(fn)
         def wrapper(*args: Any, ctx: Context | None = None, **kwargs: Any) -> str:
             caller = caller_name(ctx)
+            action_type = kwargs.get("action_type")
+            scope = kwargs.get("scope")
+            expected_model = kwargs.get("expected_model")
+            if action_type and scope is None and expected_model is None:
+                from continuum.recovery.escalation import evaluate_action_risk
+
+                risk = evaluate_action_risk(action_type, kwargs.get("arguments"), escalation_policy)
+                if not risk.immediate:
+                    # A low-risk action buffers into ReviewQueue instead of
+                    # demanding the operator's confirmation secret. The caller
+                    # is still authenticated and authorized exactly like any
+                    # other mutating call: the shared secret and the allowlist
+                    # both apply (issue #1410 review). Only the confirmation
+                    # secret is waived, because a parked item records a request
+                    # a human still has to grant rather than granting one. The
+                    # risk class is not taken from the caller's label:
+                    # evaluate_action_risk scores the recorded action type
+                    # and arguments against the operator's escalation policy,
+                    # and an unrecognised type falls back to the policy default,
+                    # so a caller cannot talk its way past the threshold by
+                    # naming an unweighted action.
+                    with _refusal_reaches_the_caller():
+                        auth.verify(caller, token_from(ctx))
+                        policy.require(caller, fn.__name__)
+                        return fn(*args, **kwargs)
             # Authenticate before authorizing (CodeRabbit review, PR #206):
             # a caller that cannot present the confirmation secret must not
             # be able to probe the allowlist, or receive its contents in the
@@ -1181,8 +1212,52 @@ def build_server(
         run_id: str,
         expected_model: str | None = None,
         scope: list[str] | str | None = None,
+        action_type: str | None = None,
+        arguments: dict[str, Any] | None = None,
+        dependency: str | None = None,
+        dependency_depth: int = 0,
+        batch_id: str | None = None,
     ) -> str:
-        """Record a human confirmation of self-reported state."""
+        """Record a human confirmation or buffer a low-risk action into the review queue."""
+        ctx.storage.get_run(run_id)
+        if action_type is not None:
+            if scope is not None or expected_model is not None:
+                raise ValueError(
+                    "action_type cannot be combined with scope or expected_model: "
+                    "deferred review buffering only enqueues an action request and cannot confirm run state."
+                )
+            from continuum.recovery.review_queue import ReviewQueue
+
+            queue = ReviewQueue(ctx.storage, policy=escalation_policy)
+            item = queue.enqueue(
+                run_id,
+                action_type,
+                arguments=arguments,
+                dependency=dependency,
+                dependency_depth=dependency_depth,
+                batch_id=batch_id,
+            )
+            if item.parked:
+                return _json(
+                    {
+                        "status": "parked",
+                        "batch_id": item.batch_id or item.review_id,
+                        "review_id": item.review_id,
+                        "actionable": False,
+                        "risk_score": item.risk_score,
+                        "message": "Action buffered in deferred review queue.",
+                    }
+                )
+            return _json(
+                {
+                    "status": "requires_immediate_review",
+                    "review_id": item.review_id,
+                    "actionable": True,
+                    "risk_score": item.risk_score,
+                    "message": "Action exceeds blast radius threshold and requires immediate human confirmation.",
+                }
+            )
+
         # Scope handling (issue #394): normalize to a list of lowercased
         # component names; None or empty means full confirm of both.
         if scope is None:
