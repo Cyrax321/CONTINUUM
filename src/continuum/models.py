@@ -1335,6 +1335,8 @@ class Action(BaseModel):
     contaminated origin can be enumerated. Round-tripped via the ledger
     payload and ``Action`` so the chain keeps the attribution.
     """
+    origin_observation_digest: str | None = None
+    """Alias for ``origin_digest`` (issue #1416)."""
     created_at: datetime = Field(default_factory=utcnow)
     started_at: datetime | None = None
     completed_at: datetime | None = None
@@ -1354,7 +1356,21 @@ class Action(BaseModel):
     claim.
     """
 
-    @field_validator("origin_digest")
+    @model_validator(mode="before")
+    @classmethod
+    def _sync_origin_observation_digest(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            ood = data.get("origin_observation_digest")
+            od = data.get("origin_digest")
+            if ood is not None and od is None:
+                data["origin_digest"] = ood
+            elif od is not None and ood is None:
+                data["origin_observation_digest"] = od
+            elif od is not None and ood is not None and od != ood:
+                raise ValueError("origin_digest and origin_observation_digest disagree")
+        return data
+
+    @field_validator("origin_digest", "origin_observation_digest")
     @classmethod
     def _origin_digest_is_sha256(cls, value: str | None) -> str | None:
         if value is None:
