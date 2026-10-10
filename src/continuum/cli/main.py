@@ -3446,6 +3446,219 @@ def cmd_hooks_remove(args: argparse.Namespace, storage: Storage, out: Any, err: 
     return ExitCode.OK
 
 
+def _agents_targets(args: argparse.Namespace) -> list[str]:
+    """The target ids one ``agents`` subcommand should act on.
+
+    ``--all`` is the shorthand for every registered target. It is resolved
+    here rather than in the parser so the registry stays the single list: a
+    target added to ``TARGETS`` is reachable by ``--all`` with no second edit.
+    """
+
+    if getattr(args, "all_targets", False):
+        from continuum.agents import TARGET_IDS
+
+        return list(TARGET_IDS)
+    return [args.target]
+
+
+def cmd_agents_install(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Render the instruction targets an IDE reads, from one source.
+
+    Refusing a target that exists and is not ours is deliberate and is not
+    an error path to be smoothed over: a hand-authored AGENTS.md is a
+    statement of intent, and overwriting it to save a reformat is the one
+    outcome this command must never produce.
+    """
+
+    from continuum.agents import REGENERATE_COMMAND, resolve_source
+    from continuum.agents import install as install_target
+
+    source = Path(args.source) if args.source else None
+    try:
+        source_path, _ = resolve_source(source)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=err)
+        return ExitCode.ERROR
+
+    results, refused = [], []
+    for target_id in _agents_targets(args):
+        try:
+            results.append(install_target(target_id, root=Path.cwd(), source=source))
+        except ValueError as exc:
+            refused.append(str(exc))
+
+    payload = {
+        "command": f"{REGENERATE_COMMAND} --target {args.target}",
+        "source": str(source_path),
+        "installed": [
+            {"target": r.target.id, "path": str(r.path), "status": r.status} for r in results
+        ],
+        "refused": refused,
+    }
+    lines = [f"Instruction targets rendered from {source_path}:"]
+    for r in results:
+        lines.append(f"  [{r.status}] {r.target.path}")
+    for message in refused:
+        lines.append(f"  [refused] {message}")
+    _emit(
+        payload,
+        "\n".join(lines),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.ERROR if refused and not results else ExitCode.OK
+
+
+def cmd_agents_remove(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Delete only the instruction targets this generator wrote.
+
+    A target the generator did not write is reported as left alone rather
+    than removed: the fingerprint is what makes ``remove`` a narrow command
+    instead of an ``rm`` with a nicer name.
+    """
+
+    from continuum.agents import TARGETS
+    from continuum.agents import remove as remove_target
+
+    removed, kept = [], []
+    for target_id in _agents_targets(args):
+        if remove_target(target_id, root=Path.cwd()):
+            removed.append(TARGETS[target_id].path)
+        else:
+            kept.append(TARGETS[target_id].path)
+
+    payload = {
+        "command": f"continuum agents remove --target {args.target}",
+        "removed": removed,
+        "left_alone": kept,
+    }
+    lines = []
+    for path in removed:
+        lines.append(f"removed {path}")
+    for path in kept:
+        lines.append(f"left alone (not written by this generator): {path}")
+    _emit(
+        payload,
+        "\n".join(lines) or "nothing to remove",
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK
+
+
+def cmd_agents_check(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Fail when a committed target no longer matches the source it came from.
+
+    CORRUPTED is the right code: the file exists, carries our fingerprint,
+    and no longer agrees with what that fingerprint claims, which is the
+    same shape as any other failed integrity check in this codebase. An
+    unmanaged target is a conflict rather than corruption and is reported
+    without failing, since nothing this command owns is wrong.
+    """
+
+    from continuum.agents import check as check_target
+
+    source = Path(args.source) if args.source else None
+    try:
+        results = [check_target(t, root=Path.cwd(), source=source) for t in _agents_targets(args)]
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=err)
+        return ExitCode.ERROR
+
+    payload = {
+        "command": "continuum agents check",
+        "clean": all(r.state in ("current", "absent", "unmanaged") for r in results),
+        "targets": [
+            {"target": r.target.id, "path": str(r.path), "state": r.state, "detail": r.detail}
+            for r in results
+        ],
+    }
+    lines = [
+        f"{r.target.path}: {r.state}" + (f" ({r.detail})" if r.state != "current" else "")
+        for r in results
+    ]
+    _emit(
+        payload,
+        "\n".join(lines),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK if payload["clean"] else ExitCode.CORRUPTED
+
+
+def cmd_agents_list(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """List the instruction targets and what each IDE reads."""
+
+    from continuum.agents import TARGETS
+
+    payload = {
+        "command": "continuum agents list",
+        "targets": [{"id": t.id, "path": t.path, "summary": t.summary} for t in TARGETS.values()],
+    }
+    lines = ["Instruction targets:"]
+    lines += [f"  {t.id:<15} {t.path:<34} {t.summary}" for t in TARGETS.values()]
+    _emit(
+        payload,
+        "\n".join(lines),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK
+
+
+def cmd_doctor(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Report whether CONTINUUM works in the IDE this shell is sitting in.
+
+    Exit codes reuse the existing vocabulary rather than adding near-duplicates
+    to it, because the meanings map onto it exactly:
+
+    * OK when every wired IDE is current and authorized. An IDE with nothing
+      configured is not a failure and never blocks a pipeline.
+    * REQUIRES_REPAIR when a registration bakes a path that no longer
+      resolves. Re-running ``continuum mcp install`` fixes it unaided, which
+      is precisely what that code documents.
+    * REQUIRES_HUMAN when any client is read-only-degraded. Re-baking the path
+      does not grant the permission, and granting it automatically is the
+      failure the authorization layer exists to prevent. Degradation outranks
+      staleness for this reason: a pipeline that only retried on
+      REQUIRES_REPAIR would loop forever.
+    * UNSAFE for anything unclassified, so an unrecognised state can never be
+      mistaken for permission to proceed.
+    """
+
+    from continuum.agents import diagnose
+
+    try:
+        report = diagnose.scan(
+            root=Path(args.root) if args.root else None,
+            home=Path(args.home) if args.home else None,
+            deep=args.deep,
+            timeout=args.timeout,
+        )
+    except OSError as exc:
+        print(f"error: {exc}", file=err)
+        return ExitCode.ERROR
+
+    _emit(
+        report.to_dict(),
+        diagnose.render_report(report),
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    if report.healthy:
+        return ExitCode.OK
+    if report.degraded:
+        return ExitCode.REQUIRES_HUMAN
+    if report.stale:
+        return ExitCode.REQUIRES_REPAIR
+    return ExitCode.UNSAFE
+
+
 def cmd_gate(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Decide whether one tool call may proceed (issue #217).
 
@@ -4996,6 +5209,88 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mcp_doctor.set_defaults(func=cmd_mcp_doctor)
 
+    agents = add("agents", cmd_agents_list, "Render IDE instruction targets from one source.")
+    agents_sub = agents.add_subparsers(dest="agents_command", metavar="ACTION", required=True)
+
+    def agents_options(p: argparse.ArgumentParser, func: Any) -> None:
+        """Give an ``agents`` action its target selector and source override.
+
+        ``--all`` is resolved against the registry at call time rather than
+        expanded into one flag per target, so a new IDE is reachable by
+        ``--all`` the moment it is registered.
+        """
+
+        from continuum.agents import TARGET_IDS
+
+        p.add_argument(
+            "--target",
+            default=TARGET_IDS[0],
+            choices=tuple(TARGET_IDS),
+            help="which instruction file to write (default: agents).",
+        )
+        p.add_argument(
+            "--all",
+            dest="all_targets",
+            action="store_true",
+            help="act on every registered target.",
+        )
+        p.add_argument(
+            "--source",
+            default=None,
+            help="instruction source to render (default: the shipped instructions.md).",
+        )
+        p.set_defaults(func=func)
+
+    agents_install = agents_sub.add_parser(
+        "install", help="Render instruction targets. Refuses to overwrite a hand-written file."
+    )
+    agents_options(agents_install, cmd_agents_install)
+
+    agents_remove = agents_sub.add_parser(
+        "remove", help="Remove only the targets this generator wrote. Mutates the tree."
+    )
+    agents_options(agents_remove, cmd_agents_remove)
+
+    agents_check = agents_sub.add_parser(
+        "check", help="Fail when a committed target no longer matches its source."
+    )
+    agents_options(agents_check, cmd_agents_check)
+
+    agents_list = agents_sub.add_parser(
+        "list", help="List the instruction targets and their files."
+    )
+    agents_list.set_defaults(func=cmd_agents_list)
+
+    doctor_cmd = add(
+        "doctor",
+        cmd_doctor,
+        "Report whether CONTINUUM works in the IDE you are in right now.",
+    )
+    doctor_cmd.add_argument(
+        "--deep",
+        action="store_true",
+        help=(
+            "also run the MCP server's own handshake checks (mcp doctor). Each "
+            "one spawns a subprocess, so this is slower than the default scan."
+        ),
+    )
+    doctor_cmd.add_argument(
+        "--timeout",
+        type=_mcp_timeout,
+        default=15.0,
+        help="handshake read timeout in seconds for --deep (default: 15).",
+    )
+    doctor_cmd.add_argument(
+        "--root",
+        default=None,
+        help="project root to scan (default: the current directory).",
+    )
+    doctor_cmd.add_argument(
+        "--home",
+        default=None,
+        help="home directory to expand ~ against (default: the real home).",
+    )
+
     daemon_cmd = add(
         "daemon",
         cmd_daemon,
@@ -5482,6 +5777,11 @@ def main(
         "notify-test",
         "mcp",
         "daemon",
+        # Both read config files and write instruction targets; neither opens
+        # a run, so neither may create an empty database as a side effect of
+        # checking whether a host is wired up.
+        "agents",
+        "doctor",
     ):
         return int(args.func(args, None, out, err))
 

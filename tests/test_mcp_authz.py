@@ -19,6 +19,9 @@ from typing import Any
 import pytest
 
 from continuum.mcp.authz import (
+    ALIASES_ENV_VAR,
+    ALLOW_ANY_CLIENT,
+    ALLOW_ANY_CLIENT_ENV_VAR,
     AUTH_ENV_VAR,
     CLIENT_TOKENS_ENV_VAR,
     CONFIRM_ENV_VAR,
@@ -181,6 +184,286 @@ def test_the_allowlist_folds_unicode_not_just_ascii() -> None:
     assert AuthorizationPolicy(["Straße"]).permits("STRASSE")
     assert AuthorizationPolicy(["STRASSE"]).permits("straße")
     assert not AuthorizationPolicy(["Straße"]).permits("strass")
+
+
+# --- the names real hosts send (issue #1595) -------------------------------- #
+#
+# `continuum mcp install --host cursor` bakes
+# CONTINUUM_MCP_MUTATING_CLIENTS=cursor. Probed against the live server, the
+# clientInfo.name it actually presented was one of the four rows in
+# OBSERVED_NAMES, and on an exact-match allowlist the three that were not the
+# baked string silently lost 10 of the 13 MCP tools. No error at install time,
+# no diagnostic, the agent looked connected, and the loss only surfaced at the
+# first thing the agent tried to write.
+
+INSTALL_BAKED = "cursor"
+
+OBSERVED_NAMES = ("cursor", "cursor-vscode", "Cursor", "visual-studio-code")
+
+#: One host profile declaring every name that client is known to send.
+DECLARED_ALIASES = f"{INSTALL_BAKED}:cursor-vscode,Cursor,visual-studio-code"
+
+
+def test_the_baked_name_is_still_an_exact_match() -> None:
+    """The row of the probe that already worked must keep working."""
+    assert AuthorizationPolicy([INSTALL_BAKED]).permits(INSTALL_BAKED)
+
+
+def test_a_case_variant_is_the_same_client() -> None:
+    """Cursor and cursor are one client, and both are granted.
+
+    A host is free to capitalise its own product name, and a comparison that
+    calls ``Cursor`` a stranger to ``cursor`` has isolated nothing.
+    """
+    policy = AuthorizationPolicy([INSTALL_BAKED])
+    assert policy.permits("Cursor")
+    assert policy.permits("CURSOR")
+    # Padding is stripped rather than turned into a second identity.
+    assert policy.permits("  Cursor  ")
+
+
+@pytest.mark.parametrize("observed", OBSERVED_NAMES)
+def test_the_probe_does_not_degrade_silently(observed: str) -> None:
+    """The four-row probe, as a regression test.
+
+    Every name the host was observed sending is honoured once the host profile
+    declares them. Three of the four were not the baked string, so before the
+    fix each of them connected successfully with only 3 of 13 tools.
+    """
+    policy = AuthorizationPolicy([INSTALL_BAKED], aliases=[DECLARED_ALIASES])
+    assert policy.permits(observed), observed
+
+
+def test_a_configured_alias_is_honoured() -> None:
+    policy = AuthorizationPolicy([INSTALL_BAKED], aliases=[f"{INSTALL_BAKED}:cursor-vscode"])
+    assert policy.permits("cursor-vscode")
+    assert policy.permits("CURSOR-VSCODE")
+    assert policy.aliases == frozenset({"cursor-vscode"})
+
+
+def test_the_alias_env_var_honours_every_declared_name(tmp_path: Path) -> None:
+    policy = load_policy(
+        root=tmp_path,
+        env={POLICY_ENV_VAR_ALIAS: INSTALL_BAKED, ALIASES_ENV_VAR: DECLARED_ALIASES},
+    )
+    assert policy.source == POLICY_ENV_VAR_ALIAS
+    for observed in OBSERVED_NAMES:
+        assert policy.permits(observed), observed
+
+
+def test_aliases_resolve_from_the_policy_file(tmp_path: Path) -> None:
+    path = tmp_path / POLICY_FILENAME
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"allow": [INSTALL_BAKED], "aliases": DECLARED_ALIASES}))
+    policy = load_policy(root=tmp_path, env={})
+    for observed in OBSERVED_NAMES:
+        assert policy.permits(observed), observed
+
+
+@pytest.mark.parametrize(
+    "entry",
+    ["cursor=cursor-vscode", "cursor=cursor", "=cursor", "cursor="],
+)
+def test_inline_alias_syntax_in_the_allowlist_is_refused(entry: str) -> None:
+    """``cursor=cursor-vscode`` is not an alias, it is a client named that.
+
+    The allowlist is split on commas and whitespace, so an inline alias would
+    be shredded into standalone entries and the operator's intent applied,
+    misread, with nothing to say so. The form is ``canonical:alias`` in a
+    separate variable, and the refusal says so.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        AuthorizationPolicy([entry])
+    message = str(excinfo.value)
+    assert ALIASES_ENV_VAR in message
+    assert "<canonical>:<alias>" in message
+
+
+def test_inline_alias_syntax_from_the_env_var_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match=ALIASES_ENV_VAR):
+        load_policy(root=tmp_path, env={POLICY_ENV_VAR_ALIAS: "cursor=cursor-vscode"})
+
+
+def test_the_wildcard_is_never_a_default(tmp_path: Path) -> None:
+    policy = load_policy(root=tmp_path, env={})
+    assert policy.denies_everything
+    assert not policy.allow_any
+    assert not policy.permits("a-client-nobody-has-seen")
+
+
+def test_the_wildcard_env_var_permits_every_named_client(tmp_path: Path) -> None:
+    policy = load_policy(root=tmp_path, env={ALLOW_ANY_CLIENT_ENV_VAR: "1"})
+    assert policy.allow_any
+    assert policy.source == ALLOW_ANY_CLIENT_ENV_VAR
+    assert policy.permits("a-client-nobody-has-seen")
+    assert not policy.denies_everything
+
+
+def test_the_wildcard_grants_names_not_the_absence_of_one(tmp_path: Path) -> None:
+    """It waives the comparison; it does not make an unidentified caller a grant."""
+    policy = load_policy(root=tmp_path, env={ALLOW_ANY_CLIENT_ENV_VAR: "yes"})
+    assert not policy.permits(None)
+    assert not policy.permits("")
+    assert not policy.permits("   ")
+
+
+def test_the_wildcard_token_in_the_allowlist_permits_every_named_client() -> None:
+    policy = AuthorizationPolicy([ALLOW_ANY_CLIENT])
+    assert policy.allow_any
+    assert policy.allowed == frozenset()
+    assert not policy.denies_everything
+    assert policy.permits("anything-at-all")
+
+
+def test_an_explicit_allowlist_narrows_the_wildcard_env_var(tmp_path: Path) -> None:
+    """Precedence is unchanged: the argument beats every environment variable."""
+    policy = load_policy([INSTALL_BAKED], root=tmp_path, env={ALLOW_ANY_CLIENT_ENV_VAR: "1"})
+    assert not policy.allow_any
+    assert policy.permits(INSTALL_BAKED)
+    assert not policy.permits("someone-else")
+
+
+def test_a_caller_cannot_declare_itself_the_wildcard() -> None:
+    """The token is configuration, not a claim."""
+    policy = AuthorizationPolicy([INSTALL_BAKED], aliases=[DECLARED_ALIASES])
+    assert not policy.permits(ALLOW_ANY_CLIENT)
+    assert not policy.permits("*:*")
+
+
+def test_a_wildcard_alias_is_rejected() -> None:
+    """``cursor:*`` would turn one client's grant into every client's grant."""
+    with pytest.raises(ValueError, match=ALLOW_ANY_CLIENT_ENV_VAR):
+        AuthorizationPolicy([INSTALL_BAKED], aliases=[f"{INSTALL_BAKED}:{ALLOW_ANY_CLIENT}"])
+
+
+def test_the_refusal_names_what_was_observed_and_how_to_fix_it() -> None:
+    """The part the operator cannot work out alone.
+
+    The registration they wrote and the clientInfo.name the host sent can
+    disagree for reasons no configuration file records. Quoting the observed
+    name back turns a silent loss of tools into a one-line fix.
+    """
+    policy = AuthorizationPolicy([INSTALL_BAKED], aliases=["cursor:cursor-vscode"])
+    with pytest.raises(NotAuthorized) as excinfo:
+        policy.require("visual-studio-code", "continuum_checkpoint")
+    message = str(excinfo.value)
+    assert "'visual-studio-code'" in message  # the observed name, quoted
+    assert INSTALL_BAKED in message  # the accepted names
+    assert "cursor-vscode" in message  # including the declared aliases
+    assert POLICY_ENV_VAR_ALIAS in message  # the exact variable to set
+    assert POLICY_FILENAME in message  # or the file to edit
+    assert ALIASES_ENV_VAR in message  # how to declare a second name
+    # The advertised alias form is the colon form, not an inline '='.
+    assert "<canonical>:<alias>" in message
+    assert "canonical=" not in message
+    assert "Read-only tools remain available" in message
+
+
+def test_an_unidentified_connection_still_gets_a_remedy() -> None:
+    with pytest.raises(UnknownCaller) as excinfo:
+        AuthorizationPolicy([INSTALL_BAKED]).require(None, "continuum_checkpoint")
+    message = str(excinfo.value)
+    assert POLICY_ENV_VAR_ALIAS in message
+    assert POLICY_FILENAME in message
+    assert "Read-only tools remain available" in message
+
+
+#: Characters either side of a real name, and the alias syntax itself. None of
+#: these may reach a grant that the declared names did not.
+NEAR_MISSES = (
+    "cur",
+    "curs",
+    "cursors",
+    "cursorx",
+    "x-cursor",
+    "my-cursor-impersonator",
+    "cursor-vs",
+    "cursor-vscode-extra",
+    "visual-studio",
+    "cursor:cursor-vscode",
+    "cursor,cursor-vscode",
+    "*",
+    "**",
+    "*cursor",
+    "cursor*",
+    "ANY",
+    "all",
+)
+
+
+@pytest.mark.parametrize("near_miss", NEAR_MISSES)
+def test_near_miss_names_are_refused(near_miss: str) -> None:
+    """No prefix, suffix or substring rule, with or without declared aliases.
+
+    ``cur`` and ``cursors`` are refused because nothing about them is a
+    spelling of ``cursor``. A rule accepting either would hand the grant to
+    anyone who typed the right characters, which is why there is no such rule:
+    a second name is a declared alias or it is a refusal, never an inference.
+    """
+    policy = AuthorizationPolicy([INSTALL_BAKED], aliases=[DECLARED_ALIASES])
+    assert not policy.permits(near_miss), near_miss
+
+
+@pytest.mark.parametrize("observed", ("cursor-vscode", "visual-studio-code"))
+def test_an_undeclared_variant_is_refused_by_name_not_by_guesswork(observed: str) -> None:
+    """No declaration, no grant: the alias set is the only way in.
+
+    Tolerance for naming variants must not become tolerance for naming
+    anything. These two names are real, and they are still strangers until a
+    host profile says which client sends them.
+    """
+    policy = AuthorizationPolicy([INSTALL_BAKED])
+    assert not policy.permits(observed)
+    with pytest.raises(NotAuthorized) as excinfo:
+        policy.require(observed, "continuum_record_progress")
+    message = str(excinfo.value)
+    assert repr(observed) in message  # what was actually seen
+    assert INSTALL_BAKED in message  # what is accepted
+    assert POLICY_ENV_VAR_ALIAS in message  # the exact variable to set
+
+
+def test_the_empty_allowlist_still_refuses_everyone() -> None:
+    """The refuse-all default is untouched by everything above."""
+    policy = AuthorizationPolicy()
+    assert policy.denies_everything
+    assert not policy.allow_any
+    for name in (INSTALL_BAKED, *OBSERVED_NAMES, *NEAR_MISSES):
+        assert not policy.permits(name), name
+
+
+def test_an_alias_is_not_a_client_in_its_own_right() -> None:
+    """Declaring the alias does not replace the canonical grant.
+
+    ``aliases`` says "this identity also answers to that", so a server that
+    allows nobody has nothing for an alias to attach to.
+    """
+    policy = AuthorizationPolicy(aliases=[DECLARED_ALIASES])
+    assert policy.denies_everything
+    assert not policy.permits("cursor-vscode")
+    assert not policy.permits(INSTALL_BAKED)
+
+
+def test_an_alias_whose_canonical_is_not_allowed_grants_nothing() -> None:
+    """The obvious way in: allow something else, declare cursor's aliases."""
+    policy = AuthorizationPolicy(["gemini-cli"], aliases=[DECLARED_ALIASES])
+    assert policy.aliases == frozenset()
+    assert not policy.permits("cursor-vscode")
+    assert not policy.permits(INSTALL_BAKED)
+
+
+@pytest.mark.parametrize("declaration", ["cursor-vscode", ":cursor-vscode", "cursor:"])
+def test_a_malformed_alias_declaration_raises(declaration: str) -> None:
+    """A declaration that grants nothing must say so, not pass silently."""
+    with pytest.raises(ValueError, match=ALIASES_ENV_VAR):
+        AuthorizationPolicy([INSTALL_BAKED], aliases=[declaration])
+
+
+def test_a_malformed_alias_key_in_the_policy_file_raises(tmp_path: Path) -> None:
+    path = tmp_path / POLICY_FILENAME
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"allow": [INSTALL_BAKED], "aliases": {"cursor": "x"}}))
+    with pytest.raises(ValueError, match="aliases"):
+        load_policy(root=tmp_path, env={})
 
 
 # --- resolving the policy --------------------------------------------------- #

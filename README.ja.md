@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI エントリーポイント
 continuum-mcp --help             # MCP サーバーエントリーポイント（[mcp] または [dev] が必要）
-pytest -q                        # 最小環境で約 3,361 件収集、約 3,361 件通過、約 41 件スキップ（正確な数は異なる）
+pytest -q                        # 最小環境で約 3,636 件収集、約 3,636 件通過、約 41 件スキップ（正確な数は異なる）
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI が強制する三つのゲート
 ```
@@ -416,7 +416,7 @@ CONTINUUM は一つのライブラリ（`src/continuum`、132 モジュール）
 | `mcp/` | 12 の stdio ツールに加え認可 `authz.py` トークン認証、allowlist、確認トークン |
 | `serve/` | Sidecar stdio JSON ワイヤ + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Web ダッシュボード `app.py` `hitl.py` と HITL ボタン確認、照合、完了、接頭辞信頼助言、ピン留め |
-| `cli/` | 52 の argparse コマンド、終了コードが評決、`runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 54 の argparse コマンド、終了コードが評決、`runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | OpenTelemetry スパンプロセッサーブリッジ |
 | `benchmark/` | CONTINUUM-Bench ハーネス、5 つのクラッシュシナリオ + 引数ドリフト + 14 シナリオのリカバリスイート |
 
@@ -498,7 +498,7 @@ CONTINUUM は耐久実行、冪等な副作用追跡、LLM エージェントの
 
 ## ステータスと制限
 
-- **テスト済み**：このツリーの 2026-08-24 監査での完全な実行で 3,361 合格 + 23 スキップ。CI は Python 3.11、3.12、3.13 でスイートを強制し、カウントはプラットフォームや Postgres などのオプションサービスにより異なる（[STATUS.md](STATUS.md) を参照）。MCP 面もライブプロトコル上で敵対的に監査済み。[test.md](test.md) を参照。
+- **テスト済み**：このツリーの 2026-08-24 監査での完全な実行で 3,636 合格 + 23 スキップ。CI は Python 3.11、3.12、3.13 でスイートを強制し、カウントはプラットフォームや Postgres などのオプションサービスにより異なる（[STATUS.md](STATUS.md) を参照）。MCP 面もライブプロトコル上で敵対的に監査済み。[test.md](test.md) を参照。
 - **PyPI では `continuum-agent` 0.1.2**（`pip install continuum-agent`、クローンは `pip install .` で依然として動作。クイックスタートを参照）。
 - **MCP 呼び出し元認証はデプロイごとに任意。** `CONTINUUM_MCP_TOKEN` が設定されているとき、サーバーは呼び出し元が `initialize` ハンドシェイクの `_meta.authToken` でその共有秘密を提示しない限り、すべての変更ツールを拒否する。呼び出し元ごとの秘密は `CONTINUUM_MCP_CLIENT_TOKENS`（`name:secret` ペア）経由で利用可能。トークンが何も設定されていない場合、認可は宣言されたアイデンティティのみによる（歴史的なデフォルト、ローカルな単一ユーザー利用のために保持）。
 - **MCP 経由で自己報告された状態を確認するには別の秘密が必要。** `continuum_confirm` はオペレーターが `CONTINUUM_MCP_CONFIRM_TOKEN` を設定するまで、すべての呼び出し元を拒否する。進捗を記録することを許されたエージェントがそれを確認することも許されてはならないからである。デフォルトのパスは人間に導かれたままである。ホストで `continuum confirm <run_id>` を実行する。

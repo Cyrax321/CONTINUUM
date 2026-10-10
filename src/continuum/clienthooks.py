@@ -88,11 +88,25 @@ _PATH_KEYS = ("file_path", "notebook_path")
 #: speaks the same stdin contract (tool_name plus tool_input JSON).
 #:
 #: ``compact_event`` is optional and names the client's context-compaction
-#: hook (issue #449). Only Claude Code documents one, so it is the only
-#: profile that carries the key: a client without it simply gets no
-#: precompact hook installed, rather than one wired to an event its harness
-#: will never fire. Adding a client's compaction hook later is this one line.
+#: hook (issue #449). A client whose hook reference does not document one
+#: simply omits the key and gets no precompact hook installed, rather than one
+#: wired to an event its harness will never fire. Adding a client's compaction
+#: hook later is this one line.
+#:
+#: Every entry is transcribed from that client's own hook reference, cited
+#: per entry. Two facts are load-bearing and easy to get wrong. An event name
+#: the harness never fires means the hook is installed and silently inert,
+#: and a settings path the client never reads means the same, so both are
+#: written down with the URL they were read from rather than from memory.
+#: A client whose hook surface does not accept the ``{"matcher": ..., "hooks":
+#: [{"type": "command", ...}]}`` group shape, or whose stdin payload is not
+#: tool_name plus tool_input, is deliberately absent: see the note above.
 CLIENT_PROFILES: dict[str, dict[str, str]] = {
+    # Source: https://docs.claude.com/en/docs/claude-code/hooks
+    # Documents the `hooks` object of `.claude/settings.json`, the
+    # SessionStart / PreToolUse / PostToolUse / PreCompact events, the
+    # matcher group shape written by _install_hook, and the tool_name +
+    # tool_input stdin payload PreToolUse and PostToolUse receive.
     "claude-code": {
         "settings": ".claude/settings.json",
         "start_event": "SessionStart",
@@ -102,6 +116,13 @@ CLIENT_PROFILES: dict[str, dict[str, str]] = {
         "write_matcher": "Write|Edit|MultiEdit|NotebookEdit",
         "any_matcher": "*",
     },
+    # Source: https://github.com/google-gemini/gemini-cli/blob/main/docs/hooks/reference.md
+    # Settings layering (project `.gemini/settings.json`, user
+    # `~/.gemini/settings.json`) and the wildcard `*` / `""` matcher forms:
+    # https://github.com/google-gemini/gemini-cli/blob/main/docs/hooks/index.md
+    # Gemini names its tool events BeforeTool / AfterTool rather than the
+    # PreToolUse / PostToolUse Claude Code uses, matches tool names by
+    # regex, and documents both receiving tool_name + tool_input.
     "gemini": {
         "settings": ".gemini/settings.json",
         "start_event": "SessionStart",
@@ -110,6 +131,10 @@ CLIENT_PROFILES: dict[str, dict[str, str]] = {
         "write_matcher": "write_file|replace",
         "any_matcher": ".*",
     },
+    # Source: https://developers.openai.com/codex/hooks
+    # Documents `<repo>/.codex/hooks.json` and `~/.codex/hooks.json`, the
+    # matcher-group config shape, and the SessionStart / PreToolUse /
+    # PostToolUse events reading tool_name + tool_input.
     "codex": {
         "settings": ".codex/hooks.json",
         "start_event": "SessionStart",
@@ -119,6 +144,24 @@ CLIENT_PROFILES: dict[str, dict[str, str]] = {
         # calls only; apply_patch and MCP tools do not traverse them.
         "write_matcher": "^Bash$|^shell$",
         "any_matcher": "^Bash$|^shell$",
+    },
+    # Source: https://github.com/QwenLM/qwen-code/blob/main/docs/users/features/hooks.md
+    # Settings file locations (project `.qwen/settings.json`, user
+    # `~/.qwen/settings.json`):
+    # https://github.com/QwenLM/qwen-code/blob/main/docs/users/configuration/settings.md
+    # That reference documents the same matcher-group shape Claude Code uses,
+    # the SessionStart / PreToolUse / PostToolUse / PreCompact events, a
+    # `PreToolUse` `permissionDecision: "deny"` that blocks the call, and a
+    # tool_name + tool_input stdin payload on both tool events. `write_file|edit`
+    # is the file-mutating matcher the reference uses in its own examples.
+    "qwen-code": {
+        "settings": ".qwen/settings.json",
+        "start_event": "SessionStart",
+        "post_event": "PostToolUse",
+        "pre_event": "PreToolUse",
+        "compact_event": "PreCompact",
+        "write_matcher": "write_file|edit",
+        "any_matcher": "*",
     },
 }
 
@@ -240,6 +283,23 @@ def observe_command(*, db: str | None = None) -> str:
     return _join_command(parts)
 
 
+def _command_stem(command: str) -> str:
+    """The filename of a command with its extension dropped, either flavour.
+
+    ``Path(...).stem`` answers from the host platform, so a command this
+    module wrote on Windows reads as one long filename when the same settings
+    file is opened on POSIX, and the recogniser stops seeing its own entry.
+    That costs the idempotency guarantee rather than merely a cosmetic detail:
+    a hook we no longer recognise is a hook we append a duplicate of on the
+    next install (#484, #526). Splitting on both separators keeps the answer
+    the same wherever the file was written.
+    """
+    name = command.replace("\\", "/").rsplit("/", 1)[-1]
+    if name.lower().endswith(".exe"):
+        name = name[: -len(".exe")]
+    return name
+
+
 def _is_managed_hook(hook: Mapping[str, Any], kind: str) -> bool:
     """True when a hook entry is one :func:`_install_hook` itself would write.
 
@@ -259,7 +319,7 @@ def _is_managed_hook(hook: Mapping[str, Any], kind: str) -> bool:
         return False
     if len(tokens) < 2 or tokens[-1] != kind:
         return False
-    if Path(tokens[0]).stem == "continuum":
+    if _command_stem(tokens[0]) == "continuum":
         return True
     return tokens[1] == "-m" and len(tokens) >= 4 and tokens[2] == "continuum.cli"
 

@@ -295,15 +295,15 @@ gap.
 
 ---
 
-## 15. CLI commands (52) `src/continuum/cli/main.py`
+## 15. CLI commands (54) `src/continuum/cli/main.py`
 
 Every subcommand is registered in `build_parser()` (`cli/main.py:4028`), which
 is the single registry — a verb that is not there is not a command. The full
 set, alphabetically:
 
-`actions`, `attest`, `attest-keygen`, `attest-verify`, `benchmark`,
+`actions`, `agents`, `attest`, `attest-keygen`, `attest-verify`, `benchmark`,
 `briefing`, `budget`, `checkpoint`, `compact`, `complete`, `confirm`,
-`daemon`, `dashboard`, `diff`, `events`, `export-evidence`, `forget`, `fork`, `gate`,
+`daemon`, `dashboard`, `diff`, `doctor`, `events`, `export-evidence`, `forget`, `fork`, `gate`,
 `gateway`, `health`, `history`, `hooks`, `impact`, `init`, `inspect`,
 `lineage-issue`, `lineage-verify`, `mcp`, `merge`, `notify-test`, `observe`,
 `policy-review`, `precompact`, `provenance`, `reconcile`, `record-plan`,

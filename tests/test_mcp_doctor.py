@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import sys
 import sysconfig
 from pathlib import Path
@@ -22,17 +23,28 @@ from typing import Any
 
 import pytest
 
+import continuum
 from continuum.cli import ExitCode, main
 from continuum.mcp import doctor
 from continuum.mcp.doctor import (
     _check_handshake,
+    _check_mutation_access,
     _check_resolution,
     _check_sdk,
     _handshake_command,
     _scripts_dir,
+    find_registration,
     render_doctor,
     run_doctor,
 )
+from continuum.mcp.observation import read_observed_clients, record_observed_client
+
+#: The ``src`` directory of whichever copy of continuum this session imported.
+#: Pinned onto PYTHONPATH for the live-server tests below so the spawned child
+#: imports the same code the assertions run against: a console script resolves
+#: through the install's own path entry, which on a machine with several
+#: checkouts can point somewhere else entirely.
+SRC_DIR = Path(continuum.__file__).resolve().parents[1]
 
 #: The venv's script directory, prepended to PATH by tests that need the
 #: console script resolvable so the healthy-path assertions hold even when
@@ -609,3 +621,583 @@ def test_the_handshake_command_follows_resolution() -> None:
         "continuum.mcp",
     ]
     assert _handshake_command({"resolved": None, "module_fallback": False}) is None
+
+
+# --------------------------------------------------------------------------- #
+# the baked client name, and whether the server honors it
+# --------------------------------------------------------------------------- #
+
+
+def _isolated_home(monkeypatch: Any, tmp_path: Path) -> Path:
+    """Point ``~`` at an empty directory so only the cwd can hold a registration.
+
+    User and local scope live under the home directory, so on any machine that
+    has run ``continuum mcp install`` they would otherwise answer the
+    "absent registration" case and make it depend on whose account the tests
+    run as. Both spellings are set because ``expanduser`` reads ``HOME`` on
+    POSIX and ``USERPROFILE`` on Windows.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    return home
+
+
+def _write_registration(
+    directory: Path, baked: str | None, *, host_file: str = ".mcp.json"
+) -> Path:
+    """A project-scope registration in ``directory``, baking ``baked``.
+
+    Shaped like the entry ``mcp install`` writes: an absolute command, an
+    absolute ``--db`` and the client name in the environment. ``baked=None``
+    writes an entry with no allowlist at all, which is what a registration
+    somebody edited by hand tends to look like.
+    """
+    entry: dict[str, Any] = {
+        "type": "stdio",
+        "command": str(SCRIPTS_DIR / "continuum-mcp"),
+        "args": ["--db", str(directory / "continuum.db")],
+    }
+    if baked is not None:
+        entry["env"] = {"CONTINUUM_MCP_MUTATING_CLIENTS": baked}
+    path = directory / host_file
+    path.write_text(
+        json.dumps({"mcpServers": {"continuum-mcp": entry}}, indent=2), encoding="utf-8"
+    )
+    return path
+
+
+def _answering_server(answer: str) -> list[str]:
+    """A server that handshakes, then answers ``tools/call`` with ``answer``.
+
+    The tool result carries ``isError`` exactly as the real SDK reports a
+    refusal, because that is the shape the permission check has to read: a
+    refused tool is a *result*, not a JSON-RPC error, so a probe that only
+    looked for ``error`` frames would call every caller authorized.
+    """
+    body = (
+        "import json, sys\n"
+        "def send(obj):\n"
+        "    sys.stdout.write(json.dumps(obj) + '\\n')\n"
+        "    sys.stdout.flush()\n"
+        "while True:\n"
+        "    line = sys.stdin.readline()\n"
+        "    if not line:\n"
+        "        break\n"
+        "    request = json.loads(line)\n"
+        "    if 'id' not in request:\n"
+        "        continue  # notifications get silence, like the real server\n"
+        "    if request['method'] == 'initialize':\n"
+        "        result = {'serverInfo': {'name': 'fake', 'version': '1'},\n"
+        "                  'protocolVersion': '2024-11-05', 'capabilities': {}}\n"
+        "    elif request['method'] == 'tools/call':\n"
+        "        result = {'content': [{'type': 'text', 'text': " + repr(answer) + "}],\n"
+        "                  'isError': True}\n"
+        "    else:\n"
+        "        result = {}\n"
+        "    send({'jsonrpc': '2.0', 'id': request['id'], 'result': result})\n"
+    )
+    return _fake_server(body)
+
+
+def _observe(directory: Path, *names: str) -> None:
+    """Record what host connections declared against a written registration.
+
+    Stands in for real hosts having connected through this project's
+    database, which is the only way the doctor learns a name the registration
+    did not already predict.
+    """
+    for name in names:
+        record_observed_client(str(directory / "continuum.db"), name)
+
+
+def _observe_via_a_real_connection(database: Path, client_name: str, allow: str) -> str:
+    """Spawn the real server, connect as ``client_name``, and leave its record.
+
+    The other observation helpers write the file directly. This one goes
+    through a real stdio handshake so the end-to-end claim holds: the value
+    the doctor reads is the one the server itself took off the wire.
+    """
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(SRC_DIR)
+    env["CONTINUUM_MCP_MUTATING_CLIENTS"] = allow
+    process = subprocess.Popen(
+        [sys.executable, "-u", "-m", "continuum.mcp", "--db", str(database)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    assert process.stdin is not None and process.stdout is not None
+
+    def send(payload: dict[str, Any]) -> None:
+        process.stdin.write(json.dumps(payload) + "\n")
+        process.stdin.flush()
+
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": client_name, "version": "1.0"},
+            },
+        }
+    )
+    assert json.loads(process.stdout.readline())["result"]
+    send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "continuum_record_progress",
+                "arguments": {"run_id": "no-such-run-xyz", "completed": 1},
+            },
+        }
+    )
+    answer = json.loads(process.stdout.readline())
+    process.stdin.close()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:  # pragma: no cover - the server always exits here
+        process.kill()
+    return answer["result"]["content"][0]["text"]
+
+
+def test_a_real_host_connection_is_what_the_doctor_ends_up_reporting(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The whole chain, with nothing simulated: a host connects, the doctor sees it.
+
+    The registration bakes ``cursor``, the same command the host would run. A
+    real Cursor-style connection declares ``cursor-vscode``, the server records
+    it and refuses the call, and the doctor then reports the two names against
+    each other. Every other test in this area writes one side of that directly;
+    this one has the server take the name off the wire.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    _write_registration(tmp_path, "cursor")
+    monkeypatch.setenv("PYTHONPATH", str(SRC_DIR))
+    registration = find_registration(tmp_path)
+    assert registration is not None
+
+    # The host connects for real and is refused, because install baked the
+    # wrong name for it. That refusal is the whole silent failure.
+    refused = _observe_via_a_real_connection(
+        tmp_path / "continuum.db", "cursor-vscode", allow="cursor"
+    )
+    assert "is not permitted to use the mutating tool" in refused, refused
+
+    client_name, _ = _check_mutation_access(_live_server(), registration, 20.0)
+
+    assert client_name["status"] == "warn"
+    assert client_name["baked_client"] == "cursor"
+    assert client_name["observed_clients"] == ["cursor-vscode"]
+    assert "cursor-vscode" in client_name["detail"]
+
+
+def _live_server() -> list[str]:
+    """The real server, resolved the way a host without a script on PATH gets it."""
+    return [sys.executable, "-u", "-m", "continuum.mcp"]
+
+
+def test_the_baked_client_name_is_reported_and_verified(monkeypatch: Any, tmp_path: Path) -> None:
+    """A registration that grants mutation is reported as doing exactly that.
+
+    This is the acceptance case for the check: the operator reads which client
+    name the registration bakes, a live server agrees that name may mutate,
+    and a real host has connected under that same name. Nothing here inspects
+    the policy source; the verdict comes from a guarded tool actually being
+    reached over the wire.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    _write_registration(tmp_path, "cursor")
+    _observe(tmp_path, "cursor")
+    monkeypatch.setenv("PYTHONPATH", str(SRC_DIR))
+    registration = find_registration(tmp_path)
+    assert registration is not None
+    assert registration["baked_client"] == "cursor"
+
+    client_name, permission = _check_mutation_access(_live_server(), registration, 20.0)
+
+    assert client_name["status"] == "pass", client_name["detail"]
+    assert client_name["baked_client"] == "cursor"
+    assert client_name["observed_client"] == "cursor"
+    assert client_name["observed_clients"] == ["cursor"]
+    assert permission["status"] == "pass", permission["detail"]
+    assert permission["authorized"] is True
+    assert permission["tool"] == "continuum_record_progress"
+
+
+def test_a_host_name_that_differs_from_the_baked_name_is_a_warning(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The bug, non-tautologically: the two strings come from different places.
+
+    The registration bakes ``cursor`` and a real host connected as
+    ``cursor-vscode``. Neither value can be derived from the other: the baked
+    name comes from the registration file, the observed one from the server's
+    own record of a connection the doctor had no part in. Before the server
+    kept that record, this check could only compare the baked name with
+    itself and reported pass whatever the host would really send.
+
+    It warns rather than fails on purpose. The observed name is asserted by
+    whoever connected, so treating it as proof of anything but a mismatch
+    would let any client claim to be a host and have the doctor agree.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    _write_registration(tmp_path, "cursor")
+    _observe(tmp_path, "cursor-vscode")
+    monkeypatch.setenv("PYTHONPATH", str(SRC_DIR))
+    registration = find_registration(tmp_path)
+
+    client_name, permission = _check_mutation_access(_live_server(), registration, 20.0)
+
+    assert client_name["status"] == "warn"
+    assert client_name["baked_client"] == "cursor"
+    assert client_name["observed_client"] == "cursor-vscode"
+    assert client_name["observed_clients"] == ["cursor-vscode"]
+    assert "cursor-vscode" in client_name["detail"] and "cursor" in client_name["detail"]
+    assert "CONTINUUM_MCP_MUTATING_CLIENTS" in client_name["fix"]
+    # The authorized side is unaffected by what was observed.
+    assert permission["authorized"] is True
+
+
+def test_nothing_observed_is_a_warning_rather_than_a_pass(monkeypatch: Any, tmp_path: Path) -> None:
+    """Before any host connects, agreement is unverified and must read as such.
+
+    The probe declares the name read from the registration, and that same
+    registration seeds the allowlist the probe runs against, so with no
+    observation the check compares the baked name with itself. Calling that a
+    pass would claim a verification that never happened, which is how the
+    original bug stayed invisible.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    _write_registration(tmp_path, "cursor")
+    monkeypatch.setenv("PYTHONPATH", str(SRC_DIR))
+    registration = find_registration(tmp_path)
+
+    client_name, permission = _check_mutation_access(_live_server(), registration, 20.0)
+
+    assert client_name["status"] == "warn"
+    assert client_name["observed_clients"] == []
+    assert "no host has connected" in client_name["detail"]
+    assert permission["status"] == "pass", "the authorized side was still verified"
+
+
+def test_an_observed_name_can_never_rescue_a_refused_caller(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """A recorded name does not authorize, even when it is the allowlisted one.
+
+    The registration names ``cursor`` but grants nothing the server accepts,
+    so the live call is refused. The observation file now says a host
+    connected as ``cursor``. The finding must stay a failure: letting the
+    observation override a refusal would hand authorization to a file any
+    client can write by connecting.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    _write_registration(tmp_path, "cursor")
+    _observe(tmp_path, "cursor")
+    monkeypatch.setenv("PYTHONPATH", str(SRC_DIR))
+    registration = find_registration(tmp_path)
+    # An empty env in the registration: the file names a client, but the
+    # server is handed no allowlist at all, so default-deny applies.
+    entry = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]["continuum-mcp"]
+    entry.pop("env")
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"continuum-mcp": entry}}), encoding="utf-8"
+    )
+    assert find_registration(tmp_path) is None, "without an env the entry names no client"
+
+    # With the name still in the file but the allowlist emptied out, the
+    # observed name must not carry the check.
+    registration = dict(registration or {}, baked_client="cursor")
+    client_name, permission = _check_mutation_access(_live_server(), registration, 20.0)
+
+    assert permission["authorized"] is False
+    assert client_name["status"] in ("fail", "warn")
+    assert client_name["status"] != "pass"
+
+
+def test_the_doctor_reads_observations_beside_the_registration_database(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The observations come from the host's database, not the probe's.
+
+    The doctor probes against a throwaway database, so if it read or wrote that
+    one it would only ever see the name it declared itself. The ``--db`` the
+    registration points the host at names the project directory real
+    connections open, so that is where the record is read from and where the
+    real history has to survive the probe.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    _write_registration(tmp_path, "cursor")
+    _observe(tmp_path, "cursor-vscode")
+    monkeypatch.setenv("PYTHONPATH", str(SRC_DIR))
+    registration = find_registration(tmp_path)
+    assert registration is not None
+    assert registration["database"] == str(tmp_path / "continuum.db")
+
+    client_name, _ = _check_mutation_access(_live_server(), registration, 20.0)
+
+    assert client_name["observed_clients"] == ["cursor-vscode"], (
+        "the probe declared 'cursor'; if it had written its own handshake into "
+        "the project's record, that name would now be in there too"
+    )
+    assert sorted(read_observed_clients(str(tmp_path / "continuum.db"))) == ["cursor-vscode"]
+
+
+def test_a_registration_the_server_refuses_fails_and_names_both_strings(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The whole point: a refused caller must be loud, and name both strings.
+
+    The registration bakes one client name and the server refuses it in favour
+    of another. Reporting only one of the two leaves the operator with no way to
+    tell which string to change, which is how a silently read-only agent stays
+    unread-only. The refusal text below is the live server's own wording,
+    captured from a real refused call rather than invented here.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    _write_registration(tmp_path, "cursor-vscode")
+    registration = find_registration(tmp_path)
+    refusal = (
+        "Error executing tool continuum_record_progress: caller 'cursor-vscode' is not "
+        "permitted to use the mutating tool 'continuum_record_progress'. Permitted "
+        "callers: cursor. Read-only tools remain available."
+    )
+
+    client_name, permission = _check_mutation_access(_answering_server(refusal), registration, 20.0)
+
+    assert client_name["status"] == "fail"
+    assert "cursor-vscode" in client_name["detail"], "names what the registration bakes"
+    assert "cursor" in client_name["detail"], "names what the server permits instead"
+    assert client_name["baked_client"] == "cursor-vscode"
+    assert client_name["permitted_clients"] == "cursor"
+    assert "continuum mcp install" in client_name["fix"]
+    assert permission["status"] == "fail"
+    assert permission["authorized"] is False
+    assert "CONTINUUM_MCP_MUTATING_CLIENTS" in client_name["fix"]
+
+
+@pytest.mark.parametrize(
+    ("answer", "authorized", "status"),
+    [
+        pytest.param(
+            "Error executing tool continuum_record_progress: no such run: "
+            "'continuum-mcp-doctor-no-such-run'",
+            True,
+            "pass",
+            id="authorized-then-failed-downstream",
+        ),
+        pytest.param(
+            "Error executing tool continuum_record_progress: caller 'cursor' is not permitted "
+            "to use the mutating tool 'continuum_record_progress'. Permitted callers: other.",
+            False,
+            "fail",
+            id="refused-as-unauthorized",
+        ),
+    ],
+)
+def test_authorized_but_failed_downstream_is_not_the_same_as_refused(
+    monkeypatch: Any, tmp_path: Path, answer: str, authorized: bool, status: str
+) -> None:
+    """Both answers are ``isError`` results; only one of them is degradation.
+
+    The SDK reports a tool that refused a call as a result carrying ``isError``,
+    not as a JSON-RPC error frame, and the two situations this check must
+    separate arrive through that same door. A call that got past authorization
+    and then failed on its own arguments proves the caller may mutate; a
+    refusal proves the agent has silently lost its mutating tools. Collapse the
+    two, or read every ``isError`` as a refusal, and the original bug hides
+    behind a healthy-looking report.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    _write_registration(tmp_path, "cursor")
+    registration = find_registration(tmp_path)
+
+    _, permission = _check_mutation_access(_answering_server(answer), registration, 20.0)
+
+    assert permission["authorized"] is authorized, permission["detail"]
+    assert permission["status"] == status
+    assert permission["server_said"] == answer, "the server's own words reach the report"
+
+
+def test_an_absent_registration_warns_and_names_the_next_command(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Nothing installed is a warn, not a fail, and must say what to run.
+
+    Failing here would be wrong twice over: there is no broken install to
+    report, and the operator who has never run the installer is exactly who
+    needs the command. The permission probe is skipped rather than run against
+    a name nobody declared, because default-deny would make an unconfigured
+    machine look like a degraded one.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    assert find_registration(tmp_path) is None
+
+    client_name, permission = _check_mutation_access(_live_server(), None, 20.0)
+
+    assert client_name["status"] == "warn"
+    assert "continuum mcp install" in client_name["fix"]
+    assert client_name["baked_client"] is None
+    assert permission["status"] == "info"
+    assert permission["authorized"] is None
+    assert "not probed" in permission["detail"]
+
+
+def test_an_absent_registration_leaves_the_report_healthy(monkeypatch: Any, tmp_path: Path) -> None:
+    """A warn must not flip the verdict, and must reach the rendered report.
+
+    ``run_doctor`` reports healthy when nothing failed. An unwarned warn would
+    be a finding the operator never reads, which is the silent failure this
+    check was added to remove, so the warning has to survive into the text.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", _with_scripts_dir_on_path())
+    monkeypatch.setenv("PYTHONPATH", str(SRC_DIR))
+
+    report = run_doctor()
+
+    checks = _by_name(report)
+    assert checks["client-name"]["status"] == "warn"
+    assert report["healthy"] is True, "an absent registration is not a broken install"
+    text = render_doctor(report)
+    assert "[warn] client-name:" in text
+    assert "continuum mcp install" in checks["client-name"]["fix"]
+    # The command has to survive into the rendered text, not only the payload:
+    # a healthy verdict suppresses the remedies block, so the fix line printed
+    # under the warning is the only place the operator will ever see it.
+    assert "continuum mcp install" in text
+    assert any("continuum mcp install" in remedy for remedy in report["remedies"])
+
+
+def test_the_live_server_refuses_a_name_the_registration_did_not_bake(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The reproduced degradation, against the real server: no IDE required.
+
+    The registration's environment grants mutation to ``cursor``. The host
+    declares ``cursor-vscode`` in its handshake, which is what the server
+    observes as the caller. The server refuses, and the agent is left with the
+    three read-only tools while install reported success and every other check
+    passed. The registration handed to the check is built by hand precisely
+    because it models what discovery alone cannot see: the name the host sends
+    and the name the registration grants are two different strings.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    monkeypatch.setenv("PYTHONPATH", str(SRC_DIR))
+    settings_path = _write_registration(tmp_path, "cursor")
+    registration = {
+        "host": "cursor",
+        "settings_path": settings_path,
+        "container_key": None,
+        "container_id": None,
+        "baked_client": "cursor-vscode",
+    }
+
+    client_name, permission = _check_mutation_access(_live_server(), registration, 20.0)
+
+    assert client_name["status"] == "fail", client_name["detail"]
+    assert client_name["baked_client"] == "cursor-vscode"
+    assert client_name["permitted_clients"] == "cursor"
+    assert permission["authorized"] is False
+    assert "not permitted" in permission["server_said"]
+    # Both strings are in the finding, because the operator has to choose one.
+    assert "cursor-vscode" in client_name["detail"] and "cursor" in client_name["detail"]
+
+
+def test_a_registration_with_no_client_name_is_reported_as_absent(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """An entry with no allowlist names no caller, so it is the absent case.
+
+    A registration can exist and still grant nobody anything: the environment
+    block is the only place the name lives, and dropping it (a hand edit, a
+    merge, a host that ignores ``env``) leaves a registration that installs
+    cleanly and authorizes no one. Reading it as "no client is baked" is what
+    makes that state a warning with a fix rather than a silent pass.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    _write_registration(tmp_path, None)
+
+    assert find_registration(tmp_path) is None
+
+    client_name, permission = _check_mutation_access(_live_server(), None, 20.0)
+
+    assert client_name["status"] == "warn"
+    assert permission["status"] == "info"
+
+
+def test_a_stale_baked_path_is_still_caught_and_the_new_checks_do_not_mask_it() -> None:
+    """A registration pointing at a moved virtualenv still fails the handshake.
+
+    The new checks only run once the handshake has passed, so they cannot
+    replace the diagnosis that names an unspawnable command. A stale baked path
+    must still be reported by name, which is the state a moved venv leaves and
+    the one the operator has to act on.
+    """
+    stale = "/nonexistent/venv/bin/continuum-mcp"
+    finding, _ = _check([stale])
+
+    assert finding["status"] == "fail"
+    assert "spawning" in finding["detail"]
+    assert stale in finding["detail"]
+
+
+def test_the_probe_environment_does_not_carry_the_policy_in(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The verdict must reflect the registration, not the operator's shell.
+
+    A ``CONTINUUM_MCP_MUTATING_CLIENTS`` exported in the terminal running the
+    doctor would otherwise authorize a registration that grants nothing, which
+    is precisely the silent failure this check exists to end. PATH and
+    PYTHONPATH are left alone, because the child still has to be spawnable and
+    importable for the call to say anything.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    settings_path = _write_registration(tmp_path, "cursor")
+    registration = {
+        "host": "cursor",
+        "settings_path": settings_path,
+        "container_key": None,
+        "container_id": None,
+        "baked_client": "cursor",
+    }
+    monkeypatch.setenv("CONTINUUM_MCP_MUTATING_CLIENTS", "ambient-shell-name")
+    monkeypatch.setenv("CONTINUUM_MCP_ALLOW", "ambient-shell-name")
+
+    env = doctor._probe_environment(registration)
+
+    assert (
+        "CONTINUUM_MCP_MUTATING_CLIENTS" not in env
+        or env["CONTINUUM_MCP_MUTATING_CLIENTS"] == "cursor"
+    ), "the ambient value must not survive into the probe"
+    assert env["CONTINUUM_MCP_MUTATING_CLIENTS"] == "cursor", "the registration's own value does"
+    assert env.get("PATH"), "the child still has to be spawnable"
+
+
+def test_a_settings_file_the_doctor_cannot_parse_is_not_a_crash(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Discovery runs on machines that are already broken; it must not raise.
+
+    The doctor is asked to run precisely when something is wrong, and a
+    settings file with a stray comma in it is a finding about the registration,
+    not an exception out of the diagnosis. Every unreadable shape resolves to
+    "no registration here" so the search continues to the next candidate.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    (tmp_path / ".mcp.json").write_text("{not json at all", encoding="utf-8")
+
+    assert find_registration(tmp_path) is None

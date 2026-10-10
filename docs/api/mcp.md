@@ -69,6 +69,41 @@ host's PATH and spawn cwd. Install is idempotent and repoints a moved
 virtualenv; `continuum mcp remove` deletes only the entries install wrote.
 See [the CLI reference](cli.md#mcp) for the flags.
 
+#### Supported hosts and config formats
+
+A host reads a config file that is not always JSON, so the format is part of
+the host profile rather than a guess made at read time. `--host` selects the
+profile; the profile supplies the file paths, the container shape and the
+client name the host is expected to announce:
+
+| `--host`      | Project file                  | Local or user file                       | Format | Client name sent |
+| ------------- | ----------------------------- | ---------------------------------------- | ------ | ---------------- |
+| `claude-code` | `.mcp.json`                   | `~/.claude.json`                          | JSON   | `claude-code`    |
+| `gemini`      | `.mcp.json`                   | `~/.gemini/settings.json`                 | JSON   | `gemini-cli`     |
+| `cursor`      | `.cursor/mcp.json`            | `~/.cursor/mcp.json`                      | JSON   | `cursor`         |
+| `vscode`      | `.vscode/mcp.json`            | the VS Code user `settings.json`          | JSON   | `vscode`         |
+| `codex`       | `.codex/config.toml`          | `~/.codex/config.toml`                    | TOML   | `codex-cli`      |
+| `opencode`    | `opencode.json`               | `~/.config/opencode/opencode.json`        | JSON   | `opencode`       |
+| `continue`    | `.continue/config.yaml`       | `~/.continue/config.yaml`                 | YAML   | `continue`       |
+| `zed`         | `.zed/settings.json`          | `~/.config/zed/settings.json`             | JSON   | `Zed`            |
+
+The client name matters because it is the name the authorization policy below
+compares against. Zed announces `Zed`, which is not the string `zed`; the
+comparison folds case and trims whitespace, so listing `zed` permits it. If a
+host ever announces a second name, that is an alias, declared below.
+
+The TOML and YAML paths need a parser the JSON ones do not. `tomli-w` backs
+TOML and `PyYAML` backs YAML, both declared in the `mcp` extra (PR #1600) and
+imported lazily, so a host that needs neither pays for neither and a clone
+registering only JSON hosts installs neither. A missing parser is refused by
+name, with the command that installs it, rather than producing a config file
+that silently drops the registration.
+
+Reading and writing both go through one format layer, so the shape of a
+registration is the same in every format. That is what lets `continuum doctor`
+report a stale or unconfigured IDE across JSON, TOML and YAML hosts alike
+instead of silently calling a YAML host empty.
+
 #### The registration lifecycle
 
 Registration is written once and then has to survive everything that happens
@@ -162,6 +197,44 @@ Either variable takes precedence over `.continuum/mcp-policy.json`, and an
 explicit `allow` passed by an API caller takes precedence over both; each
 source replaces the ones below it rather than merging, so `policy.source`
 always names exactly where a grant came from.
+
+`CONTINUUM_MCP_CLIENT_ALIASES`
+: Second spellings of a client you have already allowed, for a host that
+announces more than one name. Declared as `canonical:alias` groups separated
+by commas or whitespace, or as the policy file's `aliases` key:
+
+```bash
+CONTINUUM_MCP_CLIENT_ALIASES='cursor:cursor-vscode,claude-code:claude'
+```
+
+The separator is a **colon**, and an inline `=` inside the allowlist is refused
+outright rather than guessed at. The allowlist is split on commas and
+whitespace, so `CONTINUUM_MCP_ALLOW=cursor=cursor-vscode` would be read as two
+standalone entries: a client literally named `cursor=cursor-vscode`, plus a
+grant to `cursor-vscode` that the text beside it never referred to. That is
+an operator's intent applied and misread, with nothing to say so, so the
+inline form raises instead.
+
+An alias only counts when the canonical name it belongs to is itself allowed.
+Declaring `cursor:cursor-vscode` for a client you have not allowed grants
+nothing, which is what keeps the alias list from being a second allowlist
+nobody has to reconcile.
+
+`CONTINUUM_MCP_ALLOW_ANY_CLIENT`
+: Set it to `*` to waive the name comparison entirely, for an operator who
+genuinely runs many MCP clients against one database:
+
+```bash
+CONTINUUM_MCP_ALLOW_ANY_CLIENT='*'
+```
+
+It is opt-in, never inferred and never a default. It waives *which client is
+calling*, not whether the connection is authenticated: with
+`CONTINUUM_MCP_TOKEN` or per-client tokens set, authentication still applies.
+Because a caller whose host profile was never written down is exactly the
+caller worth seeing, a wildcard is reported in `policy.source` and named in
+every refusal the server writes. It is the one setting that makes the allowlist
+above optional, so it is worth reaching for last.
 
 `CONTINUUM_DB`
 : The database path the server opens when `--db` is not passed on the command

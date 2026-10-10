@@ -38,6 +38,11 @@ continuum briefing                               # session-start context injecti
 continuum gateway --port 8765                    # enforcing proxy for registered upstreams. mutates
 continuum daemon --port 8765                     # background gateway daemon
 continuum hooks install <client> [--with-gate]   # wire a coding CLI (claude-code, gemini, codex)
+continuum agents install --target <ide>          # render IDE instruction files from one source
+continuum agents check [--all]                   # fail when a target drifted from its source
+continuum agents remove --target <ide>           # remove only generated targets. mutates
+continuum agents list                            # list targets and the file each IDE reads
+continuum doctor [--deep]                        # per-IDE wiring, staleness and read-only state
 continuum mcp install [--scope project]          # register the MCP server, resolved absolute. mutates
 continuum mcp remove                             # remove the registration install wrote. mutates
 continuum mcp doctor --timeout 15                 # diagnose host connection failures. read-only

@@ -10,6 +10,7 @@ baked and, in the end-to-end case, spawns it exactly as a host would.
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import os
@@ -573,3 +574,179 @@ def test_the_baked_registration_connects_from_a_foreign_cwd(
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+# --------------------------------------------------------------------------- #
+# every host profile, end to end (issue #1597)
+# --------------------------------------------------------------------------- #
+
+from continuum.mcp import configfmt  # noqa: E402
+
+#: Formats whose parser is an optional dependency, so a run without one
+#: reports the profile as unsupported instead of failing on an ImportError.
+_FORMAT_AVAILABLE = {
+    "json": True,
+    "toml": importlib.util.find_spec("tomli_w") is not None,
+    "yaml": importlib.util.find_spec("yaml") is not None,
+}
+
+#: An unrelated key each host's file already carried before we touched it. It
+#: is the canary for the one property a per-host test has to prove: that
+#: nothing outside the managed entry moves.
+_UNRELATED = {"unrelatedSetting": {"keepMe": True}, "numStartups": 41}
+
+
+def _settings_for(host: str, scope: str) -> Path:
+    """The path the CLI will resolve for ``host`` and ``scope``.
+
+    Mirrors ``cli.main._mcp_settings_path`` on purpose. That function does not
+    expanduser the project scope, so a profile whose project file is not
+    repo-relative resolves differently, and the test has to see the same path
+    the command does rather than the one the profile suggests.
+    """
+    profile = mcp_install.HOST_PROFILES[host]
+    if scope == "project":
+        return Path(profile["project_settings"])
+    return Path(profile["user_settings"]).expanduser()
+
+
+def _scope_for(host: str) -> str:
+    """The scope that means something for ``host``.
+
+    A host with no project-level file cannot have one registered, so those
+    profiles are exercised through the scope they do document.
+    """
+    return (
+        "project"
+        if not mcp_install.HOST_PROFILES[host]["project_settings"].startswith("~")
+        else "user"
+    )
+
+
+def _read(host: str, path: Path) -> dict[str, Any]:
+    return configfmt.read_document(mcp_install.host_format(host), path)
+
+
+@pytest.mark.parametrize("host", sorted(mcp_install.HOST_PROFILES))
+def test_every_host_installs_reads_back_reinstalls_and_removes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    """The whole cycle, against the file the CLI itself picks.
+
+    Install, read back what actually landed, install again and prove nothing
+    duplicated, then remove and prove only our entry went. Every host in the
+    table goes through the same code path with only its profile differing,
+    which is what makes "adding a host is one dict entry" a checked claim
+    rather than a docstring.
+    """
+    if not _FORMAT_AVAILABLE[mcp_install.host_format(host)]:
+        pytest.skip(
+            f"{host} writes {mcp_install.host_format(host)}, whose parser is an optional extra"
+        )
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    scope = _scope_for(host)
+    settings = _settings_for(host, scope)
+    shape = mcp_install.host_shape(host)
+
+    # Seed the file the way the host would have left it, so the canary key has
+    # something to survive.
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    configfmt.write_document(mcp_install.host_format(host), settings, dict(_UNRELATED))
+
+    code, out, err = run("--json", "mcp", "install", "--host", host, "--scope", scope)
+    assert code == ExitCode.OK, err
+    assert json.loads(out)["status"] == "installed"
+
+    written = _read(host, settings)
+    entry = shape.find(written, scope, tmp_path, "continuum-mcp")
+    assert entry is not None, (host, sorted(written))
+    assert shape.argv_of(entry) == [*json.loads(out)["command"], "--db", json.loads(out)["db"]]
+    assert entry[shape.env_key] == {
+        "CONTINUUM_MCP_MUTATING_CLIENTS": mcp_install.HOST_PROFILES[host]["mutating_clients"]
+    }
+    assert _UNRELATED.items() <= written.items(), (host, sorted(written))
+
+    # Reinstall: the same command twice must be a no-op, not a second entry.
+    code, out, err = run("--json", "mcp", "install", "--host", host, "--scope", scope)
+    assert code == ExitCode.OK, err
+    assert json.loads(out)["status"] == "present"
+
+    after = _read(host, settings)
+    container = shape.container_at(after, scope, tmp_path, create=False)[1]
+    entries = [container] if shape.container == "dict" else container
+    assert len(entries) == 1, (host, entries)
+    assert after == written, host
+
+    code, out, err = run("--json", "mcp", "remove", "--host", host, "--scope", scope)
+    assert code == ExitCode.OK, err
+    assert json.loads(out)["removed"] is True
+
+    gone = _read(host, settings)
+    assert shape.find(gone, scope, tmp_path, "continuum-mcp") is None, host
+    assert _UNRELATED.items() <= gone.items(), (host, sorted(gone))
+    # A list-shaped host keeps its now-empty container, because an empty list
+    # is how Continue's own docs show an agent with no servers. Anything else
+    # has to come back to exactly what was there before.
+    if shape.container == "dict":
+        assert gone == _UNRELATED, host
+    else:
+        assert gone["mcpServers"] == [], (host, gone)
+
+
+@pytest.mark.parametrize("host", sorted(mcp_install.HOST_PROFILES))
+def test_removing_twice_is_a_quiet_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    """The command is documented as safe to run unconditionally.
+
+    A second remove has to report nothing to fix rather than an error a setup
+    script has to guard for, on every host and not only the JSON ones.
+    """
+    if not _FORMAT_AVAILABLE[mcp_install.host_format(host)]:
+        pytest.skip(
+            f"{host} writes {mcp_install.host_format(host)}, whose parser is an optional extra"
+        )
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    scope = _scope_for(host)
+
+    code, out, err = run("--json", "mcp", "install", "--host", host, "--scope", scope)
+    assert code == ExitCode.OK, err
+
+    code, out, err = run("--json", "mcp", "remove", "--host", host, "--scope", scope)
+    assert code == ExitCode.OK, err
+    code, out, err = run("--json", "mcp", "remove", "--host", host, "--scope", scope)
+    assert code == ExitCode.OK, err
+    assert json.loads(out)["removed"] is False
+
+
+@pytest.mark.parametrize("host", sorted(mcp_install.HOST_PROFILES))
+def test_no_host_writes_outside_the_file_it_was_pointed_at(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    """One host's install creates exactly one file, and no stray ``~`` tree.
+
+    ``--scope project`` is the one path the CLI does not expanduser, so a
+    profile whose project file is written with a leading tilde would quietly
+    create a directory literally named ``~`` inside the user's repository.
+    """
+    if not _FORMAT_AVAILABLE[mcp_install.host_format(host)]:
+        pytest.skip(
+            f"{host} writes {mcp_install.host_format(host)}, whose parser is an optional extra"
+        )
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.chdir(project)
+
+    code, _, err = run("--json", "mcp", "install", "--host", host, "--scope", "project")
+    assert code == ExitCode.OK, err
+
+    created = sorted(p.relative_to(project).as_posix() for p in project.rglob("*") if p.is_file())
+    assert len(created) == 1, (host, created)
+    assert "~" not in created[0], (host, created)
+    assert not created[0].endswith(".db"), (host, created)

@@ -46,6 +46,8 @@ continuum --json <command>                    # machine-readable output
 | `mcp install` | Register the MCP server with a host, baking resolved absolute paths (issue #834). Mutates host config. |
 | `mcp remove` | Remove the registration `mcp install` wrote. Mutates host config. |
 | `mcp doctor` | Diagnose why a host cannot connect to the MCP server. Read-only. |
+| `agents` | Render the instruction files each coding IDE reads, from one hashed source. Refuses to overwrite a file it did not write. |
+| `doctor` | Report, per IDE, whether CONTINUUM is wired up, current and authorized. Read-only. |
 | `verify <run_id>` | Re-audit the event chain for tampering. |
 | `reconcile <run_id>` | Settle uncertain actions with registered probes. Mutates storage. |
 | `actions <run_id>` | List recorded side effects and flag uncertain outcomes. |
@@ -201,8 +203,8 @@ filesystem makes the command exit 20 with the finding named.
 ## hooks
 
 `continuum hooks install` writes host-side observation hooks into agent
-settings files (for example `.claude/settings.json`, `.gemini/settings.json`, or
-`.codex/hooks.json`).
+settings files (for example `.claude/settings.json`, `.gemini/settings.json`,
+`.codex/hooks.json`, or `.qwen/settings.json`).
 
 Supported clients (`CLIENT_PROFILES` in `src/continuum/clienthooks.py`):
 
@@ -211,6 +213,7 @@ Supported clients (`CLIENT_PROFILES` in `src/continuum/clienthooks.py`):
 | `claude-code` | `.claude/settings.json` | `SessionStart`, `PostToolUse`, `PreToolUse`, `PreCompact` | `Write|Edit|MultiEdit|NotebookEdit` | `*` |
 | `gemini` | `.gemini/settings.json` | `SessionStart`, `AfterTool`, `BeforeTool` | `write_file|replace` | `.*` |
 | `codex` | `.codex/hooks.json` | `SessionStart`, `PostToolUse`, `PreToolUse` | `^Bash$|^shell$` | `^Bash$|^shell$` |
+| `qwen-code` | `.qwen/settings.json` | `SessionStart`, `PostToolUse`, `PreToolUse`, `PreCompact` | `write_file|edit` | `*` |
 
 By default, `hooks install` configures up to three entries (depending on the
 client profile; event names and matchers below are Claude Code's, see the
