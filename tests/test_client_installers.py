@@ -1,10 +1,16 @@
 """Client installers beyond Claude Code (issue #209).
 
-Gemini CLI and Codex CLI expose hook surfaces with the same stdin contract
-(tool_name + tool_input JSON) but different settings layouts, event names
-and matchers. Wiring is data-driven from CLIENT_PROFILES; these tests pin
+Gemini CLI, Codex CLI and Qwen Code expose hook surfaces with the same stdin
+contract (tool_name + tool_input JSON) but different settings layouts, event
+names and matchers. Wiring is data-driven from CLIENT_PROFILES; these tests pin
 each profile's installed shape, idempotency, removal, and the Codex feature
 flag hint.
+
+The client list is derived from CLIENT_PROFILES rather than written out here.
+A hand-copied tuple is a second source of truth that goes stale the moment a
+profile lands, and a client silently excluded from it is exactly the silent
+failure this suite exists to catch: a profile can install cleanly and still
+never run.
 """
 
 from __future__ import annotations
@@ -18,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from continuum.cli import ExitCode, main
-from continuum.clienthooks import CLIENT_PROFILES, install_client_hook
+from continuum.clienthooks import _INSTALLED_KINDS, CLIENT_PROFILES, install_client_hook
 
 
 def run(*argv: str) -> tuple[int, str, str]:
@@ -42,8 +48,22 @@ def write_gate_registry(root: Path) -> Path:
 
 import io  # noqa: E402
 
+#: Every profiled client, read from the table itself.
+CLIENTS = tuple(CLIENT_PROFILES)
 
-@pytest.mark.parametrize("client", ("claude-code", "gemini", "codex"))
+#: Clients whose hook reference documents no compaction event, so the
+#: installer must wire no precompact hook for them. Derived the same way,
+#: because the point of the test is that the key's absence is honoured.
+NO_COMPACT_CLIENTS = tuple(
+    c for c, profile in CLIENT_PROFILES.items() if "compact_event" not in profile
+)
+
+#: Clients that do document one, so the degradation below is not mistaken for
+#: the hook simply never being wired anywhere.
+COMPACT_CLIENTS = tuple(c for c, profile in CLIENT_PROFILES.items() if "compact_event" in profile)
+
+
+@pytest.mark.parametrize("client", CLIENTS)
 def test_install_writes_the_profiled_shape(tmp_path: Path, client: str) -> None:
     profile = CLIENT_PROFILES[client]
     settings = tmp_path / "settings.json"
@@ -64,7 +84,7 @@ def test_install_writes_the_profiled_shape(tmp_path: Path, client: str) -> None:
     assert payload["settings"] == str(settings)
 
 
-@pytest.mark.parametrize("client", ("claude-code", "gemini", "codex"))
+@pytest.mark.parametrize("client", CLIENTS)
 def test_install_is_idempotent_per_client(tmp_path: Path, client: str) -> None:
     settings = tmp_path / "settings.json"
     for _ in range(2):
@@ -94,7 +114,7 @@ def test_gemini_gate_uses_before_tool(tmp_path: Path, monkeypatch: pytest.Monkey
 def test_remove_cleans_each_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     write_gate_registry(tmp_path)
-    for client in ("claude-code", "gemini", "codex"):
+    for client in CLIENTS:
         settings = tmp_path / f"{client}.json"
         run("--json", "hooks", "install", client, "--with-gate", "--settings", str(settings))
         code, out, _ = run("--json", "hooks", "remove", client, "--settings", str(settings))
@@ -198,7 +218,7 @@ def test_gemini_payload_shape_matches_the_observation_contract() -> None:
     assert result.returncode == ExitCode.OK, result.stderr
 
 
-@pytest.mark.parametrize("client", ("claude-code", "gemini", "codex"))
+@pytest.mark.parametrize("client", CLIENTS)
 def test_default_settings_path_comes_from_the_profile(
     tmp_path: Path, client: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -226,7 +246,7 @@ def _installed_kinds(settings: Path) -> set[str]:
     }
 
 
-@pytest.mark.parametrize("client", ("claude-code", "gemini", "codex"))
+@pytest.mark.parametrize("client", CLIENTS)
 def test_remove_defaults_to_the_same_file_install_wrote(
     tmp_path: Path, client: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -296,7 +316,7 @@ def test_remove_reports_hooks_not_just_the_observation_hook(
     assert _installed_kinds(settings) == set()
 
 
-@pytest.mark.parametrize("client", ("claude-code", "gemini", "codex"))
+@pytest.mark.parametrize("client", CLIENTS)
 def test_briefing_is_wired_on_session_start(tmp_path: Path, client: str) -> None:
     """No CLAUDE.md required: the briefing rides the client's own
     SessionStart event so state reaches the model deterministically."""
@@ -315,7 +335,7 @@ def test_briefing_is_wired_on_session_start(tmp_path: Path, client: str) -> None
     assert len(ours) == 1
 
 
-@pytest.mark.parametrize("client", ("claude-code", "gemini", "codex"))
+@pytest.mark.parametrize("client", CLIENTS)
 def test_three_installs_leave_one_start_group(tmp_path: Path, client: str) -> None:
     """Repro for #484: briefing was duplicated on every install. Three runs
     must leave exactly one SessionStart group and the third reports present."""
@@ -469,3 +489,176 @@ def test_with_gate_warns_when_the_registry_registers_nothing(
     assert code == ExitCode.OK, err
     assert "registers no tools" in err
     assert "gate" in _installed_kinds(settings)
+
+
+@pytest.mark.parametrize("client", NO_COMPACT_CLIENTS)
+def test_a_client_without_a_compaction_event_gets_no_precompact_hook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client: str
+) -> None:
+    """The absence of ``compact_event`` has to mean "wire nothing", not
+    "wire something plausible".
+
+    Installing a precompact entry against an event the harness never fires
+    looks exactly like durability in the settings file and in the install
+    report, while sealing no checkpoint at all. Both the report and the file
+    are asserted here so neither half can drift from the profile again.
+    """
+    profile = CLIENT_PROFILES[client]
+    assert "compact_event" not in profile
+
+    monkeypatch.chdir(tmp_path)
+    write_gate_registry(tmp_path)
+
+    settings = tmp_path / "settings.json"
+    code, out, err = run(
+        "--json", "hooks", "install", client, "--with-gate", "--settings", str(settings)
+    )
+    assert code == ExitCode.OK, err
+
+    payload = json.loads(out)
+    assert "precompact" not in {h["kind"] for h in payload["hooks"]}
+
+    data = json.loads(settings.read_text())
+    assert "precompact" not in _installed_kinds(settings)
+    # No event key named like a compaction hook, whatever the client calls it.
+    assert not [event for event in data["hooks"] if "compact" in event.lower()]
+
+
+@pytest.mark.parametrize("client", COMPACT_CLIENTS)
+def test_a_client_with_a_compaction_event_does_get_one(tmp_path: Path, client: str) -> None:
+    """The flip side, so the test above cannot pass by the key being unread.
+
+    Without this, deleting ``compact_event`` from every profile would leave
+    the no-precompact test green while quietly removing the checkpoint that
+    keeps a compacted session resumable.
+    """
+    profile = CLIENT_PROFILES[client]
+    settings = tmp_path / "settings.json"
+    code, out, err = run("--json", "hooks", "install", client, "--settings", str(settings))
+    assert code == ExitCode.OK, err
+
+    event = profile["compact_event"]
+    payload = json.loads(out)
+    precompact = [h for h in payload["hooks"] if h["kind"] == "precompact"]
+    assert len(precompact) == 1
+    assert precompact[0]["event"] == event
+    # It was wired, not removed by an opt-out nobody passed.
+    assert payload["unwired"] == []
+
+    commands = _installed_commands(settings, event)
+    assert len(commands) == 1
+    assert commands[0].split()[-1] == "precompact"
+
+
+@pytest.mark.parametrize("client", CLIENTS)
+def test_remove_leaves_the_users_own_hooks_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client: str
+) -> None:
+    """Removal must delete this project's entries and nothing else.
+
+    ``_remove_hooks`` keeps a matcher group that still holds hooks a stranger
+    wrote, and drops only the entries the predicate recognises. The three
+    shapes below cover where a user's own hook can sit: sharing a matcher with
+    ours, alone in its own group, and on an event we never write.
+    """
+    monkeypatch.chdir(tmp_path)
+    write_gate_registry(tmp_path)
+    profile = CLIENT_PROFILES[client]
+    settings = tmp_path / "settings.json"
+    seeded = {
+        "unrelatedKey": {"keep": True},
+        "hooks": {
+            # Shares our matcher, so only per-hook ownership can save it.
+            profile["post_event"]: [
+                {
+                    "matcher": profile["write_matcher"],
+                    "hooks": [{"type": "command", "command": "my-own-collector"}],
+                }
+            ],
+            profile["start_event"]: [
+                {"matcher": "", "hooks": [{"type": "command", "command": "my-own-greeter"}]}
+            ],
+            "SomeEventWeNeverWrite": [
+                {"matcher": "*", "hooks": [{"type": "command", "command": "unrelated-tool"}]}
+            ],
+        },
+    }
+    settings.write_text(json.dumps(seeded))
+
+    code, _, err = run(
+        "--json", "hooks", "install", client, "--with-gate", "--settings", str(settings)
+    )
+    assert code == ExitCode.OK, err
+    code, out, err = run("--json", "hooks", "remove", client, "--settings", str(settings))
+    assert code == ExitCode.OK, err
+    assert json.loads(out)["removed"] is True
+
+    data = json.loads(settings.read_text())
+    assert data["unrelatedKey"] == {"keep": True}
+    survivors = sorted(
+        command for event in data["hooks"] for command in _installed_commands(settings, event)
+    )
+    assert survivors == ["my-own-collector", "my-own-greeter", "unrelated-tool"]
+    # None of ours survived, checked against _INSTALLED_KINDS rather than a
+    # list written here: the whole point of that tuple is that it is the one
+    # place a hook kind is named, and a test that repeats the list would let
+    # a new kind drift out of this assertion exactly as it did in #484.
+    assert _installed_kinds(settings) & set(_INSTALLED_KINDS) == set()
+
+
+@pytest.mark.parametrize(
+    ("command_parts", "platform"),
+    [
+        # A POSIX venv path, joined POSIX-style.
+        (["/home/user/my project/.venv/bin/continuum", "observe"], "posix"),
+        # The same path joined cmd.exe-style: spaces must survive either way.
+        (["/home/user/my project/.venv/bin/continuum", "observe"], "nt"),
+        # Windows paths routinely contain spaces; the branch exists for them.
+        ([r"C:\Program Files\continuum\Scripts\continuum.exe", "observe"], "nt"),
+        ([r"C:\Program Files\continuum\Scripts\continuum.exe", "observe"], "posix"),
+        # The gate form carries an extra token and must round-trip too.
+        ([r"C:\Users\Jane Doe\venv\Scripts\continuum.exe", "--db", r"D:\my db\a.db", "gate"], "nt"),
+    ],
+)
+def test_join_and_split_command_round_trip_on_a_path_with_spaces(
+    monkeypatch: pytest.MonkeyPatch, command_parts: list[str], platform: str
+) -> None:
+    """``_split_command`` is the inverse of ``_join_command`` on both families.
+
+    The two shells disagree on quoting, so the join is not the inverse of a
+    single split: the round trip only holds if each branch is paired with its
+    own. An unpaired branch is how every installed hook dies quietly on
+    Windows, because the recogniser stops seeing its own command and then
+    appends a duplicate on the next install (#484, #526).
+    """
+    from continuum import clienthooks
+
+    monkeypatch.setattr(clienthooks.os, "name", platform)
+    joined = clienthooks._join_command(command_parts)
+    assert clienthooks._split_command(joined) == command_parts
+
+
+def test_a_windows_path_stays_ours_under_the_cmd_exe_convention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The round trip is only half the contract: install and remove both decide
+    ownership through :func:`_is_managed_hook`, so a command that survives the
+    round trip but stops being recognised would still append a duplicate on
+    every re-run (#484, #526).
+
+    Paired deliberately with the branch that can actually host it: a Windows
+    path is only a native executable path under ``cmd.exe``, and the same
+    string under POSIX shlex is correctly not one.
+    """
+    from continuum import clienthooks
+
+    monkeypatch.setattr(clienthooks.os, "name", "nt")
+    command = clienthooks._join_command(
+        [r"C:\Program Files\continuum\Scripts\continuum.exe", "observe"]
+    )
+    assert command.startswith('"'), "cmd.exe quoting is expected on this branch"
+    assert clienthooks._split_command(command) == [
+        r"C:\Program Files\continuum\Scripts\continuum.exe",
+        "observe",
+    ]
+    assert clienthooks._is_managed_hook({"command": command}, "observe")
