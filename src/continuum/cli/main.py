@@ -23,6 +23,7 @@ See ``continuum.cli.exitcodes``.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import re
@@ -58,7 +59,6 @@ from continuum.gate import (
     DEFAULT_GATE_CONFIG_PATH,
     GateConfigError,
     collect_consumed_authorities,
-    is_memory_key,
     load_gate_config,
 )
 from continuum.gate import (
@@ -3813,19 +3813,21 @@ def cmd_actions(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
 
 
 def cmd_forget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
-    """Enumerate memory writes for a tenant and tombstone them (issue #567, parent #304).
+    """Enumerate memory writes for a tenant and tombstone them (issue #1417, parent #304).
 
-    Every memory write is a ledger row keyed by tenant namespace, so
-    enumeration is a filter over ``rendered_key``. The command lists
-    exactly what to delete externally and, unless ``--dry-run``, appends
-    a ``MEMORY_TOMBSTONED`` event. The chain keeps hashes, not plaintext,
-    so logical deletion does not break ``verify()``. Physical removal of
-    historical hashes is out of scope by design.
+    Every memory write is a ledger row keyed by tenant namespace, so enumeration
+    answers a right-to-erasure order: it lists exactly what to delete from the
+    target vector database and, unless ``--dry-run``, appends a
+    ``MEMORY_TOMBSTONED`` event recording what was enumerated, why, and who
+    authorised it. The chain keeps hashes, not plaintext, so logical deletion
+    does not break ``verify()``. Physical removal of historical hashes is out of
+    scope by design.
 
-    When ``--run-id`` is given, enumeration is scoped to that run;
-    otherwise it scans every run in storage. The tombstone is written
-    to the target run (explicit ``--run-id`` or the active run). Dry-run
-    never writes.
+    Enumeration is an indexed read against the ``action_index`` projection
+    rather than a fold over every run's log. When ``--run-id`` is given it is
+    scoped to that run; otherwise it is store-wide, because memory identity is
+    global to the store rather than to the run. The tombstone is written to the
+    target run (explicit ``--run-id`` or the active run). Dry-run never writes.
     """
     tenant = getattr(args, "tenant", None)
     if not tenant or not str(tenant).strip():
@@ -3833,6 +3835,7 @@ def cmd_forget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         return ExitCode.ERROR
     tenant = str(tenant).strip()
     reason = getattr(args, "reason", "") or ""
+    operator = (getattr(args, "operator", None) or "").strip() or getpass.getuser()
     dry_run = bool(getattr(args, "dry_run", False))
     run_filter = getattr(args, "run_id", None)
 
@@ -3842,65 +3845,38 @@ def cmd_forget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         active = storage.get_active_run()
         target_run_id = active.run_id if active else None
 
-    # Enumerate: scan runs for memory actions whose rendered_key contains tenant
-    hits: list[dict[str, str]] = []
-    record_keys: set[str] = set()
-    runs_to_scan = []
+    # Enumerate via the action_index projection: the ledger key is a digest of
+    # the rendered identity, so the tenant is matched on the index's
+    # rendered_key rather than by folding every run's full log.
     if run_filter:
         try:
             storage.get_run(run_filter)
-            runs_to_scan = [storage.get_run(run_filter)]
         except Exception as exc:
             print(f"error: {exc}", file=out)
             return ExitCode.NOT_FOUND
-    else:
-        runs_to_scan = list(storage.list_runs())
+    hits = storage.enumerate_tenant_memory(tenant, run_id=run_filter)
+    record_keys = {hit["record_key"] for hit in hits}
 
-    for run in runs_to_scan:
-        try:
-            events = storage.read_all_events(run.run_id)
-        except Exception:
-            continue
-        for ev in events:
-            if ev.type != EventType.ACTION_RECORDED:
-                continue
-            payload = dict(ev.payload)
-            rendered = payload.get("rendered_key") or ""
-            if not isinstance(rendered, str) or not is_memory_key(rendered):
-                continue
-            parts = rendered.split(":")
-            if rendered.startswith("memory:"):
-                # memory:{store_id}:{tenant_id}:{namespace}:{record_key...}
-                if len(parts) < 5:
-                    continue
-                tenant_in_key = parts[2]
-                if tenant_in_key != tenant:
-                    continue
-                record_key = ":".join(parts[4:])
-            else:
-                # mem:{store_id}:{tenant}:{record_key...}
-                if len(parts) < 4:
-                    continue
-                tenant_in_key = parts[2]
-                if tenant_in_key != tenant:
-                    continue
-                record_key = ":".join(parts[3:])
-            hits.append({"run_id": run.run_id, "rendered_key": rendered, "record_key": record_key})
-            record_keys.add(record_key)
-
-    # Also check tombstone history to avoid re-tombstoning? No, enumeration is idempotent
     sorted_keys = sorted(record_keys)
+    external_keys = sorted({h["rendered_key"] for h in hits})
     payload_out: dict[str, object] = {
         "tenant": tenant,
         "record_keys": sorted_keys,
+        "external_keys": external_keys,
         "hits": hits,
         "dry_run": dry_run,
         "reason": reason,
+        "operator": operator,
+        "operator_authorization": operator,
     }
     lines = [f"Tenant {tenant!r}: {len(sorted_keys)} record(s) found"]
     if sorted_keys:
         for rk in sorted_keys:
             lines.append(f"  - {rk}")
+        if external_keys:
+            lines.append("External keys to purge:")
+            for ek in external_keys:
+                lines.append(f"    {ek}")
     else:
         lines.append("  (no matching memory records)")
     if dry_run:
@@ -3923,7 +3899,11 @@ def cmd_forget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             tombstone_payload = {
                 "tenant": tenant,
                 "record_keys": sorted_keys,
+                "external_keys": external_keys,
+                "record_key_pattern": f"{tenant}:*",
                 "reason": reason,
+                "operator": operator,
+                "operator_authorization": operator,
                 "hits": len(hits),
                 "hashes_kept": True,
             }
@@ -5132,6 +5112,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--run-id", default=None, help="target run for tombstone (default: active run)."
     )
     forget.add_argument("--reason", default="", help="reason for erasure.")
+    forget.add_argument(
+        "--operator",
+        default=None,
+        help="identity authorising the erasure (default: the local user). "
+        "Recorded on the tombstone so the audit trail names who ordered it.",
+    )
     forget.add_argument("--dry-run", action="store_true", help="list only, do not write tombstone.")
 
     reconcile_auto = with_run(

@@ -150,6 +150,10 @@ class EventType(StrEnum):
 
     # precompact hook: context compaction boundary for agents that summarize history
     PRECOMPACT_HOOK = "PRECOMPACT_HOOK"
+
+    # tenant memory logical tombstoning (issues #304, #567, #1417): GDPR right-to-erasure
+    # and compliance audit seal. Records tenant identifier, record key pattern,
+    # tombstone reason, and operator authorization.
     MEMORY_TOMBSTONED = "MEMORY_TOMBSTONED"
 
     # outbound notifications (issue #305): the bell next to the HITL door.

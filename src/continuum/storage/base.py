@@ -285,6 +285,54 @@ class Storage(ABC):
         """
         raise NotImplementedError
 
+    def enumerate_tenant_memory(
+        self, tenant: str, *, run_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """A tenant's memory writes, as ``{"run_id", "rendered_key", "record_key", "status"}``.
+
+        Tenant-level enumeration for the right-to-erasure surface (issue #1417).
+        Indexed engines answer it from ``action_index``; this default is the
+        event-scan fallback for engines with ``supports_action_index`` False, so
+        ``continuum forget`` behaves the same everywhere it can run at all.
+        Memory identity is tenant-scoped and global to the store, so the scan is
+        store-wide unless ``run_id`` narrows it.
+
+        Duplicate writes of the same key collapse: the ledger is one row per key,
+        and an erasure order asks for the record, not for every attempt that
+        touched it.
+        """
+        from continuum.events import EventType
+        from continuum.gate import is_memory_key, split_memory_key
+
+        hits: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        runs = [self.get_run(run_id)] if run_id is not None else list(self.list_runs())
+        for run in runs:
+            for event in self.read_all_events(run.run_id):
+                if event.type is not EventType.ACTION_RECORDED:
+                    continue
+                rendered = event.payload.get("rendered_key")
+                if not isinstance(rendered, str) or not is_memory_key(rendered):
+                    continue
+                parsed = split_memory_key(rendered)
+                if parsed is None or parsed[0] != tenant:
+                    continue
+                identity = (run.run_id, rendered)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                action = event.payload.get("action")
+                status = str(action.get("status", "")) if isinstance(action, Mapping) else ""
+                hits.append(
+                    {
+                        "run_id": run.run_id,
+                        "rendered_key": rendered,
+                        "record_key": parsed[1],
+                        "status": status,
+                    }
+                )
+        return hits
+
     # -- lifecycle -------------------------------------------------------- #
 
     @abstractmethod

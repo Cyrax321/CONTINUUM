@@ -47,6 +47,7 @@ __all__ = [
     "MEMORY_REQUIRED_FIELDS",
     "is_memory_template",
     "is_memory_key",
+    "split_memory_key",
     "load_gate_config",
     "normalize_key_value",
     "render_key",
@@ -234,6 +235,37 @@ def is_memory_template(template: str) -> bool:
 def is_memory_key(rendered: str) -> bool:
     """Whether a rendered key is a memory-store identity."""
     return rendered.startswith(MEMORY_KEY_PREFIXES)
+
+
+def split_memory_key(rendered: str) -> tuple[str, str] | None:
+    """The ``(tenant, record_key)`` a memory key is scoped to, or None.
+
+    A memory key carries the tenant in a fixed position so the boundary is part
+    of the identity rather than something the caller asserts alongside it. Two
+    shapes are in circulation and both put the tenant third:
+
+    ``mem:{store_id}:{tenant}:{record_key...}`` and
+    ``memory:{store_id}:{tenant}:{namespace}:{record_key...}``.
+
+    The record key keeps any colons it contains (``doc:section:1`` is one record
+    key, not three segments), so the whole tail after the tenant-identifying
+    prefix is returned verbatim. Returns None when the key is not a memory key
+    or does not carry enough segments to place the tenant, because a key that
+    cannot be parsed cannot be shown to belong to anyone and must not be
+    silently attributed (issue #1417).
+    """
+    if not is_memory_key(rendered):
+        return None
+    parts = rendered.split(":")
+    if rendered.startswith("memory:"):
+        # memory:{store_id}:{tenant}:{namespace}:{record_key...}
+        if len(parts) < 5:
+            return None
+        return parts[2], ":".join(parts[4:])
+    # mem:{store_id}:{tenant}:{record_key...}
+    if len(parts) < 4:
+        return None
+    return parts[2], ":".join(parts[3:])
 
 
 def load_gate_config(path: Path) -> dict[str, dict[str, Any]] | None:

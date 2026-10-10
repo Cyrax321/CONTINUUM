@@ -64,15 +64,32 @@ def test_forget_enumerates_and_tombstones(tmp_path: Path) -> None:
         report = store.verify_events("run_1")
         assert report.ok is True
 
-    # Now real forget
+    # Now real forget with operator authorization
     code, out, err = _run_cli(
-        ["--json", "forget", "--tenant", "acme", "--run-id", "run_1", "--reason", "gdpr"], db
+        [
+            "--json",
+            "forget",
+            "--tenant",
+            "acme",
+            "--run-id",
+            "run_1",
+            "--reason",
+            "gdpr",
+            "--operator",
+            "auditor_1",
+        ],
+        db,
     )
     assert code == 0, f"forget failed: {out} {err}"
     data = json.loads(out)
     assert data["tenant"] == "acme"
     assert data["tombstone_run"] == "run_1"
     assert "tombstone_sequence" in data
+    assert sorted(data["external_keys"]) == [
+        "mem:pgvector_main:acme:rec-1",
+        "mem:pgvector_main:acme:rec-2",
+    ]
+    assert data["operator"] == "auditor_1"
     # Check tombstone event
     with SQLiteStorage(db) as store:
         events = list(store.read_events("run_1"))
@@ -80,7 +97,14 @@ def test_forget_enumerates_and_tombstones(tmp_path: Path) -> None:
         assert len(tombstones) == 1
         assert tombstones[0].payload["tenant"] == "acme"
         assert sorted(tombstones[0].payload["record_keys"]) == ["rec-1", "rec-2"]
+        assert sorted(tombstones[0].payload["external_keys"]) == [
+            "mem:pgvector_main:acme:rec-1",
+            "mem:pgvector_main:acme:rec-2",
+        ]
         assert tombstones[0].payload["reason"] == "gdpr"
+        assert tombstones[0].payload["operator"] == "auditor_1"
+        assert tombstones[0].payload["operator_authorization"] == "auditor_1"
+        assert tombstones[0].payload["record_key_pattern"] == "acme:*"
         assert tombstones[0].payload["hashes_kept"] is True
         # Verify still passes after tombstone
         report = store.verify_events("run_1")

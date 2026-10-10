@@ -172,10 +172,13 @@ CREATE TABLE IF NOT EXISTS action_index (
     action_id TEXT NOT NULL,
     status TEXT NOT NULL,
     updated_seq BIGINT NOT NULL,
-    action_json TEXT NOT NULL
+    action_json TEXT NOT NULL,
+    rendered_key TEXT
 );
 
 CREATE INDEX IF NOT EXISTS action_index_run ON action_index(run_id);
+CREATE INDEX IF NOT EXISTS action_index_rendered_key
+    ON action_index(rendered_key) WHERE rendered_key IS NOT NULL;
 """
 
 
@@ -256,7 +259,18 @@ class PostgresStorage(Storage):
     def _create_schema(self) -> None:
         with self._lock:
             self._connection.execute(_SCHEMA)
+            # Postgres has no migration runner: the schema is created
+            # idempotently, so a database written before the column existed
+            # still has the old shape and is widened here (issue #1417).
+            self._connection.execute(
+                "ALTER TABLE action_index ADD COLUMN IF NOT EXISTS rendered_key TEXT"
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS action_index_rendered_key "
+                "ON action_index(rendered_key) WHERE rendered_key IS NOT NULL"
+            )
             self._backfill_action_index()
+            self._backfill_rendered_key()
 
     def _backfill_action_index(self) -> None:
         """Seed the projection from the log when it is empty (issue #216).
@@ -296,14 +310,53 @@ class PostgresStorage(Storage):
             entry = index_entry_from_payload(EventType(row["type"]), payload)
             if entry is None:
                 continue
-            key, run_id, action_id, status, action_json = entry
+            key, run_id, action_id, status, action_json, rendered_key = entry
             self._connection.execute(
                 "INSERT INTO action_index(key, run_id, action_id, status, "
-                "updated_seq, action_json) VALUES (%s, %s, %s, %s, %s, %s) "
+                "updated_seq, action_json, rendered_key) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (key) DO UPDATE SET run_id = EXCLUDED.run_id, "
                 "action_id = EXCLUDED.action_id, status = EXCLUDED.status, "
-                "updated_seq = EXCLUDED.updated_seq, action_json = EXCLUDED.action_json",
-                (key, run_id, action_id, status, index_order_for(row["timestamp"]), action_json),
+                "updated_seq = EXCLUDED.updated_seq, action_json = EXCLUDED.action_json, "
+                "rendered_key = COALESCE(EXCLUDED.rendered_key, action_index.rendered_key)",
+                (
+                    key,
+                    run_id,
+                    action_id,
+                    status,
+                    index_order_for(row["timestamp"]),
+                    action_json,
+                    rendered_key,
+                ),
+            )
+
+    def _backfill_rendered_key(self) -> None:
+        """Fill ``rendered_key`` on pre-existing rows from the log (issue #1417).
+
+        Only the index's existing rows are touched: a database written before
+        the column existed keeps every row NULL, and the projection's own
+        backfill only runs against an empty table. Memory writes carry the
+        plaintext identity, so this is what makes an upgraded store answer the
+        same tenant query a fresh one does. Compacted stores keep their oldest
+        memory writes in ``events_archive`` only, so both tables are read.
+        """
+        rows = self._connection.execute(
+            "SELECT timestamp, type, payload FROM ("
+            "SELECT timestamp, type, payload FROM events_archive "
+            "UNION ALL "
+            "SELECT timestamp, type, payload FROM events) "
+            "WHERE type IN ('ACTION_RECORDED', 'ACTION_RECONCILED', 'ACTION_COMPENSATED')"
+        ).fetchall()
+        for row in rows:
+            payload = (
+                row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
+            )
+            entry = index_entry_from_payload(EventType(row["type"]), payload)
+            if entry is None or entry[5] is None:
+                continue
+            self._connection.execute(
+                "UPDATE action_index SET rendered_key = %s WHERE key = %s AND rendered_key IS NULL",
+                (entry[5], entry[0]),
             )
 
     # -- transactions ----------------------------------------------------- #
@@ -648,15 +701,24 @@ class PostgresStorage(Storage):
         entry = index_entry_from_payload(event.type, target_payload)
         if entry is None:
             return
-        key, run_id, action_id, status, action_json = entry
+        key, run_id, action_id, status, action_json, rendered_key = entry
         try:
             self._connection.execute(
                 "INSERT INTO action_index(key, run_id, action_id, status, "
-                "updated_seq, action_json) VALUES (%s, %s, %s, %s, %s, %s) "
+                "updated_seq, action_json, rendered_key) VALUES (%s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (key) DO UPDATE SET run_id = EXCLUDED.run_id, "
                 "action_id = EXCLUDED.action_id, status = EXCLUDED.status, "
-                "updated_seq = EXCLUDED.updated_seq, action_json = EXCLUDED.action_json",
-                (key, run_id, action_id, status, index_order_for(event.timestamp), action_json),
+                "updated_seq = EXCLUDED.updated_seq, action_json = EXCLUDED.action_json, "
+                "rendered_key = COALESCE(EXCLUDED.rendered_key, action_index.rendered_key)",
+                (
+                    key,
+                    run_id,
+                    action_id,
+                    status,
+                    index_order_for(event.timestamp),
+                    action_json,
+                    rendered_key,
+                ),
             )
         except self._psycopg.IntegrityError as exc:
             raise CorruptedRecord(
@@ -750,6 +812,47 @@ class PostgresStorage(Storage):
                 f"action index row for key {key[:12]}... failed to load: {exc}"
             ) from exc
 
+    def enumerate_tenant_memory(
+        self, tenant: str, *, run_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Indexed enumeration of a tenant's memory writes (issue #1417).
+
+        Mirrors the SQLite engine: a range scan per memory prefix over the
+        ``rendered_key`` index, with the tenant decided in Python because the
+        two key shapes put the record key at different positions.
+        """
+        from continuum.gate import MEMORY_KEY_PREFIXES, split_memory_key
+
+        hits: list[dict[str, Any]] = []
+        with self._read():
+            for prefix in MEMORY_KEY_PREFIXES:
+                query = (
+                    "SELECT run_id, rendered_key, status FROM action_index "
+                    "WHERE rendered_key >= %s AND rendered_key < %s"
+                )
+                params: list[Any] = [prefix, prefix[:-1] + chr(ord(prefix[-1]) + 1)]
+                if run_id is not None:
+                    query += " AND run_id = %s"
+                    params.append(run_id)
+                for row in self._connection.execute(query, params).fetchall():
+                    rendered = row["rendered_key"]
+                    if rendered is None:
+                        continue
+                    parsed = split_memory_key(rendered)
+                    if parsed is None or parsed[0] != tenant:
+                        continue
+                    hits.append(
+                        {
+                            "run_id": row["run_id"],
+                            "rendered_key": rendered,
+                            "record_key": parsed[1],
+                            "status": row["status"],
+                        }
+                    )
+        if not hits:
+            return super().enumerate_tenant_memory(tenant, run_id=run_id)
+        return hits
+
     def rebuild_action_index(self) -> int:
         """Recompute the whole index from the log; returns corrected rows.
 
@@ -776,9 +879,9 @@ class PostgresStorage(Storage):
             with self._connection.cursor() as cur:
                 cur.executemany(
                     "INSERT INTO action_index(key, run_id, action_id, status, "
-                    "updated_seq, action_json) VALUES (%s, %s, %s, %s, %s, %s)",
+                    "updated_seq, action_json, rendered_key) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                     [
-                        (key, entry[1], entry[2], entry[3], seq, entry[4])
+                        (key, entry[1], entry[2], entry[3], seq, entry[4], entry[5])
                         for key, (entry, seq) in canonical.items()
                     ],
                 )
@@ -811,7 +914,9 @@ class PostgresStorage(Storage):
         changed = sum(1 for k, val in expected.items() if stored.get(k) != val)
         return len(extra) + changed
 
-    def _canonical_index_rows(self) -> dict[str, tuple[tuple[str, str, str, str, str], int]]:
+    def _canonical_index_rows(
+        self,
+    ) -> dict[str, tuple[tuple[str, str, str, str, str, str | None], int]]:
         """Fold every run's action events; global last-write-per-key wins.
 
         The order value is not a position in the row stream -- it has to be
@@ -843,7 +948,7 @@ class PostgresStorage(Storage):
                 "SELECT timestamp, run_id, sequence, type, payload FROM events) "
                 "ORDER BY timestamp, run_id, sequence"
             ).fetchall()
-        canonical: dict[str, tuple[tuple[str, str, str, str, str], int]] = {}
+        canonical: dict[str, tuple[tuple[str, str, str, str, str, str | None], int]] = {}
         for row in rows:
             raw = row["payload"]
             if not isinstance(raw, dict):

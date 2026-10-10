@@ -73,11 +73,18 @@ def _maintain_action_index(
     entry = index_entry_from_payload(event.type, target_payload)
     if entry is None:
         return
-    key, run_id, action_id, status, action_json = entry
+    key, run_id, action_id, status, action_json, rendered_key = entry
     conn.execute(
-        "INSERT OR REPLACE INTO action_index(key, run_id, action_id, status, "
-        "updated_seq, action_json) VALUES (?, ?, ?, ?, ?, ?)",
-        (key, run_id, action_id, status, order_seq, action_json),
+        "INSERT INTO action_index(key, run_id, action_id, status, "
+        "updated_seq, action_json, rendered_key) VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET "
+        "run_id = excluded.run_id, "
+        "action_id = excluded.action_id, "
+        "status = excluded.status, "
+        "updated_seq = excluded.updated_seq, "
+        "action_json = excluded.action_json, "
+        "rendered_key = COALESCE(excluded.rendered_key, action_index.rendered_key)",
+        (key, run_id, action_id, status, order_seq, action_json, rendered_key),
     )
 
 
@@ -685,6 +692,49 @@ class SQLiteStorage(Storage):
                 f"action index row for key {key[:12]}... failed to load: {exc}"
             ) from exc
 
+    def enumerate_tenant_memory(
+        self, tenant: str, *, run_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Indexed enumeration of a tenant's memory writes (issue #1417).
+
+        Ranged over the ``rendered_key`` index instead of folding every run's
+        log, so a right-to-erasure audit is a seek per memory prefix rather
+        than a scan of all recorded history. Tenant is a fixed segment of the
+        rendered identity, so the prefix scan narrows to memory rows and the
+        tenant match is decided in Python where the two key shapes differ.
+        """
+        from continuum.gate import MEMORY_KEY_PREFIXES, split_memory_key
+
+        hits: list[dict[str, Any]] = []
+        with self._read() as conn:
+            for prefix in MEMORY_KEY_PREFIXES:
+                query = (
+                    "SELECT run_id, rendered_key, status FROM action_index "
+                    "WHERE rendered_key >= ? AND rendered_key < ?"
+                )
+                params: list[Any] = [prefix, prefix[:-1] + chr(ord(prefix[-1]) + 1)]
+                if run_id is not None:
+                    query += " AND run_id = ?"
+                    params.append(run_id)
+                for row in conn.execute(query, params):
+                    rendered = row["rendered_key"]
+                    if rendered is None:
+                        continue
+                    parsed = split_memory_key(rendered)
+                    if parsed is None or parsed[0] != tenant:
+                        continue
+                    hits.append(
+                        {
+                            "run_id": row["run_id"],
+                            "rendered_key": rendered,
+                            "record_key": parsed[1],
+                            "status": row["status"],
+                        }
+                    )
+        if not hits:
+            return super().enumerate_tenant_memory(tenant, run_id=run_id)
+        return hits
+
     def action_index_drift(self) -> int:
         """Count index rows that disagree with the event log. Read-only.
 
@@ -721,9 +771,9 @@ class SQLiteStorage(Storage):
             conn.execute("DELETE FROM action_index")
             conn.executemany(
                 "INSERT OR REPLACE INTO action_index(key, run_id, action_id, status, "
-                "updated_seq, action_json) VALUES (?, ?, ?, ?, ?, ?)",
+                "updated_seq, action_json, rendered_key) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
-                    (key, entry[1], entry[2], entry[3], seq, entry[4])
+                    (key, entry[1], entry[2], entry[3], seq, entry[4], entry[5])
                     for key, (entry, seq) in canonical.items()
                 ],
             )
@@ -735,7 +785,9 @@ class SQLiteStorage(Storage):
         corrections += len(set(before) - set(canonical))
         return corrections
 
-    def _canonical_index_rows(self) -> dict[str, tuple[tuple[str, str, str, str, str], int]]:
+    def _canonical_index_rows(
+        self,
+    ) -> dict[str, tuple[tuple[str, str, str, str, str, str | None], int]]:
         """Fold the log into ``{key: ((entry...), order_seq)}``, last write wins.
 
         The archive and the live log are one stream, not two segments.
@@ -759,7 +811,7 @@ class SQLiteStorage(Storage):
                 "SELECT timestamp, run_id, sequence, type, payload FROM events) "
                 "ORDER BY timestamp, run_id, sequence"
             ).fetchall()
-        canonical: dict[str, tuple[tuple[str, str, str, str, str], int]] = {}
+        canonical: dict[str, tuple[tuple[str, str, str, str, str, str | None], int]] = {}
         for row in rows:
             try:
                 payload = json.loads(row["payload"])
