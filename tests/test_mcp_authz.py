@@ -369,6 +369,104 @@ def test_an_unidentified_connection_still_gets_a_remedy() -> None:
     assert POLICY_FILENAME in message
     assert "Read-only tools remain available" in message
 
+
+#: Characters either side of a real name, and the alias syntax itself. None of
+#: these may reach a grant that the declared names did not.
+NEAR_MISSES = (
+    "cur",
+    "curs",
+    "cursors",
+    "cursorx",
+    "x-cursor",
+    "my-cursor-impersonator",
+    "cursor-vs",
+    "cursor-vscode-extra",
+    "visual-studio",
+    "cursor:cursor-vscode",
+    "cursor,cursor-vscode",
+    "*",
+    "**",
+    "*cursor",
+    "cursor*",
+    "ANY",
+    "all",
+)
+
+
+@pytest.mark.parametrize("near_miss", NEAR_MISSES)
+def test_near_miss_names_are_refused(near_miss: str) -> None:
+    """No prefix, suffix or substring rule, with or without declared aliases.
+
+    ``cur`` and ``cursors`` are refused because nothing about them is a
+    spelling of ``cursor``. A rule accepting either would hand the grant to
+    anyone who typed the right characters, which is why there is no such rule:
+    a second name is a declared alias or it is a refusal, never an inference.
+    """
+    policy = AuthorizationPolicy([INSTALL_BAKED], aliases=[DECLARED_ALIASES])
+    assert not policy.permits(near_miss), near_miss
+
+
+@pytest.mark.parametrize("observed", ("cursor-vscode", "visual-studio-code"))
+def test_an_undeclared_variant_is_refused_by_name_not_by_guesswork(observed: str) -> None:
+    """No declaration, no grant: the alias set is the only way in.
+
+    Tolerance for naming variants must not become tolerance for naming
+    anything. These two names are real, and they are still strangers until a
+    host profile says which client sends them.
+    """
+    policy = AuthorizationPolicy([INSTALL_BAKED])
+    assert not policy.permits(observed)
+    with pytest.raises(NotAuthorized) as excinfo:
+        policy.require(observed, "continuum_record_progress")
+    message = str(excinfo.value)
+    assert repr(observed) in message  # what was actually seen
+    assert INSTALL_BAKED in message  # what is accepted
+    assert POLICY_ENV_VAR_ALIAS in message  # the exact variable to set
+
+
+def test_the_empty_allowlist_still_refuses_everyone() -> None:
+    """The refuse-all default is untouched by everything above."""
+    policy = AuthorizationPolicy()
+    assert policy.denies_everything
+    assert not policy.allow_any
+    for name in (INSTALL_BAKED, *OBSERVED_NAMES, *NEAR_MISSES):
+        assert not policy.permits(name), name
+
+
+def test_an_alias_is_not_a_client_in_its_own_right() -> None:
+    """Declaring the alias does not replace the canonical grant.
+
+    ``aliases`` says "this identity also answers to that", so a server that
+    allows nobody has nothing for an alias to attach to.
+    """
+    policy = AuthorizationPolicy(aliases=[DECLARED_ALIASES])
+    assert policy.denies_everything
+    assert not policy.permits("cursor-vscode")
+    assert not policy.permits(INSTALL_BAKED)
+
+
+def test_an_alias_whose_canonical_is_not_allowed_grants_nothing() -> None:
+    """The obvious way in: allow something else, declare cursor's aliases."""
+    policy = AuthorizationPolicy(["gemini-cli"], aliases=[DECLARED_ALIASES])
+    assert policy.aliases == frozenset()
+    assert not policy.permits("cursor-vscode")
+    assert not policy.permits(INSTALL_BAKED)
+
+
+@pytest.mark.parametrize("declaration", ["cursor-vscode", ":cursor-vscode", "cursor:"])
+def test_a_malformed_alias_declaration_raises(declaration: str) -> None:
+    """A declaration that grants nothing must say so, not pass silently."""
+    with pytest.raises(ValueError, match=ALIASES_ENV_VAR):
+        AuthorizationPolicy([INSTALL_BAKED], aliases=[declaration])
+
+
+def test_a_malformed_alias_key_in_the_policy_file_raises(tmp_path: Path) -> None:
+    path = tmp_path / POLICY_FILENAME
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"allow": [INSTALL_BAKED], "aliases": {"cursor": "x"}}))
+    with pytest.raises(ValueError, match="aliases"):
+        load_policy(root=tmp_path, env={})
+
 # --- resolving the policy --------------------------------------------------- #
 
 
