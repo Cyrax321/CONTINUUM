@@ -1353,6 +1353,8 @@ class Action(BaseModel):
     budget at all, and is also the pre-#1052 legacy value, re-derived on the next
     claim.
     """
+    rendered_key: str | None = None
+    """The un-hashed, caller-facing key from the claim (issue #1536)."""
 
     @field_validator("origin_digest")
     @classmethod
