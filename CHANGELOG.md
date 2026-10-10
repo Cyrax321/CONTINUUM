@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+Test counts: ~3,360 collected on a minimal env.
+
 ### Added
 
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
@@ -254,7 +256,6 @@ All notable changes to this project are documented here. The format follows
   all its prose is rephrased, so that one pattern reads all six READMEs.
   `references/testing.md`, `references/install.md`, and the translated READMEs
   now carry the same figures as `README.md`.
->>>>>>> origin/main
 
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
@@ -1068,7 +1069,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~3,360 collected, ~3,360 passed, ~0 skipped on a minimal env).
+  (3,325 collected, ~3,325 passed, ~0 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
