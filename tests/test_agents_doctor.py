@@ -342,9 +342,12 @@ def test_toml_config_is_scanned(env: tuple[Path, Path], monkeypatch: pytest.Monk
             "mutating_clients": "claude-code",
         },
     )
+    # A quoted TOML string treats a backslash as an escape, so a Windows
+    # command path such as C:\Users\runneradmin\... makes `\\U` invalid and
+    # the file fails to parse. A literal string takes the path as written.
     (root / "config.toml").write_text(
-        f'[mcpServers."{SERVER_NAME}"]\ncommand = "{live_command()}"\n'
-        f'env.CONTINUUM_MCP_MUTATING_CLIENTS = "claude-code"\n',
+        f"[mcpServers.\"{SERVER_NAME}\"]\ncommand = '{live_command()}'\n"
+        f"env.CONTINUUM_MCP_MUTATING_CLIENTS = 'claude-code'\n",
         encoding="utf-8",
     )
     monkeypatch.delenv(POLICY_ENV_VAR_ALIAS, raising=False)
@@ -397,9 +400,12 @@ def test_a_yaml_host_is_read_not_reported_unconfigured(env: tuple[Path, Path]) -
     profile = HOST_PROFILES[host]
     config = root / profile["project_settings"]
     config.parent.mkdir(parents=True, exist_ok=True)
+    # A double-quoted YAML scalar processes backslash escapes too, so a Windows
+    # command path carries `\U` and the file stops parsing. Single quotes take
+    # the path exactly as written on every platform.
     config.write_text(
-        f'mcpServers:\n  "{SERVER_NAME}":\n    command: "{live_command()}"\n'
-        f'    env:\n      {POLICY_ENV_VAR_ALIAS}: "{profile["mutating_clients"]}"\n',
+        f"mcpServers:\n  \"{SERVER_NAME}\":\n    command: '{live_command()}'\n"
+        f"    env:\n      {POLICY_ENV_VAR_ALIAS}: '{profile['mutating_clients']}'\n",
         encoding="utf-8",
     )
 

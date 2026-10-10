@@ -64,7 +64,11 @@ def test_round_trip_holds_with_crlf_and_trailing_blanks(source: Path, tmp_path: 
     """Normalisation keeps a Windows checkout from looking permanently drifted."""
 
     crlf = tmp_path / "crlf.md"
-    crlf.write_text(SOURCE.replace("\n", "\r\n") + "\n\n\n", encoding="utf-8")
+    # newline="" keeps the bytes exactly as written. Without it, write_text
+    # translates every "\n" to the platform separator, so on Windows the
+    # "\r\n" already in the text becomes "\r\r\n" and the file no longer
+    # describes the CRLF case this test is about.
+    crlf.write_text(SOURCE.replace("\n", "\r\n") + "\n\n\n", encoding="utf-8", newline="")
     assert source_digest(crlf.read_text(encoding="utf-8")) == source_digest(SOURCE)
 
 
