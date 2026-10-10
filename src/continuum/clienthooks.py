@@ -349,9 +349,16 @@ def install_claude_code_hook(
     matcher: str | None = None,
 ) -> str:
     """Claude Code wrapper; see :func:`install_client_hook`."""
+    profile = CLIENT_PROFILES["claude-code"]
+    kind_defaults: dict[str, tuple[str, str]] = {
+        "observe": (profile["post_event"], profile["write_matcher"]),
+        "gate": (profile["pre_event"], profile["any_matcher"]),
+        "briefing": (profile["start_event"], ""),
+        "precompact": (profile.get("compact_event", "PreCompact"), ""),
+    }
+    event_name, default_matcher = kind_defaults.get(kind, (profile["pre_event"], "*"))
     if matcher is None:
-        matcher = DEFAULT_MATCHER if kind == "observe" else "*"
-    event_name = "PostToolUse" if kind == "observe" else "PreToolUse"
+        matcher = default_matcher
     return _install_hook(settings_path, command, event_name=event_name, matcher=matcher)
 
 

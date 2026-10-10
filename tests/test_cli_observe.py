@@ -343,3 +343,77 @@ def test_a_hook_written_by_an_older_version_is_still_recognised() -> None:
     legacy = r"'D:\pROJ OPEN\CONTINUUM\.venv\Scripts\python.exe' -m continuum.cli observe"
     assert _is_continuum_hook({"command": legacy}, "observe")
     assert not _is_continuum_hook({"command": "some-other-tool observe"}, "observe")
+
+
+def test_install_claude_code_hook_all_kinds_events_and_matchers(tmp_path: Path) -> None:
+    """Each hook kind must be wired to its distinct client event and matcher (#1605)."""
+    settings = tmp_path / "settings.json"
+
+    # observe -> PostToolUse, DEFAULT_MATCHER
+    assert (
+        install_claude_code_hook(settings, "/bin/continuum observe", kind="observe") == "installed"
+    )
+    # briefing -> SessionStart, matcher ""
+    assert (
+        install_claude_code_hook(settings, "/bin/continuum briefing", kind="briefing")
+        == "installed"
+    )
+    # precompact -> PreCompact, matcher ""
+    assert (
+        install_claude_code_hook(settings, "/bin/continuum precompact", kind="precompact")
+        == "installed"
+    )
+    # gate -> PreToolUse, matcher "*"
+    assert install_claude_code_hook(settings, "/bin/continuum gate", kind="gate") == "installed"
+
+    data = json.loads(settings.read_text())["hooks"]
+    assert data["PostToolUse"] == [
+        {
+            "matcher": DEFAULT_MATCHER,
+            "hooks": [{"type": "command", "command": "/bin/continuum observe"}],
+        }
+    ]
+    assert data["SessionStart"] == [
+        {"matcher": "", "hooks": [{"type": "command", "command": "/bin/continuum briefing"}]}
+    ]
+    assert data["PreCompact"] == [
+        {"matcher": "", "hooks": [{"type": "command", "command": "/bin/continuum precompact"}]}
+    ]
+    assert data["PreToolUse"] == [
+        {"matcher": "*", "hooks": [{"type": "command", "command": "/bin/continuum gate"}]}
+    ]
+
+    # Explicit matcher override must be respected
+    custom_settings = tmp_path / "custom.json"
+    install_claude_code_hook(
+        custom_settings, "/bin/continuum briefing", kind="briefing", matcher="on_start"
+    )
+    custom_data = json.loads(custom_settings.read_text())["hooks"]
+    assert custom_data["SessionStart"][0]["matcher"] == "on_start"
+
+
+def test_install_claude_code_hook_precompact_cli_idempotency(tmp_path: Path) -> None:
+    """Installing precompact via wrapper and then CLI must not duplicate entries (#1605)."""
+    settings = tmp_path / "settings.json"
+    wrapper_cmd = "/bin/continuum precompact"
+    assert install_claude_code_hook(settings, wrapper_cmd, kind="precompact") == "installed"
+
+    code, out, err = run("--json", "hooks", "install", "claude-code", "--settings", str(settings))
+    assert code == ExitCode.OK, err
+    data = json.loads(settings.read_text())["hooks"]
+
+    # PreCompact must have exactly one entry (repointed or present, not duplicated)
+    assert len(data["PreCompact"]) == 1
+    # PreToolUse must not have been created for precompact
+    assert "PreToolUse" not in data
+
+
+def test_remove_claude_code_hook_cleans_all_installed_kinds(tmp_path: Path) -> None:
+    """remove_claude_code_hook cleans every managed kind across events (#1605)."""
+    settings = tmp_path / "settings.json"
+    for kind in ("observe", "briefing", "precompact", "gate"):
+        install_claude_code_hook(settings, f"/bin/continuum {kind}", kind=kind)
+
+    assert remove_claude_code_hook(settings) is True
+    data = json.loads(settings.read_text())
+    assert "hooks" not in data or not data["hooks"]

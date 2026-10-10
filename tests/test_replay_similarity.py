@@ -108,3 +108,4 @@ def test_cross_type_matching_is_never_performed() -> None:
     )
     assert kind == "fresh"
     del match
+
