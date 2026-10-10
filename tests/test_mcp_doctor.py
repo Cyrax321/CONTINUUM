@@ -1100,8 +1100,8 @@ def test_the_live_server_refuses_a_name_the_registration_did_not_bake(
     registration = {
         "host": "cursor",
         "settings_path": settings_path,
-        "container_key": None,
-        "container_id": None,
+        "scope": "project",
+        "project_root": tmp_path,
         "baked_client": "cursor-vscode",
     }
 
@@ -1170,8 +1170,8 @@ def test_the_probe_environment_does_not_carry_the_policy_in(
     registration = {
         "host": "cursor",
         "settings_path": settings_path,
-        "container_key": None,
-        "container_id": None,
+        "scope": "project",
+        "project_root": tmp_path,
         "baked_client": "cursor",
     }
     monkeypatch.setenv("CONTINUUM_MCP_MUTATING_CLIENTS", "ambient-shell-name")
@@ -1201,3 +1201,86 @@ def test_a_settings_file_the_doctor_cannot_parse_is_not_a_crash(
     (tmp_path / ".mcp.json").write_text("{not json at all", encoding="utf-8")
 
     assert find_registration(tmp_path) is None
+
+
+def test_every_host_registration_is_found_and_its_env_is_read(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The probe has to see the registration it exists to check.
+
+    find_registration used to parse each settings file as JSON and look for an
+    ``mcpServers`` dict. That described the hosts that shipped before this
+    module did and nothing else: codex files its servers in TOML under
+    ``mcp_servers``, continue in a YAML list, opencode under ``mcp``, and zed
+    under ``context_servers``. Each of those read as no registration, so the
+    permission probe never ran for them. That probe is what install points at
+    for the client names it cannot verify, including zed's capital-Z ``Zed``,
+    so the one check that could have caught it was the check that was skipped.
+
+    Each fixture is written through the host's own shape and format, and each
+    home is isolated so a registration elsewhere on the machine cannot answer
+    in its place. That matters: before the fix, a real ``~/.claude.json`` was
+    returned for all four hosts, which is worse than finding nothing, because
+    it verifies an unrelated file and reports the answer as ours.
+    """
+
+    from continuum.mcp import configfmt
+    from continuum.mcp.install import HOST_PROFILES, SERVER_NAME, host_shape
+
+    pytest.importorskip("yaml")
+    pytest.importorskip("tomli_w")
+    for host, profile in HOST_PROFILES.items():
+        # A directory per host: each fixture is written into a project root
+        # that the next host must not inherit, and _isolated_home cannot
+        # recreate a home that already exists.
+        root = tmp_path / host
+        root.mkdir()
+        _isolated_home(monkeypatch, root)
+        shape = host_shape(host)
+        spec = configfmt.ServerSpec(
+            SERVER_NAME,
+            (str(SCRIPTS_DIR / "continuum-mcp"), "--db", str(root / "continuum.db")),
+            {"CONTINUUM_MCP_MUTATING_CLIENTS": profile["mutating_clients"]},
+        )
+        data: dict[str, Any] = {}
+        shape.put(data, "project", root, spec)
+
+        settings = root / profile["project_settings"]
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        if profile["format"] == "yaml":
+            import yaml
+
+            settings.write_text(yaml.safe_dump(data), encoding="utf-8")
+        elif profile["format"] == "toml":
+            import tomli_w
+
+            settings.write_text(tomli_w.dumps(data), encoding="utf-8")
+        else:
+            settings.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+        registration = doctor.find_registration(root)
+        assert registration is not None, f"{host} registration was not found at all"
+        assert registration["settings_path"] == settings
+        # claude-code and gemini both register into .mcp.json, so a file that
+        # one host wrote is equally the other's and which name comes back
+        # depends on iteration order, not on the file. Every other host names
+        # a file of its own, and for those the name has to be the right one.
+        claimants = [
+            name
+            for name, other in HOST_PROFILES.items()
+            if other["project_settings"] == profile["project_settings"]
+        ]
+        assert registration["host"] in claimants, (
+            f"{host} registration resolved to {registration['host']} at "
+            f"{registration['settings_path']}, which no profile names"
+        )
+        if len(claimants) == 1:
+            assert registration["host"] == host, (
+                f"{host} registration resolved to {registration['host']} at "
+                f"{registration['settings_path']}"
+            )
+        assert registration["baked_client"] == profile["mutating_clients"]
+        assert (
+            doctor._registration_env(registration).get("CONTINUUM_MCP_MUTATING_CLIENTS")
+            == profile["mutating_clients"]
+        ), f"{host} env was read through the wrong key"
