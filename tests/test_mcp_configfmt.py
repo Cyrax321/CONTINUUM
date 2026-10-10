@@ -515,3 +515,180 @@ def test_argv_of_rejects_every_entry_shape_it_cannot_represent() -> None:
     assert DICT_ARRAY.argv_of({"command": "/x/continuum-mcp"}) is None
     assert DICT_ARRAY.argv_of({"command": []}) is None
     assert DICT_ARRAY.argv_of({"command": ["/x/continuum-mcp", 2]}) is None
+
+
+# --------------------------------------------------------------------------- #
+# host profiles
+# --------------------------------------------------------------------------- #
+
+from continuum.mcp import install as mcp_install  # noqa: E402
+
+#: What each host's real config file looks like on arrival, copied from the
+#: vendor's own documentation or a shipped fixture. A profile that reads the
+#: wrong key, or writes the wrong one, fails against these even when every
+#: shape test above passes, which is the point of keeping them: the shape
+#: tests prove the layer works, the fixtures prove the profile is right.
+HOST_FIXTURES: dict[str, dict[str, Any]] = {
+    # https://zed.dev/docs/ai/mcp
+    "zed": {"context_servers": {"local-mcp-server": {"command": "some-command", "args": ["a", "b"], "env": {}}}},
+    # https://opencode.ai/docs/mcp-servers/
+    "opencode": {"$schema": "https://opencode.ai/config.json", "mcp": {"jira": {"type": "remote", "url": "https://jira/mcp"}}},
+    # https://github.com/continuedev/continue/blob/main/docs/customize/deep-dives/mcp.mdx
+    "continue": {
+        "name": "My assistant",
+        "version": "0.0.1",
+        "schema": "v1",
+        "mcpServers": [{"name": "SQLite MCP", "type": "stdio", "command": "npx", "args": ["mcp-sqlite", "/db"]}],
+    },
+    # https://developers.openai.com/codex/config-reference
+    "codex": {"model": "gpt-5", "mcp_servers": {"github": {"command": "npx", "args": ["-y", "gh-mcp"]}}},
+}
+
+#: Formats that need an optional parser, so a run without it reports the
+#: profile as unsupported instead of failing on an ImportError.
+_FORMAT_GUARD = {
+    "toml": importlib.util.find_spec("tomli_w") is not None,
+    "yaml": importlib.util.find_spec("yaml") is not None,
+}
+
+
+def profile_runnable(host: str) -> bool:
+    """Whether this machine can write ``host``'s format at all."""
+    return _FORMAT_GUARD.get(mcp_install.host_format(host), True)
+
+
+PROFILES = sorted(mcp_install.HOST_PROFILES)
+
+
+@pytest.mark.parametrize("host", PROFILES)
+def test_every_profile_declares_the_keys_the_layers_read(host: str) -> None:
+    """A profile missing a key fails here, not as a KeyError mid-write.
+
+    The shape and format lookups are the first thing every host path does, so
+    an incomplete row would otherwise only surface when somebody ran
+    ``mcp install --host`` against it.
+    """
+    profile = mcp_install.HOST_PROFILES[host]
+    for key in (
+        "project_settings",
+        "local_settings",
+        "user_settings",
+        "mutating_clients",
+        "format",
+        "container",
+        "servers_key",
+        "nested_by_project",
+        "argv_style",
+        "env_key",
+        "type_key",
+        "type_value",
+    ):
+        assert key in profile, (host, key)
+    assert profile["format"] in configfmt.FORMATS, host
+    assert profile["container"] in ("dict", "list"), host
+    assert profile["argv_style"] in ("split", "array"), host
+
+
+@pytest.mark.parametrize("host", PROFILES)
+def test_an_install_lands_where_the_vendor_says_it_lands(host: str) -> None:
+    """The written file has the container the vendor's own example shows.
+
+    For the four JSON hosts this runs everywhere. TOML and YAML hosts are
+    exercised through their fixture and shape directly below, because their
+    parsers are optional and a missing one is a refusal, not a defect.
+    """
+    if not profile_runnable(host):
+        pytest.skip(f"{host} needs an optional parser for {mcp_install.host_format(host)}")
+    if mcp_install.host_format(host) != "json":
+        pytest.skip(f"{host} writes {mcp_install.host_format(host)}, covered by the fixture tests")
+
+    shape = mcp_install.host_shape(host)
+    fixture = HOST_FIXTURES.get(host)
+    if fixture is None:
+        # The four hosts that shipped before this layer have no fixture here:
+        # their config files are covered end to end in test_mcp_install.py,
+        # against the real command the vendor documents.
+        data: dict[str, Any] = {}
+    else:
+        # A private copy: the fixtures are module-level, and every test below
+        # writes into the document it is handed.
+        data = json.loads(json.dumps(fixture))
+
+    path = shape.path("project", Path("/proj"))
+    if fixture is not None:
+        assert data[path[-1]] is not None, (host, path, sorted(data))
+
+    spec = configfmt.ServerSpec("continuum-mcp", ("/bin/x", "--db", "/p/d.db"), {"K": "v"})
+    entry = shape.entry(spec)
+    shape.put(data, "project", Path("/proj"), spec)
+
+    assert shape.argv_of(shape.find(data, "project", Path("/proj"), "continuum-mcp")) == [
+        "/bin/x",
+        "--db",
+        "/p/d.db",
+    ]
+    assert entry
+
+
+@pytest.mark.parametrize(
+    ("host", "fixture"),
+    [
+        ("zed", HOST_FIXTURES["zed"]),
+        ("opencode", HOST_FIXTURES["opencode"]),
+        ("continue", HOST_FIXTURES["continue"]),
+        ("codex", HOST_FIXTURES["codex"]),
+    ],
+)
+def test_the_other_servers_in_a_real_config_survive_an_install(
+    host: str, fixture: dict[str, Any]
+) -> None:
+    """Installing beside a host's own servers leaves all of them alone.
+
+    The fixture is that host's documented config with its documented server
+    already in it. Ours goes in beside it and a remove takes only ours back
+    out, which is the property a user with a real config depends on and the
+    one a shape test against an empty document cannot show.
+    """
+    shape = mcp_install.host_shape(host)
+    data = json.loads(json.dumps(fixture))  # a private copy per parametrisation
+
+    status, previous = shape.put(
+        data,
+        "project",
+        Path("/proj"),
+        configfmt.ServerSpec("continuum-mcp", ("/bin/x", "--db", "/p/d.db"), {"K": "v"}),
+    )
+
+    assert status == "installed" and previous is None
+    assert shape.drop(data, "project", Path("/proj"), "continuum-mcp") is True
+    assert data == fixture, (host, data)
+
+
+@pytest.mark.parametrize("host", PROFILES)
+def test_a_foreign_entry_under_our_name_is_never_overwritten(host: str) -> None:
+    """Recognition is per-host, and it has to be narrow on every host.
+
+    ``mcp remove`` deletes on this predicate, so a shape that accepted
+    somebody else's entry would delete it. A list-shaped host is the sharpest
+    case: an entry it does not own is a record in a list, not a key, and
+    getting that wrong either drops a stranger's server or leaves ours.
+    """
+    foreign = {
+        "command": "/opt/manual/continuum-mcp",
+        "args": ["--db", "continuum.db"],
+        "env": {"CONTINUUM_MCP_MUTATING_CLIENTS": "someone-else"},
+    }
+    assert mcp_install._is_managed_server(foreign, host) is False
+
+
+def test_the_verified_client_names_are_the_ones_the_sources_send() -> None:
+    """The two allowlists that were read out of a host's source, pinned.
+
+    Zed sending "Zed" with a capital Z is the whole argument for this check
+    existing: the obvious guess from the product name is wrong, and a wrong
+    one costs the host ten of its thirteen tools with nothing else changing.
+    opencode's is the case where the obvious guess happens to be right, which
+    is exactly why guessing is not a method.
+    """
+    assert mcp_install.HOST_PROFILES["zed"]["mutating_clients"] == "Zed"
+    assert mcp_install.HOST_PROFILES["opencode"]["mutating_clients"] == "opencode"

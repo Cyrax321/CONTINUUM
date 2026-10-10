@@ -164,6 +164,127 @@ HOST_PROFILES: dict[str, dict[str, str]] = {
         "type_key": "type",
         "type_value": "stdio",
     },
+    # --- verified against vendor documentation, sources cited per host below ---
+    #
+    # Codex CLI: TOML, so writing one needs a config parser at install time.
+    # Shape and path from the configuration reference:
+    # https://developers.openai.com/codex/config-reference
+    # ("User-level configuration lives in ~/.codex/config.toml . You can also
+    # add project-scoped overrides in .codex/config.toml files."), and the
+    # mcp_servers.<id>.command / .args / .env entries on the same page.
+    #
+    # MUTATING_CLIENTS IS UNVERIFIED. The reference documents no clientInfo
+    # name and the handshake site could not be read, so "codex-cli" is this
+    # project's best guess and not a citation. If it is wrong the server
+    # still connects and serves only the three read-only tools. That is the
+    # failure `continuum mcp doctor` reports, which is why the guess is
+    # recorded here rather than buried.
+    "codex": {
+        "project_settings": ".codex/config.toml",
+        "local_settings": "~/.codex/config.toml",
+        "user_settings": "~/.codex/config.toml",
+        "local_projects_key": "",
+        "mutating_clients": "codex-cli",
+        "format": "toml",
+        "container": "dict",
+        "servers_key": "mcp_servers",
+        "nested_by_project": "",
+        "argv_style": "split",
+        "env_key": "env",
+        "type_key": "",
+        "type_value": "",
+    },
+    # opencode: one argv array under "command", and "environment" rather than
+    # "env". Shape and paths from https://opencode.ai/docs/mcp-servers/ ("You
+    # can define MCP servers in your OpenCode Config under mcp", the local
+    # example showing "command": ["bun", "x", "my-mcp-command"] and
+    # "environment"), and the schema at
+    # https://github.com/sst/opencode/blob/dev/packages/core/src/config/mcp.ts
+    # (ConfigV2.MCP.Local: type "local", command: String.pipe(Schema.Array),
+    # environment). The user's file is
+    # ~/.config/opencode/opencode.json, the project's is opencode.json in the
+    # workspace root.
+    #
+    # MUTATING_CLIENTS IS VERIFIED. https://github.com/sst/opencode/blob/dev/
+    # packages/opencode/src/mcp/index.ts constructs
+    # `new Client({ name: "opencode", version: InstallationVersion })`, which
+    # is the clientInfo.name the server reads.
+    "opencode": {
+        "project_settings": "opencode.json",
+        "local_settings": "~/.config/opencode/opencode.json",
+        "user_settings": "~/.config/opencode/opencode.json",
+        "local_projects_key": "",
+        "mutating_clients": "opencode",
+        "format": "json",
+        "container": "dict",
+        "servers_key": "mcp",
+        "nested_by_project": "",
+        "argv_style": "array",
+        "env_key": "environment",
+        "type_key": "type",
+        "type_value": "local",
+    },
+    # Continue: a list, not a dict, and each record carries its own name.
+    # Shape and paths from https://github.com/continuedev/continue/blob/main/
+    # docs/customize/deep-dives/mcp.mdx, which shows `mcpServers:` followed by
+    # `- name: SQLite MCP / command: npx / args:` in config.yaml, and
+    # documents the `name`, `type`, `command`, `args` and `env` properties
+    # (with type "stdio" for a local server). The user's file is
+    # ~/.continue/config.yaml and the project's is .continue/config.yaml.
+    #
+    # MUTATING_CLIENTS IS UNVERIFIED. Continue is a VS Code extension whose
+    # MCP client name is not documented; "continue" is this project's best
+    # guess and not a citation. See the codex note above for what a wrong
+    # value costs.
+    "continue": {
+        "project_settings": ".continue/config.yaml",
+        "local_settings": "~/.continue/config.yaml",
+        "user_settings": "~/.continue/config.yaml",
+        "local_projects_key": "",
+        "mutating_clients": "continue",
+        "format": "yaml",
+        "container": "list",
+        "servers_key": "mcpServers",
+        "nested_by_project": "",
+        "argv_style": "split",
+        "env_key": "env",
+        "type_key": "type",
+        "type_value": "stdio",
+        "name_field": "name",
+    },
+    # Zed calls them context servers, not MCP servers, and puts them in its
+    # own settings file rather than in anything MCP-shaped. Shape from
+    # https://zed.dev/docs/ai/mcp, which shows the settings file as
+    # `{"context_servers": {"local-mcp-server": {"command": "...",
+    # "args": [...], "env": {}}}}`; the key is at the top level because
+    # SettingsContent flattens ProjectSettingsContent
+    # (https://github.com/zed-industries/zed/blob/main/crates/settings_content
+    # /src/settings_content.rs) and ProjectSettingsContent declares
+    # `context_servers: HashMap<...>` (crates/settings_content/src/project.rs).
+    # The user's file is ~/.config/zed/settings.json and the project's is
+    # .zed/settings.json.
+    #
+    # MUTATING_CLIENTS IS VERIFIED, and not in the way it looks:
+    # https://github.com/zed-industries/zed/blob/main/crates/context_server/
+    # src/context_server.rs sends `name: "Zed".to_string()`, capital Z. This is
+    # precisely the mismatch that silently costs a host its mutating tools,
+    # and why it is worth citing rather than inferring from the product name.
+    "zed": {
+        "project_settings": ".zed/settings.json",
+        "local_settings": "~/.config/zed/settings.json",
+        "user_settings": "~/.config/zed/settings.json",
+        "local_projects_key": "",
+        "mutating_clients": "Zed",
+        "format": "json",
+        "container": "dict",
+        "servers_key": "context_servers",
+        "nested_by_project": "",
+        "argv_style": "split",
+        "env_key": "env",
+        "type_key": "",
+        "type_value": "",
+    },
+
 }
 
 
