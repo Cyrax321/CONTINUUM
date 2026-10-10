@@ -80,7 +80,7 @@ may use mutating tools; read-only tools stay open.
 ### Client names are matched case-insensitively
 
 Both halves of the handshake key off the same `clientInfo.name` string, and
-clients do not agree on their own capitalisation — the same editor reports
+clients do not agree on their own capitalisation: the same editor reports
 `Cursor` in one release and `cursor` in the next. Every name the allowlist and
 the per-client token map compare is normalised first (whitespace-stripped and
 case-folded), so a grant written as `Cursor` covers a caller naming itself
