@@ -96,7 +96,7 @@ Verifique:
 ```bash
 continuum --help                 # ponto de entrada CLI
 continuum-mcp --help             # ponto de entrada do servidor MCP (precisa de [mcp] ou [dev])
-pytest -q                        # ~3,325 coletados, ~3,325 passando, ~41 pulados em um ambiente mínimo (as contagens exatas variam)
+pytest -q                        # ~3,361 coletados, ~3,361 passando, ~41 pulados em um ambiente mínimo (as contagens exatas variam)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # os três portões que o CI exige
 ```
@@ -499,7 +499,7 @@ O CONTINUUM se situa na interseção de execução durável, rastreamento idempo
 
 ## Status e limitações
 
-- **Testado**: 3,325 passados + 23 pulados em uma execução completa na auditoria de 2026-08-24 desta árvore, CI impõe a suíte em Python 3.11, 3.12 e 3.13, e as contagens variam por plataforma e serviços opcionais como Postgres (ver [STATUS.md](STATUS.md)). A superfície MCP também foi auditada de forma adversarial sobre o protocolo ao vivo, ver [test.md](test.md).
+- **Testado**: 3,361 passados + 23 pulados em uma execução completa na auditoria de 2026-08-24 desta árvore, CI impõe a suíte em Python 3.11, 3.12 e 3.13, e as contagens variam por plataforma e serviços opcionais como Postgres (ver [STATUS.md](STATUS.md)). A superfície MCP também foi auditada de forma adversarial sobre o protocolo ao vivo, ver [test.md](test.md).
 - **No PyPI como `continuum-agent` 0.1.2** (`pip install continuum-agent`, o clone ainda funciona via `pip install .` ver Início rápido).
 - **Autenticação de chamador MCP é opcional por implantação.** Quando `CONTINUUM_MCP_TOKEN` é definido, o servidor recusa cada ferramenta mutante a menos que o chamador apresente esse segredo compartilhado no `_meta.authToken` do handshake `initialize`, segredos por chamador disponíveis via `CONTINUUM_MCP_CLIENT_TOKENS` (pares `name:secret`). Sem nenhum token configurado, a autorização é apenas por identidade declarada (o valor histórico padrão, preservado para uso local de usuário único).
 - **Confirmar estado auto reportado via MCP requer um segredo separado.** `continuum_confirm` recusa cada chamador até que o operador defina `CONTINUUM_MCP_CONFIRM_TOKEN`, porque um agente com permissão para registrar progresso não deve também ter permissão para confirmá-lo. O caminho padrão permanece conduzido por humano: execute `continuum confirm <run_id>` no host.

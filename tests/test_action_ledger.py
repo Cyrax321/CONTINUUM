@@ -230,6 +230,113 @@ def test_settle_methods_accept_an_action_id(ledger: ActionLedger) -> None:
     assert ledger.get(str(outcome.key)) is not None
 
 
+def test_settle_methods_accept_the_rendered_key(ledger: ActionLedger) -> None:
+    """The key the gate prints is the one it tells the caller to claim.
+
+    Every human-facing string names the pre-hash rendered key: the deny
+    message (``Call continuum_intercept_action ... key='write:/tmp/x'``), the
+    claim response and the log. ``claim`` accepts it and hashes it, so before
+    this fallback the exact loop the product is built on dead-ended: the agent
+    did what it was told, then could not settle what it had claimed, because
+    the settle methods resolved only the digest and the ``action_id``.
+    """
+    outcome = ledger.claim("file_write", {"path": "/tmp/out.txt"}, key="write:/tmp/out.txt")
+    # The claim does hash the rendered key; the ledger key is not it.
+    assert str(outcome.key) != "write:/tmp/out.txt"
+
+    settled = ledger.complete("write:/tmp/out.txt", external_id="sha-1")
+
+    assert settled.status is ActionStatus.COMPLETED
+    assert settled.external_id == "sha-1"
+    # Settled under the ledger's own key, not under the rendered key passed in,
+    # or the fold would grow a second entry for one action.
+    assert len(ledger.all()) == 1
+    # And the loop closes: the next claim under the rendered key deduplicates
+    # instead of re-firing the side effect.
+    again = ledger.claim("file_write", {"path": "/tmp/out.txt"}, key="write:/tmp/out.txt")
+    assert not again.fresh
+    assert again.action.status is ActionStatus.COMPLETED
+
+
+def test_every_settle_method_accepts_the_rendered_key(ledger: ActionLedger) -> None:
+    """``complete`` is the common case, but the other three are the same join."""
+    ledger.claim("send_email", {"to": "a@b.c"}, key="email:a@b.c")
+    assert ledger.fail("email:a@b.c", "smtp refused").status is ActionStatus.FAILED
+
+    # A re-claim under a rendered key is what the gate sends a caller to after a
+    # closed attempt; it must then be reconcilable by the same rendered key.
+    again = ledger.claim("send_email", {"to": "a@b.c"}, key="email:a@b.c")
+    assert again.fresh
+    assert (
+        ledger.reconcile("email:a@b.c", occurred=True, external_id="msg-9").status
+        is ActionStatus.COMPLETED
+    )
+
+    ledger.claim("charge.card", {"amount": 1}, key="charge:card-1")
+    ledger.complete("charge:card-1", external_id="ch-1")
+    assert (
+        ledger.compensate("charge:card-1", note="refunded", by="refund").status
+        is ActionStatus.COMPENSATED
+    )
+
+
+def test_a_rendered_key_passed_via_record_key_arguments_also_settles(
+    ledger: ActionLedger,
+) -> None:
+    """``_record`` keeps the rendered key searchable for memory writes that
+    supply ``record_key`` as an argument rather than an explicit ``key``."""
+    ledger.claim("memory.write", {"record_key": "mem:tenant/user", "value": 1})
+    settled = ledger.complete("mem:tenant/user")
+    assert settled.status is ActionStatus.COMPLETED
+
+
+def test_an_ambiguous_rendered_key_is_not_guessed_at(ledger: ActionLedger) -> None:
+    """The digest mixes the action type in, so one rendered key can name two
+    actions.
+
+    Settling is a claim about the outside world, so picking one of them
+    silently would record the wrong effect as done. The refusal names the
+    collision and points at the ``action_id``, which is unambiguous, instead of
+    reading like a typo in the key.
+    """
+    a = ledger.claim("email.send", {"body": "x"}, key="shared-handle")
+    b = ledger.claim("slack.post", {"channel": "x"}, key="shared-handle")
+    assert str(a.key) != str(b.key)
+    # Neither action is the answer to the other's identifier.
+    assert ledger.resolve_key("shared-handle") is None
+
+    with pytest.raises(LedgerError, match="names 2 different actions") as exc_info:
+        ledger.complete("shared-handle")
+
+    message = str(exc_info.value)
+    # The caller is pointed at the identifier that cannot be ambiguous.
+    for action_id in (a.action.action_id, b.action.action_id):
+        assert action_id not in message
+    assert "action_id" in message
+
+
+def test_compaction_keeps_a_rendered_key_settleable(store: SQLiteStorage) -> None:
+    """The index reads the archive too, so a claim compacted before its
+    settlement still resolves (#239).
+
+    A rendered key that stopped resolving at the anchor boundary would strand
+    every action settled after compaction, and exactly-once would reset there.
+    """
+    ledger = ActionLedger(store, "run_1")
+    ledger.claim("file_write", {"path": "/tmp/persist.txt"}, key="write:/tmp/persist.txt")
+    rendered = "write:/tmp/persist.txt"
+    assert ledger.resolve_key(rendered) is not None
+
+    # Move the claim into the archive, then confirm the join still reaches it.
+    store.compact_run("run_1", through_sequence=store.last_sequence("run_1"))
+    assert store.read_archived_events("run_1")
+
+    replayed = ActionLedger(store, "run_1")
+    resolved = replayed.resolve_key(rendered)
+    assert resolved is not None
+    assert replayed.complete(rendered, external_id="sha-2").status is ActionStatus.COMPLETED
+
+
 def test_an_unknown_action_reports_the_key_needed_to_reconcile_it(
     ledger: ActionLedger,
 ) -> None:

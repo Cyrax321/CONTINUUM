@@ -96,6 +96,28 @@ class NotAuthenticated(PermissionError):
     """The caller did not prove possession of the expected shared secret."""
 
 
+def _fold(name: str) -> str:
+    """Normalise a client name so one spelling is one identity (#1598).
+
+    Both halves of the handshake key off the same ``clientInfo.name`` string,
+    and clients do not agree with each other -- or with themselves across
+    releases -- on capitalisation: the same editor reports ``Cursor`` in one
+    version and ``cursor`` in the next. Every comparison in this module goes
+    through here, so the allowlist and the per-client token map can never
+    disagree about what a name is. Before the fold they did: the allowlist
+    accepted a caller the token map then refused, and the message blamed the
+    name as unregistered rather than naming the mismatch.
+
+    ``casefold`` rather than ``lower``: the point is identity, and casefold is
+    the Unicode-aware spelling of "same name" (``"Straße".lower()`` is
+    ``"straße"`` while ``"STRASSE".lower()`` is ``"strasse"``, so a lower-only
+    comparison keeps the two apart; casefold maps both to ``"strasse"``).
+    Whitespace is stripped for the same reason ``__init__`` strips it: a
+    trailing space in a config file is not a different client.
+    """
+    return name.strip().casefold()
+
+
 class AuthPolicy:
     """Verifies that a caller possesses the expected shared secret.
 
@@ -122,7 +144,12 @@ class AuthPolicy:
         source: str = "default",
     ) -> None:
         self.expected = expected
-        self.tokens = dict(tokens) if tokens else None
+        # Keys are folded so the lookup in ``verify`` matches what the allowlist
+        # sees: a secret registered under ``Cursor`` answers a caller naming
+        # itself ``cursor`` (#1598). Two entries that fold together cannot both
+        # survive, so the later one wins rather than silently splitting the
+        # identity the fold exists to keep whole.
+        self.tokens = {_fold(k): v for k, v in tokens.items()} if tokens else None
         self.source = source
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
@@ -147,9 +174,14 @@ class AuthPolicy:
             return
         expected: str | None
         if self.tokens is not None:
-            if caller not in self.tokens:
+            # Folded the same way the token map's keys were, so the spelling a
+            # caller sends reaches the entry the operator registered (#1598).
+            # A nameless caller folds to nothing the map can hold, and the map
+            # never carries an empty key, so it refuses here as before.
+            folded = _fold(caller) if caller else caller
+            if folded not in self.tokens:
                 raise NotAuthenticated(f"caller {caller!r} is not registered for authentication")
-            expected = self.tokens[caller]
+            expected = self.tokens[folded]
         else:
             expected = self.expected
         # An empty expected secret cannot be presented, so it must refuse.
@@ -338,7 +370,10 @@ class AuthorizationPolicy:
     __slots__ = ("allowed", "source")
 
     def __init__(self, allowed: Iterable[str] = (), *, source: str = "default") -> None:
-        self.allowed = frozenset(n.strip() for n in allowed if n and n.strip())
+        # Folded so the allowlist answers the same identity the per-client token
+        # map does: a grant written as ``Cursor`` covers a caller calling itself
+        # ``cursor`` (#1598). Blank names still grant nothing, folded or not.
+        self.allowed = frozenset(_fold(n) for n in allowed if n and n.strip())
         self.source = source
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
@@ -355,12 +390,12 @@ class AuthorizationPolicy:
         """Whether ``caller`` may invoke mutating tools."""
         if not caller:
             return False
-        return caller in self.allowed
+        return _fold(caller) in self.allowed
 
     def require(self, caller: str | None, tool: str) -> None:
         """Raise unless ``caller`` may invoke the mutating tool ``tool``."""
         if caller:
-            if caller in self.allowed:
+            if _fold(caller) in self.allowed:
                 return
             raise NotAuthorized(
                 f"caller {caller!r} is not permitted to use the mutating tool "
