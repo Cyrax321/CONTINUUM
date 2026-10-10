@@ -259,6 +259,30 @@ def test_aliases_resolve_from_the_policy_file(tmp_path: Path) -> None:
     for observed in OBSERVED_NAMES:
         assert policy.permits(observed), observed
 
+
+@pytest.mark.parametrize(
+    "entry",
+    ["cursor=cursor-vscode", "cursor=cursor", "=cursor", "cursor="],
+)
+def test_inline_alias_syntax_in_the_allowlist_is_refused(entry: str) -> None:
+    """``cursor=cursor-vscode`` is not an alias, it is a client named that.
+
+    The allowlist is split on commas and whitespace, so an inline alias would
+    be shredded into standalone entries and the operator's intent applied,
+    misread, with nothing to say so. The form is ``canonical:alias`` in a
+    separate variable, and the refusal says so.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        AuthorizationPolicy([entry])
+    message = str(excinfo.value)
+    assert ALIASES_ENV_VAR in message
+    assert "<canonical>:<alias>" in message
+
+
+def test_inline_alias_syntax_from_the_env_var_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match=ALIASES_ENV_VAR):
+        load_policy(root=tmp_path, env={POLICY_ENV_VAR_ALIAS: "cursor=cursor-vscode"})
+
 # --- resolving the policy --------------------------------------------------- #
 
 

@@ -23,6 +23,13 @@ Everything else is compared **exactly**, folded. There is no prefix, suffix or
 substring rule, and adding one would be the exact failure this layer exists to
 prevent. A second name is a declared alias or it is a refusal, never an
 inference.
+
+Aliases are declared in their own variable rather than inline. The allowlist is
+split on commas and whitespace, so ``cursor=cursor-vscode`` written into it
+would be read as two standalone entries: a client literally named
+``cursor=cursor-vscode``, plus a grant to ``cursor-vscode`` that the
+declaration beside it never referred to. That is the operator's intent applied,
+misread, with nothing to say so, so an inline ``=`` is refused outright.
 """
 
 from __future__ import annotations
@@ -403,6 +410,24 @@ def _parse_aliases(value: str | Iterable[str] | None) -> dict[str, list[str]]:
     return groups
 
 
+def _reject_inline_alias_syntax(names: Iterable[str]) -> None:
+    """Refuse an inline ``canonical=alias`` written into the allowlist.
+
+    The allowlist is split on commas and whitespace, so ``cursor=cursor-vscode``
+    would be taken for a client literally called that, and ``cursor-vscode``
+    would be granted on its own even when the declaration beside it said
+    something else. The alias form is ``canonical:alias`` in a separate
+    variable, and this says so rather than guessing.
+    """
+    for name in names:
+        if "=" in name:
+            raise ValueError(
+                f"allowlist entry {name!r} uses inline alias syntax; aliases are "
+                f"not declared in the allowlist. Set {ALIASES_ENV_VAR}="
+                f"'<canonical>:<alias>[,<alias>...]' instead"
+            )
+
+
 class AuthorizationPolicy:
     """Decides whether a named caller may invoke a mutating tool.
 
@@ -426,6 +451,7 @@ class AuthorizationPolicy:
         # Folded so the allowlist answers the same identity the per-client token
         # map does: a grant written as ``Cursor`` covers a caller calling itself
         # ``cursor`` (#1598). Blank names still grant nothing, folded or not.
+        _reject_inline_alias_syntax(names)
         self.allowed = frozenset(_fold(name) for name in names)
         self.source = source
 
