@@ -12,7 +12,7 @@ from __future__ import annotations
 import io
 from decimal import Decimal
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import pytest
 
@@ -450,3 +450,177 @@ def run(*argv: str) -> tuple[int, str, str]:
     out, err = io.StringIO(), io.StringIO()
     code = main(list(argv), out=out, err=err)
     return code, out.getvalue(), err.getvalue()
+
+
+# --- semantic similarity wiring (issue #1029) ------------------------------------ #
+
+
+def seed_with_args(
+    db: str, action_type: str, rendered: str, status: ActionStatus, arguments: dict[str, Any]
+) -> None:
+    """Seed an ACTION_RECORDED row that carries the arguments similarity scores."""
+    from continuum.actions.idempotency import idempotency_key
+    from continuum.events import EventType
+
+    key = idempotency_key(action_type, None, scope="run_1", key=rendered)
+    action = {
+        "action_id": f"a_{rendered}_{status.value}",
+        "action_type": action_type,
+        "run_id": "run_1",
+        "arguments": arguments,
+        "status": status.value,
+    }
+    with SQLiteStorage(db) as store:
+        store.append_event("run_1", EventType.ACTION_RECORDED, {"key": key, "action": action})
+
+
+def similarity_verdict(
+    db: str,
+    action_type: str,
+    rendered: str,
+    arguments: dict[str, Any],
+    similarity: Any | None,
+):
+    from continuum.actions.ledger import fold_action_events
+
+    with SQLiteStorage(db) as store:
+        folded = fold_action_events(store.read_events("run_1"))
+    return evaluate(
+        action_type=action_type,
+        rendered_key=rendered,
+        run_id="run_1",
+        actions_by_key=folded,
+        similarity=similarity,
+        arguments=arguments,
+    )
+
+
+_PARAPHRASED = {
+    "customer": "acme",
+    "invoice_id": "INV-001",
+    "note": "settle the outstanding amount for INV-001",
+}
+
+
+def test_similarity_defaults_to_exact_so_a_paraphrase_stays_unclaimed(db: str) -> None:
+    # Regression guard: with no similarity configured, the rephrased call must
+    # still miss its prior claim. Silently defaulting to fuzzy would suppress
+    # side effects an operator never opted out of.
+    seed_with_args(db, "send_invoice", "pay INV-001", ActionStatus.COMPLETED, _PARAPHRASED)
+    decision = similarity_verdict(
+        db,
+        "send_invoice",
+        "settle outstanding amount for INV-001",
+        {**_PARAPHRASED, "note": "please settle the outstanding amount for INV-001"},
+        similarity=None,
+    )
+    assert decision.kind is GuardKind.DENY_UNCLAIMED
+
+
+def test_fuzzy_similarity_recognises_a_paraphrased_completed_action(db: str) -> None:
+    from continuum.actions.ledger import fold_action_events
+    from continuum.replay_similarity import SimilarityConfig
+
+    seed_with_args(db, "send_invoice", "pay INV-001", ActionStatus.COMPLETED, _PARAPHRASED)
+    decision = similarity_verdict(
+        db,
+        "send_invoice",
+        "settle outstanding amount for INV-001",
+        {
+            "customer": "acme",
+            "invoice_id": "INV-001",
+            "note": "please settle the outstanding amount for INV-001",
+        },
+        similarity=SimilarityConfig(kind="fuzzy", replay_threshold=0.60),
+    )
+    # The verdict is the dedup one, and it answers from the prior claim rather
+    # than the rendered key, so the caller can find the stored result.
+    assert decision.kind is GuardKind.SKIP_DUPLICATE
+    assert "matched by fuzzy similarity" in decision.reason
+    with SQLiteStorage(db) as store:
+        folded = fold_action_events(store.read_events("run_1"))
+    assert folded[decision.key].status is ActionStatus.COMPLETED
+
+
+def test_fuzzy_similarity_leaves_a_divergent_call_unclaimed(db: str) -> None:
+    # The fork band exists so a genuinely different call is not swallowed by
+    # the dedup: this must stay DENY_UNCLAIMED and keep the fork-detection
+    # surface intact.
+    from continuum.replay_similarity import SimilarityConfig
+
+    seed_with_args(db, "send_invoice", "pay INV-001", ActionStatus.COMPLETED, _PARAPHRASED)
+    decision = similarity_verdict(
+        db,
+        "send_invoice",
+        "refund INV-002",
+        {"customer": "globex", "invoice_id": "INV-002", "note": "refund a different invoice"},
+        similarity=SimilarityConfig(kind="fuzzy", replay_threshold=0.60),
+    )
+    assert decision.kind is GuardKind.DENY_UNCLAIMED
+
+
+def test_similarity_does_not_override_an_exact_match(db: str) -> None:
+    # The exact path already answers; similarity must not change that answer,
+    # including when the exact hit is a live claim rather than a completion.
+    from continuum.replay_similarity import SimilarityConfig
+
+    seed_with_args(db, "send_invoice", "pay INV-001", ActionStatus.STARTED, _PARAPHRASED)
+    decision = similarity_verdict(
+        db,
+        "send_invoice",
+        "pay INV-001",
+        _PARAPHRASED,
+        similarity=SimilarityConfig(kind="fuzzy", replay_threshold=0.60),
+    )
+    assert decision.kind is GuardKind.ALLOW
+    assert "matched by fuzzy similarity" not in decision.reason
+
+
+def test_a_similarity_matched_live_claim_still_allows(db: str) -> None:
+    # A paraphrase of an in-flight (not completed) action is a live claim, not
+    # a duplicate: adopting it must preserve ALLOW, not suppress the call.
+    from continuum.replay_similarity import SimilarityConfig
+
+    seed_with_args(db, "send_invoice", "pay INV-001", ActionStatus.STARTED, _PARAPHRASED)
+    decision = similarity_verdict(
+        db,
+        "send_invoice",
+        "settle outstanding amount for INV-001",
+        {**_PARAPHRASED, "note": "please settle the outstanding amount for INV-001"},
+        similarity=SimilarityConfig(kind="fuzzy", replay_threshold=0.60),
+    )
+    assert decision.kind is GuardKind.ALLOW
+    assert "matched by fuzzy similarity" in decision.reason
+
+
+def test_similarity_fails_closed_when_the_scan_raises(db: str) -> None:
+    # An embedder that blows up must not turn a denial into an allow. The exact
+    # miss is the safe answer, so the scan degrades to unclaimed.
+    from continuum.replay_similarity import SimilarityConfig
+
+    def broken_embedder(_text: str) -> list[float]:
+        raise RuntimeError("embedding service down")
+
+    seed_with_args(db, "send_invoice", "pay INV-001", ActionStatus.COMPLETED, _PARAPHRASED)
+    decision = similarity_verdict(
+        db,
+        "send_invoice",
+        "settle outstanding amount for INV-001",
+        {**_PARAPHRASED, "note": "please settle the outstanding amount for INV-001"},
+        similarity=SimilarityConfig(kind="embedding", embedder=broken_embedder),
+    )
+    assert decision.kind is GuardKind.DENY_UNCLAIMED
+
+
+def test_similarity_never_matches_across_action_types(db: str) -> None:
+    from continuum.replay_similarity import SimilarityConfig
+
+    seed_with_args(db, "charge_card", "pay INV-001", ActionStatus.COMPLETED, _PARAPHRASED)
+    decision = similarity_verdict(
+        db,
+        "send_invoice",
+        "settle outstanding amount for INV-001",
+        {**_PARAPHRASED, "note": "please settle the outstanding amount for INV-001"},
+        similarity=SimilarityConfig(kind="fuzzy", replay_threshold=0.60),
+    )
+    assert decision.kind is GuardKind.DENY_UNCLAIMED

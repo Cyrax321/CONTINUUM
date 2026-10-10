@@ -8,6 +8,30 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The replay guard can classify a side effect by semantic similarity, not
+  just an exact key (#1029).** `replay_similarity.py` shipped three backends
+  (exact, fuzzy token-set Jaccard, caller-supplied embedding) that nothing in
+  `src/` imported, so a post-restore call that rephrased its arguments ("pay
+  invoice INV-001" vs "settle INV-001") derived a different idempotency key,
+  missed its own prior claim, and fired the side effect a second time.
+  `replayguard.evaluate` now takes an optional `SimilarityConfig` and the call's
+  arguments; on an exact miss a non-exact backend may recognise the paraphrase
+  and answer from the prior action instead. The verdict still runs the ledger's
+  status table on the matched record, so a paraphrase of an in-flight claim
+  stays `ALLOW` and a paraphrase of a failed one still demands a fresh claim.
+  `gate.decide` threads the config through, and a tool opts in by adding
+  `"similarity": {"kind": "fuzzy", "replay_threshold": 0.7}` to its registry
+  entry; tools that do not are exact-only and unchanged. Only a `replay`-grade
+  match is adopted, so a divergent call still reaches the fork-detection path
+  with its approval hint. The scan fails closed: an unreadable registry, a bad
+  threshold, or an embedder that raises degrades to the unclaimed verdict the
+  exact miss already returns, never to an allow. `similarity_backend` resolves
+  an `embedder` dotted path at config-load time, and validates that thresholds
+  sit in `[0, 1]` with the fork band below the replay band, so a typo breaks
+  the gate loudly instead of silently changing which calls it suppresses.
+  Memory keys stay exact-only, because their duplicate check is cross-run and
+  tenancy-scoped, where a paraphrase is not evidence of the same write.
+
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a
   repeatedly failing integration spends its own allowance instead of the run's:
@@ -1044,7 +1068,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~3,325 collected, ~3,325 passed, ~0 skipped on a minimal env).
+  (~3,378 collected, ~3,378 passed, ~0 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

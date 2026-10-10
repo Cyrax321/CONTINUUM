@@ -383,3 +383,158 @@ def test_a_registry_error_names_an_absolute_path(
     assert reported.is_absolute(), message
     assert reported.name == filename, message
     assert reported == relative.resolve(), message
+
+
+# --- semantic similarity wiring (issue #1029) ------------------------------------ #
+
+# A tool whose key is rendered from free text: the same intent phrased twice
+# derives two different keys, so exact matching misses its own prior claim.
+SIMILARITY_CONFIG = {
+    "send_invoice": {
+        "key_template": "note:{note}",
+        "similarity": {"kind": "fuzzy", "replay_threshold": 0.60},
+    }
+}
+
+
+def _decide_similar(db: str, tool_input: dict[str, object]) -> object:
+    from continuum.actions.ledger import fold_action_events
+
+    with SQLiteStorage(db) as store:
+        folded = fold_action_events(store.read_events("run_1"))
+    return decide(
+        SIMILARITY_CONFIG, "send_invoice", tool_input, run_id="run_1", actions_by_key=folded
+    )
+
+
+def _seed_with_args(
+    db: str, rendered: str, status: ActionStatus, arguments: dict[str, object]
+) -> None:
+    """Seed a completed side effect carrying the arguments similarity scores."""
+    from continuum.events import EventType
+
+    key = str(idempotency_key("send_invoice", None, scope="run_1", key=rendered))
+    action = Action(run_id="run_1", action_type="send_invoice", status=status, arguments=arguments)
+    with SQLiteStorage(db) as store:
+        store.append_event(
+            "run_1",
+            EventType.ACTION_RECORDED,
+            {"key": key, "action": action.model_dump(mode="json")},
+        )
+
+
+def test_gate_dedups_a_paraphrased_side_effect_when_configured(db: str) -> None:
+    _seed_with_args(
+        db,
+        "note:pay invoice INV-001 acme",
+        ActionStatus.COMPLETED,
+        {"customer": "acme", "invoice_id": "INV-001", "note": "pay invoice INV-001 acme"},
+    )
+    decision = _decide_similar(
+        db, {"customer": "acme", "invoice_id": "INV-001", "note": "pay invoice INV-001 for acme"}
+    )
+    # The gate renders a different key but answers from the completed prior,
+    # which is the whole point of opting the tool into semantic dedup.
+    assert decision.allow is False
+    assert "already completed" in decision.reason
+    assert "matched by fuzzy similarity" in decision.reason
+    assert "note:pay invoice INV-001 for acme" in decision.reason
+
+
+def test_gate_still_denies_a_divergent_call_when_similarity_is_on(db: str) -> None:
+    # A call about a different invoice falls below the replay band, so it must
+    # reach the unclaimed path and keep its fork hint rather than being
+    # suppressed as a duplicate.
+    _seed_with_args(
+        db,
+        "note:pay invoice INV-001 acme",
+        ActionStatus.COMPLETED,
+        {"customer": "acme", "invoice_id": "INV-001", "note": "pay invoice INV-001 acme"},
+    )
+    decision = _decide_similar(
+        db, {"customer": "globex", "invoice_id": "INV-002", "note": "refund invoice INV-002 globex"}
+    )
+    assert decision.allow is False
+    assert "has no ledger claim" in decision.reason
+    assert "matched by fuzzy similarity" not in decision.reason
+
+
+def test_gate_is_unaffected_for_tools_that_do_not_opt_in(db: str) -> None:
+    # Only send_invoice is configured; an ungated tool passes as before.
+    decision = decide(
+        SIMILARITY_CONFIG, "Read", {"path": "/etc/hosts"}, run_id="run_1", actions_by_key={}
+    )
+    assert decision.allow is True
+
+
+def test_gate_reports_an_invalid_similarity_spec_from_an_inline_config(db: str) -> None:
+    # decide() builds the config too (the CLI path validates at load, but the
+    # pure entry point is called directly by the gateway and the tests), so a
+    # bad spec must fail closed here rather than raise out of the gate.
+    bad = {"send_invoice": {"key_template": "note:{note}", "similarity": {"kind": "cosine"}}}
+    decision = decide(bad, "send_invoice", {"note": "x"}, run_id="run_1", actions_by_key={})
+    assert decision.allow is False
+    assert "similarity for 'send_invoice' is invalid" in decision.reason
+
+
+def test_load_gate_config_rejects_an_invalid_similarity_spec(tmp_path: Path) -> None:
+    path = tmp_path / "gate.json"
+    path.write_text(
+        json.dumps(
+            {"tools": {"send_invoice": {"key_template": "{note}", "similarity": {"kind": "nope"}}}}
+        )
+    )
+    with pytest.raises(GateConfigError, match="'similarity' is invalid"):
+        load_gate_config(path)
+
+
+def test_load_gate_config_accepts_a_well_formed_similarity_spec(tmp_path: Path) -> None:
+    path = tmp_path / "gate.json"
+    path.write_text(
+        json.dumps(
+            {
+                "tools": {
+                    "send_invoice": {
+                        "key_template": "{note}",
+                        "similarity": {"kind": "fuzzy", "replay_threshold": 0.7},
+                    }
+                }
+            }
+        )
+    )
+    tools = load_gate_config(path)
+    assert tools is not None
+    assert tools["send_invoice"]["similarity"]["kind"] == "fuzzy"
+
+
+def test_the_gate_cli_dedups_a_paraphrase_end_to_end(db: str, tmp_path: Path) -> None:
+    # The hook transport path: continuum gate reads the registry from disk and
+    # denies the paraphrased repeat without the side effect firing again.
+    _seed_with_args(
+        db,
+        "note:pay invoice INV-001 acme",
+        ActionStatus.COMPLETED,
+        {"customer": "acme", "invoice_id": "INV-001", "note": "pay invoice INV-001 acme"},
+    )
+    config = tmp_path / ".continuum" / "gate.json"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text(json.dumps({"tools": SIMILARITY_CONFIG}))
+
+    p = tmp_path / "payload.json"
+    p.write_text(
+        json.dumps(
+            payload(
+                "send_invoice",
+                customer="acme",
+                invoice_id="INV-001",
+                note="pay invoice INV-001 for acme",
+            )
+        )
+    )
+    code, out, err = run(
+        "--db", db, "--json", "gate", "--config", str(config), "--payload-file", str(p)
+    )
+    assert code == 2, err
+    body = json.loads(out)
+    assert body["allow"] is False
+    assert "matched by fuzzy similarity" in body["reason"]
