@@ -20,6 +20,8 @@ import pytest
 
 from continuum.mcp.authz import (
     ALIASES_ENV_VAR,
+    ALLOW_ANY_CLIENT,
+    ALLOW_ANY_CLIENT_ENV_VAR,
     AUTH_ENV_VAR,
     CLIENT_TOKENS_ENV_VAR,
     CONFIRM_ENV_VAR,
@@ -246,6 +248,58 @@ def test_inline_alias_syntax_in_the_allowlist_is_refused(entry: str) -> None:
 def test_inline_alias_syntax_from_the_env_var_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match=ALIASES_ENV_VAR):
         load_policy(root=tmp_path, env={POLICY_ENV_VAR_ALIAS: "cursor=cursor-vscode"})
+
+
+def test_the_wildcard_is_never_a_default(tmp_path: Path) -> None:
+    policy = load_policy(root=tmp_path, env={})
+    assert policy.denies_everything
+    assert not policy.allow_any
+    assert not policy.permits("a-client-nobody-has-seen")
+
+
+def test_the_wildcard_env_var_permits_every_named_client(tmp_path: Path) -> None:
+    policy = load_policy(root=tmp_path, env={ALLOW_ANY_CLIENT_ENV_VAR: "1"})
+    assert policy.allow_any
+    assert policy.source == ALLOW_ANY_CLIENT_ENV_VAR
+    assert policy.permits("a-client-nobody-has-seen")
+    assert not policy.denies_everything
+
+
+def test_the_wildcard_grants_names_not_the_absence_of_one(tmp_path: Path) -> None:
+    """It waives the comparison; it does not make an unidentified caller a grant."""
+    policy = load_policy(root=tmp_path, env={ALLOW_ANY_CLIENT_ENV_VAR: "yes"})
+    assert not policy.permits(None)
+    assert not policy.permits("")
+    assert not policy.permits("   ")
+
+
+def test_the_wildcard_token_in_the_allowlist_permits_every_named_client() -> None:
+    policy = AuthorizationPolicy([ALLOW_ANY_CLIENT])
+    assert policy.allow_any
+    assert policy.allowed == frozenset()
+    assert not policy.denies_everything
+    assert policy.permits("anything-at-all")
+
+
+def test_an_explicit_allowlist_narrows_the_wildcard_env_var(tmp_path: Path) -> None:
+    """Precedence is unchanged: the argument beats every environment variable."""
+    policy = load_policy([INSTALL_BAKED], root=tmp_path, env={ALLOW_ANY_CLIENT_ENV_VAR: "1"})
+    assert not policy.allow_any
+    assert policy.permits(INSTALL_BAKED)
+    assert not policy.permits("someone-else")
+
+
+def test_a_caller_cannot_declare_itself_the_wildcard() -> None:
+    """The token is configuration, not a claim."""
+    policy = AuthorizationPolicy([INSTALL_BAKED], aliases=[DECLARED_ALIASES])
+    assert not policy.permits(ALLOW_ANY_CLIENT)
+    assert not policy.permits("*:*")
+
+
+def test_a_wildcard_alias_is_rejected() -> None:
+    """``cursor:*`` would turn one client's grant into every client's grant."""
+    with pytest.raises(ValueError, match=ALLOW_ANY_CLIENT_ENV_VAR):
+        AuthorizationPolicy([INSTALL_BAKED], aliases=[f"{INSTALL_BAKED}:{ALLOW_ANY_CLIENT}"])
 
 # --- resolving the policy --------------------------------------------------- #
 
