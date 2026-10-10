@@ -650,6 +650,20 @@ class ActionLedger:
 
     # -- reading ---------------------------------------------------------- #
 
+    def _merged_events(self) -> Iterator[Event]:
+        """The run's archive and live streams, merged in sequence order.
+
+        Compaction (issue #239) moves events into the archive rather than
+        deleting them, so any read of a run's history has to merge both
+        streams or a claim settled before compaction vanishes. Shared by the
+        fold and by the rendered-key index so both see the same history.
+        """
+        return merge(
+            self.storage.read_archived_events(self.run_id),
+            self.storage.read_events(self.run_id),
+            key=lambda e: e.sequence,
+        )
+
     def _replay(self) -> dict[str, Action]:
         """Rebuild the ledger by folding action events. Cheap and verifiable.
 
@@ -660,12 +674,7 @@ class ActionLedger:
         sorted, so they merge linearly instead of paying a re-sort on this
         hot path.
         """
-        merged = merge(
-            self.storage.read_archived_events(self.run_id),
-            self.storage.read_events(self.run_id),
-            key=lambda e: e.sequence,
-        )
-        return fold_action_events(merged)
+        return fold_action_events(self._merged_events())
 
     def folded(self) -> dict[str, Action]:
         """Public view of the ``key -> newest action`` fold, archive included."""
@@ -701,8 +710,42 @@ class ActionLedger:
         """Return the current action state for ``key``, or ``None`` if unclaimed."""
         return self._replay().get(key)
 
+    def _rendered_key_index(self) -> dict[str, set[str]]:
+        """Map each recorded rendered key to the stored key(s) it hashed to.
+
+        ``claim`` hashes the key a caller supplies, so the ledger is keyed by
+        the digest while every human-facing string names the pre-hash original:
+        the gate's deny text, the claim response, ``continuum actions`` and the
+        log all print it. That original rides along on the ACTION_RECORDED
+        payload as ``rendered_key``, which the forensic join already reads back.
+        This index is the same join from the other direction, so a caller
+        holding a printed key can reach the action it named.
+
+        Scans the merged stream rather than the fold because the fold keeps only
+        the hashed key. Only claim records carry a ``rendered_key``, so
+        settlement events contribute nothing, and the archive matters for the
+        same reason it matters to :meth:`_replay`: a claim made before
+        compaction must stay resolvable afterwards.
+
+        Returns a set per rendered key because the digest mixes in the action
+        type and scope, so one rendered string can name genuinely different
+        actions. :meth:`resolve_key` only accepts an unambiguous mapping.
+        """
+        index: dict[str, set[str]] = {}
+        for event in self._merged_events():
+            if event.type not in _ACTION_EVENT_TYPES:
+                continue
+            payload = event.payload or {}
+            rendered = payload.get("rendered_key")
+            stored = payload.get("key")
+            if not rendered or not stored:
+                continue
+            index.setdefault(str(rendered), set()).add(str(stored))
+        return index
+
     def resolve_key(self, identifier: str) -> str | None:
-        """The ledger key for ``identifier``, which may be a key or an ``action_id``.
+        """The ledger key for ``identifier``: a key, an ``action_id``, or the
+        rendered key every message prints.
 
         The ledger is keyed by idempotency key, but almost everything a caller
         reads back is keyed by ``action_id``: ``Action.action_id`` itself, the
@@ -711,15 +754,29 @@ class ActionLedger:
         recovering caller has in hand is usually the one the settle methods did
         not accept, and the two are indistinguishable by shape (issue #367).
 
-        Resolving both here rather than at one call site means every settle
-        method inherits it, and the recovery guidance that names an ``action_id``
-        becomes executable as written instead of needing to be rewritten in terms
-        of an identifier no output exposes.
+        Resolving all of them here rather than at one call site means every
+        settle method inherits it, and the recovery guidance that names an
+        ``action_id`` becomes executable as written instead of needing to be
+        rewritten in terms of an identifier no output exposes.
 
-        The mapping is unambiguous: one key holds one action, and a re-claim after
-        FAILED or COMPENSATED copies the existing action, so ``action_id`` stays
-        with its key rather than being reissued. Returns ``None`` when neither
-        space matches.
+        The third space is the rendered key, the pre-hash original the gate
+        hands back in its deny message and instructs the caller to claim. It is
+        the identifier an agent following the printed instructions actually
+        holds, and before this fallback the claim it was told to make was the
+        one thing it could not then settle: claim accepted the rendered key and
+        hashed it, while the settle methods resolved only the digest or the
+        ``action_id``, so the loop the product is built on dead-ended and the
+        action stayed STARTED forever.
+
+        The mapping is unambiguous: one key holds one action, and a re-claim
+        after FAILED or COMPENSATED copies the existing action, so
+        ``action_id`` stays with its key rather than being reissued. The
+        rendered space is not: the digest mixes in the action type and scope,
+        so one rendered string can name several actions. Those are left
+        unresolved rather than guessed at, because settling is a claim about
+        the outside world and picking the wrong record would record it as done.
+        Returns ``None`` when no space matches, or when the rendered key is
+        ambiguous.
         """
         folded = self._replay()
         if identifier in folded:
@@ -727,6 +784,9 @@ class ActionLedger:
         for stored_key, action in folded.items():
             if action.action_id == identifier:
                 return stored_key
+        candidates = self._rendered_key_index().get(identifier)
+        if candidates and len(candidates) == 1:
+            return next(iter(candidates))
         return None
 
     def resolve_claim(
@@ -1701,17 +1761,30 @@ class ActionLedger:
         to record its settlement under the key the fold uses, not under whatever
         identifier the caller happened to hold (issue #367).
 
-        The message names both identifier spaces. The previous wording,
+        The message names every identifier space. The previous wording,
         ``no action recorded for key <prefix>...``, left a caller that had passed
         a perfectly valid ``action_id`` with no way to tell that it had reached
-        for the wrong identifier rather than a nonexistent action.
+        for the wrong identifier rather than a nonexistent action. The rendered
+        key the gate instructs a caller to claim is accepted too, so a miss now
+        genuinely means nothing was recorded under it; an ambiguous rendered key,
+        one naming several actions, says so and points at the ``action_id``
+        instead of reading like a typo.
         """
         resolved = self.resolve_key(key)
         if resolved is None:
+            ambiguous = self._rendered_key_index().get(key)
+            if ambiguous and len(ambiguous) > 1:
+                raise LedgerError(
+                    f"the rendered key {key!r} names {len(ambiguous)} different "
+                    f"actions in run {self.run_id!r}, which hashed to separate "
+                    f"ledger keys, so it cannot settle one of them. Pass the "
+                    f"action_id instead: `continuum actions {self.run_id}` lists them."
+                )
             known = len(self._replay())
             raise LedgerError(
                 f"no action in run {self.run_id!r} matches {key[:16]!r} as either an "
-                f"idempotency key or an action_id ({known} action(s) recorded). "
+                f"idempotency key or an action_id, or as the rendered key the gate "
+                f"told you to claim ({known} action(s) recorded). "
                 f"List them with `continuum actions {self.run_id}` or "
                 f"continuum_list_actions, and pass the action_key or action_id from there."
             )
