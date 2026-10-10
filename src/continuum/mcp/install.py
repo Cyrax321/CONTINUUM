@@ -57,6 +57,7 @@ __all__ = [
     "install_server",
     "remove_server",
     "resolve_command",
+    "resolve_vscode_settings_path",
     "verify_sdk",
 ]
 
@@ -74,6 +75,7 @@ INSTALL_COMMAND = 'pip install "continuum-agent[mcp]"'
 #: How long the SDK probe may run before the install gives up on it.
 PROBE_TIMEOUT_SECONDS = 30.0
 
+
 #: Per-host wiring profiles, structured the way ``CLIENT_PROFILES`` is
 #: (``src/continuum/clienthooks.py``): everything that differs between hosts
 #: is data, not code. ``project_settings`` is the committed, per-project file
@@ -82,6 +84,19 @@ PROBE_TIMEOUT_SECONDS = 30.0
 #: (``--scope local``, the default). ``mutating_clients`` is the client name
 #: the registration allows to call mutating tools. Adding cursor or windsurf
 #: later is one dict entry, not a redesign.
+def resolve_vscode_settings_path() -> Path:
+    """The default path to VS Code's user settings.json for the current platform."""
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        return base / "Code" / "User" / "settings.json"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Code" / "User" / "settings.json"
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(config_home) if config_home else Path.home() / ".config"
+    return base / "Code" / "User" / "settings.json"
+
+
 HOST_PROFILES: dict[str, dict[str, str]] = {
     "claude-code": {
         "project_settings": ".mcp.json",
@@ -106,8 +121,8 @@ HOST_PROFILES: dict[str, dict[str, str]] = {
     },
     "vscode": {
         "project_settings": ".vscode/mcp.json",
-        "local_settings": "~/Library/Application Support/Code/User/settings.json",
-        "user_settings": "~/Library/Application Support/Code/User/settings.json",
+        "local_settings": str(resolve_vscode_settings_path()),
+        "user_settings": str(resolve_vscode_settings_path()),
         "local_projects_key": "mcpServers",
         "mutating_clients": "vscode",
     },

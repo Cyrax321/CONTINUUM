@@ -3099,6 +3099,10 @@ def _mcp_settings_path(args: argparse.Namespace) -> Path:
         return Path(args.settings)
     if args.scope == "project":
         return Path(profile["project_settings"])
+    if args.host == "vscode":
+        from continuum.mcp.install import resolve_vscode_settings_path
+
+        return resolve_vscode_settings_path()
     if args.scope == "user":
         return Path(profile["user_settings"]).expanduser()
     return Path(profile["local_settings"]).expanduser()
