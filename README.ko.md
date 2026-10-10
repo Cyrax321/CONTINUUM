@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI 진입점
 continuum-mcp --help             # MCP 서버 진입점 ([mcp] 또는 [dev] 필요)
-pytest -q                        # 최소 환경에서 약 3,629개 수집, 약 3,629개 통과, 약 41개 스킵 (정확한 수는 환경에 따라 다름)
+pytest -q                        # 최소 환경에서 약 3,636개 수집, 약 3,636개 통과, 약 41개 스킵 (정확한 수는 환경에 따라 다름)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI가 강제하는 세 가지 게이트
 ```
@@ -498,7 +498,7 @@ CONTINUUM은 내구성 있는 실행, 멱등한 사이드 이펙트 추적, LLM 
 
 ## 상태와 제한
 
-- **테스트됨**: 이 트리의 2026-08-24 감사에서 완전한 실행으로 3,629 통과 + 23 스킵. CI는 Python 3.11, 3.12, 3.13에서 스위트를 강제하며, 카운트는 플랫폼과 Postgres 같은 선택적 서비스에 따라 다르다([STATUS.md](STATUS.md) 참조). MCP 표면도 라이브 프로토콜 위에서 적대적으로 감사되었다. [test.md](test.md) 참조.
+- **테스트됨**: 이 트리의 2026-08-24 감사에서 완전한 실행으로 3,636 통과 + 23 스킵. CI는 Python 3.11, 3.12, 3.13에서 스위트를 강제하며, 카운트는 플랫폼과 Postgres 같은 선택적 서비스에 따라 다르다([STATUS.md](STATUS.md) 참조). MCP 표면도 라이브 프로토콜 위에서 적대적으로 감사되었다. [test.md](test.md) 참조.
 - **PyPI에서 `continuum-agent` 0.1.2**(`pip install continuum-agent`, 클론은 `pip install .`로 여전히 동작. 빠른 시작 참조).
 - **MCP 호출자 인증은 배포별로 선택 사항.** `CONTINUUM_MCP_TOKEN`이 설정되면, 서버는 호출자가 `initialize` 핸드셰이크의 `_meta.authToken`에서 그 공유 비밀을 제시하지 않는 한 모든 변경 도구를 거부한다. 호출자별 비밀은 `CONTINUUM_MCP_CLIENT_TOKENS`(`name:secret` 쌍)를 통해 이용 가능하다. 토큰이 아무것도 설정되지 않으면, 인가는 선언된 아이덴티티のみ에 의한다(역사적 기본값, 로컬 단일 사용자 사용을 위해 유지).
 - **MCP를 통해 자체 보고된 상태를 확인하려면 별도의 비밀이 필요하다.** `continuum_confirm`은 운영자가 `CONTINUUM_MCP_CONFIRM_TOKEN`을 설정할 때까지 모든 호출자를 거부한다. 진행 상황을 기록하도록 허용된 에이전트가 그것을 확인하는 것도 허용되어서는 안 되기 때문이다. 기본 경로는 인간이 이끄는 채로 유지된다. 호스트에서 `continuum confirm <run_id>`를 실행하라.

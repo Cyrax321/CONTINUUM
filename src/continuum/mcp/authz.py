@@ -420,18 +420,6 @@ def token_from(context: Any) -> str | None:
     return str(token) if token else None
 
 
-def _fold(name: str) -> str:
-    """Normalise a client name for comparison: trimmed and case-folded.
-
-    Both hosts and operators capitalise product names, so ``Cursor`` and
-    ``cursor`` are one client. A comparison that calls them two has not
-    isolated anything, it has only made the failure silent. Folding is applied
-    to both sides of every comparison, so it cannot smuggle in a name that
-    differs in more than case: ``my-cursor-impersonator`` folds to itself.
-    """
-    return name.strip().casefold()
-
-
 def _parse_aliases(value: str | Iterable[str] | None) -> dict[str, list[str]]:
     """Parse alias declarations into ``{canonical: [alias, ...]}``.
 

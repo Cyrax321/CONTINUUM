@@ -185,6 +185,7 @@ def test_the_allowlist_folds_unicode_not_just_ascii() -> None:
     assert AuthorizationPolicy(["STRASSE"]).permits("straße")
     assert not AuthorizationPolicy(["Straße"]).permits("strass")
 
+
 # --- the names real hosts send (issue #1595) -------------------------------- #
 #
 # `continuum mcp install --host cursor` bakes
