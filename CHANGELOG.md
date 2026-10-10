@@ -232,7 +232,6 @@ Test counts: ~3,355 collected on a minimal env.
   all its prose is rephrased, so that one pattern reads all six READMEs.
   `references/testing.md`, `references/install.md`, and the translated READMEs
   now carry the same figures as `README.md`.
->>>>>>> origin/main
 
 - **`load_reconcilers` now refuses a registry missing the `probes` wrapper
   instead of silently loading it as empty (#1062).** A file that maps action
