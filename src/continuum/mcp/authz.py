@@ -39,6 +39,41 @@ leave an unlisted caller unable to discover *why* its writes are failing.
 The split is driven by the ``read_only_hint`` annotation each tool already
 declares, rather than a second hand-maintained list that could drift out of
 step with it.
+
+Names hosts actually send
+-------------------------
+
+The allowlist is keyed on the ``clientInfo.name`` the host puts in its
+handshake, which is a fact about the host's build rather than something this
+project chooses. ``continuum mcp install --host cursor`` bakes
+``CONTINUUM_MCP_MUTATING_CLIENTS=cursor``, and a live probe found the same
+host presenting ``cursor``, ``cursor-vscode`` or ``visual-studio-code``
+depending on the build. On an exact string match every one of those but the
+first connected successfully with 3 of the 13 tools and said nothing, so the
+loss surfaced at the first write the agent attempted.
+
+Three rules close that without turning the allowlist into a shape an attacker
+can walk through:
+
+- Comparison is **case-insensitive** and whitespace-trimmed. ``Cursor`` is the
+  client that ``cursor`` names, not a stranger to it.
+- A host that sends **more than one name** declares the others with
+  ``CONTINUUM_MCP_CLIENT_ALIASES`` (``canonical:alias1,alias2``, or the
+  policy file's ``aliases`` key). An alias is a second spelling of an identity
+  that is already allowed, so a host nobody has observed sending a second name
+  still gets exactly one, and an alias declared for an unlisted client grants
+  nothing.
+- Everything else is compared **exactly**, folded. There is no prefix, suffix
+  or substring rule, and adding one would be the exact failure this layer
+  exists to prevent: a rule accepting ``cur*`` accepts ``cursorpwned``, and one
+  accepting ``*-vscode`` accepts ``attacker-vscode``. A second name is a
+  declared alias or it is a refusal, never an inference.
+
+``CONTINUUM_MCP_ALLOW_ANY_CLIENT`` waives the comparison entirely, for an
+operator who genuinely runs many MCP clients against one database. It is
+opt-in, never inferred, never a default, and it is visible in ``policy.source``
+and in every refusal this module writes, because a caller whose host profile
+was never written down is exactly the caller that must be visible.
 """
 
 from __future__ import annotations
@@ -325,6 +360,18 @@ def token_from(context: Any) -> str | None:
     return str(token) if token else None
 
 
+def _fold(name: str) -> str:
+    """Normalise a client name for comparison: trimmed and case-folded.
+
+    Both hosts and operators capitalise product names, so ``Cursor`` and
+    ``cursor`` are one client. A comparison that calls them two has not
+    isolated anything, it has only made the failure silent. Folding is applied
+    to both sides of every comparison, so it cannot smuggle in a name that
+    differs in more than case: ``my-cursor-impersonator`` folds to itself.
+    """
+    return name.strip().casefold()
+
+
 class AuthorizationPolicy:
     """Decides whether a named caller may invoke a mutating tool.
 
@@ -338,7 +385,7 @@ class AuthorizationPolicy:
     __slots__ = ("allowed", "source")
 
     def __init__(self, allowed: Iterable[str] = (), *, source: str = "default") -> None:
-        self.allowed = frozenset(n.strip() for n in allowed if n and n.strip())
+        self.allowed = frozenset(_fold(n) for n in allowed if n and n.strip())
         self.source = source
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
@@ -352,23 +399,33 @@ class AuthorizationPolicy:
         return not self.allowed
 
     def permits(self, caller: str | None) -> bool:
-        """Whether ``caller`` may invoke mutating tools."""
-        if not caller:
+        """Whether ``caller`` may invoke mutating tools.
+
+        The comparison is exact after normalisation: trimmed, case-folded, and
+        equal to an allowlisted name. There is no prefix, suffix or substring
+        rule, because a rule accepting anything ending in ``-vscode`` also
+        accepts ``attacker-vscode``, and a rule accepting ``cur*`` accepts
+        ``cursorpwned``.
+        """
+        if caller is None:
             return False
-        return caller in self.allowed
+        name = _fold(caller)
+        if not name:
+            return False
+        return name in self.allowed
 
     def require(self, caller: str | None, tool: str) -> None:
         """Raise unless ``caller`` may invoke the mutating tool ``tool``."""
-        if caller:
-            if caller in self.allowed:
-                return
-            raise NotAuthorized(
-                f"caller {caller!r} is not permitted to use the mutating tool "
-                f"{tool!r}. {self._remedy(caller)}"
+        if not caller:
+            raise UnknownCaller(
+                f"the connection did not identify itself, so the mutating tool "
+                f"{tool!r} is refused. {self._remedy(None)}"
             )
-        raise UnknownCaller(
-            f"the connection did not identify itself, so the mutating tool "
-            f"{tool!r} is refused. {self._remedy(None)}"
+        if self.permits(caller):
+            return
+        raise NotAuthorized(
+            f"caller {caller!r} is not permitted to use the mutating tool "
+            f"{tool!r}. {self._remedy(caller)}"
         )
 
     def _remedy(self, caller: str | None) -> str:
