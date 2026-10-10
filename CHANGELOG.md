@@ -53,6 +53,18 @@ Test counts: ~3,636 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **Client names are now folded, so the mutating-tool allowlist and the
+  per-client token map agree (#1598).** Both halves of the handshake key off
+  the same `clientInfo.name` string, and neither normalised it, so the two
+  could disagree: a host naming itself `Cursor` against a grant registered as
+  `cursor` passed authorisation and then failed authentication, and the
+  message blamed the name as unregistered rather than naming the mismatch.
+  Every name comparison in `src/continuum/mcp/authz.py` now goes through one
+  fold (whitespace-stripped, `casefold`), so one spelling of a client name is
+  one identity across both halves. Secrets are still compared exactly, and
+  the refusal paths still fail closed. The match is documented as
+  case-insensitive in `docs/api/security.md`.
+
 - **A probe that prints `occurred:false` is now told the separator is the
   problem.** A command probe's verdict contract was documented only in the
   module docstring, so the place an operator met it was the error, and the
