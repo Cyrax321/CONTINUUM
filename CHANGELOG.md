@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+Test counts: ~3,355 collected on a minimal env.
+
 ### Added
 
 - **Deferred review queue and priority batching for low-risk confirmations (#1410).**
@@ -1059,7 +1061,7 @@ All notable changes to this project are documented here. The format follows
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (~3,325 collected, ~3,325 passed, ~0 skipped on a minimal env).
+  (3,325 collected, ~3,325 passed, ~0 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
