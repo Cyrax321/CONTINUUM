@@ -159,6 +159,14 @@ class EventType(StrEnum):
     NOTIFICATION_SENT = "NOTIFICATION_SENT"
     NOTIFICATION_FAILED = "NOTIFICATION_FAILED"
 
+    # reviewer fatigue telemetry (issue #1411): audit facts for human oversight.
+    # Recorded facts, never folded: they leave projected state unchanged, but
+    # ride the same per-run hash chain as every other event so they are covered
+    # by verify().
+    REVIEW_PARKED = "REVIEW_PARKED"
+    REVIEW_BATCH_APPROVED = "REVIEW_BATCH_APPROVED"
+    FATIGUE_SIGNAL_RECORDED = "FATIGUE_SIGNAL_RECORDED"
+
 
 #: Event types whose payloads may carry ``caused_by`` causal links
 #: (issues #551, #597). Findings joined decisions and actions here:
