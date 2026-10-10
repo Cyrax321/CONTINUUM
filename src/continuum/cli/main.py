@@ -3233,6 +3233,46 @@ def cmd_hooks_install(args: argparse.Namespace, storage: Storage, out: Any, err:
 
     briefing_command = command[: -len("observe")] + "briefing"
     precompact_command = command[: -len("observe")] + "precompact"
+    # --with-gate is a request for enforcement, and enforcement is the one
+    # thing this flag cannot fake. The installed hook resolves the same
+    # DEFAULT_GATE_CONFIG_PATH the gate command does, and the gate treats a
+    # *missing* registry as "no gate configured": Decision(True), exit 0 for an
+    # unclaimed side-effecting call. Wiring the hook in that state installs a
+    # guard that looks armed and disarms itself, which is worse than no guard
+    # at all. The README's onboarding promise, that unclaimed side effects
+    # registered in .continuum/gate.json are refused before they fire, reads as
+    # active to everyone who passes the flag while every call is allowed. Fail
+    # before touching settings, the way the gateway refuses to start as an open
+    # relay rather than forwarding everything. Re-running is idempotent
+    # (install_client_hook reports "present"), so the cost is one command.
+    if getattr(args, "with_gate", False):
+        registry = Path(DEFAULT_GATE_CONFIG_PATH)
+        try:
+            tools = load_gate_config(registry)
+        except GateConfigError as exc:
+            print(f"error: --with-gate needs a readable gate registry: {exc}", file=err)
+            return ExitCode.ERROR
+        if tools is None:
+            print(
+                f"error: --with-gate was passed but {registry} does not exist, so the "
+                "installed gate would allow every tool call: the gate reads a missing "
+                'registry as "no gate configured" and returns exit 0. Create one, '
+                "register your side-effecting tools, then re-run this command:\n"
+                "  mkdir -p .continuum && echo "
+                '\'{"tools": {"Write": {"key_template": "{file_path}"}}}\' '
+                f"> {registry}\n"
+                "Each entry names the tool as the harness sees it and the key template "
+                "that identifies the operation; see docs/guides/embed-claude-code.md "
+                "and docs/guides/memory_governance.md.",
+                file=err,
+            )
+            return ExitCode.ERROR
+        if not tools:
+            print(
+                f"warning: {registry} registers no tools, so the installed gate will "
+                'allow every call until you add entries under "tools".',
+                file=err,
+            )
     statuses = [
         (
             install_client_hook(
