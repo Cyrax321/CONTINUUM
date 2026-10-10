@@ -1321,15 +1321,31 @@ def cmd_health(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     except Exception:
         trajectory_payload = None
         trajectory_text = ""
+    # Reviewer fatigue (issue #1411): advisory only, same rule as the score
+    # above. A warning here never gates a resume, because blocking a fast
+    # approval would deadlock the emergency operation that needed it; the
+    # warning is what an operator reads, and the evidence stays in the log.
+    fatigue_payload = None
+    fatigue_text = ""
+    try:
+        from continuum.recovery.fatigue import advisory_text, fatigue_advisory
+
+        fatigue_payload = fatigue_advisory(storage, run_id)
+        fatigue_text = "\n" + advisory_text(fatigue_payload)
+    except Exception:
+        fatigue_payload = None
+        fatigue_text = ""
     payload = {"run_id": run_id, "advisory": advisory}
     if trajectory_payload is not None:
         payload["trajectory_report"] = trajectory_payload
+    if fatigue_payload is not None:
+        payload["reviewer_fatigue"] = fatigue_payload
     _emit(
         payload,
         f"trust_score: {advisory['trust_score']} "
         f"(role={advisory['breakdown']['role']} "
         f"goal={advisory['breakdown']['goal']} "
-        f"evidence={advisory['breakdown']['evidence']})" + trajectory_text,
+        f"evidence={advisory['breakdown']['evidence']})" + trajectory_text + fatigue_text,
         as_json=args.json,
         stream=out,
         palette=getattr(args, "_palette", None),
@@ -1735,6 +1751,23 @@ def cmd_confirm(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
         if _c not in allowed:
             print(f"error: --scope must be one of {sorted(allowed)}; got {scope!r}", file=err)
             return ExitCode.ERROR
+    # Record the human's batch decision before the confirmation it produces, so
+    # the audit trail carries how many items were cleared and how long they sat
+    # (issue #1411). Telemetry is best-effort: a recording failure must not trap
+    # a run that only a human can release.
+    try:
+        from continuum.recovery.fatigue import record_batch_approval
+
+        record_batch_approval(
+            storage,
+            args.run_id,
+            item_count=len(components),
+            reviewer=getattr(args, "reviewer", None) or "operator",
+            complexity=getattr(args, "complexity", "high"),
+            source=Origin.HUMAN,
+        )
+    except Exception as exc:  # noqa: BLE001 - never block a human confirmation
+        print(f"warning: fatigue telemetry could not be recorded: {exc}", file=err)
     storage.append_event(
         args.run_id,
         EventType.REVIEW_CONFIRMED,
@@ -4773,6 +4806,17 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["goal", "progress"],
         default=None,
         help="confirm only these components (default: goal and progress).",
+    )
+    confirm.add_argument(
+        "--reviewer",
+        default="operator",
+        help="identity to attribute the confirmation to in fatigue telemetry (default: operator).",
+    )
+    confirm.add_argument(
+        "--complexity",
+        default="high",
+        choices=["low", "medium", "high"],
+        help="complexity of the reviewed batch for fatigue telemetry (default: high).",
     )
 
     complete = with_run(add("complete", cmd_complete, "Close a run as done. Mutates storage."))

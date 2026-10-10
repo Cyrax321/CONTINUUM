@@ -842,6 +842,11 @@ _NON_PROJECTING = frozenset(
         # memory: a tombstone records that something was deleted from the
         # projected memory index, not that the assistant's state changed.
         EventType.MEMORY_TOMBSTONED,
+        # reviewer fatigue telemetry (issue #1411): audit facts for human oversight;
+        # they carry timing and batch context, not assistant state changes.
+        EventType.REVIEW_PARKED,
+        EventType.REVIEW_BATCH_APPROVED,
+        EventType.FATIGUE_SIGNAL_RECORDED,
     }
 )
 
