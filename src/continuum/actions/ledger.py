@@ -1613,13 +1613,36 @@ class ActionLedger:
         return self._record(key, action, EventType.ACTION_COMPENSATED)
 
     @_single_writer
-    def flag_for_review(self, key: str, reason: str) -> Action:
+    def flag_for_review(
+        self,
+        key: str,
+        reason: str,
+        *,
+        risk_score: float | None = None,
+    ) -> Action:
         """Escalate an action a human must judge."""
         key, existing = self._require(key)
         action = existing.model_copy(
             update={"status": ActionStatus.REQUIRES_REVIEW, "last_error": reason}
         )
-        return self._record(key, action)
+        recorded = self._record(key, action)
+        # Telemetry is best-effort: a storage failure must not strand an action
+        # in REQUIRES_REVIEW or block the escalation that prompted the flag.
+        try:
+            from continuum.recovery.fatigue import record_review_parked
+
+            record_review_parked(
+                self.storage,
+                self.run_id,
+                key=key,
+                action_type=recorded.action_type,
+                reason=reason,
+                risk_score=risk_score,
+                source=self._source,
+            )
+        except Exception:
+            pass
+        return recorded
 
     def forensic_lookup(self, record_key: str) -> list[dict[str, Any]]:
         """Find actions whose rendered key contains ``record_key``.

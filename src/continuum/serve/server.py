@@ -911,6 +911,22 @@ def _h_resume(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]:
 
 def _h_confirm(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]:
     run_id = _require(params, "run_id")
+    # Fatigue telemetry for the human's batch decision (issue #1411), recorded
+    # before the confirmation it produces. Best-effort: the confirmation is what
+    # releases the run, and an audit row must not gate it.
+    try:
+        from continuum.recovery.fatigue import record_batch_approval
+
+        record_batch_approval(
+            server.storage,
+            run_id,
+            item_count=2,
+            reviewer=str(params.get("reviewer") or "sidecar-operator"),
+            complexity="high",
+            source=Origin.HUMAN,
+        )
+    except Exception:
+        pass
     server.storage.append_event(
         run_id,
         EventType.REVIEW_CONFIRMED,

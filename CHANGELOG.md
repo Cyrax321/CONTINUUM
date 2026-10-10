@@ -10,6 +10,14 @@ Test counts: ~3,355 collected on a minimal env.
 
 ### Added
 
+- **Reviewer fatigue telemetry and audit events for human oversight (#1411, #1407, #296).**
+  Add reviewer fatigue detection and telemetry for human-in-the-loop oversight.
+  Introduces three audit-grade events (`REVIEW_PARKED`, `REVIEW_BATCH_APPROVED`,
+  `FATIGUE_SIGNAL_RECORDED`) that maintain append-only hash chain integrity.
+  Provides `FatigueContract` to enforce dwell time thresholds and complexity floors,
+  integrating into `ActionLedger.flag_for_review`, CLI `confirm` and `health` commands,
+  the HITL dashboard, and HTTP sidecar endpoints to flag rapid rubber-stamped batch approvals.
+
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a
   repeatedly failing integration spends its own allowance instead of the run's:
