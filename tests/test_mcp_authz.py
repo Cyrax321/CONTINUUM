@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from continuum.mcp.authz import (
+    ALIASES_ENV_VAR,
     AUTH_ENV_VAR,
     CLIENT_TOKENS_ENV_VAR,
     CONFIRM_ENV_VAR,
@@ -219,6 +220,44 @@ def test_a_case_variant_is_the_same_client() -> None:
     assert policy.permits("CURSOR")
     # Padding is stripped rather than turned into a second identity.
     assert policy.permits("  Cursor  ")
+
+
+@pytest.mark.parametrize("observed", OBSERVED_NAMES)
+def test_the_probe_does_not_degrade_silently(observed: str) -> None:
+    """The four-row probe, as a regression test.
+
+    Every name the host was observed sending is honoured once the host profile
+    declares them. Three of the four were not the baked string, so before the
+    fix each of them connected successfully with only 3 of 13 tools.
+    """
+    policy = AuthorizationPolicy([INSTALL_BAKED], aliases=[DECLARED_ALIASES])
+    assert policy.permits(observed), observed
+
+
+def test_a_configured_alias_is_honoured() -> None:
+    policy = AuthorizationPolicy([INSTALL_BAKED], aliases=[f"{INSTALL_BAKED}:cursor-vscode"])
+    assert policy.permits("cursor-vscode")
+    assert policy.permits("CURSOR-VSCODE")
+    assert policy.aliases == frozenset({"cursor-vscode"})
+
+
+def test_the_alias_env_var_honours_every_declared_name(tmp_path: Path) -> None:
+    policy = load_policy(
+        root=tmp_path,
+        env={POLICY_ENV_VAR_ALIAS: INSTALL_BAKED, ALIASES_ENV_VAR: DECLARED_ALIASES},
+    )
+    assert policy.source == POLICY_ENV_VAR_ALIAS
+    for observed in OBSERVED_NAMES:
+        assert policy.permits(observed), observed
+
+
+def test_aliases_resolve_from_the_policy_file(tmp_path: Path) -> None:
+    path = tmp_path / POLICY_FILENAME
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"allow": [INSTALL_BAKED], "aliases": DECLARED_ALIASES}))
+    policy = load_policy(root=tmp_path, env={})
+    for observed in OBSERVED_NAMES:
+        assert policy.permits(observed), observed
 
 # --- resolving the policy --------------------------------------------------- #
 

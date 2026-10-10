@@ -1,59 +1,14 @@
 """Which MCP callers may change a run.
-
-The problem this solves is coexistence, not intrusion. Several agents can be
-configured against the same database at once (Kilo, Gemini CLI and Claude Code
-have all pointed at this project's ``continuum.db`` simultaneously), and until
-now any of them could overwrite another's progress, checkpoint over its state,
-or claim its actions. This layer keeps honestly-named agents out of each other's
-runs.
-
-It is a security boundary only when authentication is turned on. By default
-``clientInfo`` is asserted by the client during the initialize handshake and
-never verified, so a caller that wants to be called ``claude-code`` simply says
-so. What the transport does guarantee is that the name is fixed at connection
-time and injected server-side: a caller cannot elevate itself mid-session by
-passing a forged ``clientInfo`` in tool arguments. That is enough to separate
-cooperating agents, and not enough to stop a hostile one on its own.
-
-When ``CONTINUUM_MCP_TOKEN`` is set, the server verifies one shared secret the
-client presents in the handshake's ``_meta.authToken``. Per-client credentials
-are available via ``CONTINUUM_MCP_CLIENT_TOKENS`` (``name:secret`` pairs): each
-caller's secret is bound to the identity it claims, so a token issued to one
-client cannot be replayed by another. A caller that cannot prove possession of
-the expected secret (for its own name, under per-client mode) is refused every
-mutating tool regardless of the name it claims, which is what turns "cooperating
-agents kept apart" into "hostile caller stopped". The check is fail-closed: a
-missing, empty, or mismatched secret always refuses, and an unset secret leaves
-authentication disabled so the default local, single-user, no-account behavior
-is unchanged. A hostile process with direct filesystem access to the database
-can still edit it without the server, which is outside this layer's scope.
-
-Read-only tools stay open
--------------------------
-
-Only mutating tools are gated. ``validate``, ``resume`` and ``list_actions``
-cannot alter a run, and their whole value is that anyone can ask "is this safe
-to continue?" without first being granted permission. Gating them would also
-leave an unlisted caller unable to discover *why* its writes are failing.
-
-The split is driven by the ``read_only_hint`` annotation each tool already
-declares, rather than a second hand-maintained list that could drift out of
-step with it.
-
-Names hosts actually send
--------------------------
-
 The allowlist is keyed on the ``clientInfo.name`` the host puts in its
 handshake, which is a fact about the host's build rather than something this
 project chooses. ``continuum mcp install --host cursor`` bakes
-``CONTINUUM_MCP_MUTATING_CLIENTS=cursor``, and a live probe found the same
-host presenting ``cursor``, ``cursor-vscode`` or ``visual-studio-code``
-depending on the build. On an exact string match every one of those but the
-first connected successfully with 3 of the 13 tools and said nothing, so the
-loss surfaced at the first write the agent attempted.
+``CONTINUUM_MCP_MUTATING_CLIENTS=cursor``, and a live probe found that host
+presenting ``Cursor`` depending on the build. On an exact string match it
+connected successfully with 3 of the 13 tools and said nothing, so the loss
+surfaced at the first write the agent attempted.
 
-Three rules close that without turning the allowlist into a shape an attacker
-can walk through:
+Two rules close that without loosening the comparison into something an
+attacker can walk through:
 
 - Comparison is **case-insensitive** and whitespace-trimmed. ``Cursor`` is the
   client that ``cursor`` names, not a stranger to it.
@@ -63,17 +18,11 @@ can walk through:
   that is already allowed, so a host nobody has observed sending a second name
   still gets exactly one, and an alias declared for an unlisted client grants
   nothing.
-- Everything else is compared **exactly**, folded. There is no prefix, suffix
-  or substring rule, and adding one would be the exact failure this layer
-  exists to prevent: a rule accepting ``cur*`` accepts ``cursorpwned``, and one
-  accepting ``*-vscode`` accepts ``attacker-vscode``. A second name is a
-  declared alias or it is a refusal, never an inference.
 
-``CONTINUUM_MCP_ALLOW_ANY_CLIENT`` waives the comparison entirely, for an
-operator who genuinely runs many MCP clients against one database. It is
-opt-in, never inferred, never a default, and it is visible in ``policy.source``
-and in every refusal this module writes, because a caller whose host profile
-was never written down is exactly the caller that must be visible.
+Everything else is compared **exactly**, folded. There is no prefix, suffix or
+substring rule, and adding one would be the exact failure this layer exists to
+prevent. A second name is a declared alias or it is a refusal, never an
+inference.
 """
 
 from __future__ import annotations
@@ -94,6 +43,7 @@ __all__ = [
     "POLICY_ENV_VAR",
     "POLICY_ENV_VAR_ALIAS",
     "POLICY_FILENAME",
+    "ALIASES_ENV_VAR",
     "AUTH_ENV_VAR",
     "CONFIRM_ENV_VAR",
     "load_policy",
@@ -114,6 +64,13 @@ POLICY_ENV_VAR = "CONTINUUM_MCP_ALLOW"
 POLICY_ENV_VAR_ALIAS = "CONTINUUM_MCP_MUTATING_CLIENTS"
 
 POLICY_FILENAME = ".continuum/mcp-policy.json"
+
+#: Alias declarations: ``canonical:alias1,alias2`` groups, separated by commas
+#: or whitespace, spelled the way ``CONTINUUM_MCP_CLIENT_TOKENS`` is. An alias
+#: says "this identity also answers to this name", so a host that sends a
+#: second spelling of itself gets one grant rather than two policies to keep in
+#: step. See "Names hosts actually send" in the module docstring.
+ALIASES_ENV_VAR = "CONTINUUM_MCP_CLIENT_ALIASES"
 
 #: Used when the handshake supplied no client name at all.
 UNKNOWN_CALLER = "<unidentified>"
@@ -404,6 +361,48 @@ def _fold(name: str) -> str:
     return name.strip().casefold()
 
 
+def _parse_aliases(value: str | Iterable[str] | None) -> dict[str, list[str]]:
+    """Parse alias declarations into ``{canonical: [alias, ...]}``.
+
+    Entries are ``canonical:alias`` groups separated by commas or whitespace,
+    mirroring ``CONTINUUM_MCP_CLIENT_TOKENS``: a token carrying a colon opens
+    a group, and the tokens after it are further names for that group. A
+    declaration naming no canonical, declaring no alias, or smuggling the
+    wildcard into an alias position raises rather than being quietly dropped,
+    because a dropped alias is a host that silently loses its tools.
+    """
+    if value is None:
+        return {}
+    tokens: Iterable[str] = [value] if isinstance(value, str) else value
+    groups: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for token in tokens:
+        for part in str(token).replace(",", " ").split():
+            canonical, sep, alias = part.partition(":")
+            if not sep:
+                if current is None:
+                    raise ValueError(
+                        f"alias {part!r} has no canonical name to attach to; the form "
+                        f"is 'canonical:alias', with each alias following its "
+                        f"canonical ({ALIASES_ENV_VAR})"
+                    )
+                current.append(part)
+                continue
+            if not canonical:
+                raise ValueError(
+                    f"alias declaration {part!r} has no canonical name; the form is "
+                    f"'canonical:alias' ({ALIASES_ENV_VAR})"
+                )
+            if not alias:
+                raise ValueError(
+                    f"alias declaration {part!r} declares no alternative name; the "
+                    f"form is 'canonical:alias' ({ALIASES_ENV_VAR})"
+                )
+            current = groups.setdefault(canonical, [])
+            current.append(alias)
+    return groups
+
+
 class AuthorizationPolicy:
     """Decides whether a named caller may invoke a mutating tool.
 
@@ -414,14 +413,36 @@ class AuthorizationPolicy:
     rather than resolving in its own favour.
     """
 
-    __slots__ = ("allowed", "source")
+    __slots__ = ("allowed", "aliases", "source", "_identities", "_labels")
 
-    def __init__(self, allowed: Iterable[str] = (), *, source: str = "default") -> None:
+    def __init__(
+        self,
+        allowed: Iterable[str] = (),
+        *,
+        aliases: str | Iterable[str] | None = None,
+        source: str = "default",
+    ) -> None:
+        names = [n.strip() for n in allowed if n and n.strip()]
         # Folded so the allowlist answers the same identity the per-client token
         # map does: a grant written as ``Cursor`` covers a caller calling itself
         # ``cursor`` (#1598). Blank names still grant nothing, folded or not.
-        self.allowed = frozenset(_fold(n) for n in allowed if n and n.strip())
+        self.allowed = frozenset(_fold(name) for name in names)
         self.source = source
+
+        # An alias is only kept when the canonical it belongs to is itself
+        # allowed. Aliases declared for a client this server does not permit are
+        # dropped rather than honoured, because honouring them would admit
+        # exactly that client through the side of the allowlist.
+        live = {
+            canonical: extra
+            for canonical, extra in _parse_aliases(aliases).items()
+            if _fold(canonical) in self.allowed
+        }
+        self.aliases = frozenset(_fold(alias) for extra in live.values() for alias in extra)
+        self._identities = self.allowed | self.aliases
+        # The spellings as written, so a refusal quotes back something the
+        # operator recognises rather than a lowercased shadow of it.
+        self._labels = tuple(dict.fromkeys([*names, *(a for e in live.values() for a in e)]))
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         listed = ", ".join(sorted(self.allowed)) or "(none)"
@@ -437,17 +458,18 @@ class AuthorizationPolicy:
         """Whether ``caller`` may invoke mutating tools.
 
         The comparison is exact after normalisation: trimmed, case-folded, and
-        equal to an allowlisted name. There is no prefix, suffix or substring
-        rule, because a rule accepting anything ending in ``-vscode`` also
-        accepts ``attacker-vscode``, and a rule accepting ``cur*`` accepts
-        ``cursorpwned``.
+        equal to an allowlisted name or to a declared alias of one. There is no
+        prefix, suffix or substring rule, because a rule accepting anything
+        ending in ``-vscode`` also accepts ``attacker-vscode``, and a rule
+        accepting ``cur*`` accepts ``cursorpwned``. A second name is a declared
+        alias or it is a refusal, never an inference.
         """
         if caller is None:
             return False
         name = _fold(caller)
         if not name:
             return False
-        return name in self.allowed
+        return name in self._identities
 
     def require(self, caller: str | None, tool: str) -> None:
         """Raise unless ``caller`` may invoke the mutating tool ``tool``."""
@@ -481,8 +503,11 @@ def _from_env(value: str | None) -> list[str]:
     return [part for part in value.replace(",", " ").split() if part]
 
 
-def _from_file(path: Path) -> tuple[list[str], str] | None:
+def _from_file(path: Path) -> tuple[list[str], Any, str] | None:
     """Read an allowlist from ``path``. Returns ``None`` when absent.
+
+    Returns the allowlist, the raw ``aliases`` declaration (or ``None``), and
+    the path as the source label.
 
     A malformed policy file raises rather than falling back to the default. A
     file that exists is a deliberate statement of intent; silently ignoring a
@@ -496,22 +521,30 @@ def _from_file(path: Path) -> tuple[list[str], str] | None:
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot read MCP policy at {path}: {exc}") from exc
 
+    declared: Any = None
     if isinstance(data, list):
         names = data
     elif isinstance(data, Mapping):
         names = data.get("allow", data.get("allowed", []))
+        declared = data.get("aliases")
     else:
         raise ValueError(
             f'MCP policy at {path} must be a list of client names or an object with an "allow" key'
         )
     if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
         raise ValueError(f"MCP policy at {path}: 'allow' must be a list of strings")
-    return list(names), str(path)
+    if isinstance(declared, list):
+        if not all(isinstance(a, str) for a in declared):
+            raise ValueError(f"MCP policy at {path}: 'aliases' must be a list of strings")
+    elif declared is not None and not isinstance(declared, str):
+        raise ValueError(f"MCP policy at {path}: 'aliases' must be a string or a list of strings")
+    return list(names), declared, str(path)
 
 
 def load_policy(
     allow: Iterable[str] | None = None,
     *,
+    aliases: str | Iterable[str] | None = None,
     root: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> AuthorizationPolicy:
@@ -519,21 +552,27 @@ def load_policy(
 
     Each source replaces the ones below it rather than merging, so a caller can
     always see exactly where a grant came from by reading ``policy.source``.
+    Aliases follow the same rule: the ``aliases`` argument alongside an
+    explicit ``allow``, ``CONTINUUM_MCP_CLIENT_ALIASES`` alongside an allowlist
+    from either allowlist variable, and the policy file's ``aliases`` key
+    alongside an allowlist from the file. An alias never grants by itself, so a
+    stale aliases variable beside an emptied allowlist grants nothing.
     """
     if allow is not None:
-        return AuthorizationPolicy(allow, source="argument")
+        return AuthorizationPolicy(allow, aliases=aliases, source="argument")
 
     environ = os.environ if env is None else env
+    declared = environ.get(ALIASES_ENV_VAR)
     for var in (POLICY_ENV_VAR_ALIAS, POLICY_ENV_VAR):
         from_env = _from_env(environ.get(var))
         if from_env:
-            return AuthorizationPolicy(from_env, source=var)
+            return AuthorizationPolicy(from_env, aliases=declared, source=var)
 
     base = Path.cwd() if root is None else root
     found = _from_file(base / POLICY_FILENAME)
     if found is not None:
-        names, source = found
-        return AuthorizationPolicy(names, source=source)
+        names, file_aliases, source = found
+        return AuthorizationPolicy(names, aliases=file_aliases, source=source)
 
     return AuthorizationPolicy((), source="default (deny)")
 
