@@ -1,14 +1,59 @@
 """Which MCP callers may change a run.
+
+The problem this solves is coexistence, not intrusion. Several agents can be
+configured against the same database at once (Kilo, Gemini CLI and Claude Code
+have all pointed at this project's ``continuum.db`` simultaneously), and until
+now any of them could overwrite another's progress, checkpoint over its state,
+or claim its actions. This layer keeps honestly-named agents out of each other's
+runs.
+
+It is a security boundary only when authentication is turned on. By default
+``clientInfo`` is asserted by the client during the initialize handshake and
+never verified, so a caller that wants to be called ``claude-code`` simply says
+so. What the transport does guarantee is that the name is fixed at connection
+time and injected server-side: a caller cannot elevate itself mid-session by
+passing a forged ``clientInfo`` in tool arguments. That is enough to separate
+cooperating agents, and not enough to stop a hostile one on its own.
+
+When ``CONTINUUM_MCP_TOKEN`` is set, the server verifies one shared secret the
+client presents in the handshake's ``_meta.authToken``. Per-client credentials
+are available via ``CONTINUUM_MCP_CLIENT_TOKENS`` (``name:secret`` pairs): each
+caller's secret is bound to the identity it claims, so a token issued to one
+client cannot be replayed by another. A caller that cannot prove possession of
+the expected secret (for its own name, under per-client mode) is refused every
+mutating tool regardless of the name it claims, which is what turns "cooperating
+agents kept apart" into "hostile caller stopped". The check is fail-closed: a
+missing, empty, or mismatched secret always refuses, and an unset secret leaves
+authentication disabled so the default local, single-user, no-account behavior
+is unchanged. A hostile process with direct filesystem access to the database
+can still edit it without the server, which is outside this layer's scope.
+
+Read-only tools stay open
+-------------------------
+
+Only mutating tools are gated. ``validate``, ``resume`` and ``list_actions``
+cannot alter a run, and their whole value is that anyone can ask "is this safe
+to continue?" without first being granted permission. Gating them would also
+leave an unlisted caller unable to discover *why* its writes are failing.
+
+The split is driven by the ``read_only_hint`` annotation each tool already
+declares, rather than a second hand-maintained list that could drift out of
+step with it.
+
+Names hosts actually send
+-------------------------
+
 The allowlist is keyed on the ``clientInfo.name`` the host puts in its
 handshake, which is a fact about the host's build rather than something this
 project chooses. ``continuum mcp install --host cursor`` bakes
-``CONTINUUM_MCP_MUTATING_CLIENTS=cursor``, and a live probe found that host
-presenting ``Cursor`` depending on the build. On an exact string match it
-connected successfully with 3 of the 13 tools and said nothing, so the loss
-surfaced at the first write the agent attempted.
+``CONTINUUM_MCP_MUTATING_CLIENTS=cursor``, and a live probe found the same
+host presenting ``cursor``, ``cursor-vscode`` or ``visual-studio-code``
+depending on the build. On an exact string match every one of those but the
+first connected successfully with 3 of the 13 tools and said nothing, so the
+loss surfaced at the first write the agent attempted.
 
-Two rules close that without loosening the comparison into something an
-attacker can walk through:
+Three rules close that without turning the allowlist into a shape an attacker
+can walk through:
 
 - Comparison is **case-insensitive** and whitespace-trimmed. ``Cursor`` is the
   client that ``cursor`` names, not a stranger to it.
@@ -18,11 +63,11 @@ attacker can walk through:
   that is already allowed, so a host nobody has observed sending a second name
   still gets exactly one, and an alias declared for an unlisted client grants
   nothing.
-
-Everything else is compared **exactly**, folded. There is no prefix, suffix or
-substring rule, and adding one would be the exact failure this layer exists to
-prevent. A second name is a declared alias or it is a refusal, never an
-inference.
+- Everything else is compared **exactly**, folded. There is no prefix, suffix
+  or substring rule, and adding one would be the exact failure this layer
+  exists to prevent: a rule accepting ``cur*`` accepts ``cursorpwned``, and one
+  accepting ``*-vscode`` accepts ``attacker-vscode``. A second name is a
+  declared alias or it is a refusal, never an inference.
 
 Aliases are declared in their own variable rather than inline. The allowlist is
 split on commas and whitespace, so ``cursor=cursor-vscode`` written into it
@@ -33,10 +78,9 @@ misread, with nothing to say so, so an inline ``=`` is refused outright.
 
 ``CONTINUUM_MCP_ALLOW_ANY_CLIENT`` waives the comparison entirely, for an
 operator who genuinely runs many MCP clients against one database. It is
-opt-in, never inferred, never a default, and it reports itself in
-``policy.source``. It grants every caller that *asserts a name*: an
-unidentified connection still refuses, so the wildcard cannot be used to wave
-through a caller that named nothing.
+opt-in, never inferred, never a default, and it is visible in ``policy.source``
+and in every refusal this module writes, because a caller whose host profile
+was never written down is exactly the caller that must be visible.
 """
 
 from __future__ import annotations
@@ -548,14 +592,30 @@ class AuthorizationPolicy:
         )
 
     def _remedy(self, caller: str | None) -> str:
+        """Say what was seen, what is accepted, and exactly what to set.
+
+        The observed name is the part an operator cannot work out alone. The
+        registration they wrote and the ``clientInfo.name`` the host sent can
+        disagree for reasons no configuration file records, and quoting the
+        observed string back turns a silent loss of tools into a one-line fix.
+        """
         name = caller or "<your-client-name>"
         if self.denies_everything:
             base = "No callers are currently permitted to make changes."
+        elif self.allow_any:
+            base = f"Every named caller is permitted ({ALLOW_ANY_CLIENT_ENV_VAR} is set)."
         else:
-            base = f"Permitted callers: {', '.join(sorted(self.allowed))}."
+            base = f"Permitted callers: {', '.join(self._labels)}."
+        if caller:
+            seen = f"Observed clientInfo.name {caller!r}, which is not one of them."
+        else:
+            seen = "Observed clientInfo.name: none, the handshake carried no name."
         return (
-            f"{base} Read-only tools remain available. To grant access, set "
-            f"{POLICY_ENV_VAR_ALIAS}={name!r} or add it to {POLICY_FILENAME}."
+            f"{seen} {base} Read-only tools remain available. To grant access, set "
+            f"{POLICY_ENV_VAR_ALIAS}={name!r} or add it to {POLICY_FILENAME}. A host "
+            f"known to send more than one name declares the others with "
+            f"{ALIASES_ENV_VAR}='<canonical>:<alias>[,<alias>...]'. To permit every "
+            f"named client, set {ALLOW_ANY_CLIENT_ENV_VAR}."
         )
 
 
