@@ -50,7 +50,12 @@ dev = [
 ]
 # The MCP server is optional: the core library and CLI never import it, so
 # installing CONTINUUM does not pull in a server stack you may not want.
-mcp = ["mcp>=2.0"]
+# tomli-w and PyYAML are here because `continuum mcp install` registers with
+# hosts whose own config files are not JSON (Codex CLI writes TOML, Continue
+# writes YAML). Both are imported lazily and only when such a host is
+# registered, so a host that needs neither pays for neither, and a missing one
+# is reported by name with the command that installs it.
+mcp = ["mcp>=2.0", "tomli-w>=1.0", "PyYAML>=6.0"]
 # The OpenTelemetry bridge is optional: the core library never imports it.
 otel = ["opentelemetry-api>=1.20"]
 # The LangGraph adapter is optional: it wraps langgraph's StateGraph and tool
