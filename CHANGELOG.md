@@ -10,7 +10,7 @@ Test counts: ~3,355 collected on a minimal env.
 
 ### Added
 
-- **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
+- **Recovery-attempt budgets are scoped to the dependency that owns them (#744, #1428).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a
   repeatedly failing integration spends its own allowance instead of the run's:
   exhausting dependency A leaves dependency B's repair path open, which is what
