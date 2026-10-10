@@ -343,3 +343,5 @@ def test_a_hook_written_by_an_older_version_is_still_recognised() -> None:
     legacy = r"'D:\pROJ OPEN\CONTINUUM\.venv\Scripts\python.exe' -m continuum.cli observe"
     assert _is_continuum_hook({"command": legacy}, "observe")
     assert not _is_continuum_hook({"command": "some-other-tool observe"}, "observe")
+
+

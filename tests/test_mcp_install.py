@@ -573,3 +573,66 @@ def test_the_baked_registration_connects_from_a_foreign_cwd(
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+def test_resolve_vscode_settings_path_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows, resolve to %APPDATA%\\Code\\User\\settings.json (#1604)."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", r"C:\Users\tester\AppData\Roaming")
+    resolved = mcp_install.resolve_vscode_settings_path()
+    assert resolved == Path(r"C:\Users\tester\AppData\Roaming\Code\User\settings.json")
+
+    # Fallback when APPDATA is unset
+    monkeypatch.delenv("APPDATA", raising=False)
+    resolved_fallback = mcp_install.resolve_vscode_settings_path()
+    assert (
+        resolved_fallback == Path.home() / "AppData" / "Roaming" / "Code" / "User" / "settings.json"
+    )
+
+
+def test_resolve_vscode_settings_path_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On macOS, resolve to ~/Library/Application Support/Code/User/settings.json (#1604)."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    resolved = mcp_install.resolve_vscode_settings_path()
+    assert (
+        resolved
+        == Path.home() / "Library" / "Application Support" / "Code" / "User" / "settings.json"
+    )
+
+
+def test_resolve_vscode_settings_path_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Linux, resolve to ~/.config or XDG_CONFIG_HOME (#1604)."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/custom/config")
+    resolved = mcp_install.resolve_vscode_settings_path()
+    assert resolved == Path("/custom/config/Code/User/settings.json")
+
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    resolved_fallback = mcp_install.resolve_vscode_settings_path()
+    assert resolved_fallback == Path.home() / ".config" / "Code" / "User" / "settings.json"
+
+
+def test_mcp_settings_path_vscode_host_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_mcp_settings_path resolves vscode settings per-platform (#1604)."""
+    import argparse
+
+    from continuum.cli.main import _mcp_settings_path
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", r"C:\Users\tester\AppData\Roaming")
+
+    user_path = _mcp_settings_path(argparse.Namespace(host="vscode", scope="user", settings=None))
+    assert user_path == Path(r"C:\Users\tester\AppData\Roaming\Code\User\settings.json")
+
+    local_path = _mcp_settings_path(argparse.Namespace(host="vscode", scope="local", settings=None))
+    assert local_path == Path(r"C:\Users\tester\AppData\Roaming\Code\User\settings.json")
+
+    project_path = _mcp_settings_path(
+        argparse.Namespace(host="vscode", scope="project", settings=None)
+    )
+    assert project_path == Path(".vscode/mcp.json")
+
+    custom_path = _mcp_settings_path(
+        argparse.Namespace(host="vscode", scope="user", settings="my_settings.json")
+    )
+    assert custom_path == Path("my_settings.json")
