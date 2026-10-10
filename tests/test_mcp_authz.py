@@ -67,6 +67,7 @@ MUTATING_CALLS: dict[str, dict[str, Any]] = {
     },
     "continuum_compensate_action": {"run_id": "run_1", "action_key": "k"},
     "continuum_confirm": {"run_id": "run_1"},
+    "continuum_complete_run": {"run_id": "run_1"},
     "continuum_record_summary": {
         "run_id": "run_1",
         "plan_stack": ["step"],

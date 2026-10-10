@@ -83,6 +83,7 @@ def test_valid_non_object_json_is_tolerated(project: Path, contents: str) -> Non
         (lambda storage, run_id: _cli_complete(storage, run_id), "cli"),
         (lambda storage, run_id: tui_model.complete_run(storage, run_id), "tui"),
         (lambda storage, run_id: hitl.complete_run(storage, run_id), "dashboard"),
+        (lambda storage, run_id: _mcp_complete(storage, run_id), "mcp"),
     ],
 )
 def test_every_completion_path_clears_the_pointer(project: Path, closer, label: str) -> None:
@@ -92,6 +93,31 @@ def test_every_completion_path_clears_the_pointer(project: Path, closer, label: 
         closer(storage, "r1")
         assert storage.get_run("r1").status.value == "completed"
     assert not _POINTER.exists(), f"{label} completion left a stale resume pointer"
+
+
+def _mcp_complete(storage: SQLiteStorage, run_id: str) -> None:
+    """Drive the real MCP tool, the path an agent uses to close its own run.
+
+    The tool has no access to ``update_run`` or ``clear_resume_pointer``; it can
+    only append, so this is the path that exposed the bug the fix has to cover
+    without help from the caller.
+    """
+    import asyncio
+
+    from continuum.mcp.authz import AuthorizationPolicy
+    from continuum.mcp.server import build_server
+    from tests.mcp_helpers import fake_context as _ctx
+
+    server, _ = build_server(storage=storage, policy=AuthorizationPolicy(["test"]))
+    # Deliberately not ctx.close()d: this ctx wraps the caller's storage, and
+    # closing it would race the `with` block that owns the handle.
+    asyncio.run(
+        server.call_tool(
+            "continuum_complete_run",
+            {"run_id": run_id},
+            context=_ctx("test"),
+        )
+    )
 
 
 def _cli_complete(storage: SQLiteStorage, run_id: str) -> None:

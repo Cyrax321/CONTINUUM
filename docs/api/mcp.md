@@ -136,11 +136,12 @@ tools are gated by the allowlist (see Security).
 | `continuum_reconcile_action` | mutate | Resolve an uncertain side effect from outside evidence. |
 | `continuum_compensate_action` | mutate | Record a completed side effect was deliberately undone. |
 | `continuum_confirm` | mutate | Confirm a human-approved recovery step. |
+| `continuum_complete_run` | mutate | Close a run once the goal is met, so it stops surfacing as the active run. Agent-sourced: it lands `RUN_COMPLETED` without `REVIEW_CONFIRMED`, so a self-certification request stays open for a human to clear. |
 | `continuum_validate` | read | Check state against the current environment. |
 | `continuum_resume` | read | Assess and describe how the run may resume. Omit `run_id` to target the most recently active (interrupted) run. Returns the run's `goal` so a resumed session knows what to continue. |
 | `continuum_list_actions` | read | List recorded side effects and their outcomes. |
 
-Thirteen tools: three read-only, ten mutating.
+Fourteen tools: three read-only, eleven mutating.
 
 Read-only responses `continuum_resume` and `continuum_validate` include a
 `constraint_pins` block: per-pin status (`present`, `absent`, `unverifiable`), grace deadline, and flagged set derived from reconstruction accounting (hash-tagged markers in the recovery context, issue #419). The CLI renders flagged pins prominently with TTY-aware colour while piped output stays byte-identical modulo colour codes. No gating changes live here; strict escalation remains in the accounting layer.
@@ -168,11 +169,10 @@ always names exactly where a grant came from.
 line (default `./continuum.db`).
 
 `CONTINUUM_MCP_SLIM`
-: Set to `1` to ship a read-only server. The tool table above lists thirteen
+: Set to `1` to ship a read-only server. The tool table above lists fourteen
   tools -- ten mutating, three read-only -- and slim removes the ten mutating
   ones, leaving `continuum_resume`, `continuum_validate` and
-  `continuum_list_actions`.
-The variable is checked inside `build_server`, so every caller path that
+  `continuum_list_actions`.The variable is checked inside `build_server`, so every caller path that
 constructs a server honours it, not just the CLI entry point. It is off by
 default and is not a security boundary on its own: it shrinks what a caller can
 ask for, but the allowlist above is still what decides who may ask.

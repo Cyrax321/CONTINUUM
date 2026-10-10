@@ -28,11 +28,11 @@ from continuum.mcp import install as mcp_install
 SCRIPTS_DIR = Path(sys.executable).parent
 
 PROTOCOL_VERSION = "2024-11-05"
-#: Thirteen tools: three read-only, ten mutating (``docs/api/mcp.md``). Main
+#: Fourteen tools: three read-only, eleven mutating (``docs/api/mcp.md``). Main
 #: gained ``continuum_compensate_action`` (#1260) after this test was written,
 #: so the count is rechecked against the live server by
 #: ``test_mcp_entrypoint.py``.
-TOOL_COUNT = 13
+TOOL_COUNT = 14
 
 
 def run(*argv: str) -> tuple[int, str, str]:

@@ -193,7 +193,7 @@ Full walkthrough with code is in `docs/recovery_walkthrough.md` (`examples/recov
 | Environment revalidation | Every checkpoint component verified against the current world before resume |
 | Provenance-aware state | Agent-reported progress is marked `REQUIRES_REVIEW`, never self-certifying |
 | Recovery engine | Seven recovery modes with a deterministic, sealed next-action contract |
-| Deny-by-default MCP server | Thirteen tools, read-only/mutating split, caller allowlist |
+| Deny-by-default MCP server | Fourteen tools, read-only/mutating split, caller allowlist |
 | Framework adapters | Generic Python, OpenAI Agents SDK, LangGraph, and LangChain integrations |
 | Secure planning loop | Two-signal observation verification escalates high-risk branches to REQUIRES_REVIEW |
 | Periodic revalidation | Environment re-checked on a schedule, catching mid-run drift within one cycle |
@@ -274,7 +274,7 @@ $env:CONTINUUM_MCP_MUTATING_CLIENTS = "your-client-name"
 continuum-mcp
 ```
 
-Thirteen tools over stdio. Three are read-only (`continuum_validate`, `continuum_resume`, `continuum_list_actions`); ten mutate. Side effects are two-phase (claim, perform, complete), and mutating tools deny by default behind an allowlist. Agent-reported state is recorded with `Origin.EXTERNAL_AGENT` provenance and marked `REQUIRES_REVIEW`.
+Fourteen tools over stdio. Three are read-only (`continuum_validate`, `continuum_resume`, `continuum_list_actions`); eleven mutate. Side effects are two-phase (claim, perform, complete), and mutating tools deny by default behind an allowlist. Agent-reported state is recorded with `Origin.EXTERNAL_AGENT` provenance and marked `REQUIRES_REVIEW`.
 
 Verification details, including crash recovery at startup and the end to end Claude Code test, are in [references/mcp.md](references/mcp.md). If a registered server reports `CONNECTION_CLOSED`, the cause is almost always `PATH` resolution rather than the server itself: [docs/api/mcp.md](docs/api/mcp.md#troubleshooting) has the diagnosis and two remedies.
 
@@ -362,7 +362,7 @@ Any harness plugs into the same hash chained log. The same run can be written by
 | Seam | How to connect | What it gives you |
 |:--|:--|:--|
 | 1 In-process | `GenericAgentAdapter.intercept_action(...)` and `wrap_tool(key_fn=...)` on LangChain, LangGraph, OpenAI Agents SDK | Python frameworks, trusted writes |
-| 2 MCP server | `continuum-mcp` 13 tools over stdio (`continuum_record_progress`, `continuum_intercept_action`, `continuum_complete_action`, etc.) | Any MCP capable client, 3 read-only + 10 mutating, allowlist `CONTINUUM_MCP_MUTATING_CLIENTS` |
+| 2 MCP server | `continuum-mcp` 14 tools over stdio (`continuum_record_progress`, `continuum_intercept_action`, `continuum_complete_action`, etc.) | Any MCP capable client, 3 read-only + 11 mutating, allowlist `CONTINUUM_MCP_MUTATING_CLIENTS` |
 | 3 CLI lifecycle hooks | `continuum hooks install claude-code --with-gate` also `gemini` and `codex` | Coding CLIs: `SessionStart briefing`, `PostToolUse observe`, `PreToolUse gate`; no CLAUDE.md needed |
 | 4 Enforcing HTTP gateway | `continuum gateway --port 8765` with `.continuum/gateway.json` | Any language, any outbound HTTP must have a claim, gateway settles from real status code |
 | 5 OpenTelemetry bridge | `make_span_processor(storage)` | Any traced app, spans become `TOOL_COMPLETED` evidence |
@@ -447,7 +447,7 @@ CONTINUUM is one library (`src/continuum`, 141 modules) plus a large test suite 
 | `replay_similarity.py` | Semantic similarity backends exact/fuzzy/embedding for replay vs fork |
 | `reconcilers.py` | Probe registry `.continuum/reconcilers.json` for automatic settlement |
 | `adapters/` | 9 class adapters + thin hooks `thin.py` CrewAI AutoGen Pydantic AI + LangGraph store |
-| `mcp/` | 13 stdio tools plus authz `authz.py` token auth, allowlist, confirmation token |
+| `mcp/` | 14 stdio tools plus authz `authz.py` token auth, allowlist, confirmation token |
 | `serve/` | Sidecar stdio JSON wire + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Web dashboard `app.py` `hitl.py` with HITL buttons confirm/reconcile/complete, prefix trust advisory, pins |
 | `cli/` | 52 argparse commands, exit codes as verdict: `runs, start, inspect, resume, verify, health, tree, benchmark, attest, lineage-issue, lineage-verify, dashboard` |

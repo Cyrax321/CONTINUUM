@@ -82,11 +82,11 @@ Registered in `.mcp.json` (project root):
 
 - Spawns as a stdio MCP server; it opens `continuum.db` in the current working
   directory.
-- **Thirteen tools**, split read-only vs mutating:
+- **Fourteen tools**, split read-only vs mutating:
   `continuum_record_progress`, `continuum_checkpoint`,
   `continuum_record_summary`, `continuum_intercept_action`,
   `continuum_complete_action`, `continuum_fail_action`,
-  `continuum_reconcile_action`, `continuum_confirm`
+  `continuum_reconcile_action`, `continuum_confirm`, `continuum_complete_run`
   (mutating), and `continuum_validate`, `continuum_resume`,
   `continuum_list_actions` (read-only).
 - **Authorization** (`authz.py`): mutating tools are gated by an allowlist
@@ -241,7 +241,7 @@ coarser than desired.
 
 ### P7. Per-session token floor
 Every session pays for the system prompt (`CLAUDE.md`) plus the schemas of all
-thirteen MCP tools, regardless of how little work is done. For many short
+fourteen MCP tools, regardless of how little work is done. For many short
 resume checks this fixed cost dominates.
 
 ---
@@ -327,7 +327,7 @@ continuum --db continuum.db events guide     # the recorded section trail
 
 ## 10. Key files to read
 
-- `src/continuum/mcp/server.py`  -  `build_server`, `ContinuumMCP`, the 13 tools,
+- `src/continuum/mcp/server.py`  -  `build_server`, `ContinuumMCP`, the 14 tools,
   `continuum_resume` (optional `run_id`, returns `goal`).
 - `src/continuum/storage/sqlite.py`  -  `get_active_run`, `list_runs`, run table.
 - `src/continuum/recovery/engine.py`  -  `RecoveryEngine.assess` (mode decision).

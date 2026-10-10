@@ -294,7 +294,7 @@ What gets baked:
   project root, resolved), because the host's spawn cwd is neither documented
   nor guaranteed to be the project root.
 - **`env`**: names the host's client in the mutating-tools allowlist, so the
-  registration exposes all thirteen tools rather than the three read-only ones.
+  registration exposes all fourteen tools rather than the three read-only ones.
 
 Before writing anything, the `mcp` SDK extra is verified by spawning a probe
 subprocess; when it is missing, install prints

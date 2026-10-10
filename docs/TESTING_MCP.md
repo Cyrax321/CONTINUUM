@@ -1,6 +1,6 @@
 # CONTINUUM MCP test report
 
-Adversarial verification of the CONTINUUM MCP server: all 13 registered tools,
+Adversarial verification of the CONTINUUM MCP server: all 14 registered tools,
 their failure modes, and the guarantees that must not move.
 
 - **Date:** 2026-08-24
@@ -16,7 +16,7 @@ their failure modes, and the guarantees that must not move.
 | `python -m pytest` | 1361 passed, 24 skipped, stable across consecutive runs |
 | `ruff check` / `ruff format --check` | clean on every changed file |
 | `mypy src` | 25 errors, identical to baseline (missing stubs for the optional `mcp` extra and `cryptography`) |
-| In-process audit, all 13 tools | 23 of 23 assertions passed |
+| In-process audit, all 14 tools | 23 of 23 assertions passed |
 | Adversarial probe round 2 | 14 of 14 assertions passed |
 | Adversarial probe round 3 | 14 of 16, both failures diagnosed (one probe bug, one real finding) |
 | Live MCP audit through the running server | all fixes confirmed present |
@@ -48,7 +48,7 @@ fix carries a test that fails without it.
 
 ## Tool coverage
 
-All 13 tools were exercised. None was covered by inspection alone.
+All 14 tools were exercised. None was covered by inspection alone.
 
 | Tool | Exercised with |
 |---|---|
@@ -59,6 +59,7 @@ All 13 tools were exercised. None was covered by inspection alone.
 | `continuum_validate` | no `env`, matching `env`, drifted `env`, `expected_model`, unknown run |
 | `continuum_resume` | by id, no id (active-run path), unknown run, `expected_model`, both guidance branches |
 | `continuum_confirm` | refusal without an operator token |
+| `continuum_complete_run` | valid close, run already completed, summary carried, no `REVIEW_CONFIRMED` written |
 | `continuum_intercept_action` | fresh, dedup by key, varied arguments, blank `action_type`, at budget, beyond budget |
 | `continuum_complete_action` | valid, bogus key, with and without `external_id` |
 | `continuum_fail_action` | `certain=true`, `certain=false` |
