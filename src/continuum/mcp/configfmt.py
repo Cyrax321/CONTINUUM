@@ -29,18 +29,34 @@ a user's annotated config gets flattened into something they did not write.
 
 Sources for every host profile in ``install.HOST_PROFILES`` are recorded next
 to the profile itself.
+
+What this module does not know
+------------------------------
+
+Whether an entry is *ours* is deliberately not decided here. That predicate
+needs CONTINUUM's own constants (the console-script name, the interpreter
+fallback's argv) and it lives in ``install``, which owns them. What lives here
+is the translation between a host's structure and a list of argv, which is
+the part that has nothing to do with CONTINUUM: ``Shape.argv_of`` turns any
+host's entry into argv, and ``install`` decides whether that argv is one of
+ours. Keeping the two apart is what lets a new host be added without teaching
+this module what a ``continuum-mcp`` is.
 """
 
 from __future__ import annotations
 
 import importlib
 import json
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 __all__ = [
     "FORMATS",
     "ConfigError",
+    "ServerSpec",
+    "Shape",
     "read_document",
     "render_document",
     "write_document",
@@ -263,3 +279,257 @@ def write_document(fmt: str, path: Path, data: dict[str, Any]) -> None:
     text = render_document(fmt, data)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# shapes
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class ServerSpec:
+    """A registration, stated the way CONTINUUM means it, format-free.
+
+    Everything a host needs is here: the name the entry is filed under, the
+    argv that starts the server, and the environment the server reads. How a
+    particular host spells those three is :class:`Shape`'s problem.
+    """
+
+    name: str
+    argv: tuple[str, ...]
+    env: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class Shape:
+    """Where a host files its servers, and how it spells one.
+
+    Three axes, deliberately separate, because real hosts combine them freely:
+
+    - ``container``. ``"dict"`` files servers under a name, ``"list"`` files
+      them as records that carry their own name.
+    - ``nesting_key``. Some per-user settings files hold one section per
+      project, so a registration can be scoped to one checkout. Hosts with no
+      such notion pass ``""`` and every scope lands in the same container.
+    - ``argv_style``. Most hosts split the command into a string and an args
+      list; opencode takes one argv array. Neither is more correct.
+
+    ``type_key``/``type_value`` cover the hosts that tag an entry with its
+    transport or connection kind, and ``env_key`` covers the one that spells
+    the environment ``environment``. None of them interact with ``format``,
+    which is the point: a TOML host and a YAML host are both dict-keyed today,
+    and nothing here would stop a YAML host being list-shaped.
+    """
+
+    servers_key: str
+    container: str = "dict"
+    nesting_key: str = ""
+    name_field: str = "name"
+    argv_style: str = "split"
+    env_key: str = "env"
+    type_key: str = ""
+    type_value: str = ""
+
+    # -- paths ------------------------------------------------------------ #
+
+    def path(self, scope: str, project_root: Path) -> list[str]:
+        """The keys leading to the servers container, for one scope.
+
+        Only the per-project ``local`` scope nests, and only on a host whose
+        settings file has a place to nest in. Everywhere else the container
+        is at the top level, which is why ``nesting_key`` is empty for most
+        hosts rather than an absent-project fallback.
+        """
+        if scope == "local" and self.nesting_key:
+            return [self.nesting_key, str(project_root), self.servers_key]
+        return [self.servers_key]
+
+    # -- entries ---------------------------------------------------------- #
+
+    def entry(self, spec: ServerSpec) -> dict[str, Any]:
+        """Build the host-native entry for ``spec``."""
+        entry: dict[str, Any] = {}
+        if self.type_key and self.type_value:
+            entry[self.type_key] = self.type_value
+        if self.container == "list":
+            entry[self.name_field] = spec.name
+        if self.argv_style == "array":
+            entry["command"] = list(spec.argv)
+        else:
+            entry["command"] = spec.argv[0]
+            entry["args"] = list(spec.argv[1:])
+        entry[self.env_key] = dict(spec.env)
+        return entry
+
+    def argv_of(self, entry: Any) -> list[str] | None:
+        """Read an entry back as argv, or ``None`` when it is not one.
+
+        ``None`` is the answer for every shape this cannot represent: not a
+        mapping, a command that is the wrong type, args that are not all
+        strings. That is deliberately the same answer as "not one of ours",
+        because a caller cannot act differently on the two and guessing is
+        what makes a remove delete somebody else's configuration.
+        """
+        if not isinstance(entry, dict):
+            return None
+        command = entry.get("command")
+        if self.argv_style == "array":
+            if not isinstance(command, list) or not command:
+                return None
+            if not all(isinstance(part, str) for part in command):
+                return None
+            return [str(part) for part in command]
+        if not isinstance(command, str):
+            return None
+        args = entry.get("args")
+        if not isinstance(args, list):
+            return None
+        if not all(isinstance(arg, str) for arg in args):
+            return None
+        return [command, *[str(arg) for arg in args]]
+
+    # -- locating --------------------------------------------------------- #
+
+    def container_at(
+        self, data: dict[str, Any], scope: str, project_root: Path, *, create: bool
+    ) -> tuple[list[str], Any] | None:
+        """Find the servers container, walking or creating the path to it.
+
+        Every container on the way has to be a mapping when it already exists
+        and is created when it does not. A container that exists and is
+        something else is a shape this tool will not overwrite, so it raises
+        rather than replacing it.
+        """
+        path = self.path(scope, project_root)
+        node: Any = data
+        for key in path[:-1]:
+            child = node.get(key)
+            if child is None:
+                if not create:
+                    return None
+                child = node[key] = {}
+            if not isinstance(child, dict):
+                raise ConfigError(
+                    f"{'.'.join(path)}: {key!r} is not an object; refusing to edit it"
+                )
+            node = child
+        last = path[-1]
+        container = node.get(last)
+        if container is None:
+            if not create:
+                return None
+            container = node[last] = [] if self.container == "list" else {}
+        if not isinstance(container, list if self.container == "list" else dict):
+            raise ConfigError(
+                f"{'.'.join(path)} is not {'a list' if self.container == 'list' else 'an object'}; "
+                "refusing to edit it"
+            )
+        return path, container
+
+    def find(self, data: dict[str, Any], scope: str, project_root: Path, name: str) -> Any | None:
+        """The entry filed under ``name``, with the path it was found at.
+
+        The entry is returned bare rather than in a pair: a caller that found
+        one either recognises it or it does not, and the path is only needed
+        by the removal that already knows the scope it searched under.
+        """
+        located = self.container_at(data, scope, project_root, create=False)
+        if located is None:
+            return None
+        _path, container = located
+        if self.container == "list":
+            for item in container:
+                if isinstance(item, dict) and item.get(self.name_field) == name:
+                    return item
+            return None
+        return container.get(name)
+
+    def put(
+        self,
+        data: dict[str, Any],
+        scope: str,
+        project_root: Path,
+        spec: ServerSpec,
+    ) -> tuple[str, Any]:
+        """File ``spec`` under its name, returning ``(status, previous)``.
+
+        ``"installed"`` when there was nothing there, ``"updated"`` when there
+        was something different, ``"present"`` when it already matches. The
+        caller decides what to do about a previous entry it does not own;
+        that decision needs CONTINUUM's constants, so it stays in ``install``.
+        """
+        located = self.container_at(data, scope, project_root, create=True)
+        assert located is not None, "create=True always locates or creates the container"
+        container: Any = located[1]
+        entry = self.entry(spec)
+        if self.container == "list":
+            for index, item in enumerate(container):
+                if isinstance(item, dict) and item.get(self.name_field) == spec.name:
+                    if item == entry:
+                        return "present", item
+                    container[index] = entry
+                    return "updated", item
+            container.append(entry)
+            return "installed", None
+        previous = container.get(spec.name)
+        if previous is None:
+            container[spec.name] = entry
+            return "installed", None
+        if previous == entry:
+            return "present", previous
+        container[spec.name] = entry
+        return "updated", previous
+
+    def drop(
+        self, data: dict[str, Any], scope: str, project_root: Path, name: str
+    ) -> bool:
+        """Take ``name`` out, pruning every container the entry emptied.
+
+        A per-project registration sits three containers deep, so removing it
+        can leave a per-user settings file holding an empty project keyed by
+        an absolute path. That residue is what a user notices and files a bug
+        about, so a remove leaves the file as if the install had never run.
+        """
+        entry = self.find(data, scope, project_root, name)
+        if entry is None:
+            return False
+        located = self.container_at(data, scope, project_root, create=False)
+        assert located is not None, "find() located the entry, so the path exists"
+        path, container = located
+        if self.container == "list":
+            container.remove(entry)
+        else:
+            del container[name]
+        _prune(data, path)
+        return True
+
+
+def _prune(data: dict[str, Any], path: list[str]) -> None:
+    """Remove ``path`` and its parents while each is an empty mapping.
+
+    Only mappings are pruned, and only upwards from the container. A list is
+    left even when empty, because an empty list is a value the host may well
+    have written on purpose: Continue's own docs show an agent with no
+    servers as ``mcpServers: []``, and deleting the key would remove the one
+    thing that tells the host MCP is configured at all.
+    """
+    edges: list[tuple[dict[str, Any], str]] = []
+    node: Any = data
+    for key in path:
+        if not isinstance(node, dict):
+            return
+        edges.append((node, key))
+        child = node.get(key)
+        if not isinstance(child, dict):
+            break
+        node = child
+    for parent, key in reversed(edges):
+        if key not in parent:
+            # Already gone: this level emptied itself, so the one above it is
+            # the next candidate rather than a blocker.
+            continue
+        value = parent[key]
+        if isinstance(value, dict) and not value:
+            del parent[key]
+        else:
+            return

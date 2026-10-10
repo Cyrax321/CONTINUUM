@@ -329,3 +329,189 @@ def test_reading_toml_never_needs_a_writer() -> None:
 
     parsed = tomllib.loads('[mcp_servers.x]\ncommand = "c"\n')
     assert parsed == {"mcp_servers": {"x": {"command": "c"}}}
+
+
+# --------------------------------------------------------------------------- #
+# shapes
+# --------------------------------------------------------------------------- #
+
+#: The shapes the landed profiles use. Every combination here is real: no
+#: profile is dict-keyed with an argv array, but a YAML host being list-shaped
+#: and a TOML host being dict-keyed both are, so the axes are exercised
+#: independently rather than only in the combinations that happen to ship.
+DICT_SPLIT = configfmt.Shape(servers_key="mcpServers", nesting_key="projects", type_key="type", type_value="stdio")
+LIST_SPLIT = configfmt.Shape(servers_key="mcpServers", container="list")
+DICT_ARRAY = configfmt.Shape(
+    servers_key="mcp", container="dict", argv_style="array", env_key="environment",
+    type_key="type", type_value="local",
+)
+
+SPEC = configfmt.ServerSpec(
+    name="continuum-mcp",
+    argv=("/opt/venv/bin/continuum-mcp", "--db", "/home/op/proj/continuum.db"),
+    env={"CONTINUUM_MCP_MUTATING_CLIENTS": "claude-code"},
+)
+
+
+@pytest.mark.parametrize("shape", [DICT_SPLIT, LIST_SPLIT, DICT_ARRAY])
+def test_a_registration_survives_a_write_and_a_read_in_any_shape(shape: configfmt.Shape) -> None:
+    """Every shape reads back the same registration install wrote.
+
+    This is the round-trip guarantee for the structure layer, and it is the
+    reason the shape does not depend on the format: the argv that goes in is
+    the argv that comes back, whatever the host's keys are called.
+    """
+    data: dict[str, Any] = {}
+    assert shape.put(data, "local", Path("/proj"), SPEC)[0] == "installed"
+
+    assert shape.argv_of(shape.find(data, "local", Path("/proj"), SPEC.name)) == list(SPEC.argv)
+
+
+@pytest.mark.parametrize("shape", [DICT_SPLIT, LIST_SPLIT, DICT_ARRAY])
+def test_re_installing_never_duplicates_the_entry(shape: configfmt.Shape) -> None:
+    """The second install is a no-op, on every shape.
+
+    This is the bug class of issues #484 and #526. A dict shape makes it
+    invisible, because a key either exists or it does not; a list shape
+    appends, so getting it wrong shows up as two identical servers in the
+    agent's picker and nothing else anywhere.
+    """
+    data: dict[str, Any] = {}
+    assert shape.put(data, "project", Path("/proj"), SPEC)[0] == "installed"
+    assert shape.put(data, "project", Path("/proj"), SPEC)[0] == "present"
+
+    container = shape.container_at(data, "project", Path("/proj"), create=False)[1]
+    entries = [container] if isinstance(container, dict) else container
+    assert len(entries) == 1
+
+
+@pytest.mark.parametrize("shape", [DICT_SPLIT, LIST_SPLIT, DICT_ARRAY])
+def test_a_moved_environment_repoints_rather_than_duplicating(shape: configfmt.Shape) -> None:
+    """A changed argv updates in place; it never leaves a second entry.
+
+    Reinstalling after a virtualenv moves has to be safe to run
+    unconditionally from a setup script, and a list-shaped host that appends
+    on every run is exactly how that becomes a problem.
+    """
+    moved = configfmt.ServerSpec(
+        name=SPEC.name,
+        argv=("/new/venv/bin/continuum-mcp", "--db", SPEC.argv[2]),
+        env=SPEC.env,
+    )
+    data: dict[str, Any] = {}
+    shape.put(data, "project", Path("/proj"), SPEC)
+
+    assert shape.put(data, "project", Path("/proj"), moved)[0] == "updated"
+
+    container = shape.container_at(data, "project", Path("/proj"), create=False)[1]
+    entries = [container] if isinstance(container, dict) else container
+    assert len(entries) == 1
+    assert shape.argv_of(shape.find(data, "project", Path("/proj"), SPEC.name)) == list(moved.argv)
+
+
+@pytest.mark.parametrize("shape", [DICT_SPLIT, LIST_SPLIT, DICT_ARRAY])
+def test_remove_takes_out_only_what_was_installed(shape: configfmt.Shape) -> None:
+    """Other servers, and other keys, survive a remove untouched."""
+    data: dict[str, Any] = {"unrelated": {"keep": True}}
+    shape.put(data, "project", Path("/proj"), SPEC)
+    container = shape.container_at(data, "project", Path("/proj"), create=False)[1]
+    if shape.container == "list":
+        container.append({"name": "weather", "command": "weather-bin"})
+    else:
+        container["weather"] = {"command": "weather-bin"}
+
+    assert shape.drop(data, "project", Path("/proj"), SPEC.name) is True
+
+    assert shape.find(data, "project", Path("/proj"), SPEC.name) is None
+    assert data["unrelated"] == {"keep": True}
+    assert shape.find(data, "project", Path("/proj"), "weather") is not None
+
+
+def test_a_nested_registration_prunes_every_container_it_emptied() -> None:
+    """A local registration sits three containers deep; all three go.
+
+    The alternative is a per-user settings file left holding an empty project
+    keyed by an absolute path, which is residue a user notices and files a bug
+    about.
+    """
+    data: dict[str, Any] = {}
+    DICT_SPLIT.put(data, "local", Path("/proj"), SPEC)
+    assert data == {"projects": {"/proj": {"mcpServers": {"continuum-mcp": DICT_SPLIT.entry(SPEC)}}}}
+
+    DICT_SPLIT.drop(data, "local", Path("/proj"), SPEC.name)
+
+    assert data == {}
+
+
+def test_an_empty_list_container_is_left_alone() -> None:
+    """``mcpServers: []`` survives, because the host may have written it.
+
+    Deleting the key would remove the only thing telling Continue that MCP is
+    configured at all.
+    """
+    data: dict[str, Any] = {"mcpServers": []}
+    LIST_SPLIT.put(data, "local", Path("/proj"), SPEC)
+
+    LIST_SPLIT.drop(data, "local", Path("/proj"), SPEC.name)
+
+    assert data == {"mcpServers": []}
+
+
+@pytest.mark.parametrize(
+    ("taken", "shape", "expected"),
+    [
+        pytest.param(["not a dict"], DICT_SPLIT, "is not an object", id="dict-taken-by-a-list"),
+        pytest.param({"not": "a list"}, LIST_SPLIT, "is not a list", id="list-taken-by-a-mapping"),
+    ],
+)
+def test_a_container_that_is_the_wrong_type_is_refused(
+    taken: Any, shape: configfmt.Shape, expected: str
+) -> None:
+    """A container taken by something else is never overwritten.
+
+    The same contract ``_load_object`` has for the file itself, one level
+    down: whatever is in there was written on purpose.
+    """
+    data = {shape.servers_key: taken}
+
+    with pytest.raises(configfmt.ConfigError, match=expected):
+        shape.put(data, "project", Path("/proj"), SPEC)
+
+
+def test_a_nesting_container_that_is_the_wrong_type_is_refused() -> None:
+    """A ``projects`` key holding a string stops the install dead."""
+    data: dict[str, Any] = {"projects": "a string"}
+
+    with pytest.raises(configfmt.ConfigError, match="is not an object"):
+        DICT_SPLIT.put(data, "local", Path("/proj"), SPEC)
+
+
+def test_a_shape_without_per_project_nesting_ignores_the_scope() -> None:
+    """A host with nowhere to nest puts every scope in the same container.
+
+    opencode and Continue scope a registration by which file it is in, not by
+    a section inside one, so ``local``, ``project`` and ``user`` are the same
+    place and the scope only picked the path in the first place.
+    """
+    data: dict[str, Any] = {}
+    for scope in ("local", "project", "user"):
+        LIST_SPLIT.put(data, scope, Path("/proj"), SPEC)
+
+    assert list(data) == ["mcpServers"]
+    assert len(data["mcpServers"]) == 1
+
+
+def test_argv_of_rejects_every_entry_shape_it_cannot_represent() -> None:
+    """``None`` means "not argv", whether that is a type error or a bad value.
+
+    The caller cannot act differently on a missing ``args`` and on an ``args``
+    holding a number, so both have to produce the same refusal: guessing here
+    is what makes a remove delete somebody else's configuration.
+    """
+    assert DICT_SPLIT.argv_of("not a dict") is None
+    assert DICT_SPLIT.argv_of({"command": "/x/continuum-mcp"}) is None
+    assert DICT_SPLIT.argv_of({"command": "/x/continuum-mcp", "args": [1]}) is None
+    assert DICT_SPLIT.argv_of({"command": 7, "args": []}) is None
+    assert DICT_ARRAY.argv_of({"command": "/x/continuum-mcp"}) is None
+    assert DICT_ARRAY.argv_of({"command": []}) is None
+    assert DICT_ARRAY.argv_of({"command": ["/x/continuum-mcp", 2]}) is None
