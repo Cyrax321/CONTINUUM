@@ -443,7 +443,10 @@ def test_a_nested_registration_prunes_every_container_it_emptied() -> None:
     data: dict[str, Any] = {}
     DICT_SPLIT.put(data, "local", Path("/proj"), SPEC)
     assert data == {
-        "projects": {"/proj": {"mcpServers": {"continuum-mcp": DICT_SPLIT.entry(SPEC)}}}
+        # The container is keyed by str(project_root), which renders per
+        # platform: "/proj" on POSIX, "\proj" on Windows. Asserting the POSIX
+        # spelling made this fail on Windows while the code was right.
+        "projects": {str(Path("/proj")): {"mcpServers": {"continuum-mcp": DICT_SPLIT.entry(SPEC)}}}
     }
 
     DICT_SPLIT.drop(data, "local", Path("/proj"), SPEC.name)
