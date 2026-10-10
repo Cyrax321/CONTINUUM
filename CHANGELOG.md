@@ -31,6 +31,12 @@ Test counts: ~3,355 collected on a minimal env.
   the line carries counts and a dependency name only, never arguments, files
   or failure detail. `RecoveryEngine` takes an optional ledger and reads the
   budget read-only; without one every decision is unchanged.
+
+- **Scalability stress harness, fault injection resilience suite, and action ledger caching (#1583).**
+  Adds reproducible interleaved stress test workloads across 1,000 and 10,000 steps in
+  `benchmarks/scalability/stress_workload.py`, comprehensive fault injection tests covering 7 failure
+  scenarios in `tests/test_scalability_fault_injection.py`, and in-memory folded action caching
+  with storage head invalidation in `ActionLedger` to avoid quadratic scan overhead during action claims.
 ### Fixed
 
 - **A probe that prints `occurred:false` is now told the separator is the

@@ -1570,3 +1570,27 @@ def test_a_terminal_foreign_record_does_not_bypass_the_drift_fallback(
     replay = local.claim("send.invoice", drifted, scoped_to_run=False)
     assert not replay.fresh, "the completed effect must not be re-performed"
     assert replay.external_id == "EXT-9"
+
+
+def test_folded_action_cache_invalidates_when_another_writer_appends(
+    store: SQLiteStorage,
+) -> None:
+    """A process-local ActionLedger must not serve stale folded cache when another writer advances."""
+    writer1 = ActionLedger(store, "run_1")
+    writer2 = ActionLedger(store, "run_1")
+
+    # writer1 reads and populates its in-memory cache
+    outcome1 = writer1.claim("github.create_issue", {"title": "Issue 1"})
+    assert outcome1.fresh
+    writer1.complete(outcome1.key, external_id="101")
+    assert writer1.get(outcome1.key).status is ActionStatus.COMPLETED
+
+    # writer2 records an independent action on the same run
+    outcome2 = writer2.claim("github.create_issue", {"title": "Issue 2"})
+    assert outcome2.fresh
+    writer2.complete(outcome2.key, external_id="102")
+
+    # writer1 must see the new action despite its populated folded cache
+    action2 = writer1.get(outcome2.key)
+    assert action2.status is ActionStatus.COMPLETED
+    assert action2.external_id == "102"
