@@ -2932,13 +2932,21 @@ def cmd_precompact(args: argparse.Namespace, storage: Storage, out: Any, err: An
         return ExitCode.OK
 
     storage.get_run(run_id)  # raises RunNotFound -> NOT_FOUND by the dispatcher
-    checkpoint = CheckpointManager(storage).checkpoint(
+    manager = CheckpointManager(storage)
+    checkpoint = manager.checkpoint(
         run_id,
         trigger=CheckpointTrigger.CONTEXT_PRESSURE,
         reason=args.reason or "pre-compact",
         environment=_environment(args, run_id),
     )
+    reinject_failure: str | None = None
+    try:
+        manager.reinject_constraints(run_id)
+    except Exception as exc:  # hook must never fail the host
+        reinject_failure = f"constraint re-injection: {exc}"
     written, failures = _write_precompact_snapshots(storage, run_id)
+    if reinject_failure:
+        failures.append(reinject_failure)
 
     lines = [
         f"Checkpoint {checkpoint.checkpoint_id} sealed at v{checkpoint.version} "

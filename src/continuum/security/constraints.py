@@ -22,17 +22,22 @@ rules follow the rest of the security surface:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Iterator
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
 from continuum.models import Frozen, Origin
 from continuum.security.hashing import stable_hash
+
+if TYPE_CHECKING:
+    from continuum.events import Event
+    from continuum.storage.base import Storage
 
 __all__ = [
     "DEFAULT_CONSTRAINTS_PATH",
@@ -40,8 +45,11 @@ __all__ = [
     "ConstraintSpec",
     "ConstraintRegistry",
     "load_constraints",
+    "load_constraints_or_none",
     "constraints_digest",
     "ConstraintRegistryError",
+    "reinject_constraint_pins",
+    "re_inject_constraint_pins",
 ]
 
 #: Where the registry lives relative to the project root. JSON, matching
@@ -369,3 +377,180 @@ def load_constraints_or_none(
     if not target.exists() and not target.is_symlink():
         return None
     return load_constraints(target, asserted_by=asserted_by)
+
+
+def reinject_constraint_pins(
+    storage: Storage,
+    run_id: str,
+    *,
+    constraints_path: Path | None = None,
+    asserted_by: Origin = Origin.DETERMINISTIC,
+) -> list[Event]:
+    """Verify active constraint pins and re-inject them into the live event tail (issue #1413).
+
+    Post-compaction and pre-compaction hook. Archiving history moves early
+    CONSTRAINT_PINNED events to events_archive. If constraints are not
+    explicitly verified against the operator's registry and re-injected into
+    the live anchor, subsequent agent sessions could operate without governing
+    invariants.
+
+    This function:
+    1. Loads the operator's registry from .continuum/constraints.json if present.
+    2. Projects active pins from full history.
+    3. If neither a registry exists nor any active pins were present, does nothing.
+    4. For any active pin that fails verification (id missing in registry or hash mismatch),
+       emits CONSTRAINT_PIN_DROPPED.
+    5. For each valid constraint, ensures CONSTRAINT_PINNED is appended to the
+       surviving live tail if not already present.
+    6. Appends CONSTRAINT_PINS_VERIFIED to the live tail with active digest,
+       pin count, and verification status.
+
+    Returns the list of appended events.
+    """
+    from continuum.checkpoint.manager import CheckpointManager
+    from continuum.events import EventType
+
+    state = CheckpointManager(storage).project_current(run_id, full_history=True)
+    active_pins = dict(state.pins)
+
+    try:
+        registry = load_constraints_or_none(constraints_path, asserted_by=asserted_by)
+    except Exception:
+        registry = None
+
+    if registry is None and not active_pins:
+        return []
+
+    appended: list[Event] = []
+    live_events = storage.read_events(run_id)
+    live_pinned: dict[str, str] = {}
+    for e in live_events:
+        if not isinstance(e.payload, dict):
+            continue
+        cid = e.payload.get("constraint_id")
+        if not cid:
+            continue
+        if e.type is EventType.CONSTRAINT_PINNED:
+            live_pinned[cid] = e.payload.get("sha256")
+        elif e.type in (EventType.CONSTRAINT_RETRACTED, EventType.CONSTRAINT_PIN_DROPPED):
+            live_pinned.pop(cid, None)
+
+    # Constraints explicitly retracted in history that were not re-pinned
+    archived_events = storage.read_archived_events(run_id)
+    retracted_cids: set[str] = set()
+    for e in list(archived_events) + list(live_events):
+        if e.type in (
+            EventType.CONSTRAINT_RETRACTED,
+            EventType.CONSTRAINT_PIN_DROPPED,
+        ) and isinstance(e.payload, dict):
+            cid = e.payload.get("constraint_id")
+            if cid:
+                retracted_cids.add(cid)
+    retracted_cids -= set(active_pins.keys())
+
+    if registry is not None:
+        verified_pins: list[tuple[str, str, str]] = []
+
+        # Audit active pins against operator registry
+        for pin_id, pin in active_pins.items():
+            spec = registry.get(pin_id)
+            if spec is None:
+                ev = storage.append_event(
+                    run_id,
+                    EventType.CONSTRAINT_PIN_DROPPED,
+                    {
+                        "constraint_id": pin.constraint_id,
+                        "sha256": pin.sha256,
+                        "reason": "not_in_registry",
+                    },
+                    source=asserted_by,
+                )
+                appended.append(ev)
+            else:
+                expected_sha = hashlib.sha256(spec.predicate.encode("utf-8")).hexdigest()
+                if pin.sha256 != expected_sha:
+                    ev = storage.append_event(
+                        run_id,
+                        EventType.CONSTRAINT_PIN_DROPPED,
+                        {
+                            "constraint_id": pin.constraint_id,
+                            "sha256": pin.sha256,
+                            "expected_sha256": expected_sha,
+                            "reason": "digest_mismatch",
+                        },
+                        source=asserted_by,
+                    )
+                    appended.append(ev)
+                else:
+                    verified_pins.append((spec.id, expected_sha, spec.level.value))
+
+        # Ensure all constraints from the operator registry are active (unless explicitly retracted)
+        for spec in registry:
+            if spec.id in retracted_cids:
+                continue
+            expected_sha = hashlib.sha256(spec.predicate.encode("utf-8")).hexdigest()
+            if not any(v[0] == spec.id for v in verified_pins):
+                verified_pins.append((spec.id, expected_sha, spec.level.value))
+
+        # Re-inject missing pins into the live tail
+        for pin_id, pin_sha, _pin_level in verified_pins:
+            if live_pinned.get(pin_id) != pin_sha:
+                ev = storage.append_event(
+                    run_id,
+                    EventType.CONSTRAINT_PINNED,
+                    {"constraint_id": pin_id, "sha256": pin_sha},
+                    source=asserted_by,
+                )
+                appended.append(ev)
+                live_pinned[pin_id] = pin_sha
+
+        # Append audit verification record
+        sorted_verified = sorted(verified_pins, key=lambda x: x[0])
+        ev_verified = storage.append_event(
+            run_id,
+            EventType.CONSTRAINT_PINS_VERIFIED,
+            {
+                "digest": registry.digest,
+                "count": len(sorted_verified),
+                "verified": True,
+                "pins": [
+                    {"constraint_id": cid, "sha256": csha, "level": clevel}
+                    for cid, csha, clevel in sorted_verified
+                ],
+            },
+            source=asserted_by,
+        )
+        appended.append(ev_verified)
+        return appended
+
+    # registry is None, but active_pins exists
+    for pin in active_pins.values():
+        if live_pinned.get(pin.constraint_id) != pin.sha256:
+            ev = storage.append_event(
+                run_id,
+                EventType.CONSTRAINT_PINNED,
+                {"constraint_id": pin.constraint_id, "sha256": pin.sha256},
+                source=asserted_by,
+            )
+            appended.append(ev)
+            live_pinned[pin.constraint_id] = pin.sha256
+
+    sorted_pins = sorted(active_pins.values(), key=lambda p: p.constraint_id)
+    ev_verified = storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINS_VERIFIED,
+        {
+            "digest": stable_hash(
+                [{"constraint_id": p.constraint_id, "sha256": p.sha256} for p in sorted_pins]
+            ),
+            "count": len(sorted_pins),
+            "verified": False,
+            "pins": [{"constraint_id": p.constraint_id, "sha256": p.sha256} for p in sorted_pins],
+        },
+        source=asserted_by,
+    )
+    appended.append(ev_verified)
+    return appended
+
+
+re_inject_constraint_pins = reinject_constraint_pins
