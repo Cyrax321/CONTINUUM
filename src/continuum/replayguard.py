@@ -75,6 +75,62 @@ class GuardDecision:
     kind: GuardKind
     reason: str
     key: str | None = None
+    matched_by_similarity: bool = False
+    """Set when the verdict answered from a prior claim a semantic backend
+    matched rather than the call's own exact key (issue #1029). Lets a renderer
+    explain that the keys differ, which is otherwise indistinguishable from an
+    exact duplicate."""
+
+
+def _similar_action(
+    *,
+    action_type: str,
+    rendered_key: str,
+    arguments: Mapping[str, Any],
+    actions_by_key: Mapping[str, Any],
+    similarity: Any,
+    run_id: str,
+) -> tuple[str, Any] | None:
+    """Find a prior action a semantic backend scores as the same intent (issue #1029).
+
+    Returns ``(ledger_key, action)`` for the best same-type match above the
+    replay threshold, else ``None``. Only a ``replay``-grade match is adopted: a
+    ``fork`` score is deliberately divergent work, so leaving it to the normal
+    unclaimed path keeps the fork-detection surface and its approval hint intact.
+    """
+    from continuum.replay_similarity import classify_call
+
+    prior_view = {
+        ledger_key: {
+            "action_type": prior.action_type,
+            "status": prior.status.value,
+            "arguments": dict(prior.arguments or {}),
+        }
+        for ledger_key, prior in actions_by_key.items()
+    }
+    try:
+        classification, match = classify_call(
+            new_key=rendered_key,
+            new_args=dict(arguments),
+            action_type=action_type,
+            prior_actions=prior_view,
+            config=similarity,
+            run_id=run_id,
+        )
+    except Exception:
+        # Fail-closed: the semantic scan only augments the exact lookup, so a
+        # scan that cannot run must not upgrade a denial into an allow. The
+        # unclaimed verdict the exact miss already returns is the safe answer.
+        return None
+    if classification != "replay" or not isinstance(match, Mapping):
+        return None
+    ledger_key = match.get("__ledger_key__")
+    if not isinstance(ledger_key, str):
+        return None
+    action = actions_by_key.get(ledger_key)
+    if action is None or action.action_type != action_type:
+        return None
+    return ledger_key, action
 
 
 def evaluate(
@@ -83,38 +139,75 @@ def evaluate(
     rendered_key: str,
     run_id: str,
     actions_by_key: Mapping[str, Any],
+    similarity: Any | None = None,
+    arguments: Mapping[str, Any] | None = None,
 ) -> GuardDecision:
-    """Classify one intended side effect against the folded ledger."""
+    """Classify one intended side effect against the folded ledger.
+
+    ``similarity`` opts a call into semantic matching (issue #1029): when the
+    exact idempotency key misses, a fuzzy or embedding backend may still
+    recognise a paraphrase of prior work and answer from it. It defaults to
+    ``exact``-only, so a caller that does not configure it gets unchanged
+    behaviour, and a configured scan that fails never turns a denial into an
+    allow.
+    """
     from continuum.actions.idempotency import idempotency_key
     from continuum.models import ActionStatus
+    from continuum.replay_similarity import SimilarityKind
 
     key = str(idempotency_key(action_type, None, scope=run_id, key=rendered_key))
     action = actions_by_key.get(key)
+    matched_by_similarity = False
+
+    if (
+        action is None
+        and similarity is not None
+        and getattr(similarity, "kind", None) is not SimilarityKind.EXACT
+        and arguments is not None
+    ):
+        matched = _similar_action(
+            action_type=action_type,
+            rendered_key=rendered_key,
+            arguments=arguments,
+            actions_by_key=actions_by_key,
+            similarity=similarity,
+            run_id=run_id,
+        )
+        if matched is not None:
+            action = matched[1]
+            key = matched[0]
+            matched_by_similarity = True
+
     if action is None or action.action_type != action_type:
         return GuardDecision(
             GuardKind.DENY_UNCLAIMED,
             f"{action_type!r} {rendered_key!r} has no ledger claim",
             key=key,
         )
+    note = ""
+    if matched_by_similarity and similarity is not None:
+        note = f" (matched by {similarity.kind.value} similarity to a prior call)"
+
+    def _decision(kind: GuardKind, reason: str) -> GuardDecision:
+        return GuardDecision(kind, reason, key=key, matched_by_similarity=matched_by_similarity)
+
     status = action.status
     if status is ActionStatus.STARTED:
-        return GuardDecision(GuardKind.ALLOW, "live claim", key=key)
+        return _decision(GuardKind.ALLOW, f"live claim{note}")
     if status is ActionStatus.COMPLETED:
-        return GuardDecision(
+        return _decision(
             GuardKind.SKIP_DUPLICATE,
-            f"{action_type!r} {rendered_key!r} already completed",
-            key=key,
+            f"{action_type!r} {rendered_key!r} already completed{note}",
         )
     if status is ActionStatus.UNKNOWN:
-        return GuardDecision(
+        return _decision(
             GuardKind.BLOCK_UNCERTAIN,
-            f"{action_type!r} {rendered_key!r} has an unknown outcome; reconcile first",
-            key=key,
+            f"{action_type!r} {rendered_key!r} has an unknown outcome; reconcile first{note}",
         )
-    return GuardDecision(
+    return _decision(
         GuardKind.DENY_RECLAIM,
         f"previous attempt of {action_type!r} {rendered_key!r} is closed "
-        f"({status.value}); claim again before retrying",
+        f"({status.value}); claim again before retrying{note}",
     )
 
 
