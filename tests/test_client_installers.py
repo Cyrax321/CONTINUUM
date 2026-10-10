@@ -51,6 +51,34 @@ import io  # noqa: E402
 #: Every profiled client, read from the table itself.
 CLIENTS = tuple(CLIENT_PROFILES)
 
+
+class _OsFlavour:
+    """``os`` with a chosen ``name``, leaving the real module in place.
+
+    ``clienthooks`` picks its quoting convention by reading ``os.name``, and
+    the tests below need that branch. Patching ``os.name`` on the module
+    itself would also change what ``pathlib.Path`` returns, because pathlib
+    reads the same global: on a POSIX host ``Path(...)`` would become
+    ``WindowsPath`` and raise ``NotImplementedError`` inside
+    ``_is_managed_hook``, which is production code that has to keep working on
+    whichever platform it is really running on. Standing in for the module the
+    code under test reads keeps the real ``os`` intact for everything else.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __getattr__(self, item: str) -> object:
+        return getattr(os, item)
+
+
+def _as_windows(monkeypatch: pytest.MonkeyPatch, name: str = "nt") -> None:
+    """Make ``clienthooks`` read ``os.name`` as ``name`` and nothing else."""
+    from continuum import clienthooks
+
+    monkeypatch.setattr(clienthooks, "os", _OsFlavour(name))
+
+
 #: Clients whose hook reference documents no compaction event, so the
 #: installer must wire no precompact hook for them. Derived the same way,
 #: because the point of the test is that the key's absence is honoured.
@@ -633,7 +661,7 @@ def test_join_and_split_command_round_trip_on_a_path_with_spaces(
     """
     from continuum import clienthooks
 
-    monkeypatch.setattr(clienthooks.os, "name", platform)
+    _as_windows(monkeypatch, platform)
     joined = clienthooks._join_command(command_parts)
     assert clienthooks._split_command(joined) == command_parts
 
@@ -652,7 +680,7 @@ def test_a_windows_path_stays_ours_under_the_cmd_exe_convention(
     """
     from continuum import clienthooks
 
-    monkeypatch.setattr(clienthooks.os, "name", "nt")
+    _as_windows(monkeypatch, "nt")
     command = clienthooks._join_command(
         [r"C:\Program Files\continuum\Scripts\continuum.exe", "observe"]
     )

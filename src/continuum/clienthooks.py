@@ -283,6 +283,23 @@ def observe_command(*, db: str | None = None) -> str:
     return _join_command(parts)
 
 
+def _command_stem(command: str) -> str:
+    """The filename of a command with its extension dropped, either flavour.
+
+    ``Path(...).stem`` answers from the host platform, so a command this
+    module wrote on Windows reads as one long filename when the same settings
+    file is opened on POSIX, and the recogniser stops seeing its own entry.
+    That costs the idempotency guarantee rather than merely a cosmetic detail:
+    a hook we no longer recognise is a hook we append a duplicate of on the
+    next install (#484, #526). Splitting on both separators keeps the answer
+    the same wherever the file was written.
+    """
+    name = command.replace("\\", "/").rsplit("/", 1)[-1]
+    if name.lower().endswith(".exe"):
+        name = name[: -len(".exe")]
+    return name
+
+
 def _is_managed_hook(hook: Mapping[str, Any], kind: str) -> bool:
     """True when a hook entry is one :func:`_install_hook` itself would write.
 
@@ -302,7 +319,7 @@ def _is_managed_hook(hook: Mapping[str, Any], kind: str) -> bool:
         return False
     if len(tokens) < 2 or tokens[-1] != kind:
         return False
-    if Path(tokens[0]).stem == "continuum":
+    if _command_stem(tokens[0]) == "continuum":
         return True
     return tokens[1] == "-m" and len(tokens) >= 4 and tokens[2] == "continuum.cli"
 
