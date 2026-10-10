@@ -29,7 +29,7 @@ from datetime import UTC
 from typing import Any
 
 from continuum.environment.diff import EnvironmentDiff, ResourceChange, diff_environments
-from continuum.events import Event  # for caused_by graph
+from continuum.events import Event, EventType  # for caused_by graph
 from continuum.models import (
     Action,
     ActionStatus,
@@ -37,6 +37,7 @@ from continuum.models import (
     Component,
     ComponentValidationEntry,
     EnvironmentSnapshot,
+    Origin,
     SemanticState,
     StateCheckpoint,
     StateStatus,
@@ -337,6 +338,7 @@ class StateValidator:
             self._check_model(state, expected_model, entries)
             self._check_evidence(state, entries)
             self._check_derived(state, entries)
+            self._check_constraints(state, events, entries)
         else:
             # Scoped re-validation: only the named dependency resources are
             # re-checked and only their derivation subtree is allowed to go
@@ -1183,6 +1185,185 @@ class StateValidator:
                         component_id=ev.evidence_id,
                         status=StateStatus.REQUIRES_REVIEW,
                         detail=f"derived from {ev.provenance.origin.value} and not independently verified",
+                    )
+                )
+
+    def _check_constraints(
+        self,
+        state: SemanticState,
+        events: Iterable[Event] | None,
+        entries: list[ComponentValidationEntry],
+    ) -> None:
+        """Inspect active constraint pins against current state and event log (issue #1414).
+
+        If a hard constraint is marked dropped, missing, or unverified, emit a
+        ComponentValidationEntry with status REQUIRES_REVIEW and failure details.
+        """
+        from continuum.security.constraints import ConstraintRegistryError, load_constraints_or_none
+
+        try:
+            registry = load_constraints_or_none(asserted_by=Origin.DETERMINISTIC)
+        except ConstraintRegistryError as exc:
+            entries.append(
+                ComponentValidationEntry(
+                    component=Component.PIN,
+                    component_id="registry",
+                    status=StateStatus.REQUIRES_REVIEW,
+                    detail=f"constraint registry unreadable: {exc}; operator review required",
+                )
+            )
+            return
+
+        events_list = list(events) if events is not None else []
+
+        dropped_events: dict[str, dict[str, Any]] = {}
+        verified_events: list[dict[str, Any]] = []
+        for ev in events_list:
+            if ev.type is EventType.CONSTRAINT_PIN_DROPPED and isinstance(ev.payload, dict):
+                cid = ev.payload.get("constraint_id")
+                if cid:
+                    dropped_events[cid] = ev.payload
+            elif ev.type is EventType.CONSTRAINT_PINS_VERIFIED and isinstance(ev.payload, dict):
+                verified_events.append(ev.payload)
+
+        # 1. Audit against operator registry if present
+        if registry is not None:
+            for spec in registry.hard():
+                cid = spec.id
+                expected_sha = spec.digest
+
+                is_confirmed = (
+                    "pin" in self.confirmed
+                    or "constraints" in self.confirmed
+                    or cid.lower() in self.confirmed
+                )
+
+                if cid not in state.pins:
+                    drop_info = dropped_events.get(cid, {})
+                    reason = drop_info.get("reason", "missing from active pins")
+                    status = StateStatus.VALID if is_confirmed else StateStatus.REQUIRES_REVIEW
+                    detail = (
+                        f"hard constraint {cid!r} confirmed by operator ({reason})"
+                        if is_confirmed
+                        else f"hard constraint {cid!r} missing or dropped from active pins ({reason}); operator confirmation required"
+                    )
+                    entries.append(
+                        ComponentValidationEntry(
+                            component=Component.PIN,
+                            component_id=cid,
+                            status=status,
+                            detail=detail,
+                        )
+                    )
+                else:
+                    pin = state.pins[cid]
+                    if pin.sha256 != expected_sha:
+                        status = StateStatus.VALID if is_confirmed else StateStatus.REQUIRES_REVIEW
+                        detail = (
+                            f"hard constraint {cid!r} confirmed by operator (digest mismatch)"
+                            if is_confirmed
+                            else f"hard constraint {cid!r} predicate digest mismatch; operator confirmation required"
+                        )
+                        entries.append(
+                            ComponentValidationEntry(
+                                component=Component.PIN,
+                                component_id=cid,
+                                status=status,
+                                detail=detail,
+                            )
+                        )
+                    elif cid in dropped_events and not is_confirmed:
+                        reason = dropped_events[cid].get("reason", "dropped")
+                        entries.append(
+                            ComponentValidationEntry(
+                                component=Component.PIN,
+                                component_id=cid,
+                                status=StateStatus.REQUIRES_REVIEW,
+                                detail=f"hard constraint {cid!r} was marked dropped ({reason}); operator confirmation required",
+                            )
+                        )
+                    else:
+                        entries.append(
+                            ComponentValidationEntry(
+                                component=Component.PIN,
+                                component_id=cid,
+                                status=StateStatus.VALID,
+                                detail="active and verified",
+                            )
+                        )
+
+            for spec in registry.soft():
+                cid = spec.id
+                if cid in state.pins:
+                    pin = state.pins[cid]
+                    expected_sha = spec.digest
+                    entries.append(
+                        ComponentValidationEntry(
+                            component=Component.PIN,
+                            component_id=cid,
+                            status=StateStatus.VALID,
+                            detail="active soft constraint"
+                            if pin.sha256 == expected_sha
+                            else "soft constraint digest mismatch (advisory)",
+                        )
+                    )
+            return
+
+        # 2. When no operator registry exists on disk
+        for cid, drop_payload in dropped_events.items():
+            level = drop_payload.get("level", "hard")
+            if level != "soft":
+                is_confirmed = (
+                    "pin" in self.confirmed
+                    or "constraints" in self.confirmed
+                    or cid.lower() in self.confirmed
+                )
+                reason = drop_payload.get("reason", "dropped")
+                status = StateStatus.VALID if is_confirmed else StateStatus.REQUIRES_REVIEW
+                detail = (
+                    f"hard constraint {cid!r} confirmed by operator ({reason})"
+                    if is_confirmed
+                    else f"hard constraint {cid!r} was marked dropped ({reason}); operator confirmation required"
+                )
+                entries.append(
+                    ComponentValidationEntry(
+                        component=Component.PIN,
+                        component_id=cid,
+                        status=status,
+                        detail=detail,
+                    )
+                )
+
+        unverified_in_audit = False
+        if verified_events:
+            last_verified = verified_events[-1]
+            if last_verified.get("verified") is False:
+                unverified_in_audit = True
+
+        for cid, _pin in state.pins.items():
+            if any(e.component is Component.PIN and e.component_id == cid for e in entries):
+                continue
+            is_confirmed = (
+                "pin" in self.confirmed
+                or "constraints" in self.confirmed
+                or cid.lower() in self.confirmed
+            )
+            if unverified_in_audit and not is_confirmed:
+                entries.append(
+                    ComponentValidationEntry(
+                        component=Component.PIN,
+                        component_id=cid,
+                        status=StateStatus.REQUIRES_REVIEW,
+                        detail=f"hard constraint {cid!r} unverified; operator confirmation required",
+                    )
+                )
+            else:
+                entries.append(
+                    ComponentValidationEntry(
+                        component=Component.PIN,
+                        component_id=cid,
+                        status=StateStatus.VALID,
+                        detail="active pin",
                     )
                 )
 

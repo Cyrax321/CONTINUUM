@@ -50,6 +50,8 @@ from continuum.gate import collect_consumed_authorities
 from continuum.models import (
     Action,
     ActionStatus,
+    Component,
+    ComponentValidationEntry,
     EnvironmentSnapshot,
     Origin,
     RecoveryContract,
@@ -57,6 +59,7 @@ from continuum.models import (
     RecoverySafety,
     SemanticState,
     StateStatus,
+    StateValidationResult,
 )
 from continuum.plugins import Registry, ValidationRule
 from continuum.recovery.contract import build_contract
@@ -270,6 +273,7 @@ class RecoveryEngine:
         self.validator = validator or StateValidator(strict_unknown=strict_unknown)
         self.strict_unknown = strict_unknown
         self.ledger = ledger
+        self._ledger = ledger
         self.dependency_budgets = dependency_budgets
         self._manager = CheckpointManager(storage)
         self._validation_rules: tuple[object, ...] = tuple(validation_rules or ())
@@ -356,7 +360,18 @@ class RecoveryEngine:
             archive_aware_events = self.storage.read_all_events(run_id)
         except Exception:
             archive_aware_events = self.storage.read_events(run_id)
-        for _ev in archive_aware_events:
+        for _ev in sorted(archive_aware_events, key=lambda event: event.sequence):
+            if _ev.type in (
+                EventType.CONSTRAINT_PINNED,
+                EventType.CONSTRAINT_PIN_DROPPED,
+                EventType.CONSTRAINT_RETRACTED,
+            ):
+                confirmed_components.discard("pin")
+                confirmed_components.discard("constraints")
+                pin_id = _ev.payload.get("constraint_id") if isinstance(_ev.payload, dict) else None
+                if pin_id:
+                    confirmed_components.discard(str(pin_id).strip().lower())
+                continue
             if _ev.type is not EventType.REVIEW_CONFIRMED:
                 continue
             # Only human confirmations clear self-certification; an agent
@@ -435,7 +450,6 @@ class RecoveryEngine:
         if not admissibility.admissible:
             has_action_ref = any(d["consumed_inputs"]["action_ids"] for d in admissibility.details)
             status = StateStatus.REQUIRES_REVIEW if has_action_ref else StateStatus.STALE
-            from continuum.models import Component, ComponentValidationEntry
 
             entries = list(validation.report.statuses)
             entries.append(
@@ -446,7 +460,6 @@ class RecoveryEngine:
                     detail=admissibility.reason,
                 )
             )
-            from continuum.models import StateValidationResult
 
             new_report = StateValidationResult(
                 run_id=validation.report.run_id,
@@ -503,8 +516,6 @@ class RecoveryEngine:
                 if scope is not None:
                     candidate_deps.update(scope)
                 else:
-                    from continuum.models import Component
-
                     for entry in validation.report.statuses:
                         if entry.component == Component.EXTERNAL_DEPENDENCY and entry.component_id:
                             candidate_deps.add(entry.component_id)
@@ -948,6 +959,21 @@ class RecoveryEngine:
 
         if plan.requires_human:
             proposals.append((RecoveryMode.REQUEST_HUMAN, "at least one repair needs a person"))
+
+        # Hard constraint pins (issue #1414): dropped, unanchored, or violated hard pins must escalate
+        dropped_pins = [
+            e.component_id
+            for e in validation.report.statuses
+            if e.component is Component.PIN and e.status is not StateStatus.VALID
+        ]
+        if dropped_pins:
+            pins_str = ", ".join(filter(None, dropped_pins))
+            proposals.append(
+                (
+                    RecoveryMode.REQUEST_HUMAN,
+                    f"hard constraint pin(s) unanchored or violated: {pins_str}; operator confirmation required",
+                )
+            )
 
         if exhausted_dependencies:
             deps_str = ", ".join(sorted(exhausted_dependencies))

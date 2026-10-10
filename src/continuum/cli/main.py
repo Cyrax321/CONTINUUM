@@ -1730,7 +1730,7 @@ def cmd_confirm(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     scope = getattr(args, "scope", None)
     components = [c.lower() for c in scope] if scope else ["goal", "progress"]
     # Validate scope explicitly so a typo fails closed rather than being ignored.
-    allowed = {"goal", "progress"}
+    allowed = {"goal", "progress", "pin", "constraints"}
     for _c in components:
         if _c not in allowed:
             print(f"error: --scope must be one of {sorted(allowed)}; got {scope!r}", file=err)

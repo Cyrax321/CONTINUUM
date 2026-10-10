@@ -239,6 +239,13 @@ def _step_for(
                 reason=entry.detail,
                 requires_human=entry.status is StateStatus.REQUIRES_REVIEW,
             )
+        case Component.PIN:
+            return RepairStep(
+                kind=RepairKind.HUMAN_REVIEW,
+                target=target,
+                reason=entry.detail or f"constraint pin {target!r} requires operator confirmation",
+                requires_human=True,
+            )
         case _:
             return RepairStep(
                 kind=RepairKind.HUMAN_REVIEW,

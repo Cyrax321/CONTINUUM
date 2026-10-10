@@ -81,9 +81,11 @@ class EventType(StrEnum):
     WORK_COMPLETED = "WORK_COMPLETED"
     DEPENDENCY_DECLARED = "DEPENDENCY_DECLARED"
 
-    # constraints (issue #416): first-class pins carrying hashes, never text
+    # constraints (issues #416, #1413, #1414): first-class pins carrying hashes, never text
     CONSTRAINT_PINNED = "CONSTRAINT_PINNED"
     CONSTRAINT_RETRACTED = "CONSTRAINT_RETRACTED"
+    CONSTRAINT_PINS_VERIFIED = "CONSTRAINT_PINS_VERIFIED"
+    CONSTRAINT_PIN_DROPPED = "CONSTRAINT_PIN_DROPPED"
 
     # approvals
     APPROVAL_REQUESTED = "APPROVAL_REQUESTED"
