@@ -144,6 +144,120 @@ def _total_attempts(events: list[Event]) -> int:
     return min(claims, _MAX_ATTEMPTS)
 
 
+def _plan_step_spans(events: list[Event]) -> list[tuple[str, int, int]]:
+    """Derive ordered (step_id, first_sequence, last_sequence) spans from PLAN_UPSERT events (issue #1463)."""
+    transitions: list[tuple[str, int]] = []
+    current_step: str | None = None
+    plan_units: dict[str, str] = {}
+
+    for ev in events:
+        if ev.type is not EventType.PLAN_UPSERT:
+            continue
+        payload = ev.payload if isinstance(ev.payload, dict) else {}
+        units = payload.get("units")
+        if not isinstance(units, list):
+            continue
+
+        for u in units:
+            if not isinstance(u, dict):
+                continue
+            uid = str(u.get("id") or u.get("step_id") or "").strip()
+            if not uid:
+                continue
+            if "status" in u and u["status"] is not None:
+                plan_units[uid] = str(u["status"]).strip().lower()
+            elif uid not in plan_units:
+                plan_units[uid] = "pending"
+
+        active: str | None = None
+        for uid, status in plan_units.items():
+            if status in ("working", "in_progress"):
+                active = uid
+                break
+
+        if active is None:
+            for uid, status in plan_units.items():
+                if status not in ("done", "completed", "blocked"):
+                    active = uid
+                    break
+
+        if active and active != current_step:
+            transitions.append((active, ev.sequence))
+            current_step = active
+
+    if not transitions:
+        return []
+
+    end_seq = max((ev.sequence for ev in events), default=transitions[-1][1])
+    spans: list[tuple[str, int, int]] = []
+    for idx, (step_id, start_seq) in enumerate(transitions):
+        if idx + 1 < len(transitions):
+            next_start = transitions[idx + 1][1]
+            last_seq = max(start_seq, next_start - 1)
+        else:
+            last_seq = max(start_seq, end_seq)
+        spans.append((step_id, start_seq, last_seq))
+
+    return spans
+
+
+def _locate_action_type_step(
+    action_type: str,
+    events: list[Event],
+    latest_actions: dict[str, Action],
+    spans: list[tuple[str, int, int]],
+) -> str | None:
+    """Find the plan step whose sequence span contains the stalling action's events."""
+    if not spans:
+        return None
+
+    stalling_keys = {
+        key
+        for key, action in latest_actions.items()
+        if action.action_type == action_type
+        and action.status in (ActionStatus.FAILED, ActionStatus.STARTED, ActionStatus.UNKNOWN)
+    }
+
+    seqs: list[int] = []
+    for ev in events:
+        payload = ev.payload if isinstance(ev.payload, dict) else {}
+        if ev.type in (
+            EventType.ACTION_RECORDED,
+            EventType.ACTION_RECONCILED,
+            EventType.ACTION_COMPENSATED,
+        ):
+            raw_key = payload.get("key")
+            if raw_key and str(raw_key) in stalling_keys:
+                seqs.append(ev.sequence)
+            elif not raw_key:
+                act = payload.get("action")
+                if isinstance(act, dict) and act.get("action_type") == action_type:
+                    seqs.append(ev.sequence)
+
+    if not seqs:
+        for ev in events:
+            if ev.type is EventType.ACTION_RECORDED:
+                payload = ev.payload if isinstance(ev.payload, dict) else {}
+                act = payload.get("action")
+                if isinstance(act, dict) and act.get("action_type") == action_type:
+                    seqs.append(ev.sequence)
+
+    if not seqs:
+        return None
+
+    step_counts: Counter[str] = Counter()
+    for seq in seqs:
+        for step_id, first_seq, last_seq in spans:
+            if first_seq <= seq <= last_seq:
+                step_counts[step_id] += 1
+                break
+
+    if not step_counts:
+        return None
+
+    return step_counts.most_common(1)[0][0]
+
+
 def _stall_sites(events: list[Event]) -> list[str]:
     """Action types where the run repeatedly stalled, by retry or by failure.
 
@@ -152,6 +266,11 @@ def _stall_sites(events: list[Event]) -> list[str]:
     settled. A settled failure counts once, the way an operator would count it;
     a re-claimed key that is still STARTED or UNKNOWN is a retry and counts
     double, so a single retry surfaces even when no type has yet failed twice.
+
+    When the run records a plan via PLAN_UPSERT, each stalling action type is
+    joined to the plan step span containing its events and reported as
+    action_type@step (issue #1463). When no plan is recorded, it falls back
+    to the bare action type.
     """
     event_count: dict[str, int] = {}
     for ev in events:
@@ -165,8 +284,9 @@ def _stall_sites(events: list[Event]) -> list[str]:
         if raw_key:
             event_count[str(raw_key)] = event_count.get(str(raw_key), 0) + 1
 
+    latest = _latest_actions(events)
     counts: Counter[str] = Counter()
-    for key, action in _latest_actions(events).items():
+    for key, action in latest.items():
         if action.status not in (ActionStatus.FAILED, ActionStatus.STARTED, ActionStatus.UNKNOWN):
             continue
         retried_unsettled = event_count.get(key, 0) >= 2 and action.status in (
@@ -180,9 +300,15 @@ def _stall_sites(events: list[Event]) -> list[str]:
     stalled = [t for t, c in counts.items() if c >= 2]
     if not stalled:
         most = counts.most_common(1)
-        return [most[0][0]] if most else []
+        stalled = [most[0][0]] if most else []
     stalled_sorted = sorted(stalled, key=lambda t: (-counts[t], t))
-    return stalled_sorted[:_MAX_STALL_SITES]
+
+    spans = _plan_step_spans(events)
+    results: list[str] = []
+    for t in stalled_sorted[:_MAX_STALL_SITES]:
+        step = _locate_action_type_step(t, events, latest, spans)
+        results.append(f"{t}@{step}" if step else t)
+    return results
 
 
 def _top_failure_types(events: list[Event]) -> list[str]:
