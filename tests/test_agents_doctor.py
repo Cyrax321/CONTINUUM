@@ -315,7 +315,7 @@ def test_unparseable_config_is_reported_not_fatal(
     assert any("could not be parsed" in d for d in row.details)
 
 
-def test_toml_and_yaml_configs_are_scanned(
+def test_toml_config_is_scanned(
     env: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Format support is data, not code: toml is read without a new branch.
@@ -351,17 +351,15 @@ def test_toml_and_yaml_configs_are_scanned(
 
 
 def test_config_reader_handles_each_format(tmp_path: Path) -> None:
-    """The reader covers json, toml and yaml, and rejects nothing it cannot parse."""
+    """The reader covers json and toml, and returns nothing for the rest."""
 
     (tmp_path / "a.json").write_text('{"k": 1}', encoding="utf-8")
     (tmp_path / "a.toml").write_text("[t]\nk = 1\n", encoding="utf-8")
-    (tmp_path / "a.yaml").write_text("k: 1\n", encoding="utf-8")
     (tmp_path / "broken.json").write_text("{", encoding="utf-8")
     (tmp_path / "a.md").write_text("# not a config", encoding="utf-8")
 
     assert diagnose._read_config(tmp_path / "a.json") == {"k": 1}
     assert diagnose._read_config(tmp_path / "a.toml") == {"t": {"k": 1}}
-    assert diagnose._read_config(tmp_path / "a.yaml") == {"k": 1}
     assert diagnose._read_config(tmp_path / "broken.json") is None
     assert diagnose._read_config(tmp_path / "a.md") is None
     assert diagnose._read_config(tmp_path / "missing.json") is None

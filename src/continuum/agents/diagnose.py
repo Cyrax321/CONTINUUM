@@ -80,10 +80,12 @@ def _read_config(path: Path) -> Any | None:
     IDE's settings file has a stray comma is worse than one that reports the
     file as unparseable. The caller records that as a detail.
 
-    Format handling is json, toml and yaml, matching the hosts that use each.
-    ``mcp.configfmt`` is the single reader for this once the format-adapter
-    track merges; until then this mirrors it rather than importing it, so
-    neither module owns the other's behaviour.
+    Format handling is json and toml, because both are reachable from the
+    standard library and neither is optional. yaml is deliberately absent:
+    every host profile in the tree today is json, and multi-format reading
+    belongs to ``mcp.configfmt`` beside the profiles that will need it. A yaml
+    branch here would mean a lazy optional import in the doctor, and a
+    dependency to own, for a format nothing reads yet.
     """
 
     if not path.is_file():
@@ -101,15 +103,6 @@ def _read_config(path: Path) -> Any | None:
             import tomllib
 
             return tomllib.loads(text)
-        if suffix in (".yaml", ".yml"):
-            # Optional dependency with no stubs, imported lazily because a
-            # clone without the yaml extra must still be able to run the
-            # doctor. Scoped ignore rather than a blanket one: if PyYAML ever
-            # gains stubs, the next reader finds a real error instead of a
-            # silenced one.
-            import yaml  # type: ignore[import-untyped]
-
-            return yaml.safe_load(text)
     except Exception:
         return None
     # A settings file with no extension (Codex's hooks.json aside) is JSON in
