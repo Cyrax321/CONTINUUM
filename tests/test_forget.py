@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import getpass
+import io
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from continuum.actions.ledger import ActionLedger
+from continuum.cli.main import main
 from continuum.events import EventType
 from continuum.models import Run
 from continuum.storage import SQLiteStorage
@@ -64,15 +69,32 @@ def test_forget_enumerates_and_tombstones(tmp_path: Path) -> None:
         report = store.verify_events("run_1")
         assert report.ok is True
 
-    # Now real forget
+    # Now real forget with operator authorization
     code, out, err = _run_cli(
-        ["--json", "forget", "--tenant", "acme", "--run-id", "run_1", "--reason", "gdpr"], db
+        [
+            "--json",
+            "forget",
+            "--tenant",
+            "acme",
+            "--run-id",
+            "run_1",
+            "--reason",
+            "gdpr",
+            "--operator",
+            "auditor_1",
+        ],
+        db,
     )
     assert code == 0, f"forget failed: {out} {err}"
     data = json.loads(out)
     assert data["tenant"] == "acme"
     assert data["tombstone_run"] == "run_1"
     assert "tombstone_sequence" in data
+    assert sorted(data["external_keys"]) == [
+        "mem:pgvector_main:acme:rec-1",
+        "mem:pgvector_main:acme:rec-2",
+    ]
+    assert data["operator"] == "auditor_1"
     # Check tombstone event
     with SQLiteStorage(db) as store:
         events = list(store.read_events("run_1"))
@@ -80,7 +102,14 @@ def test_forget_enumerates_and_tombstones(tmp_path: Path) -> None:
         assert len(tombstones) == 1
         assert tombstones[0].payload["tenant"] == "acme"
         assert sorted(tombstones[0].payload["record_keys"]) == ["rec-1", "rec-2"]
+        assert sorted(tombstones[0].payload["external_keys"]) == [
+            "mem:pgvector_main:acme:rec-1",
+            "mem:pgvector_main:acme:rec-2",
+        ]
         assert tombstones[0].payload["reason"] == "gdpr"
+        assert tombstones[0].payload["operator"] == "auditor_1"
+        assert tombstones[0].payload["operator_authorization"] == "auditor_1"
+        assert tombstones[0].payload["record_key_pattern"] == "acme:*"
         assert tombstones[0].payload["hashes_kept"] is True
         # Verify still passes after tombstone
         report = store.verify_events("run_1")
@@ -141,3 +170,23 @@ def test_forget_empty_tenant_no_tombstone(tmp_path: Path) -> None:
         tombstones = [e for e in events if e.type == EventType.MEMORY_TOMBSTONED]
         # No tombstone when nothing to tombstone? Our impl writes only when sorted_keys non-empty
         assert len(tombstones) == 0
+
+
+def test_forget_fails_gracefully_when_user_cannot_be_determined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When getpass.getuser() fails and no --operator is given, an error is reported cleanly."""
+    db = str(tmp_path / "forget_no_user.db")
+    with SQLiteStorage(db) as store:
+        store.create_run(Run(run_id="run_1", goal="g"))
+        store.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+
+    def _fail_user() -> str:
+        raise KeyError("getpwuid(): uid not found: 1001")
+
+    monkeypatch.setattr(getpass, "getuser", _fail_user)
+    out = io.StringIO()
+    err = io.StringIO()
+    code = main(["--db", db, "forget", "--tenant", "acme", "--run-id", "run_1"], out=out, err=err)
+    assert code != 0
+    assert "cannot determine local user; pass --operator" in err.getvalue()

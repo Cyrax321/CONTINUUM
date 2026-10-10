@@ -238,9 +238,9 @@ def test_baseline_and_migration_both_produce_the_table(db_path: str) -> None:
     assert "action_index" in names
 
 
-def test_schema_version_is_six() -> None:
+def test_schema_version_is_seven() -> None:
     """Pinned so a future bump consciously revisits prior migrations."""
-    assert SCHEMA_VERSION == 6
+    assert SCHEMA_VERSION == 7
 
 
 def test_v2_database_backfills_on_open(tmp_path: Path) -> None:
@@ -549,8 +549,8 @@ def test_postgres_rebuild_action_index_reports_corrected_count() -> None:
     # "k1": updated_seq 1, status "completed"
     # "k2": updated_seq 2, status "started" (missing from index)
     canonical = {
-        "k1": (("k1", "run1", "a1", "completed", "{}"), 1),
-        "k2": (("k2", "run1", "a2", "started", "{}"), 2),
+        "k1": (("k1", "run1", "a1", "completed", "{}", None), 1),
+        "k2": (("k2", "run1", "a2", "started", "{}", None), 2),
     }
     store._canonical_index_rows = lambda: canonical  # type: ignore[method-assign]
 

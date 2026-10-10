@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from continuum.events import EventType
+from continuum.gate import is_memory_key
 
 __all__ = [
     "ACTION_EVENT_TYPES",
@@ -61,13 +62,19 @@ def index_order_for(timestamp: str | datetime) -> int:
 
 def index_entry_from_payload(
     event_type: EventType, payload: Mapping[str, Any]
-) -> tuple[str, str, str, str, str] | None:
-    """Extract ``(key, run_id_in_action, action_id, status, action_json)``.
+) -> tuple[str, str, str, str, str, str | None] | None:
+    """Extract ``(key, run_id_in_action, action_id, status, action_json, rendered_key)``.
 
     Returns None for anything the index does not track. The embedded Action
     record is the authority for identity; a malformed payload yields None
     rather than a half-row, because the index must never disagree with the
     log silently.
+
+    ``rendered_key`` is the plaintext identity the ledger key was hashed from
+    (issue #1417). The indexed ``key`` is a digest, so tenant-level queries
+    such as ``continuum forget`` would have nothing to filter on without it.
+    Only present on payloads that carry one (memory writes that claim under an
+    explicit key), hence the optional element.
     """
     if event_type not in ACTION_EVENT_TYPES:
         return None
@@ -75,6 +82,9 @@ def index_entry_from_payload(
     action_payload = payload.get("action")
     if not isinstance(key, str) or not key or not isinstance(action_payload, Mapping):
         return None
+    rendered = payload.get("rendered_key")
+    if not (isinstance(rendered, str) and is_memory_key(rendered)):
+        rendered = None
     try:
         return (
             key,
@@ -82,6 +92,7 @@ def index_entry_from_payload(
             str(action_payload.get("action_id", "")),
             str(action_payload.get("status", "")),
             json.dumps(dict(action_payload), sort_keys=True),
+            rendered,
         )
     except (TypeError, ValueError):
         return None
