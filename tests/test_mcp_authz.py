@@ -414,6 +414,49 @@ def test_per_client_tokens_map_a_secret_to_a_name() -> None:
     assert "_meta.authToken" in str(exc_info.value)
 
 
+def test_per_client_tokens_fold_case_in_the_caller_name() -> None:
+    """One spelling of a name is one identity on both halves (issue #1598)."""
+    auth = AuthPolicy(tokens={"cursor": "tok"})
+    # The caller spells its name differently from the registration, and holds
+    # the right secret: it is the same caller, so it authenticates.
+    for spelling in ("Cursor", "CURSOR", " cursor ", "Cursor\t"):
+        auth.verify(spelling, "tok")
+    # A name that folds to a different identity is still refused.
+    with pytest.raises(NotAuthenticated, match="not registered"):
+        auth.verify("VSCode", "tok")
+
+
+def test_per_client_token_keys_are_folded_too() -> None:
+    """Registration spelling and connection spelling are interchangeable."""
+    auth = AuthPolicy(tokens={"Cursor": "tok"})
+    auth.verify("cursor", "tok")
+    auth.verify("CURSOR", "tok")
+
+
+def test_per_client_tokens_still_refuse_the_wrong_secret_after_folding() -> None:
+    auth = AuthPolicy(tokens={"cursor": "tok"})
+    with pytest.raises(NotAuthenticated, match="registered for this caller"):
+        auth.verify("Cursor", "nope")
+
+
+def test_an_unidentified_caller_is_refused_under_per_client_tokens() -> None:
+    auth = AuthPolicy(tokens={"cursor": "tok"})
+    with pytest.raises(NotAuthenticated, match="not registered"):
+        auth.verify(None, "tok")
+
+
+def test_two_spellings_of_one_name_need_one_secret() -> None:
+    """Folded duplicates with different secrets are ambiguous, not redundant."""
+    with pytest.raises(ValueError, match="one identity"):
+        AuthPolicy(tokens={"cursor": "tok-a", "Cursor": "tok-b"})
+
+
+def test_two_spellings_sharing_one_secret_are_harmless() -> None:
+    auth = AuthPolicy(tokens={"cursor": "tok", "Cursor": "tok"})
+    auth.verify("cursor", "tok")
+    auth.verify("Cursor", "tok")
+
+
 def test_argument_auth_names_the_matching_client_field() -> None:
     auth = AuthPolicy("a-secret", source="argument")
 
@@ -460,6 +503,19 @@ def test_load_auth_reads_per_client_tokens_env() -> None:
         auth.verify("trusted-agent", "tok-k")  # another client's token
     with pytest.raises(NotAuthenticated):
         auth.verify("stranger", "tok-a")  # unregistered caller
+
+
+def test_load_auth_folds_client_names_from_the_env_var() -> None:
+    """A name spelled one way in config and another on the wire is one caller."""
+    auth = load_auth(env={CLIENT_TOKENS_ENV_VAR: "Cursor:tok-a"})
+    assert not auth.disabled
+    auth.verify("cursor", "tok-a")
+    auth.verify("CURSOR", "tok-a")
+
+
+def test_load_auth_rejects_colliding_client_names_from_the_env_var() -> None:
+    with pytest.raises(ValueError, match="one identity"):
+        load_auth(env={CLIENT_TOKENS_ENV_VAR: "cursor:tok-a,Cursor:tok-b"})
 
 
 def test_load_auth_rejects_malformed_client_tokens() -> None:
@@ -645,6 +701,40 @@ async def test_an_unregistered_caller_is_refused_even_with_a_token(
             "continuum_record_progress",
             {"run_id": "run_1", "completed": 1, "goal": "g"},
             context=fake_context(STRANGER, auth_token="tok-a"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_per_client_tokens_fold_case_across_the_handshake(
+    store: SQLiteStorage,
+) -> None:
+    """The allowlist entry and the token registration spell the caller differently.
+
+    Before the fold the allowlist authorised this caller and authentication then
+    refused it for presenting the right secret; now one spelling is one identity.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    srv, _ = build_server(
+        storage=store,
+        policy=AuthorizationPolicy(["Cursor"]),
+        auth=AuthPolicy(tokens={"cursor": "tok-a"}),
+    )
+    # The allowlist accepted "Cursor"; the token registered under "cursor" is
+    # the same caller's secret, so the call succeeds instead of failing on the
+    # second half of the handshake.
+    result = await srv.call_tool(
+        "continuum_record_progress",
+        {"run_id": "run_1", "completed": 3, "total": 10, "goal": "g"},
+        context=fake_context("Cursor", auth_token="tok-a"),
+    )
+    assert json.loads(result.content[0].text)["completed"] == 3
+    # Folding the name does not fold the secret: the wrong token still refuses.
+    with pytest.raises(ToolError, match="registered for this caller"):
+        await srv.call_tool(
+            "continuum_record_progress",
+            {"run_id": "run_1", "completed": 1, "goal": "g"},
+            context=fake_context("Cursor", auth_token="tok-b"),
         )
 
 

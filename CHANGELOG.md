@@ -53,6 +53,23 @@ Test counts: ~3,361 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **MCP per-client tokens now fold case when they compare client names
+  (#1598).** A client name is an identity, not a byte string: the allowlist and
+  the per-client token map both key on the same `clientInfo.name`, and a caller
+  registered as `cursor` that connects as `Cursor` holds the same secret either
+  way. `AuthPolicy.verify` compared that name exactly, `if caller not in
+  self.tokens`, and refused the caller with `caller 'Cursor' is not registered
+  for authentication` for spelling its own name differently from its
+  registration. It now folds the caller name (trimmed, case-folded) before it
+  looks the secret up, and keys its token map by the folded name, so one
+  spelling of a client name is one identity. The refusal stayed fail-closed
+  throughout; this closes a consistency gap, not a hole. The allowlist's own name
+  matching is a separate change, so the two move independently. Folding one name
+  to one identity also means one caller cannot hold two secrets under two
+  spellings: a token map in which two spellings of the same name carry different
+  secrets now raises `ValueError` at load time rather than silently letting one
+  secret shadow the other.
+
 - **A probe that prints `occurred:false` is now told the separator is the
   problem.** A command probe's verdict contract was documented only in the
   module docstring, so the place an operator met it was the error, and the

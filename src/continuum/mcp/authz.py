@@ -28,6 +28,17 @@ authentication disabled so the default local, single-user, no-account behavior
 is unchanged. A hostile process with direct filesystem access to the database
 can still edit it without the server, which is outside this layer's scope.
 
+A client name is an identity, not a byte string. The allowlist and the
+per-client token map both key on the same ``clientInfo.name``, and a caller
+registered as ``cursor`` that connects as ``Cursor`` holds the same secret
+either way. ``AuthPolicy`` compared that name exactly, ``caller not in
+self.tokens``, and refused it with ``caller 'Cursor' is not registered for
+authentication`` for spelling its own name differently from its registration
+(issue #1598). It now folds case and surrounding whitespace before it looks a
+caller's secret up, and keys its token map by the folded name. The allowlist's
+own name matching is a separate change; this one widens nothing but the
+credential path, which is why the two move independently.
+
 Read-only tools stay open
 -------------------------
 
@@ -84,6 +95,47 @@ POLICY_FILENAME = ".continuum/mcp-policy.json"
 UNKNOWN_CALLER = "<unidentified>"
 
 
+def _fold(name: str) -> str:
+    """Normalise a client name so that one spelling is one identity.
+
+    A host registered as ``cursor`` that connects as ``Cursor`` is the same
+    caller, and the allowlist and the per-client token map have to agree about
+    that, because both key on the same ``clientInfo.name`` (issue #1598). The
+    fold is deliberately narrow: surrounding whitespace is trimmed and case is
+    folded, nothing more. A client name is a value an operator typed into a
+    config file or an environment variable, not an arbitrary byte string the
+    transport is contracted to preserve, so ``strip().casefold()`` is the whole
+    of what "the same name" means here.
+    """
+    return name.strip().casefold()
+
+
+def _folded_tokens(tokens: Mapping[str, str]) -> dict[str, str]:
+    """Key per-client secrets by folded client name (issue #1598).
+
+    Two spellings of one name are one identity, so the map is keyed by the
+    folded form and a caller presenting either spelling finds its secret. Two
+    configured spellings that fold together but carry *different* secrets are
+    ambiguous rather than merely redundant: one secret would silently shadow the
+    other and the operator would never learn why only one client ever
+    authenticates. That is a misconfiguration, so it raises rather than guessing
+    which secret wins. Two spellings sharing one secret are harmless and stay.
+    """
+    folded: dict[str, str] = {}
+    spelling: dict[str, str] = {}
+    for name, secret in tokens.items():
+        key = _fold(name)
+        if key in folded and folded[key] != secret:
+            raise ValueError(
+                f"client names {spelling[key]!r} and {name!r} differ only in "
+                f"spelling but configure different secrets for the same caller; "
+                f"a client name has one identity, so configure one secret for it"
+            )
+        folded[key] = secret
+        spelling[key] = name
+    return folded
+
+
 class NotAuthorized(PermissionError):
     """A caller attempted a mutating tool it is not permitted to use."""
 
@@ -110,6 +162,13 @@ class AuthPolicy:
     mismatched secret always refuses, and a misconfigured empty secret refuses
     rather than opening the door. No exception path resolves in the caller's
     favour.
+
+    In per-client mode a caller's name is folded for case and surrounding
+    whitespace before its secret is looked up, so a caller registered as
+    ``cursor`` that connects as ``Cursor`` finds the secret configured for it
+    instead of being refused for spelling its own name differently from its
+    registration (issue #1598). The token map is keyed by the folded name, so
+    either spelling resolves to the one secret configured for that caller.
     """
 
     __slots__ = ("expected", "tokens", "source")
@@ -122,7 +181,7 @@ class AuthPolicy:
         source: str = "default",
     ) -> None:
         self.expected = expected
-        self.tokens = dict(tokens) if tokens else None
+        self.tokens = _folded_tokens(tokens) if tokens else None
         self.source = source
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
@@ -147,9 +206,14 @@ class AuthPolicy:
             return
         expected: str | None
         if self.tokens is not None:
-            if caller not in self.tokens:
+            # The caller's name is folded the way the allowlist folds it, so a
+            # spelling change between registration and connection is not a
+            # change of identity (issue #1598). A caller that never identified
+            # itself has no folded key, and no key, so it is refused.
+            key = _fold(caller) if caller else ""
+            if key not in self.tokens:
                 raise NotAuthenticated(f"caller {caller!r} is not registered for authentication")
-            expected = self.tokens[caller]
+            expected = self.tokens[key]
         else:
             expected = self.expected
         # An empty expected secret cannot be presented, so it must refuse.
