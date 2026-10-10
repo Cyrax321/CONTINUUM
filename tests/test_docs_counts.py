@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -239,6 +240,69 @@ def test_required_files_state_a_total() -> None:
     stated = {f.name: documented_total(f) for f in REQUIRED_FILES}
     missing = [name for name, total in stated.items() if total is None]
     assert not missing, f"no collected-total figure in: {missing}"
+
+
+#: The landing page is the one user-facing surface the markdown guard never
+#: opened: it is HTML, and its headline drifted three times -- 9 tools / 14
+#: commands / 675 tests (#724), then a hand-resync that itself aged into 45
+#: commands and 2,163 tests against 46 and 2,323. Every fix corrected the
+#: figures by hand and nothing caught the next drift (#1283).
+_LANDING_META_RE = re.compile(r'<meta\s+name="description"\s+content="([^"]*)"')
+
+
+def _landing_meta() -> str:
+    """The site's meta description: the figure search engines and previews render."""
+    path = ROOT / "docs" / "index.html"
+    text = path.read_text(encoding="utf-8")
+    match = _LANDING_META_RE.search(text)
+    assert match, f"{path} declares no meta description for the guard to pin"
+    return match.group(1)
+
+
+def _cli_subcommand_count() -> int:
+    """Subcommands the CLI parser actually registers.
+
+    ``build_parser()`` is the ground truth and the only reliable one: the
+    subcommands are registered from a table plus a handful of explicit calls,
+    so counting ``add_parser`` in the source over- or under-counts depending
+    on how each one is registered.
+    """
+    from continuum.cli.main import build_parser
+
+    parser = build_parser()
+    # argparse's subparser holder is untyped, so read it as Any: the count is
+    # what the guard asserts, not the argparse internals' shape.
+    subparsers: Any = parser._subparsers  # noqa: SLF001
+    assert subparsers is not None, "build_parser() registered no subcommands"
+    groups = [a for a in subparsers._group_actions if hasattr(a, "choices")]  # noqa: SLF001
+    return sum(len(g.choices) for g in groups)
+
+
+def test_landing_page_meta_cli_count_matches_the_parser() -> None:
+    """The landing page's CLI command count is pinned to the parser (#1283).
+
+    The page's other two figures are already watched: the test count is pinned
+    to the docs' total by ``test_index_html_test_figure_matches_the_docs``
+    (#840), and the MCP tool count by
+    ``tests/test_mcp_docs.py::test_documented_tool_counts_match_the_server``,
+    which scans ``docs/*.html``. The CLI command count was the one figure with
+    no reader at all, and it aged from 46 to 45 to 52 while nothing looked at
+    it. This is that reader.
+
+    It is pinned exactly rather than within a tolerance: the count is a
+    deterministic property of ``build_parser()``, not an environment-dependent
+    one like the suite size.
+    """
+    meta = _landing_meta()
+    commands = re.search(r"(\d[\d,]*)\s+CLI commands", meta)
+    assert commands, "the landing page's meta states no CLI command count"
+
+    stated = int(commands.group(1).replace(",", ""))
+    actual = _cli_subcommand_count()
+    assert stated == actual, (
+        f"the landing page advertises {stated} CLI commands but build_parser() "
+        f"registers {actual}: re-sync the meta description in docs/index.html"
+    )
 
 
 def test_documented_counts_agree() -> None:
