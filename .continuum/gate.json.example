@@ -18,6 +18,15 @@
     },
     "mem_write": {
       "key_template": "mem:{store_id}:{tenant}:{record_key}"
+    },
+    "acme.send_invoice": {
+      "key_template": "instruction:{instruction}",
+      "action_type": "send_invoice",
+      "similarity": {
+        "kind": "fuzzy",
+        "replay_threshold": 0.7,
+        "fork_threshold": 0.4
+      }
     }
   }
 }

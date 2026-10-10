@@ -263,6 +263,19 @@ def load_gate_config(path: Path) -> dict[str, dict[str, Any]] | None:
             raise GateConfigError(f"{location}: tool {tool!r} needs a string 'key_template'")
         if spec.get("action_type") is not None and not isinstance(spec.get("action_type"), str):
             raise GateConfigError(f"{location}: tool {tool!r} 'action_type' must be a string")
+        raw_similarity = spec.get("similarity")
+        if raw_similarity is not None:
+            # Validated here rather than at classify time so a typo in the
+            # registry breaks the gate loudly on the next call instead of
+            # silently degrading every classification for that tool (#1029).
+            from continuum.replay_similarity import similarity_backend
+
+            try:
+                similarity_backend(raw_similarity)
+            except (ValueError, TypeError) as exc:
+                raise GateConfigError(
+                    f"{location}: tool {tool!r} 'similarity' is invalid: {exc}"
+                ) from exc
         template = spec.get("key_template", "")
         if is_memory_template(template):
             import string as _string
@@ -508,6 +521,26 @@ def decide(
     from continuum.replayguard import GuardKind
     from continuum.replayguard import evaluate as core_evaluate
 
+    # Semantic dedup is opt-in per tool (issue #1029): a tool that renders a
+    # key from free text -- "pay invoice INV-001" vs "settle INV-001" -- misses
+    # its own prior claim under exact matching and fires twice. Configured
+    # through the registry, defaulting to exact so every other tool is
+    # unaffected. Memory keys are deliberately excluded: their duplicate check
+    # is cross-run and tenancy-scoped, where a paraphrase match is not evidence
+    # of the same write.
+    similarity = None
+    raw_similarity = spec.get("similarity")
+    if raw_similarity is not None:
+        try:
+            from continuum.replay_similarity import similarity_backend
+
+            similarity = similarity_backend(raw_similarity)
+        except (ValueError, TypeError) as exc:
+            return Decision(
+                False,
+                f"gate configuration error: similarity for {tool_name!r} is invalid: {exc}",
+            )
+
     # Single source of truth (#237): the gate classifies through the shared
     # replayguard core, then renders its own registry-aware messages.
     decision = core_evaluate(
@@ -515,6 +548,8 @@ def decide(
         rendered_key=rendered,
         run_id=run_id,
         actions_by_key=actions_by_key,
+        similarity=similarity,
+        arguments=tool_input,
     )
     action = actions_by_key.get(decision.key) if decision.key else None
 
@@ -549,11 +584,20 @@ def decide(
             )
         return Decision(False, message, fork_candidates=candidates)
     if decision.kind is GuardKind.SKIP_DUPLICATE:
+        # A similarity match answers from a differently-keyed prior, so say so:
+        # without the note an operator reads this as an exact duplicate and
+        # cannot tell the two renderings apart (issue #1029).
+        similarity_note = ""
+        if decision.matched_by_similarity and similarity is not None:
+            similarity_note = (
+                f" (matched by {similarity.kind.value} similarity to a prior call,"
+                f" not the rendered key)"
+            )
         return Decision(
             False,
             f"{action_type!r} with key {rendered!r} was already completed"
             + (f" (external id {action.external_id!r})" if action and action.external_id else "")
-            + ". Do not repeat it.",
+            + f". Do not repeat it.{similarity_note}",
         )
     if decision.kind is GuardKind.BLOCK_UNCERTAIN:
         return Decision(
