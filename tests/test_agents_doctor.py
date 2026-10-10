@@ -16,7 +16,7 @@ import pytest
 from continuum.agents import diagnose
 from continuum.cli.exitcodes import ExitCode
 from continuum.mcp.authz import POLICY_ENV_VAR_ALIAS, UNKNOWN_CALLER
-from continuum.mcp.install import HOST_PROFILES, SERVER_NAME
+from continuum.mcp.install import HOST_PROFILES, SERVER_NAME, host_shape
 
 
 def doctor_exit_code(report: diagnose.DoctorReport) -> int:
@@ -331,17 +331,13 @@ def test_toml_config_is_scanned(env: tuple[Path, Path], monkeypatch: pytest.Monk
     """
 
     root, _ = env
-    monkeypatch.setitem(
-        HOST_PROFILES,
-        "claude-code",
-        {
-            "project_settings": "config.toml",
-            "local_settings": "config.toml",
-            "user_settings": "config.toml",
-            "local_projects_key": "mcpServers",
-            "mutating_clients": "claude-code",
-        },
-    )
+    # Only the file names change. host_shape() is built from these keys, so
+    # swapping in a partial profile would test a shape no host has.
+    patched = dict(HOST_PROFILES["claude-code"])
+    patched["project_settings"] = "config.toml"
+    patched["local_settings"] = "config.toml"
+    patched["user_settings"] = "config.toml"
+    monkeypatch.setitem(HOST_PROFILES, "claude-code", patched)
     # A quoted TOML string treats a backslash as an escape, so a Windows
     # command path such as C:\Users\runneradmin\... makes `\\U` invalid and
     # the file fails to parse. A literal string takes the path as written.
@@ -398,16 +394,27 @@ def test_a_yaml_host_is_read_not_reported_unconfigured(env: tuple[Path, Path]) -
 
     host = yaml_hosts[0]
     profile = HOST_PROFILES[host]
+    shape = host_shape(host)
     config = root / profile["project_settings"]
     config.parent.mkdir(parents=True, exist_ok=True)
     # A double-quoted YAML scalar processes backslash escapes too, so a Windows
     # command path carries `\U` and the file stops parsing. Single quotes take
     # the path exactly as written on every platform.
-    config.write_text(
-        f"mcpServers:\n  \"{SERVER_NAME}\":\n    command: '{live_command()}'\n"
-        f"    env:\n      {POLICY_ENV_VAR_ALIAS}: '{profile['mutating_clients']}'\n",
-        encoding="utf-8",
-    )
+    #
+    # The entry is rendered in the host's own container, because the doctor now
+    # reads it through that host's shape rather than by matching a key suffix.
+    # A dict-shaped fixture for a list-shaped host parses fine and still reads
+    # as unconfigured, which is the bug this file exists to catch.
+    command = f"command: '{live_command()}'"
+    granted = f"{POLICY_ENV_VAR_ALIAS}: '{profile['mutating_clients']}'"
+    if shape.container == "list":
+        entry = (
+            f"  - {shape.name_field}: {SERVER_NAME}\n    {command}\n"
+            f"    {shape.env_key}:\n      {granted}\n"
+        )
+    else:
+        entry = f"  {SERVER_NAME}:\n    {command}\n    {shape.env_key}:\n      {granted}\n"
+    config.write_text(f"{shape.servers_key}:\n{entry}", encoding="utf-8")
 
     row = ide_for(scan(env), host, "mcp")
     assert row.wired is True, f"{host} reads YAML and must be seen as wired: {row.details}"
@@ -467,3 +474,59 @@ def test_health_never_reports_ok_when_unmapped(env: tuple[Path, Path]) -> None:
             "unmanaged",
         ), f"unmapped state {ide.state!r} would be treated as unknown"
     assert isinstance(report.healthy, bool)
+
+
+def test_every_mcp_host_shape_is_read_back_as_wired(
+    env: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registration written by install is a registration the doctor can see.
+
+    The scan used to walk the document and match a dotted key suffix, which is
+    only how a host that keys its servers by name files them. A list-shaped
+    host files the entry under an index and never produces that suffix, so
+    continue read as not-configured while the server was registered. An
+    argv-array host spells its environment something other than ``env``, so
+    opencode was found but reported read-only-degraded. Both answers were
+    wrong and both reported the overall run healthy.
+
+    Each fixture is built by the shape layer and written in the host's own
+    format, so this covers the shapes rather than one hand-written layout.
+    """
+
+    root, home = env
+    from continuum.mcp import configfmt
+    from continuum.mcp.install import HOST_PROFILES
+
+    pytest.importorskip("yaml")
+    for host, profile in HOST_PROFILES.items():
+        if "project_settings" not in profile:
+            continue
+        shape = host_shape(host)
+        spec = configfmt.ServerSpec(
+            SERVER_NAME,
+            (live_command(), "--db", str(root / "continuum.db")),
+            {POLICY_ENV_VAR_ALIAS: profile["mutating_clients"]},
+        )
+        data: dict[str, object] = {}
+        shape.put(data, "project", root, spec)
+
+        config = root / profile["project_settings"]
+        config.parent.mkdir(parents=True, exist_ok=True)
+        if profile["format"] == "yaml":
+            import yaml
+
+            config.write_text(yaml.safe_dump(data), encoding="utf-8")
+        elif profile["format"] == "toml":
+            tomli_w = pytest.importorskip("tomli_w")
+            config.write_text(tomli_w.dumps(data), encoding="utf-8")
+        else:
+            config.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+        monkeypatch.setenv(POLICY_ENV_VAR_ALIAS, profile["mutating_clients"])
+        row = ide_for(scan(env), host, "mcp")
+        assert row.wired is True, f"{host} shape was not read back: {row.details}"
+        assert row.state == diagnose.WIRED, f"{host} shape degraded: {row.details}"
+        monkeypatch.delenv(POLICY_ENV_VAR_ALIAS, raising=False)
+        for name in ("project_settings", "local_settings", "user_settings"):
+            target = root / profile.get(name, "")
+            target.unlink(missing_ok=True)

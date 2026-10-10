@@ -42,7 +42,7 @@ from ..mcp.authz import (
     AuthorizationPolicy,
     load_policy,
 )
-from ..mcp.install import HOST_PROFILES, SERVER_NAME
+from ..mcp.install import HOST_PROFILES, SERVER_NAME, host_shape
 from . import generator
 from .targets import TARGETS
 
@@ -149,10 +149,20 @@ def _resolves(command: str, *, home: Path) -> bool:
     )
 
 
-def _declared_clients(entry: Mapping[str, Any]) -> tuple[str, ...]:
-    """Client names the registration itself grants, from its ``env`` block."""
+_SCOPE_OF_LABEL = {
+    "project_settings": "project",
+    "local_settings": "local",
+    "user_settings": "user",
+}
 
-    env = entry.get("env")
+
+def _declared_clients(entry: Mapping[str, Any], env_key: str = "env") -> tuple[str, ...]:
+    """Client names the registration itself grants, from its env block.
+
+    ``env_key`` is the host's spelling, which is not always ``env``.
+    """
+
+    env = entry.get(env_key)
     if not isinstance(env, Mapping):
         return ()
     for var in (POLICY_ENV_VAR_ALIAS, POLICY_ENV_VAR):
@@ -285,6 +295,7 @@ def _scan_mcp_host(host: str, *, root: Path, home: Path, policy: AuthorizationPo
 
     profile = HOST_PROFILES[host]
     expected = profile.get("mutating_clients", host)
+    shape = host_shape(host)
     paths = {
         key: _expand(profile[key], root=root, home=home)
         for key in ("project_settings", "local_settings", "user_settings")
@@ -302,20 +313,36 @@ def _scan_mcp_host(host: str, *, root: Path, home: Path, policy: AuthorizationPo
             if path.is_file():
                 details.append(f"{label}: {path} could not be parsed")
             continue
-        for dotted, value in _walk(data):
-            if not dotted.endswith(f".{SERVER_NAME}") or not isinstance(value, Mapping):
-                continue
-            found_in.append(f"{label}: {path}")
-            granted.update(_declared_clients(value))
-            command = value.get("command")
-            if isinstance(command, str) and not _resolves(command, home=home):
-                stale_paths.append(f"{label}: {path} bakes {command}")
-                details.append(f"{label}: {path} bakes {command}, which no longer resolves")
-            elif isinstance(command, str):
-                details.append(f"{label}: {path} -> {command}")
-            args = value.get("args")
-            if isinstance(args, list) and args:
-                details.append(f"{label}: args {' '.join(str(a) for a in args)}")
+        # Ask the host's own shape where it files the registration, rather than
+        # walking the document and matching on a key suffix. The two disagree
+        # for every host that does not key its servers by name: a list-shaped
+        # host files the entry under an index, so the suffix never appears, and
+        # an argv-array host spells its environment something other than "env".
+        # Both cases used to read as "not configured" while the server was
+        # actually registered, and the run still reported healthy.
+        #
+        # find() raises rather than returning None when the container is not the
+        # shape this host promises, which is the right answer for an editor and
+        # the wrong one for a doctor: a scan reports what it found, so a
+        # container it cannot read is reported and stepped over.
+        try:
+            entry = shape.find(data, _SCOPE_OF_LABEL[label], root, SERVER_NAME)
+        except configfmt.ConfigError as exc:
+            details.append(f"{label}: {path} is not a {host} config ({exc})")
+            continue
+        if entry is None:
+            continue
+        found_in.append(f"{label}: {path}")
+        granted.update(_declared_clients(entry, shape.env_key))
+        argv = shape.argv_of(entry)
+        command = argv[0] if argv else None
+        if command is not None and not _resolves(command, home=home):
+            stale_paths.append(f"{label}: {path} bakes {command}")
+            details.append(f"{label}: {path} bakes {command}, which no longer resolves")
+        elif argv:
+            details.append(f"{label}: {path} -> {' '.join(argv)}")
+        if argv and len(argv) > 1:
+            details.append(f"{label}: args {' '.join(argv[1:])}")
 
     # The effective grant is what the server will see: the registration's own
     # env block when it carries one, otherwise whatever policy the operator

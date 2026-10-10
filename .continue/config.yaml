@@ -1,0 +1,9 @@
+mcpServers:
+- type: stdio
+  name: continuum-mcp
+  command: /Users/cyrax8590gmail.com/Personal Projects/untitled folder 2/.venv/bin/continuum-mcp
+  args:
+  - --db
+  - /private/tmp/fix-1612/continuum.db
+  env:
+    CONTINUUM_MCP_MUTATING_CLIENTS: continue
