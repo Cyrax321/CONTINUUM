@@ -10,6 +10,7 @@ flag hint.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -426,7 +427,10 @@ def test_with_gate_refuses_an_absent_registry(
         "--json", "hooks", "install", "claude-code", "--with-gate", "--settings", str(settings)
     )
     assert code == ExitCode.ERROR
-    assert ".continuum/gate.json does not exist" in err
+    # The message prints DEFAULT_GATE_CONFIG_PATH, which is a forward-slash
+    # relative path on POSIX and a backslash one on Windows; the registry name
+    # is what the assertion cares about, not the separator.
+    assert ".continuum" + (os.sep == "\\" and "\\" or "/") + "gate.json does not exist" in err
     assert not settings.exists(), "nothing should have been written to settings"
 
 
