@@ -31,6 +31,17 @@ Test counts: ~3,355 collected on a minimal env.
   the line carries counts and a dependency name only, never arguments, files
   or failure detail. `RecoveryEngine` takes an optional ledger and reads the
   budget read-only; without one every decision is unchanged.
+
+- **`continuum budget` reports per-dependency retry budget usage (#1460).**
+  The command reported retry-budget usage per action type (#240) and per
+  authorization (#413), but per-dependency budgets (#1428) were invisible in
+  both JSON and text output. `cmd_budget` now reports a `dependency_budgets`
+  section with attempts used, configured ceilings (resolved via
+  `max_attempts_for_dependency`), remaining allowance, and exhaustion status.
+  The recovery ledger directory is discovered across `--ledger-dir`,
+  `CONTINUUM_LEDGER_DIR`, `.continuum/ledger`, `.continuum`, and
+  `storage.storage_dir`, and degrades gracefully when no dependency budgets
+  are configured.
 ### Fixed
 
 - **A probe that prints `occurred:false` is now told the separator is the
