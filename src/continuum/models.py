@@ -456,6 +456,7 @@ class Approval(BaseModel):
     granted_by: str | None = None
     expires_at: datetime | None = None
     reason: str | None = None
+    parked: bool = False
 
 
 class ExternalDependency(BaseModel):
