@@ -1360,6 +1360,10 @@ class Action(BaseModel):
     @classmethod
     def _sync_origin_observation_digest(cls, data: Any) -> Any:
         if isinstance(data, dict):
+            # Pydantic hands the validator the caller's own mapping, so write
+            # to a copy: mutating it in place leaks the alias back into the
+            # stored event payload the caller passed to model_validate.
+            data = dict(data)
             ood = data.get("origin_observation_digest")
             od = data.get("origin_digest")
             if ood is not None and od is None:
