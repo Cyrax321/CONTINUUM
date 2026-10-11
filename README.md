@@ -154,7 +154,7 @@ CONTINUUM separates **LLM context** (temporary) from **durable task state** (per
 
 ![CONTINUUM how it works](docs/assets/architecture.svg)
 
-The detailed explanation, the projection model, and the recovery context are in [references/architecture.md](references/architecture.md).
+The detailed explanation, the projection model, and the recovery context are in [references/architecture.md](references/architecture.md). The full-system Mermaid view, from the five integration seams through the enforcement boundary and storage backends to the surfaces, is in [docs/diagrams/architecture.md](docs/diagrams/architecture.md).
 
 ## Where CONTINUUM sits
 
