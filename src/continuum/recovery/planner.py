@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -28,6 +29,8 @@ from continuum.models import (
     ActionStatus,
     Component,
     ComponentValidationEntry,
+    PlanStepStatus,
+    SemanticState,
     StateStatus,
 )
 
@@ -248,6 +251,112 @@ def _step_for(
             )
 
 
+def _extract_risk_fields(
+    risk_ev: Any,
+) -> tuple[str | None, str | None, str | None, dict[str, Any]]:
+    """Extract (trigger, step_id, episode_id, detail) from a risk event or model."""
+    if isinstance(risk_ev, dict):
+        trig = risk_ev.get("trigger")
+        step = risk_ev.get("step_id")
+        ep = risk_ev.get("episode_id")
+        detail = risk_ev.get("detail", {})
+    elif hasattr(risk_ev, "payload") and isinstance(risk_ev.payload, dict):
+        trig = risk_ev.payload.get("trigger")
+        step = risk_ev.payload.get("step_id")
+        ep = risk_ev.payload.get("episode_id")
+        detail = risk_ev.payload.get("detail", {})
+    else:
+        trig = getattr(risk_ev, "trigger", None)
+        step = getattr(risk_ev, "step_id", None)
+        ep = getattr(risk_ev, "episode_id", None)
+        detail = getattr(risk_ev, "detail", {})
+
+    trigger_str = str(trig).strip() if isinstance(trig, str) and trig.strip() else None
+    step_str = str(step).strip() if step is not None and str(step).strip() else None
+    detail_dict = detail if isinstance(detail, dict) else {}
+    if ep is None and detail_dict.get("episode_id") is not None:
+        ep = detail_dict.get("episode_id")
+    ep_str = str(ep).strip() if ep is not None and str(ep).strip() else None
+    return trigger_str, step_str, ep_str, detail_dict
+
+
+def _find_last_verified_fact_step(
+    state: SemanticState | None,
+    trigger_step_id: str | None = None,
+    detail: dict[str, Any] | None = None,
+) -> str | None:
+    """Identify the last verified fact-gathering step prior to the anomalous cascade."""
+    if detail:
+        explicit = (
+            detail.get("last_verified_step")
+            or detail.get("fact_gathering_step")
+            or detail.get("rollback_target")
+        )
+        if isinstance(explicit, str) and explicit.strip():
+            return explicit.strip()
+
+    fact_keywords = (
+        "gather",
+        "fact",
+        "evidence",
+        "collect",
+        "query",
+        "fetch",
+        "search",
+        "read",
+        "check",
+        "inspect",
+        "observe",
+        "probe",
+        "find",
+    )
+
+    if state is not None and state.plan:
+        candidates = list(state.plan)
+        if trigger_step_id is not None:
+            for idx, s in enumerate(state.plan):
+                if s.step_id == trigger_step_id:
+                    candidates = state.plan[:idx]
+                    break
+
+        for step in reversed(candidates):
+            is_verified = step.status in (PlanStepStatus.VERIFIED, PlanStepStatus.COMPLETED)
+            has_evidence = bool(step.evidence)
+            has_kw = any(k in f"{step.step_id} {step.description}".lower() for k in fact_keywords)
+            if is_verified and (has_evidence or has_kw):
+                return step.step_id
+
+        for step in reversed(candidates):
+            has_evidence = bool(step.evidence)
+            has_kw = any(k in f"{step.step_id} {step.description}".lower() for k in fact_keywords)
+            if has_evidence or has_kw:
+                return step.step_id
+
+        for step in reversed(candidates):
+            if step.status in (PlanStepStatus.VERIFIED, PlanStepStatus.COMPLETED):
+                return step.step_id
+
+        if candidates:
+            return candidates[-1].step_id
+
+    if state is not None and state.evidence:
+        for ev in reversed(state.evidence):
+            if ev.status is StateStatus.VALID:
+                return ev.evidence_id
+        return state.evidence[-1].evidence_id
+
+    if state is not None and state.findings:
+        for f in reversed(state.findings):
+            if f.status is StateStatus.VALID:
+                return f.finding_id
+        return state.findings[-1].finding_id
+
+    if trigger_step_id is not None:
+        return trigger_step_id
+
+    return None
+
+
 def plan_repairs(
     findings: Sequence[ComponentValidationEntry] = (),
     *,
@@ -256,6 +365,8 @@ def plan_repairs(
     unprojectable: tuple[int, str, str] | None = None,
     exhausted_dependencies: Collection[str] = (),
     run_budget_exhausted: bool = False,
+    risk_events: Sequence[Any] = (),
+    state: SemanticState | None = None,
 ) -> RepairPlan:
     """Build an ordered repair plan from validation findings and ledger state.
 
@@ -332,6 +443,65 @@ def plan_repairs(
         )
         if step is not None:
             steps.append(step)
+
+    for risk_ev in risk_events:
+        trig, step_id, ep_id, detail = _extract_risk_fields(risk_ev)
+        if not trig:
+            continue
+        trig_lower = trig.lower()
+
+        if trig_lower == "loop":
+            targets: list[str] = []
+            if step_id:
+                targets.append(step_id)
+            repeated = (
+                detail.get("repeating_steps")
+                or detail.get("repeated_steps")
+                or detail.get("action_signature")
+                or detail.get("action")
+            )
+            if isinstance(repeated, (list, tuple)):
+                for r in repeated:
+                    if isinstance(r, str) and r.strip() and r.strip() not in targets:
+                        targets.append(r.strip())
+            elif isinstance(repeated, str) and repeated.strip() and repeated.strip() not in targets:
+                targets.append(repeated.strip())
+
+            for target in targets:
+                step_id_val = step_id or target
+                ep_val = ep_id or "none"
+                reason = (
+                    f"replan excluding repeating trajectory for step {target} "
+                    f"(step_id: {step_id_val}, trigger: {trig_lower}, episode_id: {ep_val})"
+                )
+                steps.append(
+                    RepairStep(
+                        kind=RepairKind.REVIEW_DECISION,
+                        target=target,
+                        reason=reason,
+                        blocking=True,
+                        requires_human=False,
+                    )
+                )
+
+        elif trig_lower == "meltdown":
+            fact_step = _find_last_verified_fact_step(state, trigger_step_id=step_id, detail=detail)
+            target = fact_step or step_id or "last_fact_gathering_step"
+            step_id_val = step_id or "none"
+            ep_val = ep_id or "none"
+            reason = (
+                f"target rollback to last verified fact-gathering step {target} "
+                f"prior to anomalous cascade (step_id: {step_id_val}, trigger: {trig_lower}, episode_id: {ep_val})"
+            )
+            steps.append(
+                RepairStep(
+                    kind=RepairKind.HUMAN_REVIEW,
+                    target=target,
+                    reason=reason,
+                    blocking=True,
+                    requires_human=True,
+                )
+            )
 
     seen: set[tuple[RepairKind, str]] = set()
     unique: list[RepairStep] = []
