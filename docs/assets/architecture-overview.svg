@@ -1,0 +1,218 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1250 920" font-family="Helvetica, Arial, sans-serif" role="img" aria-label="CONTINUUM architecture: agents and clients reach the core through five integration seams; the gate and action ledger hold the boundary to external systems; all events append to one hash-chained event log, which the state engine projects, the checkpoint manager seals with RECOVERY anchors, and the recovery engine turns into a sealed contract; below, durable storage and four surfaces read it back.">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#475569"/>
+    </marker>
+    <style>
+      .group   { fill:#f1f5f9; stroke:#cbd5e1; }
+      .stage   { fill:#ffffff; stroke:#1d4ed8; stroke-width:1.6; }
+      .accent  { fill:#2563eb; }
+      .src     { fill:#ffffff; stroke:#94a3b8; stroke-width:1.3; }
+      .bridge  { fill:#ffffff; stroke:#0f766e; stroke-width:1.4; }
+      .baccent { fill:#0f766e; }
+      .gtitle  { fill:#475569; font-size:15px; font-weight:700; }
+      .title   { fill:#0f172a; font-size:25px; font-weight:700; }
+      .stitle  { fill:#1e3a8a; font-size:15px; font-weight:700; }
+      .ssub    { fill:#334155; font-size:11px; }
+      .item    { fill:#0f172a; font-size:12px; }
+      .brtitle { fill:#134e4a; font-size:13px; font-weight:700; }
+      .brtxt   { fill:#1f2937; font-size:11px; }
+      .srctxt  { fill:#0f172a; font-size:12px; }
+      .arrowln { stroke:#475569; stroke-width:1.5; fill:none; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1250" height="920" fill="#ffffff"/>
+  <text x="625" y="40" text-anchor="middle" class="title">CONTINUUM architecture</text>
+  <text x="625" y="63" text-anchor="middle" class="ssub">One hash-chained log, any harness. Schema v6, 55 event types, 13 MCP tools, 141 modules. Every fact carries its origin; trust is earned, never assumed.</text>
+
+  <!-- ================= AGENTS & CLIENTS ================= -->
+  <rect x="15" y="95" width="215" height="445" rx="12" class="group"/>
+  <text x="122" y="122" text-anchor="middle" class="gtitle">Agents &amp; clients</text>
+
+  <rect x="30" y="140" width="185" height="56" rx="8" class="src"/>
+  <text x="122" y="163" text-anchor="middle" class="srctxt">Claude Code</text>
+  <text x="122" y="181" text-anchor="middle" class="ssub">coding agent</text>
+
+  <rect x="30" y="206" width="185" height="56" rx="8" class="src"/>
+  <text x="122" y="229" text-anchor="middle" class="srctxt">Gemini CLI</text>
+  <text x="122" y="247" text-anchor="middle" class="ssub">coding agent</text>
+
+  <rect x="30" y="272" width="185" height="56" rx="8" class="src"/>
+  <text x="122" y="295" text-anchor="middle" class="srctxt">Codex</text>
+  <text x="122" y="313" text-anchor="middle" class="ssub">coding agent</text>
+
+  <rect x="30" y="338" width="185" height="56" rx="8" class="src"/>
+  <text x="122" y="361" text-anchor="middle" class="srctxt">LangGraph</text>
+  <text x="122" y="379" text-anchor="middle" class="ssub">graph workflows</text>
+
+  <rect x="30" y="404" width="185" height="56" rx="8" class="src"/>
+  <text x="122" y="427" text-anchor="middle" class="srctxt">OpenAI SDK</text>
+  <text x="122" y="445" text-anchor="middle" class="ssub">Agents SDK</text>
+
+  <rect x="30" y="470" width="185" height="56" rx="8" class="src"/>
+  <text x="122" y="493" text-anchor="middle" class="srctxt">CrewAI · others</text>
+  <text x="122" y="511" text-anchor="middle" class="ssub">thin hooks, no SDK</text>
+
+  <!-- ================= FIVE SEAMS ================= -->
+  <rect x="240" y="95" width="190" height="445" rx="12" class="group"/>
+  <text x="335" y="122" text-anchor="middle" class="gtitle">Five integration seams</text>
+
+  <rect x="255" y="140" width="160" height="70" rx="10" class="bridge"/>
+  <rect x="255" y="140" width="160" height="9" rx="10" class="baccent"/>
+  <text x="335" y="166" text-anchor="middle" class="brtitle">1 · In-process</text>
+  <text x="335" y="185" text-anchor="middle" class="brtxt">intercept_action,</text>
+  <text x="335" y="201" text-anchor="middle" class="brtxt">wrap_tool on 3 SDKs</text>
+
+  <rect x="255" y="219" width="160" height="70" rx="10" class="bridge"/>
+  <rect x="255" y="219" width="160" height="9" rx="10" class="baccent"/>
+  <text x="335" y="245" text-anchor="middle" class="brtitle">2 · MCP server</text>
+  <text x="335" y="264" text-anchor="middle" class="brtxt">continuum-mcp, 13 tools,</text>
+  <text x="335" y="280" text-anchor="middle" class="brtxt">deny by default + authz</text>
+
+  <rect x="255" y="298" width="160" height="70" rx="10" class="bridge"/>
+  <rect x="255" y="298" width="160" height="9" rx="10" class="baccent"/>
+  <text x="335" y="324" text-anchor="middle" class="brtitle">3 · CLI hooks</text>
+  <text x="335" y="343" text-anchor="middle" class="brtxt">gate + observe,</text>
+  <text x="335" y="359" text-anchor="middle" class="brtxt">claude-code / gemini / codex</text>
+
+  <rect x="255" y="377" width="160" height="70" rx="10" class="bridge"/>
+  <rect x="255" y="377" width="160" height="9" rx="10" class="baccent"/>
+  <text x="335" y="403" text-anchor="middle" class="brtitle">4 · HTTP gateway</text>
+  <text x="335" y="422" text-anchor="middle" class="brtxt">claim before fire,</text>
+  <text x="335" y="438" text-anchor="middle" class="brtxt">settles from status code</text>
+
+  <rect x="255" y="456" width="160" height="70" rx="10" class="bridge"/>
+  <rect x="255" y="456" width="160" height="9" rx="10" class="baccent"/>
+  <text x="335" y="482" text-anchor="middle" class="brtitle">5 · OTel bridge</text>
+  <text x="335" y="501" text-anchor="middle" class="brtxt">make_span_processor,</text>
+  <text x="335" y="517" text-anchor="middle" class="brtxt">spans become evidence</text>
+
+  <!-- agents -> seams panel -->
+  <line x1="215" y1="168" x2="238" y2="317" class="arrowln" marker-end="url(#arrow)"/>
+  <line x1="215" y1="234" x2="238" y2="317" class="arrowln" marker-end="url(#arrow)"/>
+  <line x1="215" y1="300" x2="238" y2="317" class="arrowln" marker-end="url(#arrow)"/>
+  <line x1="215" y1="366" x2="238" y2="317" class="arrowln" marker-end="url(#arrow)"/>
+  <line x1="215" y1="432" x2="238" y2="317" class="arrowln" marker-end="url(#arrow)"/>
+  <line x1="215" y1="498" x2="238" y2="317" class="arrowln" marker-end="url(#arrow)"/>
+
+  <!-- seams -> Gate -->
+  <line x1="415" y1="175" x2="453" y2="225" class="arrowln" marker-end="url(#arrow)"/>
+  <line x1="415" y1="254" x2="453" y2="225" class="arrowln" marker-end="url(#arrow)"/>
+  <line x1="415" y1="333" x2="453" y2="225" class="arrowln" marker-end="url(#arrow)"/>
+  <line x1="415" y1="412" x2="453" y2="225" class="arrowln" marker-end="url(#arrow)"/>
+  <line x1="415" y1="491" x2="453" y2="225" class="arrowln" marker-end="url(#arrow)"/>
+
+  <!-- non-action events straight to the log -->
+  <line x1="415" y1="317" x2="453" y2="425" class="arrowln" marker-end="url(#arrow)"/>
+
+  <!-- ================= ENFORCEMENT ROW ================= -->
+  <rect x="455" y="150" width="170" height="150" rx="10" class="stage"/>
+  <rect x="455" y="150" width="170" height="10" rx="10" class="accent"/>
+  <text x="540" y="185" text-anchor="middle" class="stitle">Gate</text>
+  <text x="540" y="208" text-anchor="middle" class="ssub">gate.py</text>
+  <text x="540" y="232" text-anchor="middle" class="ssub">no claim → DENY (exit 2)</text>
+  <text x="540" y="252" text-anchor="middle" class="ssub">unknown host fails closed</text>
+
+  <rect x="645" y="150" width="170" height="150" rx="10" class="stage"/>
+  <rect x="645" y="150" width="170" height="10" rx="10" class="accent"/>
+  <text x="730" y="185" text-anchor="middle" class="stitle">Action Ledger</text>
+  <text x="730" y="208" text-anchor="middle" class="ssub">actions/</text>
+  <text x="730" y="232" text-anchor="middle" class="ssub">claim → fire → settle</text>
+  <text x="730" y="252" text-anchor="middle" class="ssub">idempotent key, arg-drift safe</text>
+
+  <rect x="835" y="150" width="170" height="150" rx="10" class="stage"/>
+  <rect x="835" y="150" width="170" height="10" rx="10" class="accent"/>
+  <text x="920" y="185" text-anchor="middle" class="stitle">External Systems</text>
+  <text x="920" y="208" text-anchor="middle" class="ssub">GitHub · email · APIs</text>
+  <text x="920" y="232" text-anchor="middle" class="ssub">settled from real status,</text>
+  <text x="920" y="252" text-anchor="middle" class="ssub">never from agent report</text>
+
+  <line x1="625" y1="225" x2="643" y2="225" class="arrowln" marker-end="url(#arrow)"/>
+  <line x1="815" y1="225" x2="833" y2="225" class="arrowln" marker-end="url(#arrow)"/>
+
+  <!-- settle loop: real status returns to the ledger -->
+  <path d="M920,300 L920,318 L730,318 L730,302" class="arrowln" marker-end="url(#arrow)"/>
+  <text x="1045" y="312" text-anchor="middle" class="ssub">real status settles the ledger,</text>
+  <text x="1045" y="327" text-anchor="middle" class="ssub">so replay returns the cached result</text>
+
+  <!-- ================= PROJECTION ROW ================= -->
+  <rect x="455" y="350" width="170" height="150" rx="10" class="stage"/>
+  <rect x="455" y="350" width="170" height="10" rx="10" class="accent"/>
+  <text x="540" y="385" text-anchor="middle" class="stitle">Event Log</text>
+  <text x="540" y="408" text-anchor="middle" class="ssub">events.py</text>
+  <text x="540" y="432" text-anchor="middle" class="ssub">hash-chained, 55 event types</text>
+  <text x="540" y="452" text-anchor="middle" class="ssub">verify() → trusted_through</text>
+
+  <rect x="645" y="350" width="170" height="150" rx="10" class="stage"/>
+  <rect x="645" y="350" width="170" height="10" rx="10" class="accent"/>
+  <text x="730" y="385" text-anchor="middle" class="stitle">State Engine</text>
+  <text x="730" y="408" text-anchor="middle" class="ssub">state/ · project()</text>
+  <text x="730" y="432" text-anchor="middle" class="ssub">validation + staleness:</text>
+  <text x="730" y="452" text-anchor="middle" class="ssub">dependency → evidence → finding</text>
+
+  <rect x="835" y="350" width="170" height="150" rx="10" class="stage"/>
+  <rect x="835" y="350" width="170" height="10" rx="10" class="accent"/>
+  <text x="920" y="385" text-anchor="middle" class="stitle">Checkpoint</text>
+  <text x="920" y="408" text-anchor="middle" class="ssub">checkpoint/ · policy</text>
+  <text x="920" y="432" text-anchor="middle" class="ssub">RECOVERY anchors · prune</text>
+  <text x="920" y="452" text-anchor="middle" class="ssub">Goal + Plan + Progress</text>
+
+  <rect x="1025" y="350" width="170" height="150" rx="10" class="stage"/>
+  <rect x="1025" y="350" width="170" height="10" rx="10" class="accent"/>
+  <text x="1110" y="385" text-anchor="middle" class="stitle">Recovery Engine</text>
+  <text x="1110" y="408" text-anchor="middle" class="ssub">recovery/ · 7 modes</text>
+  <text x="1110" y="432" text-anchor="middle" class="ssub">sealed contract: safe,</text>
+  <text x="1110" y="452" text-anchor="middle" class="ssub">human_steps, pinning drift</text>
+
+  <line x1="625" y1="425" x2="643" y2="425" class="arrowln" marker-end="url(#arrow)"/>
+  <line x1="815" y1="425" x2="833" y2="425" class="arrowln" marker-end="url(#arrow)"/>
+  <line x1="1005" y1="425" x2="1023" y2="425" class="arrowln" marker-end="url(#arrow)"/>
+
+  <!-- ledger -> log -->
+  <path d="M670,300 L670,325 L600,325 L600,348" class="arrowln" marker-end="url(#arrow)"/>
+  <text x="558" y="318" text-anchor="middle" class="ssub">append TOOL_COMPLETED</text>
+
+  <!-- ================= STORAGE & SURFACES ================= -->
+  <rect x="240" y="690" width="955" height="190" rx="12" class="group"/>
+  <text x="717" y="718" text-anchor="middle" class="gtitle">Storage &amp; surfaces</text>
+
+  <rect x="275" y="735" width="290" height="120" rx="10" class="bridge"/>
+  <rect x="275" y="735" width="290" height="9" rx="10" class="baccent"/>
+  <text x="420" y="762" text-anchor="middle" class="brtitle">SQLite · primary</text>
+  <text x="420" y="782" text-anchor="middle" class="brtxt">schema v6 · WAL · synchronous FULL</text>
+  <text x="420" y="800" text-anchor="middle" class="brtxt">integrity-checked on read</text>
+  <text x="420" y="820" text-anchor="middle" class="brtxt">events · runs · versions · checkpoints</text>
+  <text x="420" y="838" text-anchor="middle" class="brtxt">action_index · events_archive · lg_*</text>
+
+  <rect x="595" y="735" width="250" height="120" rx="10" class="bridge"/>
+  <rect x="595" y="735" width="250" height="9" rx="10" class="baccent"/>
+  <text x="720" y="762" text-anchor="middle" class="brtitle">Postgres</text>
+  <text x="720" y="782" text-anchor="middle" class="brtxt">CI-verified backend</text>
+  <text x="720" y="800" text-anchor="middle" class="brtxt">migrations.py</text>
+  <text x="720" y="818" text-anchor="middle" class="brtxt">blob payload rehydration</text>
+
+  <rect x="875" y="735" width="290" height="120" rx="10" class="bridge"/>
+  <rect x="875" y="735" width="290" height="9" rx="10" class="baccent"/>
+  <text x="1020" y="762" text-anchor="middle" class="brtitle">Surfaces</text>
+  <text x="1020" y="782" text-anchor="middle" class="brtxt">CLI · 52 commands</text>
+  <text x="1020" y="800" text-anchor="middle" class="brtxt">exit code is the verdict</text>
+  <text x="1020" y="820" text-anchor="middle" class="brtxt">Web dashboard · HITL · TUI</text>
+  <text x="1020" y="838" text-anchor="middle" class="brtxt">benchmark (crash scenarios)</text>
+
+  <!-- write path: log -> storage -->
+  <line x1="540" y1="500" x2="424" y2="733" class="arrowln" marker-end="url(#arrow)"/>
+  <text x="418" y="606" text-anchor="middle" class="ssub">events, versions,</text>
+  <text x="418" y="620" text-anchor="middle" class="ssub">checkpoints</text>
+
+  <!-- read path: storage -> state engine -->
+  <line x1="720" y1="733" x2="730" y2="502" class="arrowln" marker-end="url(#arrow)"/>
+  <text x="800" y="618" text-anchor="middle" class="ssub">verify, project, replay</text>
+
+  <!-- resume path: recovery -> surfaces -->
+  <line x1="1110" y1="500" x2="1024" y2="733" class="arrowln" marker-end="url(#arrow)"/>
+  <text x="1118" y="606" text-anchor="middle" class="ssub">resume →</text>
+  <text x="1118" y="620" text-anchor="middle" class="ssub">sealed contract</text>
+
+  <text x="625" y="898" text-anchor="middle" class="ssub">Cross-cutting: security/ trust gate + revalidation + attestation · pinning.py drift on resume · budgets.py retry caps · replay_similarity · reconcilers auto-settle. Recovery order: RESUME &lt; REPAIR_AND_RESUME &lt; REPLAN &lt; WAIT &lt; REQUEST_HUMAN &lt; ROLLBACK &lt; ABORT.</text>
+</svg>

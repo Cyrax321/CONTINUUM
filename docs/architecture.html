@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>CONTINUUM - System Architecture</title>
+  <meta name="description" content="CONTINUUM system architecture: one hash-chained event log, five integration seams, trust-earned recovery engine."/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"/>
+  <style>
+    :root{--bg:#F3F7FA;--panel:#E8EFF5;--core:#DDE8F1;--card:#FFFFFF;--ink:#0E1F2D;--slate:#46607A;--slate2:#7D96AB;--rule:#CDDAE6;--accent:#C73F0A;--accentTint:#FBE9E1;--spine:#111F2B;--onSpine:#E3EFF8;--spineAlt:#9FB5C6;--edgeP:#2F4F68;--edgeS:#8FACBE;--shadow2:0 2px 8px rgba(14,31,45,.10);}
+    @media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#09131D;--panel:#0D1A26;--core:#102233;--card:#152334;--ink:#D8E8F3;--slate:#8FADC2;--slate2:#627F94;--rule:#1E3848;--accent:#FF7040;--accentTint:#3B1A0E;--spine:#070F18;--onSpine:#D8E8F3;--spineAlt:#5A7B93;--edgeP:#7AA5BE;--edgeS:#3E606F;--shadow2:0 2px 8px rgba(0,0,0,.45);color-scheme:dark;}}
+    :root[data-theme="dark"]{--bg:#09131D;--panel:#0D1A26;--core:#102233;--card:#152334;--ink:#D8E8F3;--slate:#8FADC2;--slate2:#627F94;--rule:#1E3848;--accent:#FF7040;--accentTint:#3B1A0E;--spine:#070F18;--onSpine:#D8E8F3;--spineAlt:#5A7B93;--edgeP:#7AA5BE;--edgeS:#3E606F;--shadow2:0 2px 8px rgba(0,0,0,.45);color-scheme:dark;}
+    *,*::before,*::after{box-sizing:border-box;}
+    html{background:var(--bg);}
+    body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,"Segoe UI",system-ui,sans-serif;padding:32px clamp(16px,4vw,56px) 72px;-webkit-font-smoothing:antialiased;}
+    .pagehead{max-width:1280px;margin:0 auto 24px;display:flex;flex-wrap:wrap;align-items:flex-end;gap:16px;}
+    .pagehead-text{flex:1;min-width:260px;}
+    .eyebrow{font-size:10.5px;font-weight:800;letter-spacing:2.4px;text-transform:uppercase;color:var(--accent);margin:0 0 8px;}
+    h1{font-size:clamp(22px,3.2vw,34px);font-weight:800;letter-spacing:-0.025em;margin:0 0 10px;color:var(--ink);line-height:1.18;}
+    .lede{max-width:72ch;color:var(--slate);font-size:14px;line-height:1.6;margin:0;}
+    .theme-btn{flex-shrink:0;align-self:flex-start;margin-top:4px;background:var(--card);border:1px solid var(--rule);color:var(--slate);font:600 12px/1 Inter,sans-serif;padding:8px 14px;border-radius:8px;cursor:pointer;}
+    .stats{max-width:1280px;margin:0 auto 20px;display:flex;flex-wrap:wrap;gap:10px;}
+    .pill{background:var(--card);border:1px solid var(--rule);border-radius:999px;padding:5px 14px;font-size:12px;color:var(--slate);display:flex;gap:6px;align-items:center;}
+    .pill b{color:var(--ink);font-weight:700;}
+    figure{max-width:1280px;margin:0 auto;}
+    .scroll{overflow-x:auto;border:1px solid var(--rule);border-radius:16px;background:var(--card);padding:8px;box-shadow:var(--shadow2);}
+    svg.arch{display:block;width:100%;height:auto;min-width:800px;}
+    .band{fill:var(--panel);stroke:none;}
+    .bandX{fill:var(--core);stroke:var(--rule);stroke-width:1;}
+    .card{fill:var(--card);stroke:none;filter:drop-shadow(0 1px 2px rgba(14,31,45,.07));}
+    .cardX{fill:var(--accentTint);stroke:none;filter:drop-shadow(0 1px 2px rgba(14,31,45,.07));}
+    .tab{fill:var(--accent);}
+    .strip{fill:color-mix(in srgb,var(--ink) 4%,transparent);stroke:none;}
+    .spine{fill:var(--spine);}
+    .edgeP{stroke:var(--edgeP);stroke-width:2.5;fill:none;}
+    .edgeS{stroke:var(--edgeS);stroke-width:1.5;fill:none;}
+    .dashX{stroke:var(--accent);stroke-width:2;fill:none;stroke-dasharray:7 5;}
+    .mkP{fill:var(--edgeP);}
+    .mkS{fill:var(--edgeS);}
+    .mkX{fill:var(--accent);}
+    .lbl{font-size:9.5px;font-weight:700;letter-spacing:2px;fill:var(--slate2);}
+    .ttl{font-size:12.5px;font-weight:700;fill:var(--ink);}
+    .ttl2{font-size:11.5px;font-weight:700;fill:var(--ink);}
+    .sub{font-size:10px;fill:var(--slate);}
+    .subb{font-size:9px;fill:var(--slate2);}
+    .mono{font-family:"JetBrains Mono",ui-monospace,Menlo,monospace;font-size:9px;fill:var(--slate);}
+    .elbl{font-size:9px;fill:var(--slate);}
+    .elblX{font-size:9px;fill:var(--accent);font-weight:600;}
+    .hub{font-size:13px;font-weight:800;letter-spacing:0.5px;fill:var(--onSpine);}
+    .hubS{font-size:9.5px;fill:var(--spineAlt);}
+    .note{font-size:9px;fill:var(--slate2);}
+    .badge{font-size:8px;font-weight:700;fill:var(--onSpine);}
+    .legend{display:flex;flex-wrap:wrap;gap:10px 24px;max-width:1280px;margin:14px auto 0;font-size:12px;color:var(--slate);}
+    .legend span{display:inline-flex;align-items:center;gap:8px;}
+    .sw-p{display:inline-block;width:30px;height:0;border-top:2.5px solid var(--edgeP);}
+    .sw-s{display:inline-block;width:30px;height:0;border-top:1.5px solid var(--edgeS);}
+    .sw-x{display:inline-block;width:30px;height:0;border-top:2px dashed var(--accent);}
+    .sw-bx{display:inline-block;width:13px;height:10px;background:var(--accentTint);border-left:3px solid var(--accent);}
+    figcaption{max-width:80ch;margin:16px auto 0;font-size:13px;line-height:1.65;color:var(--slate);}
+    figcaption b{color:var(--ink);font-weight:700;}
+    code{font-family:"JetBrains Mono",ui-monospace,Menlo,monospace;font-size:11.5px;}
+    .provenance{max-width:1280px;margin:28px auto 0;border-top:1px solid var(--rule);padding-top:16px;font-size:12px;color:var(--slate);line-height:1.65;}
+    .provenance b{color:var(--ink);}
+  </style>
+</head>
+<body>
+<div class="pagehead">
+  <div class="pagehead-text">
+    <p class="eyebrow">CONTINUUM</p>
+    <h1>Architecture: one hash-chained log, any harness</h1>
+    <p class="lede">Every fact carries its origin, and trust is earned, never assumed. Any harness plugs into the same append-only log through five seams; the gate denies any unclaimed effect, the action ledger fires exactly once, and the recovery engine re-derives a sealed contract rather than trusting a transcript.</p>
+  </div>
+  <button class="theme-btn" type="button" aria-label="Toggle color theme">Dark</button>
+</div>
+<div class="stats">
+  <div class="pill"><b>141</b> modules</div>
+  <div class="pill"><b>55</b> EventType members</div>
+  <div class="pill"><b>schema v6</b></div>
+  <div class="pill"><b>13</b> MCP tools</div>
+  <div class="pill"><b>203</b> test files</div>
+  <div class="pill"><b>7</b> recovery modes</div>
+  <div class="pill"><b>5</b> integration seams</div>
+</div>
+<figure>
+<div class="scroll">
+<svg class="arch" viewBox="0 0 1280 1180" role="img" aria-label="CONTINUUM system architecture diagram">
+  <defs>
+    <marker id="arrP" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="mkP" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="arrS" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mkS" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="arrX" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mkX" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+
+  <!-- TITLE -->
+  <text x="48" y="42" style="font-size:11.5px;font-weight:800;letter-spacing:1.8px;fill:var(--accent);">CONTINUUM - SYSTEM ARCHITECTURE</text>
+  <text x="48" y="62" class="sub">One library (src/continuum, 141 modules) - all modules append to and replay one hash-chained log.</text>
+  <text x="1232" y="42" text-anchor="end" class="mono">schema v6 - 55 event types - 13 MCP tools</text>
+  <text x="1232" y="58" text-anchor="end" class="mono">141 modules - 203 test files</text>
+
+  <!-- ROW 1: AGENTS -->
+  <rect class="band" x="40" y="78" width="1200" height="108" rx="14"/>
+  <text x="60" y="100" class="lbl">AGENTS AND CLIENTS</text>
+  <rect class="card" x="60"  y="110" width="172" height="60" rx="9"/>
+  <text x="76"  y="133" class="ttl2">Claude Code</text>
+  <text x="76"  y="149" class="sub">coding agent</text>
+  <text x="76"  y="163" class="subb">claude-code CLI hook</text>
+  <rect class="card" x="246" y="110" width="172" height="60" rx="9"/>
+  <text x="262" y="133" class="ttl2">Gemini CLI</text>
+  <text x="262" y="149" class="sub">coding agent</text>
+  <text x="262" y="163" class="subb">gemini CLI hook</text>
+  <rect class="card" x="432" y="110" width="172" height="60" rx="9"/>
+  <text x="448" y="133" class="ttl2">Codex</text>
+  <text x="448" y="149" class="sub">coding agent</text>
+  <text x="448" y="163" class="subb">codex CLI hook</text>
+  <rect class="card" x="618" y="110" width="172" height="60" rx="9"/>
+  <text x="634" y="133" class="ttl2">LangGraph</text>
+  <text x="634" y="149" class="sub">graph workflows</text>
+  <text x="634" y="163" class="subb">wrap_tool seam</text>
+  <rect class="card" x="804" y="110" width="172" height="60" rx="9"/>
+  <text x="820" y="133" class="ttl2">OpenAI Agents SDK</text>
+  <text x="820" y="149" class="sub">agent orchestration</text>
+  <text x="820" y="163" class="subb">intercept_action seam</text>
+  <rect class="card" x="990" y="110" width="222" height="60" rx="9"/>
+  <text x="1006" y="133" class="ttl2">CrewAI - AutoGen - others</text>
+  <text x="1006" y="149" class="sub">thin hooks, no SDK required</text>
+  <text x="1006" y="163" class="subb">OTel bridge or HTTP gateway</text>
+  <path class="edgeP" d="M640,186 L640,216" marker-end="url(#arrP)"/>
+  <text x="655" y="207" class="elbl">five integration seams</text>
+
+  <!-- ROW 2: SEAMS -->
+  <rect class="band" x="40" y="216" width="1200" height="120" rx="14"/>
+  <text x="60" y="238" class="lbl">FIVE INTEGRATION SEAMS - NO FRAMEWORK COOPERATION REQUIRED</text>
+  <rect class="card" x="60"  y="250" width="218" height="70" rx="9"/>
+  <text x="76"  y="273" class="ttl2">1 - In-process</text>
+  <text x="76"  y="289" class="mono">intercept_action</text>
+  <text x="76"  y="303" class="sub">wrap_tool on 3 SDKs</text>
+  <text x="76"  y="315" class="subb">zero network hop</text>
+  <rect class="card" x="292" y="250" width="218" height="70" rx="9"/>
+  <text x="308" y="273" class="ttl2">2 - MCP server</text>
+  <text x="308" y="289" class="mono">continuum-mcp</text>
+  <text x="308" y="303" class="sub">13 tools - deny by default</text>
+  <text x="308" y="315" class="subb">authz + token isolation</text>
+  <rect class="card" x="524" y="250" width="218" height="70" rx="9"/>
+  <text x="540" y="273" class="ttl2">3 - CLI hooks</text>
+  <text x="540" y="289" class="mono">gate + observe</text>
+  <text x="540" y="303" class="sub">claude-code / gemini / codex</text>
+  <text x="540" y="315" class="subb">shell-level interception</text>
+  <rect class="card" x="756" y="250" width="218" height="70" rx="9"/>
+  <text x="772" y="273" class="ttl2">4 - HTTP gateway</text>
+  <text x="772" y="289" class="mono">gateway.py</text>
+  <text x="772" y="303" class="sub">claim before fire</text>
+  <text x="772" y="315" class="subb">settles from HTTP status code</text>
+  <rect class="card" x="988" y="250" width="224" height="70" rx="9"/>
+  <text x="1004" y="273" class="ttl2">5 - OTel bridge</text>
+  <text x="1004" y="289" class="mono">make_span_processor</text>
+  <text x="1004" y="303" class="sub">spans become evidence</text>
+  <text x="1004" y="315" class="subb">no SDK coupling needed</text>
+  <path class="edgeP" d="M488,336 L488,400" marker-end="url(#arrP)"/>
+  <text x="503" y="374" class="elbl">every action intercepted</text>
+  <path class="edgeS" d="M52,336 L52,590 L70,590" marker-end="url(#arrS)"/>
+
+  <!-- CORE -->
+  <rect class="bandX" x="40" y="360" width="1200" height="502" rx="14"/>
+  <rect x="60" y="370" width="160" height="22" rx="11" fill="var(--ink)"/>
+  <text x="140" y="385" text-anchor="middle" style="font-size:9.5px;font-weight:800;letter-spacing:1.5px;fill:var(--onSpine);">CONTINUUM CORE</text>
+  <text x="1220" y="382" text-anchor="end" class="note">same run: written by one harness, resumed by another</text>
+
+  <!-- Gate -->
+  <rect class="cardX" x="68"  y="400" width="256" height="100" rx="9"/>
+  <rect class="tab"   x="68"  y="408" width="3"   height="84"  rx="1.5"/>
+  <text x="86"  y="428" class="ttl">Gate</text>
+  <text x="86"  y="445" class="mono">security/gate.py</text>
+  <text x="86"  y="461" class="sub">no claim - DENY (exit 2)</text>
+  <text x="86"  y="477" class="subb">unknown host fails closed</text>
+  <text x="86"  y="491" class="subb">replay guard blocks re-fire</text>
+
+  <!-- Action Ledger -->
+  <rect class="cardX" x="344" y="400" width="256" height="100" rx="9"/>
+  <rect class="tab"   x="344" y="408" width="3"   height="84"  rx="1.5"/>
+  <text x="362" y="428" class="ttl">Action Ledger</text>
+  <text x="362" y="445" class="mono">actions/ - ledger.py</text>
+  <text x="362" y="461" class="sub">claim - fire - settle</text>
+  <text x="362" y="477" class="subb">idempotent key - arg-drift safe</text>
+  <text x="362" y="491" class="subb">per-dependency retry budgets</text>
+
+  <!-- External Systems -->
+  <rect class="cardX" x="620" y="400" width="256" height="100" rx="9"/>
+  <rect class="tab"   x="620" y="408" width="3"   height="84"  rx="1.5"/>
+  <text x="638" y="428" class="ttl">External Systems</text>
+  <text x="638" y="445" class="sub">GitHub - email - HTTP APIs</text>
+  <text x="638" y="461" class="sub">settled from real status,</text>
+  <text x="638" y="477" class="subb">never from agent report</text>
+  <text x="638" y="491" class="subb">tenant-scoped namespace boundary</text>
+
+  <!-- Replay Guard + Risk -->
+  <rect class="card"  x="896" y="400" width="316" height="100" rx="9"/>
+  <text x="914" y="428" class="ttl">Replay Guard + Risk Monitor</text>
+  <text x="914" y="445" class="mono">replayguard.py - risk/</text>
+  <text x="914" y="461" class="sub">protected_call blocks replayed tools</text>
+  <text x="914" y="477" class="subb">ingest_risk - RiskObservedPayload</text>
+  <text x="914" y="491" class="subb">RISK_OBSERVED - observed_risks projection</text>
+
+  <path class="edgeP" d="M324,444 L344,444" marker-end="url(#arrP)"/>
+  <text x="334" y="436" text-anchor="middle" class="elbl">allow if claimed</text>
+  <path class="edgeP" d="M600,444 L620,444" marker-end="url(#arrP)"/>
+  <text x="610" y="436" text-anchor="middle" class="elbl">fires once</text>
+  <path class="edgeS" d="M748,500 L748,518 L472,518 L472,500" marker-end="url(#arrS)"/>
+  <text x="610" y="533" text-anchor="middle" class="elbl">real status settles ledger; replay returns cached result</text>
+
+  <!-- EVENT LOG -->
+  <rect class="spine" x="68" y="560" width="1144" height="76" rx="10"/>
+  <rect x="68" y="560" width="88" height="18" rx="5" fill="var(--accent)" opacity="0.85"/>
+  <text x="112" y="572" text-anchor="middle" class="badge">APPEND-ONLY</text>
+  <text x="92"  y="598" class="hub">EVENT LOG - events.py</text>
+  <text x="92"  y="617" class="hubS">hash-chained - 55 event types - SCHEMA_VERSION 6 - verify() - trusted_through - blobs offloaded to content-addressed store</text>
+  <text x="1192" y="605" text-anchor="end" class="hubS" style="fill:#3E5E72;">one log - many projections</text>
+  <path class="edgeP" d="M488,518 L488,560" marker-end="url(#arrP)"/>
+  <text x="503" y="545" class="elbl">append TOOL_COMPLETED</text>
+
+  <!-- PROJECTION ROW -->
+  <rect class="card" x="68" y="658" width="342" height="106" rx="9"/>
+  <text x="86"  y="682" class="ttl">State Engine</text>
+  <text x="86"  y="699" class="mono">state/ - project() - validate()</text>
+  <text x="86"  y="717" class="sub">staleness propagates through graph</text>
+  <text x="86"  y="733" class="subb">dependency - evidence - finding - decision</text>
+  <text x="86"  y="748" class="subb">observed_risks folded from RISK_OBSERVED</text>
+
+  <rect class="card" x="432" y="658" width="342" height="106" rx="9"/>
+  <text x="450" y="682" class="ttl">Checkpoint Manager</text>
+  <text x="450" y="699" class="mono">checkpoint/ - policy-driven capture</text>
+  <text x="450" y="717" class="sub">RECOVERY anchors - prune old versions</text>
+  <text x="450" y="733" class="subb">Goal + Plan + Progress, not a transcript</text>
+  <text x="450" y="748" class="subb">environment-aware anchors (#1049)</text>
+
+  <rect class="cardX" x="796" y="658" width="416" height="106" rx="9"/>
+  <rect class="tab"   x="796" y="666" width="3"   height="90"  rx="1.5"/>
+  <text x="814" y="682" class="ttl">Recovery Engine</text>
+  <text x="814" y="699" class="mono">recovery/ - 7 modes - sealed contract</text>
+  <text x="814" y="717" class="sub">RESUME - REPAIR_AND_RESUME - REPLAN</text>
+  <text x="814" y="733" class="subb">WAIT - REQUEST_HUMAN - ROLLBACK - ABORT</text>
+  <text x="814" y="748" class="subb">per-dependency budgets - family rollup - risk-driven verdict</text>
+
+  <path class="edgeP"  d="M280,636 L280,658" marker-end="url(#arrP)"/>
+  <text x="295" y="651" class="elbl">replay + project()</text>
+  <path class="edgeS"  d="M410,706 L432,706" marker-end="url(#arrS)"/>
+  <text x="421" y="698" text-anchor="middle" class="elbl">validated versions</text>
+  <path class="edgeS"  d="M774,706 L796,706" marker-end="url(#arrS)"/>
+  <text x="785" y="698" text-anchor="middle" class="elbl">anchor</text>
+  <path class="dashX" d="M1004,658 L1004,636" marker-end="url(#arrX)"/>
+  <text x="1018" y="652" class="elblX">RECOVERY_STARTED</text>
+
+  <!-- Cross-cutting -->
+  <rect class="strip" x="68" y="790" width="1144" height="56" rx="9"/>
+  <text x="88" y="812" class="sub" style="font-weight:600;">Cross-cutting concerns</text>
+  <text x="88" y="828" class="subb">security/ trust gate + revalidation + attestation - pinning.py drift on resume - budgets.py retry caps - replay_similarity - reconcilers auto-settle</text>
+  <text x="88" y="842" class="subb">blob store: content-addressed payloads at storage_dir/blobs/sha256.blob - audit_blob_descriptor - deep integrity verify - ActionReconciler plugins</text>
+
+  <!-- resume channel -->
+  <path class="dashX" d="M1212,706 L1228,706 L1228,1090 L1212,1090" marker-end="url(#arrX)"/>
+  <text x="1222" y="870"  text-anchor="end" class="elblX">resume</text>
+  <text x="1222" y="884"  text-anchor="end" class="elblX">sealed</text>
+  <text x="1222" y="898"  text-anchor="end" class="elblX">contract</text>
+
+  <!-- ROW 4: STORAGE -->
+  <rect class="band" x="40" y="870" width="1200" height="150" rx="14"/>
+  <text x="60" y="892" class="lbl">DURABLE STORAGE - ONE SCHEMA, TWO ENGINES</text>
+
+  <rect class="card" x="68"  y="904" width="348" height="96" rx="9"/>
+  <text x="86"  y="927" class="ttl2">SQLite - primary</text>
+  <text x="86"  y="944" class="mono">sqlite.py - schema v6</text>
+  <text x="86"  y="960" class="sub">WAL mode - synchronous FULL</text>
+  <text x="86"  y="975" class="sub">integrity-checked on every read</text>
+  <text x="86"  y="989" class="subb">single-retry WAL/SHM cleanup on startup</text>
+
+  <rect class="card" x="436" y="904" width="348" height="96" rx="9"/>
+  <text x="454" y="927" class="ttl2">PostgreSQL - CI-verified</text>
+  <text x="454" y="944" class="mono">postgres.py - migrations.py</text>
+  <text x="454" y="960" class="sub">rebuild_action_index - environment-aware compact</text>
+  <text x="454" y="975" class="sub">blob payload rehydration - suppress on decode error</text>
+  <text x="454" y="989" class="subb">psycopg3 - psycopg.rows.dict_row</text>
+
+  <rect class="strip" x="804" y="904" width="408" height="96" rx="9"/>
+  <text x="822" y="927" class="sub" style="font-weight:600;">Eight tables</text>
+  <text x="822" y="943" class="subb">events - events_archive</text>
+  <text x="822" y="957" class="subb">runs - versions - checkpoints</text>
+  <text x="822" y="971" class="subb">action_index - lg_checkpoints</text>
+  <text x="822" y="985" class="subb">lg_writes</text>
+
+  <path class="edgeP" d="M380,858 L380,870" marker-end="url(#arrP)"/>
+  <text x="396" y="866" class="elbl">write: events, versions, checkpoints</text>
+  <path class="edgeS" d="M760,870 L760,858" marker-end="url(#arrS)"/>
+  <text x="776" y="866" class="elbl">read: verify, project, restore</text>
+
+  <!-- ROW 5: SURFACES -->
+  <rect class="band" x="40" y="1042" width="1200" height="108" rx="14"/>
+  <text x="60" y="1064" class="lbl">READ SURFACES</text>
+
+  <rect class="card" x="68"  y="1076" width="264" height="58" rx="9"/>
+  <text x="86"  y="1099" class="ttl2">CLI - 47 commands</text>
+  <text x="86"  y="1115" class="sub">exit code is the verdict</text>
+  <text x="86"  y="1128" class="subb">verify - health - tree - briefing - resume</text>
+
+  <rect class="card" x="352" y="1076" width="264" height="58" rx="9"/>
+  <text x="370" y="1099" class="ttl2">Web Dashboard</text>
+  <text x="370" y="1115" class="sub">HITL: confirm - reconcile - complete</text>
+  <text x="370" y="1128" class="subb">human gate, plan approval, audit log</text>
+
+  <rect class="card" x="636" y="1076" width="264" height="58" rx="9"/>
+  <text x="654" y="1099" class="ttl2">TUI - live view</text>
+  <text x="654" y="1115" class="sub">rich terminal run monitor</text>
+  <text x="654" y="1128" class="subb">event tail - checkpoint status</text>
+
+  <rect class="card" x="920" y="1076" width="292" height="58" rx="9"/>
+  <text x="938" y="1099" class="ttl2">Benchmark suite</text>
+  <text x="938" y="1115" class="sub">CONTINUUM-Bench crash scenarios</text>
+  <text x="938" y="1128" class="subb">18 recovery scenarios - 8 risk-fault scenarios</text>
+
+  <path class="edgeP" d="M400,1020 L400,1042" marker-end="url(#arrP)"/>
+  <text x="416" y="1035" class="elbl">verify - health - tree - briefing</text>
+
+  <!-- FOOTER -->
+  <text x="640" y="1170" text-anchor="middle" class="note" style="font-size:9.5px;">RESUME &lt; REPAIR_AND_RESUME &lt; REPLAN &lt; WAIT &lt; REQUEST_HUMAN &lt; ROLLBACK &lt; ABORT -- the engine takes the most cautious signal; safety never loses to convenience.</text>
+</svg>
+</div>
+<figcaption>
+  <b>How to read it.</b> Follow the arrows downward: any harness reaches the core through one of <b>five seams</b>. An action is intercepted at the <b>Gate</b> (no claim -- DENY, exit 2), which then consults the <b>Action Ledger</b>; the ledger fires the effect exactly once and settles it from the external system's real HTTP status, so a replay returns the cached result instead of firing again. Everything appends to one <b>hash-chained event log</b>, which the <b>State Engine</b> replays into a typed projection and the <b>Checkpoint Manager</b> seals behind a RECOVERY anchor. On resume, the <b>Recovery Engine</b> re-derives a sealed contract from that state, checking file digests, dependency pins, model identity, risk observations and human-gate budgets before it says <b>safe</b>. Vermilion markers show every boundary where trust is earned rather than assumed.
+</figcaption>
+<div class="legend">
+  <span><i class="sw-p"></i> primary write path</span>
+  <span><i class="sw-s"></i> projections and reads</span>
+  <span><i class="sw-x"></i> recovery / re-derivation (never trust)</span>
+  <span><i class="sw-bx"></i> boundary where trust is earned</span>
+</div>
+</figure>
+<p class="provenance">
+  <b>Figures are read from the code, not the README.</b>
+  55 <code>EventType</code> members, schema v6, and 13 MCP tools were counted from <code>src/continuum/</code>;
+  141 modules confirmed; 203 test files confirmed in <code>tests/</code>.
+  New since the last diagram: blob offload store (<code>storage/blob.py</code>), transparent rehydration, deep integrity verify,
+  <code>RiskObservedPayload</code> schema and projection, per-dependency recovery budgets, <code>ActionReconciler</code> plugins,
+  and environment-aware compaction anchors.
+  Blind spot: the gate does not see inside shell commands, so <code>Bash</code>/<code>curl</code> bypasses structured tool claims.
+</p>
+<script>
+(function(){
+  var mq = window.matchMedia('(prefers-color-scheme: dark)');
+  var btn = document.querySelector('.theme-btn');
+  if (!btn) return;
+  var root = document.documentElement;
+  function isDark() {
+    var d = root.dataset.theme;
+    return d === 'dark' || (!d && mq.matches);
+  }
+  function sync() {
+    btn.textContent = isDark() ? 'Light' : 'Dark';
+  }
+  btn.addEventListener('click', function() {
+    root.dataset.theme = isDark() ? 'light' : 'dark';
+    sync();
+  });
+  sync();
+  mq.addEventListener('change', sync);
+})();
+</script>
+</body>
+</html>
