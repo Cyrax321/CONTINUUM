@@ -287,7 +287,10 @@ def test_recovery_engine_escalates_and_seals_contract(tmp_path: Path, monkeypatc
 
     # 6. Actionable human recovery guidance
     guidance = human_steps_for(decision, run_id=run_id)
-    assert any("financial_gate" in step and "continuum confirm" in step for step in guidance)
+    assert any(
+        "financial_gate" in step and "continuum confirm" in step and "--scope pin" in step
+        for step in guidance
+    )
 
 
 def test_cli_confirm_clears_constraint_pin_via_scope(tmp_path: Path, monkeypatch) -> None:
@@ -339,6 +342,11 @@ def test_cli_confirm_clears_constraint_pin_via_scope(tmp_path: Path, monkeypatch
     assert any(
         e.type is EventType.REVIEW_CONFIRMED and "pin" in e.payload.get("components", [])
         for e in events
+    )
+    d2 = RecoveryEngine(storage).assess(run_id)
+    assert not any(
+        e.component is Component.PIN and e.status is not StateStatus.VALID
+        for e in d2.validation.report.statuses
     )
 
 
@@ -524,7 +532,9 @@ def test_soft_pin_digest_mismatch_creates_advisory_entry(tmp_path: Path, monkeyp
     validator = StateValidator()
     outcome = validator.validate(state, events=events)
     entry = next(
-        e for e in outcome.report.statuses if e.component is Component.PIN and e.component_id == "soft_audit"
+        e
+        for e in outcome.report.statuses
+        if e.component is Component.PIN and e.component_id == "soft_audit"
     )
     assert entry.status is StateStatus.VALID
     assert "advisory" in entry.detail
@@ -562,3 +572,75 @@ def test_pin_confirmation_invalidated_by_subsequent_pin_event(tmp_path: Path) ->
     decision = engine.assess(run_id)
     assert decision.mode is RecoveryMode.REQUEST_HUMAN
     assert any("pin_2" in item for item in decision.contract.invalidated)
+
+
+def test_repinned_constraint_clears_pending_drop(tmp_path: Path, monkeypatch) -> None:
+    """When a constraint was dropped but subsequently re-pinned with CONSTRAINT_PINNED,
+    the pending drop is cleared and the pin evaluates to VALID."""
+    constraints_path = tmp_path / ".continuum" / "constraints.json"
+    constraints_path.parent.mkdir(parents=True, exist_ok=True)
+    predicate = "audit log active"
+    spec_data = [{"id": "audit_pin", "level": "hard", "predicate": predicate, "scope": ["*"]}]
+    constraints_path.write_text(json.dumps({"constraints": spec_data}), encoding="utf-8")
+    monkeypatch.setattr("continuum.security.constraints.DEFAULT_CONSTRAINTS_PATH", constraints_path)
+
+    db = str(tmp_path / "repin.db")
+    storage = SQLiteStorage(db)
+    run_id = "run_repin"
+    storage.create_run(Run(run_id=run_id, goal="test repin"))
+
+    # Start run with pin
+    pin_payload = ConstraintPinned(constraint_id="audit_pin", sha256=predicate_digest(predicate))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    storage.append_event(run_id, EventType.CONSTRAINT_PINNED, pin_payload.model_dump())
+
+    # Pin dropped
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PIN_DROPPED,
+        {"constraint_id": "audit_pin", "level": "hard", "reason": "context compacted"},
+    )
+
+    # Re-pinned with same valid digest
+    storage.append_event(run_id, EventType.CONSTRAINT_PINNED, pin_payload.model_dump())
+
+    engine = RecoveryEngine(storage)
+    decision = engine.assess(run_id)
+    pin_entries = [
+        e
+        for e in decision.validation.report.statuses
+        if e.component is Component.PIN and e.component_id == "audit_pin"
+    ]
+    assert len(pin_entries) == 1
+    assert pin_entries[0].status is StateStatus.VALID
+    assert "active and verified" in pin_entries[0].detail
+
+
+def test_repinned_constraint_no_registry_clears_pending_drop(tmp_path: Path, monkeypatch) -> None:
+    """Without an on-disk registry, re-pinning after a drop clears the pending drop."""
+    monkeypatch.setattr(
+        "continuum.security.constraints.DEFAULT_CONSTRAINTS_PATH", tmp_path / "nonexistent.json"
+    )
+    db = str(tmp_path / "repin_noreg.db")
+    storage = SQLiteStorage(db)
+    run_id = "run_repin_noreg"
+    storage.create_run(Run(run_id=run_id, goal="test repin no registry"))
+
+    pin_payload = ConstraintPinned(constraint_id="sec_pin", sha256="abc" * 21 + "a")
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    storage.append_event(run_id, EventType.CONSTRAINT_PINNED, pin_payload.model_dump())
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PIN_DROPPED,
+        {"constraint_id": "sec_pin", "level": "hard", "reason": "dropped"},
+    )
+    storage.append_event(run_id, EventType.CONSTRAINT_PINNED, pin_payload.model_dump())
+
+    engine = RecoveryEngine(storage)
+    decision = engine.assess(run_id)
+    pin_entries = [
+        e
+        for e in decision.validation.report.statuses
+        if e.component is Component.PIN and e.component_id == "sec_pin"
+    ]
+    assert not any(e.status is StateStatus.REQUIRES_REVIEW for e in pin_entries)

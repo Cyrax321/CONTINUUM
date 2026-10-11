@@ -136,7 +136,7 @@ def human_steps_for(
                 cid = step.target.removeprefix("pin:")
                 steps.append(
                     f"operator confirmation required for missing or unverified constraint pin {cid!r}: "
-                    f"inspect compliance, then run `continuum confirm {run_id}`"
+                    f"inspect compliance, then run `continuum confirm {run_id} --scope pin`"
                 )
             else:
                 steps.append(
