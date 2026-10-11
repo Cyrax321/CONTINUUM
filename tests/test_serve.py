@@ -154,6 +154,33 @@ def test_checkpoint_and_resume_round_trip() -> None:
     assert decision["progress"]["completed"] == 1
 
 
+def test_confirm_does_not_trust_a_caller_supplied_reviewer() -> None:
+    """``confirm`` must not let a requester name the reviewer in the audit trail.
+
+    With ``CONTINUUM_SERVE_TOKEN`` unset the endpoint is unauthenticated, so a
+    caller-controlled ``reviewer`` would let anyone attribute a human approval
+    to any identity. The trusted identity is the fixed operator name; the
+    caller's claim is kept only as ``claimed_reviewer``.
+    """
+    from continuum.actions.ledger import ActionLedger
+    from continuum.events import EventType
+
+    srv = make_server()
+    srv.dispatch("record_progress", {"run_id": "r1", "completed": 1, "total": 10, "goal": "g"})
+    ledger = ActionLedger(srv.storage, "r1")
+    outcome = ledger.claim("delete_db", {"x": 1}, key="db:1")
+    ledger.flag_for_review(outcome.action.action_id, reason="blast radius")
+
+    srv.dispatch("confirm", {"run_id": "r1", "reviewer": "anyone-the-caller-likes"})
+
+    batches = [
+        e for e in srv.storage.read_events("r1") if e.type is EventType.REVIEW_BATCH_APPROVED
+    ]
+    assert len(batches) == 1
+    assert batches[0].payload["reviewer"] == "sidecar-operator"
+    assert batches[0].payload["claimed_reviewer"] == "anyone-the-caller-likes"
+
+
 # --- resume mirrors the MCP surface (issue #91) ------------------------------
 
 

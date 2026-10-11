@@ -74,16 +74,18 @@ def confirm_run(storage: Storage, run_id: str) -> None:
     """
     storage.get_run(run_id)
     try:
-        from continuum.recovery.fatigue import record_batch_approval
+        from continuum.recovery.fatigue import open_parked_count, record_batch_approval
 
-        record_batch_approval(
-            storage,
-            run_id,
-            item_count=2,
-            reviewer="dashboard-operator",
-            complexity="high",
-            source=Origin.HUMAN,
-        )
+        parked = open_parked_count(storage, run_id)
+        if parked:
+            record_batch_approval(
+                storage,
+                run_id,
+                item_count=parked,
+                reviewer="dashboard-operator",
+                complexity="high",
+                source=Origin.HUMAN,
+            )
     except Exception:
         pass
     storage.append_event(

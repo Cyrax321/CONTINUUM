@@ -67,6 +67,7 @@ __all__ = [
     "record_review_parked",
     "record_batch_approval",
     "evaluate_batch",
+    "open_parked_count",
     "open_dwell_seconds",
     "fatigue_advisory",
     "advisory_text",
@@ -215,6 +216,37 @@ def record_review_parked(
     )
 
 
+def _open_parked_events(events: list[Event]) -> list[Event]:
+    """Parked items still open: parked after the last ``REVIEW_BATCH_APPROVED``.
+
+    Shared by :func:`open_parked_count` and :func:`open_dwell_seconds` so the
+    count and the measured dwell always refer to the same set of items. The
+    caller passes full history (live plus archived): a parked row can be
+    archived by compaction before the batch that clears it lands, and reading
+    only the live tail would then lose it.
+    """
+    last_batch_index = -1
+    for index, event in enumerate(events):
+        if event.type is EventType.REVIEW_BATCH_APPROVED:
+            last_batch_index = index
+    return [
+        event for event in events[last_batch_index + 1 :] if event.type is EventType.REVIEW_PARKED
+    ]
+
+
+def open_parked_count(storage: Storage, run_id: str) -> int:
+    """Number of review items parked and not yet cleared by a batch approval.
+
+    This is the size of the batch a human is actually clearing, which is what
+    ``record_batch_approval`` must divide dwell by: the goal/progress scope of
+    a confirm is not the batch, and hardcoding a count invents audit facts in
+    both directions (one parked item cleared fast reads as a fatigued batch of
+    two; ten cleared in two seconds read as 1s each and never trip).
+    """
+    events = list(storage.read_all_events(run_id))
+    return len(_open_parked_events(events))
+
+
 def open_dwell_seconds(
     storage: Storage,
     run_id: str,
@@ -229,14 +261,8 @@ def open_dwell_seconds(
     caller's signal that dwell is unmeasurable for this batch.
     """
     now_ts = now or utcnow()
-    events = storage.read_events(run_id)
-    last_batch_index = -1
-    for index, event in enumerate(events):
-        if event.type is EventType.REVIEW_BATCH_APPROVED:
-            last_batch_index = index
-    parked = [
-        event for event in events[last_batch_index + 1 :] if event.type is EventType.REVIEW_PARKED
-    ]
+    events = list(storage.read_all_events(run_id))
+    parked = _open_parked_events(events)
     if not parked:
         return None
     oldest = min(event.timestamp for event in parked)
@@ -300,7 +326,8 @@ def _already_signalled(storage: Storage, run_id: str, batch_event_id: str) -> bo
     Re-evaluating a batch must not append a second signal for it: the audit trail
     would then claim the same rubber-stamp was detected twice.
     """
-    for event in storage.read_events(run_id):
+    events = list(storage.read_all_events(run_id))
+    for event in events:
         if (
             event.type is EventType.FATIGUE_SIGNAL_RECORDED
             and _payload(event).get("batch_event_id") == batch_event_id
@@ -320,6 +347,7 @@ def record_batch_approval(
     contract: FatigueContract | None = None,
     now: datetime | None = None,
     source: Origin = Origin.HUMAN,
+    claimed_reviewer: str | None = None,
 ) -> tuple[Event, Event | None]:
     """Record a human clearing a batch, and the signal when it trips the contract.
 
@@ -327,6 +355,12 @@ def record_batch_approval(
     it is ``None`` the dwell is read from the run's still-open parked items, which
     is the interval an approval actually closed. Still-``None`` means nothing was
     parked, so no per-item time can be derived and no signal is recorded.
+
+    ``reviewer`` is the identity the surface trusts: it must not come from an
+    unauthenticated caller, or a requester can name anyone in the audit trail.
+    ``claimed_reviewer`` carries such a caller-supplied name separately, so the
+    log records the claim without ever asserting it was verified. It is omitted
+    from the payload entirely when no caller claims a name.
 
     Returns the batch event and the signal event, or ``None`` for the signal when
     the batch was within bounds, unmeasurable, or already signalled.
@@ -346,16 +380,19 @@ def record_batch_approval(
     else:
         elapsed = max(float(dwell), 0.0)
         decision_seconds = elapsed / item_count
+    batch_payload: dict[str, Any] = {
+        "item_count": item_count,
+        "reviewer": reviewer,
+        "complexity": complexity,
+        "dwell_seconds": dwell,
+        "decision_seconds": decision_seconds,
+    }
+    if claimed_reviewer is not None:
+        batch_payload["claimed_reviewer"] = claimed_reviewer
     batch = storage.append_event(
         run_id,
         EventType.REVIEW_BATCH_APPROVED,
-        {
-            "item_count": item_count,
-            "reviewer": reviewer,
-            "complexity": complexity,
-            "dwell_seconds": dwell,
-            "decision_seconds": decision_seconds,
-        },
+        batch_payload,
         source=source,
     )
     reading = evaluate_batch(batch, contract=cfg)
@@ -363,19 +400,22 @@ def record_batch_approval(
         return batch, None
     if _already_signalled(storage, run_id, batch.event_id):
         return batch, None
+    signal_payload: dict[str, Any] = {
+        "batch_event_id": batch.event_id,
+        "item_count": reading.item_count,
+        "complexity": reading.complexity,
+        "reviewer": reviewer,
+        "dwell_seconds": reading.dwell_seconds,
+        "decision_seconds": reading.decision_seconds,
+        "threshold_seconds": reading.threshold_seconds,
+        "reason": reading.reason,
+    }
+    if claimed_reviewer is not None:
+        signal_payload["claimed_reviewer"] = claimed_reviewer
     signal = storage.append_event(
         run_id,
         EventType.FATIGUE_SIGNAL_RECORDED,
-        {
-            "batch_event_id": batch.event_id,
-            "item_count": reading.item_count,
-            "complexity": reading.complexity,
-            "reviewer": reviewer,
-            "dwell_seconds": reading.dwell_seconds,
-            "decision_seconds": reading.decision_seconds,
-            "threshold_seconds": reading.threshold_seconds,
-            "reason": reading.reason,
-        },
+        signal_payload,
         source=source,
     )
     return batch, signal

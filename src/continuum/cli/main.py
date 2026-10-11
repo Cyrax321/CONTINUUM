@@ -1753,19 +1753,23 @@ def cmd_confirm(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
             return ExitCode.ERROR
     # Record the human's batch decision before the confirmation it produces, so
     # the audit trail carries how many items were cleared and how long they sat
-    # (issue #1411). Telemetry is best-effort: a recording failure must not trap
-    # a run that only a human can release.
+    # (issue #1411). The batch is the parked review queue, not the goal/progress
+    # scope this confirm clears, so the count comes from the open parked items.
+    # Telemetry is best-effort: a recording failure must not trap a run that
+    # only a human can release.
     try:
-        from continuum.recovery.fatigue import record_batch_approval
+        from continuum.recovery.fatigue import open_parked_count, record_batch_approval
 
-        record_batch_approval(
-            storage,
-            args.run_id,
-            item_count=len(components),
-            reviewer=getattr(args, "reviewer", None) or "operator",
-            complexity=getattr(args, "complexity", "high"),
-            source=Origin.HUMAN,
-        )
+        parked = open_parked_count(storage, args.run_id)
+        if parked:
+            record_batch_approval(
+                storage,
+                args.run_id,
+                item_count=parked,
+                reviewer=getattr(args, "reviewer", None) or "operator",
+                complexity=getattr(args, "complexity", "high"),
+                source=Origin.HUMAN,
+            )
     except Exception as exc:  # noqa: BLE001 - never block a human confirmation
         print(f"warning: fatigue telemetry could not be recorded: {exc}", file=err)
     storage.append_event(

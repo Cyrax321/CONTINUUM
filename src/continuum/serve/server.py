@@ -915,16 +915,26 @@ def _h_confirm(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]:
     # before the confirmation it produces. Best-effort: the confirmation is what
     # releases the run, and an audit row must not gate it.
     try:
-        from continuum.recovery.fatigue import record_batch_approval
+        from continuum.recovery.fatigue import open_parked_count, record_batch_approval
 
-        record_batch_approval(
-            server.storage,
-            run_id,
-            item_count=2,
-            reviewer=str(params.get("reviewer") or "sidecar-operator"),
-            complexity="high",
-            source=Origin.HUMAN,
-        )
+        # ``reviewer`` is the identity this surface trusts, so it is the fixed
+        # operator name rather than anything the requester sent: with
+        # CONTINUUM_SERVE_TOKEN unset the endpoint is unauthenticated, and a
+        # caller-supplied name would let anyone write an arbitrary identity into
+        # the audit trail. The claimed name is kept separate as
+        # ``claimed_reviewer``, recorded but never asserted as verified.
+        claimed_reviewer = str(params.get("reviewer") or "").strip() or None
+        parked = open_parked_count(server.storage, run_id)
+        if parked:
+            record_batch_approval(
+                server.storage,
+                run_id,
+                item_count=parked,
+                reviewer="sidecar-operator",
+                claimed_reviewer=claimed_reviewer,
+                complexity="high",
+                source=Origin.HUMAN,
+            )
     except Exception:
         pass
     server.storage.append_event(
