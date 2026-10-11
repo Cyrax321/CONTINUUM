@@ -274,3 +274,23 @@ def test_legacy_approval_events_ignored_by_review_queue(queue: ReviewQueue) -> N
     items = queue.list_all("run_1")
     assert len(items) == 0
     assert len(queue.list_pending("run_1")) == 0
+
+
+def test_parked_review_item_does_not_block_validation(queue: ReviewQueue) -> None:
+    """Parked low-risk items fold as parked approvals and remain VALID in validation."""
+    from continuum.models import Component, StateStatus
+    from continuum.state.semantic import project
+    from continuum.state.validator import StateValidator
+
+    queue.storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "test parked validation"})
+    queue.enqueue("run_1", "read_query")  # low risk, parked=True
+
+    events = list(queue.storage.read_events("run_1"))
+    state = project("run_1", events)
+    assert any(a.parked for a in state.approvals)
+
+    outcome = StateValidator().validate(state, events=events)
+    approval_entries = [e for e in outcome.report.statuses if e.component is Component.APPROVAL]
+    assert len(approval_entries) == 1
+    assert approval_entries[0].status is StateStatus.VALID
+    assert "parked for deferred review" in approval_entries[0].detail
