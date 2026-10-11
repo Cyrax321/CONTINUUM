@@ -666,9 +666,14 @@ def test_dependencies_for_action_handles_strings_and_action_types() -> None:
     assert dependencies_for_action("ext:weather-api") == ["ext:weather-api"]
     assert dependencies_for_action("service:auth") == ["service:auth"]
     assert dependencies_for_action("plain_action") == []
+    assert dependencies_for_action("tool:search") == []
+    assert dependencies_for_action("http:post") == []
     assert dependencies_for_action({"action_type": "ext:weather-api"}) == ["ext:weather-api"]
+    assert dependencies_for_action({"action_type": "tool:search"}) == []
     action_obj = Action(run_id="run_1", action_type="ext:sandbox")
     assert dependencies_for_action(action_obj) == ["ext:sandbox"]
+    action_tool = Action(run_id="run_1", action_type="tool:search")
+    assert dependencies_for_action(action_tool) == []
 
     derived = derive_recovery_dependencies(action_type="ext:weather-api")
     assert derived == ["ext:weather-api"]
@@ -677,3 +682,7 @@ def test_dependencies_for_action_handles_strings_and_action_types() -> None:
         action_type="send_invoice", dependency="ext:weather-api"
     )
     assert derived_kw == ["ext:weather-api"]
+
+    # When explicit dependency is present, action_type is ignored and not duplicated.
+    derived_dup = derive_recovery_dependencies(dependency="payments", action_type="ext:payments")
+    assert derived_dup == ["payments"]

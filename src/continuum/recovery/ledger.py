@@ -133,12 +133,15 @@ def dependencies_for_contract(contract: RecoveryContract) -> list[str]:
     return deps
 
 
+_DEP_PREFIXES: tuple[str, ...] = ("ext:", "service:")
+
+
 def dependencies_for_action(action: Any) -> list[str]:
     """Derive external dependency names from an action or action-like object."""
     if action is None:
         return []
     if isinstance(action, str):
-        if action.startswith("ext:") or ":" in action:
+        if action.startswith(_DEP_PREFIXES):
             return [action.strip()]
         return []
     dep = getattr(action, "dep_scope", None)
@@ -146,11 +149,11 @@ def dependencies_for_action(action: Any) -> list[str]:
         dep = action.get("dep_scope") or action.get("dependency")
         if not dep and isinstance(action.get("action_type"), str):
             act_type = action["action_type"]
-            if act_type.startswith("ext:") or ":" in act_type:
+            if act_type.startswith(_DEP_PREFIXES):
                 return [act_type.strip()]
     elif dep is None:
         act_type = getattr(action, "action_type", None)
-        if isinstance(act_type, str) and (act_type.startswith("ext:") or ":" in act_type):
+        if isinstance(act_type, str) and act_type.startswith(_DEP_PREFIXES):
             return [act_type.strip()]
     if not dep or not isinstance(dep, str):
         return []
@@ -188,7 +191,7 @@ def derive_recovery_dependencies(
         for d in dependencies_for_action(action):
             if d not in out:
                 out.append(d)
-    if action_type is not None:
+    if action_type is not None and not out:
         for d in dependencies_for_action(action_type):
             if d not in out:
                 out.append(d)
