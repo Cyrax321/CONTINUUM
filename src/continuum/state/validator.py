@@ -1219,12 +1219,22 @@ class StateValidator:
         dropped_events: dict[str, dict[str, Any]] = {}
         verified_events: list[dict[str, Any]] = []
         for ev in events_list:
-            if ev.type is EventType.CONSTRAINT_PIN_DROPPED and isinstance(ev.payload, dict):
-                cid = ev.payload.get("constraint_id")
-                if cid:
-                    dropped_events[cid] = ev.payload
-            elif ev.type is EventType.CONSTRAINT_PINS_VERIFIED and isinstance(ev.payload, dict):
-                verified_events.append(ev.payload)
+            cid = (
+                ev.payload.get("constraint_id")
+                if isinstance(ev.payload, dict)
+                else getattr(ev.payload, "constraint_id", None)
+            )
+            if ev.type is EventType.CONSTRAINT_PIN_DROPPED and cid:
+                dropped_events[cid] = (
+                    ev.payload if isinstance(ev.payload, dict) else ev.payload.model_dump()
+                )
+            elif ev.type is EventType.CONSTRAINT_PINNED and cid:
+                dropped_events.pop(cid, None)
+            elif ev.type is EventType.CONSTRAINT_PINS_VERIFIED:
+                if isinstance(ev.payload, dict):
+                    verified_events.append(ev.payload)
+                elif hasattr(ev.payload, "model_dump"):
+                    verified_events.append(ev.payload.model_dump())
 
         # 1. Audit against operator registry if present
         if registry is not None:
