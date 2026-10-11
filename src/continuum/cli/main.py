@@ -1960,6 +1960,7 @@ def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             )
             for le in ledger_entries
         )
+        remaining: int | None
         if ceiling is not None:
             remaining = 0 if escalated else max(0, ceiling - used)
             exhausted = remaining == 0
