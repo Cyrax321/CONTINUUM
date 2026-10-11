@@ -42,6 +42,7 @@ The distinction is documented rather than marketed away.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -75,13 +76,19 @@ from continuum.concurrency.lease import LeaseCoordinator
 from continuum.events import Event, EventType
 from continuum.models import Action, ActionStatus, ConsumedInputs, Origin, UnknownSideEffect, utcnow
 from continuum.security.hashing import canonical_sanitize, stable_hash
-from continuum.storage.base import Storage
+from continuum.storage.base import CorruptedRecord, Storage
 
 _ACTION_EVENT_TYPES = (
     EventType.ACTION_RECORDED,
     EventType.ACTION_RECONCILED,
     EventType.ACTION_COMPENSATED,
 )
+
+#: A full idempotency key as it is stored in the action index: a stable
+#: content hash, which is 64 lowercase hex characters. Partial record keys
+#: never match this shape, which is how the forensic fallback tells a key it
+#: can address in the index from one it cannot (#1416).
+_IDEMPOTENCY_KEY_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 def fold_action_events(events: Any) -> dict[str, Action]:
@@ -1843,6 +1850,13 @@ def get_memory_provenance(
         - ``observation_event``: initiating Event (PERCEPTION_OBSERVED, etc.) or None
         - ``sibling_records``: list of other rendered keys sharing this origin_digest
         - ``sibling_actions``: list of other Action instances sharing this origin_digest
+        - ``skipped_runs``: run ids that could not be read, so the answer is partial
+
+    A short key is matched by rank, not by first hit: an exact rendered key or
+    action id wins, then a namespace suffix such as ``mem:t:record_1``, and a
+    bare substring only when it is the sole survivor. Two candidates at the
+    best rank raise :class:`LedgerError` rather than blaming one of them, since
+    guessing is exactly the failure a forensic lookup must not make.
 
     Returns ``None`` when no action matches ``record_key``.
     """
@@ -1853,11 +1867,18 @@ def get_memory_provenance(
     target_hit: dict[str, Any] | None = None
     actions_by_id: dict[str, tuple[str, str, Action, str | None]] = {}
     all_observations: dict[str, Any] = {}
+    # Runs we could not read at all. A corrupted or tampered log used to
+    # vanish from the answer silently, which is the worst failure mode for a
+    # forensic lookup: the caller gets a confident partial result and never
+    # learns a run was unreadable (#1416).
+    skipped_runs: list[str] = []
 
     def _scan_run(rid: str) -> None:
+        """Fold one run's action events into ``actions_by_id`` and index its observations."""
         try:
             events = list(storage.read_all_events(rid))
         except Exception:
+            skipped_runs.append(rid)
             return
 
         for ev in events:
@@ -1898,28 +1919,65 @@ def get_memory_provenance(
     for rid in runs_to_scan:
         _scan_run(rid)
 
-    # Resolve target action from folded actions
-    for rid, rendered, act, digest in actions_by_id.values():
-        match = (
-            record_key == rendered
-            or record_key in rendered
-            or record_key == act.action_id
-            or (act.arguments and record_key in str(act.arguments))
-        )
-        if match:
-            target_hit = {
-                "run_id": rid,
-                "rendered_key": rendered,
-                "action": act,
-                "origin_digest": digest,
-            }
-            break
+    # Resolve the target action, ranking matches so an ambiguous short key
+    # cannot pick a record by insertion order. ``record_1`` is a substring of
+    # ``mem:t:record_10``, and a first-hit scan would blame record_10's
+    # observation and its siblings, which is precisely the misattribution a
+    # forensic lookup exists to avoid (#1416).
+    def _match_rank(act: Action, rendered: str) -> int | None:
+        """Rank a candidate from 0 (exact) to 2 (substring); None when it does not match."""
+        if record_key == rendered or record_key == act.action_id:
+            return 0
+        # A namespace suffix such as ``mem:t:record_1`` is an exact identity in
+        # the caller's own vocabulary, so it outranks a bare substring.
+        if rendered.rsplit(":", 1)[-1] == record_key:
+            return 1
+        if act.arguments and act.arguments.get("record_key") == record_key:
+            return 1
+        if record_key in rendered or (act.arguments and record_key in str(act.arguments)):
+            return 2
+        return None
 
-    # Fallback: check action_index if storage supports it
-    if target_hit is None and hasattr(storage, "foreign_action"):
+    ranked: list[tuple[int, str, str, Action, str | None]] = []
+    for rid, rendered, act, digest in actions_by_id.values():
+        rank = _match_rank(act, rendered)
+        if rank is not None:
+            ranked.append((rank, rid, rendered, act, digest))
+
+    if ranked:
+        # Only a sole survivor at the best rank is a defensible target.
+        best = min(rank for rank, *_ in ranked)
+        best_hits = [hit for hit in ranked if hit[0] == best]
+        if len(best_hits) > 1:
+            keys = ", ".join(sorted(h[2] for h in best_hits))
+            raise LedgerError(
+                f"record key {record_key!r} is ambiguous: it matches {len(best_hits)} "
+                f"actions ({keys}); pass the full rendered key or an action id "
+                "to disambiguate the forensic lookup"
+            )
+        _, rid, rendered, act, digest = best_hits[0]
+        target_hit = {
+            "run_id": rid,
+            "rendered_key": rendered,
+            "action": act,
+            "origin_digest": digest,
+        }
+
+    # Fallback: consult the action index on engines that maintain one. Gated
+    # on the capability flag rather than hasattr, because every Storage
+    # subclass inherits the no-op foreign_action; the flag is the contract.
+    # The index is keyed by the full idempotency key (a 64-hex stable hash),
+    # so a caller's partial record key cannot address a row: skip the lookup
+    # for anything that is not a full key, and keep the run scope so a scoped
+    # lookup cannot return another run's action.
+    if (
+        target_hit is None
+        and getattr(storage, "supports_action_index", False)
+        and _IDEMPOTENCY_KEY_PATTERN.fullmatch(record_key)
+    ):
         try:
-            foreign = storage.foreign_action(record_key, exclude_run="")
-            if foreign is not None:
+            foreign = storage.foreign_action(record_key, exclude_run=run_id or "")
+            if foreign is not None and (run_id is None or foreign.run_id == run_id):
                 digest = foreign.origin_observation_digest or foreign.origin_digest
                 target_hit = {
                     "run_id": foreign.run_id,
@@ -1927,6 +1985,11 @@ def get_memory_provenance(
                     "action": foreign,
                     "origin_digest": digest,
                 }
+        except CorruptedRecord:
+            # A row that fails its integrity check is evidence, not noise: the
+            # caller is doing forensics and must see that a run was unreadable
+            # instead of receiving a silently incomplete answer.
+            skipped_runs.append(run_id or "(action_index)")
         except Exception:
             pass
 
@@ -1949,6 +2012,7 @@ def get_memory_provenance(
             "observation_event": None,
             "sibling_records": [],
             "sibling_actions": [],
+            "skipped_runs": sorted(set(skipped_runs)),
         }
 
     # If run_id was provided, scan all other runs for cross-run observations and siblings
@@ -1982,4 +2046,5 @@ def get_memory_provenance(
         "observation_event": obs_ev,
         "sibling_records": sorted(set(sibling_records)),
         "sibling_actions": sibling_actions,
+        "skipped_runs": sorted(set(skipped_runs)),
     }

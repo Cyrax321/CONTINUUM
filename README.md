@@ -241,7 +241,7 @@ CONTINUUM is verified against real LLM agents, live protocol boundaries, and har
 <!-- BENCH:START -->
 ### Horizon-scale benchmark (real runs, no invented numbers)
 
-Generated: 2026-10-01T11:30:02.538840  Horizon scenarios: 5  Passed: 4  Failed: 1
+Generated: 2026-09-30T11:03:24.403017  Horizon scenarios: 5  Passed: 4  Failed: 1
 
 Accuracy: 0.8  Unnecessary escalation: 0.2  Repair precision: 0.8  Duplicate side effects: 0  Duplicate work: 0.0  Compression: 0.138
 
@@ -428,7 +428,7 @@ Schema v6. SQLite is primary, Postgres is CI verified. One log, many projections
 
 ### Module map: one library, many surfaces
 
-CONTINUUM is one library (`src/continuum`, 141 modules) plus a large test suite (203 test files, ~3,355 tests). All modules append to and replay one hash chained event log:
+CONTINUUM is one library (`src/continuum`, 141 modules) plus a large test suite (204 test files, ~3,355 tests). All modules append to and replay one hash chained event log:
 
 | Module | Role |
 |:--|:--|

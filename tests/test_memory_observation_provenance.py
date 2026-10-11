@@ -10,6 +10,8 @@ Covers:
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from continuum.actions.ledger import ActionLedger, LedgerError, get_memory_provenance
@@ -17,6 +19,7 @@ from continuum.events import EventType
 from continuum.models import Action, ActionStatus, Run
 from continuum.security.hashing import stable_hash
 from continuum.storage import SQLiteStorage
+from continuum.storage.base import CorruptedRecord
 
 
 def test_action_model_origin_observation_digest_validation() -> None:
@@ -164,6 +167,96 @@ def test_get_memory_provenance_identifies_siblings() -> None:
     assert "mem:store:item_gamma" in prov["sibling_records"]
     assert "mem:store:item_alpha" not in prov["sibling_records"]
     assert len(prov["sibling_actions"]) == 2
+
+
+def test_get_memory_provenance_prefers_exact_key_over_substring() -> None:
+    """A short key does not resolve to a longer key that merely contains it.
+
+    ``record_1`` is a substring of ``record_10``; the first-hit scan used to
+    return whichever action it met first, blaming that record's observation and
+    siblings. Matching is now ranked, so the exact record wins.
+    """
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="test"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "test"})
+
+    # item_10 is claimed first, so a first-hit substring scan would find it
+    ledger = ActionLedger(storage, "run_1")
+    ledger.claim("mem_write", key="mem:s:item_10", origin_observation_digest="a" * 64)
+    ledger.claim("mem_write", key="mem:s:item_1", origin_observation_digest="b" * 64)
+
+    prov = get_memory_provenance(storage, "item_1")
+    assert prov is not None
+    assert prov["rendered_key"] == "mem:s:item_1"
+    assert prov["origin_digest"] == "b" * 64
+    assert prov["sibling_records"] == []
+
+
+def test_get_memory_provenance_rejects_ambiguous_substring_key() -> None:
+    """Two equal-rank matches raise instead of guessing one.
+
+    ``item`` is a substring of both ``item_1`` and ``item_10`` and matches
+    neither exactly, so nothing distinguishes them: blaming either would be a
+    silent guess in a forensic tool.
+    """
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="test"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "test"})
+
+    ledger = ActionLedger(storage, "run_1")
+    ledger.claim("mem_write", key="mem:s:item_1", origin_observation_digest="a" * 64)
+    ledger.claim("mem_write", key="mem:s:item_10", origin_observation_digest="b" * 64)
+
+    with pytest.raises(LedgerError, match="ambiguous"):
+        get_memory_provenance(storage, "item")
+
+
+def test_get_memory_provenance_reports_skipped_runs() -> None:
+    """A run that cannot be read is reported, not silently dropped."""
+    storage = SQLiteStorage(":memory:")
+    for rid in ("run_1", "run_2"):
+        storage.create_run(Run(run_id=rid, goal="test"))
+        storage.append_event(rid, EventType.RUN_STARTED, {"goal": "test"})
+
+    obs_payload = {"source": "tool", "text": "shared raw data"}
+    digest = stable_hash(obs_payload)
+    storage.append_event("run_1", EventType.PERCEPTION_OBSERVED, obs_payload)
+
+    ledger = ActionLedger(storage, "run_1")
+    ledger.claim("mem_write", key="mem:s:record_1", origin_observation_digest=digest)
+
+    # run_2's log becomes unreadable, as if tampered with. The lookup still
+    # answers for run_1, but the sibling scan of run_2 must surface the
+    # failure instead of presenting a complete-looking result.
+    real_read_all_events = storage.read_all_events
+
+    def _flaky_read(rid: str) -> Any:
+        if rid == "run_2":
+            raise CorruptedRecord("simulated tampering")
+        return real_read_all_events(rid)
+
+    storage.read_all_events = _flaky_read  # type: ignore[method-assign]
+    provenance = ledger.get_memory_provenance("record_1")
+    assert provenance is not None
+    assert provenance["rendered_key"] == "mem:s:record_1"
+    assert provenance["skipped_runs"] == ["run_2"]
+
+
+def test_action_validator_does_not_mutate_caller_payload() -> None:
+    """The before-validator must not add keys to the dict the caller passed."""
+    digest = "c" * 64
+    payload = {"run_id": "run_1", "action_type": "mem_write", "origin_observation_digest": digest}
+
+    Action.model_validate(payload)
+
+    # The alias was written into the model, not leaked back into the caller's
+    # mapping, which is also the stored event payload.
+    assert "origin_digest" not in payload
+    assert set(payload) == {
+        "run_id",
+        "action_type",
+        "origin_observation_digest",
+    }
 
 
 def test_get_memory_provenance_survives_compaction() -> None:

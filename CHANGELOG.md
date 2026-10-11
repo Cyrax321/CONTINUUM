@@ -16,7 +16,11 @@ Test counts: ~3,355 collected on a minimal env.
   for `origin_digest`, persisting the linkage on ledger events and `action_index` projections
   so attribution survives event-log compaction. Added `get_memory_provenance()` to walk backward
   from a memory record key to its initiating observation event in the hash-chained log and
-  enumerate sibling records originating from the same contaminated observation.
+  enumerate sibling records originating from the same contaminated observation. The lookup
+  resolves a short key by rank (exact key or action id, then a namespace suffix, then a
+  substring) and raises `LedgerError` when two candidates tie, rather than blaming one of them
+  by insertion order. Runs it cannot read are listed in the result's `skipped_runs` so a
+  forensic answer never passes as complete when a log was unreadable.
 
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a
