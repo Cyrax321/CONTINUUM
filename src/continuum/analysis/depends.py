@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import functools
+import re
 import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -39,6 +40,12 @@ _STDLIB = {name.lower() for name in sys.stdlib_module_names}
 
 _EXCLUDE_DIRS = (".venv", "venv", "node_modules", "__pycache__", ".git", "build", "dist")
 
+
+def _canonical_dist(name: str) -> str:
+    """Canonicalize a distribution name per PEP 503: lower-cased, [-_.]+ collapsed to '-'."""
+    return re.sub(r"[-_.]+", "-", name).strip().lower()
+
+
 _COMMON_DIST_TO_IMPORTS: dict[str, set[str]] = {
     "pillow": {"pil"},
     "pyyaml": {"yaml"},
@@ -48,7 +55,7 @@ _COMMON_DIST_TO_IMPORTS: dict[str, set[str]] = {
     "opencv-python-headless": {"cv2"},
     "python-dateutil": {"dateutil"},
     "attrs": {"attr", "attrs"},
-    "protobuf": {"google"},
+    "protobuf": {"google.protobuf"},
     "setuptools": {"pkg_resources", "setuptools"},
     "pydantic-core": {"pydantic_core"},
     "typing-extensions": {"typing_extensions"},
@@ -56,8 +63,9 @@ _COMMON_DIST_TO_IMPORTS: dict[str, set[str]] = {
 
 _COMMON_IMPORT_TO_DISTS: dict[str, set[str]] = {}
 for _dist, _imports in _COMMON_DIST_TO_IMPORTS.items():
+    _dist_canon = _canonical_dist(_dist)
     for _imp in _imports:
-        _COMMON_IMPORT_TO_DISTS.setdefault(_imp, set()).add(_dist)
+        _COMMON_IMPORT_TO_DISTS.setdefault(_imp, set()).add(_dist_canon)
 
 
 @functools.lru_cache(maxsize=1)
@@ -71,8 +79,37 @@ def _installed_packages_distributions() -> Mapping[str, list[str]]:
         return {}
 
 
+@functools.lru_cache(maxsize=1)
+def _installed_dist_to_imports() -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for imp, dists in _installed_packages_distributions().items():
+        imp_lower = imp.strip().lower()
+        if imp_lower == "google":
+            continue
+        for d in dists:
+            d_canon = _canonical_dist(d)
+            out.setdefault(d_canon, set()).add(imp_lower)
+    return out
+
+
+@functools.lru_cache(maxsize=1)
+def _installed_import_to_dists() -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for imp, dists in _installed_packages_distributions().items():
+        imp_lower = imp.strip().lower()
+        if imp_lower == "google":
+            continue
+        for d in dists:
+            out.setdefault(imp_lower, set()).add(_canonical_dist(d))
+    return out
+
+
 def _top_level(name: str) -> str:
-    return name.split(".")[0].strip().lower()
+    name = name.strip().lower()
+    parts = name.split(".")
+    if parts[0] == "google" and len(parts) > 1:
+        return f"{parts[0]}.{parts[1]}"
+    return parts[0]
 
 
 def _normalize_dep(spec: str) -> str:
@@ -100,6 +137,12 @@ class DependencyGraph:
         self.root = Path(root)
         self.declared: set[str] = self._read_declared(requirements)
         self._custom_aliases: dict[str, set[str]] = self._parse_aliases(aliases)
+        self._declared_candidates: dict[str, set[str]] = {
+            pkg: self._candidate_imports(pkg) for pkg in self.declared
+        }
+        self._all_declared_imports_cache: set[str] = (
+            set().union(*self._declared_candidates.values()) if self._declared_candidates else set()
+        )
         self._file_imports: dict[Path, set[str]] = {}
         self._package_files: dict[str, set[Path]] = {}
         self._scan()
@@ -112,44 +155,43 @@ class DependencyGraph:
             return {}
         result: dict[str, set[str]] = {}
         for k, v in aliases.items():
+            k_canon = _canonical_dist(k)
             k_norm = _normalize_dep(k)
             vals = {_top_level(v)} if isinstance(v, str) else {_top_level(x) for x in v}
-            result.setdefault(k_norm, set()).update(vals)
+            for key in (k_canon, k_norm):
+                result.setdefault(key, set()).update(vals)
             for val in vals:
-                result.setdefault(val, set()).add(k_norm)
+                val_canon = _canonical_dist(val)
+                result.setdefault(val_canon, set()).add(k_canon)
+                result.setdefault(val, set()).add(k_canon)
         return result
 
     def _candidate_imports(self, dep_or_mod: str) -> set[str]:
         norm = _normalize_dep(dep_or_mod)
+        canon_dist = _canonical_dist(norm)
         top = _top_level(norm)
-        names = {norm, top, top.replace("-", "_")}
-        if norm in self._custom_aliases:
-            names.update(self._custom_aliases[norm])
-        if top in self._custom_aliases:
-            names.update(self._custom_aliases[top])
-        if norm in _COMMON_DIST_TO_IMPORTS:
-            names.update(_COMMON_DIST_TO_IMPORTS[norm])
-        if top in _COMMON_DIST_TO_IMPORTS:
-            names.update(_COMMON_DIST_TO_IMPORTS[top])
-        if norm in _COMMON_IMPORT_TO_DISTS:
-            names.update(_COMMON_IMPORT_TO_DISTS[norm])
-        if top in _COMMON_IMPORT_TO_DISTS:
-            names.update(_COMMON_IMPORT_TO_DISTS[top])
-        installed = _installed_packages_distributions()
-        for imp_name, dist_names in installed.items():
-            imp_lower = imp_name.lower()
-            if imp_lower in (top, norm):
-                names.add(imp_lower)
-            for d in dist_names:
-                if _normalize_dep(d) in (norm, top):
-                    names.add(imp_lower)
+        names = {norm, canon_dist, top, top.replace("-", "_"), canon_dist.replace("-", "_")}
+        for key in (canon_dist, norm, top):
+            if key in self._custom_aliases:
+                names.update(self._custom_aliases[key])
+        for key in (canon_dist, norm):
+            if key in _COMMON_DIST_TO_IMPORTS:
+                names.update(_COMMON_DIST_TO_IMPORTS[key])
+        for key in (norm, top):
+            if key in _COMMON_IMPORT_TO_DISTS:
+                names.update(_COMMON_IMPORT_TO_DISTS[key])
+        dist_map = _installed_dist_to_imports()
+        for key in (canon_dist, norm):
+            if key in dist_map:
+                names.update(dist_map[key])
+        imp_map = _installed_import_to_dists()
+        for key in (norm, top):
+            if key in imp_map:
+                names.update(imp_map[key])
         return names
 
     def _all_declared_imports(self) -> set[str]:
-        result: set[str] = set()
-        for pkg in self.declared:
-            result.update(self._candidate_imports(pkg))
-        return result
+        return set(self._all_declared_imports_cache)
 
     def _read_declared(self, requirements: Iterable[str] | None) -> set[str]:
         declared: set[str] = set()
@@ -187,13 +229,18 @@ class DependencyGraph:
                 tree = ast.parse(path.read_text(encoding="utf-8"))
             except (SyntaxError, UnicodeDecodeError, OSError):
                 continue
-            mods = set()
+            mods: set[str] = set()
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
                         mods.add(_top_level(alias.name))
                 elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                    mods.add(_top_level(node.module))
+                    mod_parts = node.module.strip().lower().split(".")
+                    if mod_parts[0] == "google" and len(mod_parts) == 1:
+                        for alias in node.names:
+                            mods.add(f"google.{alias.name.strip().lower().split('.')[0]}")
+                    else:
+                        mods.add(_top_level(node.module))
             self._file_imports[path] = mods
             for mod in mods:
                 self._package_files.setdefault(mod, set()).add(path)
@@ -213,7 +260,7 @@ class DependencyGraph:
             mods = self._file_imports.get(self.root / target)
         if not mods:
             return set()
-        return {pkg for pkg in self.declared if bool(self._candidate_imports(pkg) & mods)}
+        return {pkg for pkg, cands in self._declared_candidates.items() if bool(cands & mods)}
 
     def files_using(self, package: str) -> set[Path]:
         """``.py`` files that import the top-level module of ``package``."""
