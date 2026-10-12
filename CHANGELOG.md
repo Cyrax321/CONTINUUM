@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Test counts: ~3,636 collected on a minimal env.
+Test counts: ~3,672 collected on a minimal env.
 
 ### Added
 
@@ -1082,7 +1082,7 @@ Test counts: ~3,636 collected on a minimal env.
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (3,636 collected, ~3,636 passed, ~0 skipped on a minimal env).
+  (3,672 collected, ~3,672 passed, ~0 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
