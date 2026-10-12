@@ -1506,6 +1506,179 @@ def test_cmd_gateway_runs_with_tenant_flag(tmp_path: Path) -> None:
             assert mock_server.call_args.kwargs["bound_tenant"] == "tenant_cli_override"
 
 
+def test_cmd_daemon_runs_with_storage_none(tmp_path: Path) -> None:
+    """cmd_daemon handles storage=None when invoked from CLI dispatch (#1603)."""
+    import argparse
+    import io
+    from unittest.mock import patch
+
+    from continuum.cli.main import cmd_daemon
+
+    cfg = tmp_path / "gateway.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "upstreams": [
+                    {
+                        "host": "api.example.com",
+                        "action_type": "send",
+                        "key_template": "key:{id}",
+                    }
+                ]
+            }
+        )
+    )
+    args = argparse.Namespace(
+        config=str(cfg),
+        tenant=None,
+        run_id=None,
+        db=str(tmp_path / "absent.db"),
+        port=8765,
+        detach=False,
+        pid_file=None,
+    )
+    out = io.StringIO()
+    err = io.StringIO()
+    with patch("continuum.gateway.GatewayServer") as mock_server:
+        mock_server.return_value.serve_forever.return_value = None
+        mock_server.return_value.port = 8765
+        code = cmd_daemon(args, None, out, err)
+        assert code == 0
+        assert mock_server.call_args.args[1] is None
+
+
+def test_cmd_daemon_resolves_active_run_when_storage_none(tmp_path: Path) -> None:
+    """cmd_daemon resolves active run from existing db when storage is None (#1603)."""
+    import argparse
+    import io
+    from unittest.mock import patch
+
+    from continuum.cli.main import cmd_daemon
+
+    cfg = tmp_path / "gateway.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "upstreams": [
+                    {
+                        "host": "api.example.com",
+                        "action_type": "send",
+                        "key_template": "key:{id}",
+                    }
+                ]
+            }
+        )
+    )
+    db_path = str(tmp_path / "existing.db")
+    with SQLiteStorage(db_path) as store:
+        store.create_run(Run(run_id="active_daemon_run", goal="g"))
+        store.append_event("active_daemon_run", EventType.RUN_STARTED, {"goal": "g"})
+
+    args = argparse.Namespace(
+        config=str(cfg),
+        tenant=None,
+        run_id=None,
+        db=db_path,
+        port=8765,
+        detach=False,
+        pid_file=None,
+    )
+    out = io.StringIO()
+    err = io.StringIO()
+    with patch("continuum.gateway.GatewayServer") as mock_server:
+        mock_server.return_value.serve_forever.return_value = None
+        mock_server.return_value.port = 8765
+        code = cmd_daemon(args, None, out, err)
+        assert code == 0
+        assert mock_server.call_args.args[1] == "active_daemon_run"
+
+
+def test_cmd_daemon_detach_without_os_fork(tmp_path: Path) -> None:
+    """cmd_daemon --detach spawns background process when os.fork is unavailable (#1603)."""
+    import argparse
+    import io
+    import os
+    from unittest.mock import MagicMock, patch
+
+    from continuum.cli.main import cmd_daemon
+
+    cfg = tmp_path / "gateway.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "upstreams": [
+                    {
+                        "host": "api.example.com",
+                        "action_type": "send",
+                        "key_template": "key:{id}",
+                    }
+                ]
+            }
+        )
+    )
+    pid_file = tmp_path / "daemon.pid"
+    args = argparse.Namespace(
+        config=str(cfg),
+        tenant=None,
+        run_id="run_123",
+        db=str(tmp_path / "test.db"),
+        port=8765,
+        detach=True,
+        pid_file=str(pid_file),
+    )
+    out = io.StringIO()
+    err = io.StringIO()
+
+    mock_proc = MagicMock()
+    mock_proc.pid = 99999
+
+    orig_fork = getattr(os, "fork", None)
+    if hasattr(os, "fork"):
+        delattr(os, "fork")
+    try:
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            code = cmd_daemon(args, None, out, err)
+            assert code == 0
+            assert mock_popen.called
+            assert pid_file.read_text(encoding="utf-8") == "99999"
+            out_val = out.getvalue()
+            assert "CONTINUUM daemon started (pid 99999)" in out_val
+            assert str(pid_file) in out_val
+    finally:
+        if orig_fork is not None:
+            os.fork = orig_fork
+
+
+def test_main_daemon_invocation_end_to_end(tmp_path: Path) -> None:
+    """main(['daemon', ...]) runs without AttributeError when storage is None (#1603)."""
+    import io
+    from unittest.mock import patch
+
+    from continuum.cli.main import main
+
+    cfg = tmp_path / "gateway.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "upstreams": [
+                    {
+                        "host": "api.example.com",
+                        "action_type": "send",
+                        "key_template": "key:{id}",
+                    }
+                ]
+            }
+        )
+    )
+    out = io.StringIO()
+    err = io.StringIO()
+    with patch("continuum.gateway.GatewayServer") as mock_server:
+        mock_server.return_value.serve_forever.return_value = None
+        mock_server.return_value.port = 8765
+        code = main(["daemon", "--config", str(cfg), "--port", "8765"], out=out, err=err)
+        assert code == 0
+
+
 def test_match_route_falls_back_to_run_metadata_tenant(tmp_path: Path) -> None:
     """match_route extracts bound tenant from storage run metadata when bound_tenant is None (#1415)."""
     route = Route(

@@ -3013,7 +3013,7 @@ def cmd_gateway(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     return ExitCode.OK
 
 
-def cmd_daemon(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err: Any) -> int:
     """Run CONTINUUM as a background daemon (gateway + watch).
 
     Starts the enforcing HTTP gateway as a long-running process. Use
@@ -3045,22 +3045,76 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         return ExitCode.ERROR
 
     bound_tenant = getattr(args, "tenant", None) or load_gateway_tenant(config_path)
-    active = storage.get_active_run()
-    run_id = args.run_id or (active.run_id if active else None)
+    run_id = getattr(args, "run_id", None)
+    if run_id is None:
+        if storage is not None:
+            active = storage.get_active_run()
+            run_id = active.run_id if active else None
+        else:
+            db_path = getattr(args, "db", None)
+            if db_path and (db_path == ":memory:" or Path(db_path).exists()):
+                try:
+                    probe_storage = open_storage(db_path)
+                    try:
+                        active = probe_storage.get_active_run()
+                        run_id = active.run_id if active else None
+                    finally:
+                        probe_storage.close()
+                except Exception:
+                    run_id = None
+
+    pid_file = Path(args.pid_file) if args.pid_file else Path(".continuum/daemon.pid")
+
+    if args.detach and not hasattr(os, "fork"):
+        import subprocess
+
+        cmd = [sys.executable, "-m", "continuum.cli.main"]
+        if getattr(args, "db", None):
+            cmd.extend(["--db", str(args.db)])
+        cmd.append("daemon")
+        cmd.extend(["--port", str(args.port)])
+        if getattr(args, "config", None):
+            cmd.extend(["--config", str(args.config)])
+        if getattr(args, "tenant", None):
+            cmd.extend(["--tenant", str(args.tenant)])
+        if run_id:
+            cmd.extend(["--run-id", str(run_id)])
+        cmd.extend(["--pid-file", str(pid_file)])
+
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
+            )
+
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.Popen(
+            cmd,
+            creationflags=creationflags,
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        pid_file.write_text(str(proc.pid), encoding="utf-8")
+        print(f"CONTINUUM daemon started (pid {proc.pid})", file=out)
+        print(f"  pid file: {pid_file}", file=out)
+        print(f"  gateway: 127.0.0.1:{args.port}", file=out)
+        return ExitCode.OK
+
     server = GatewayServer(
         lambda: open_storage(args.db), run_id, routes, port=args.port, bound_tenant=bound_tenant
     )
 
-    pid_file = Path(args.pid_file) if args.pid_file else Path(".continuum/daemon.pid")
-
     if args.detach:
-        pid = os.fork()
+        pid = os.fork()  # type: ignore[attr-defined]
         if pid > 0:
             print(f"CONTINUUM daemon started (pid {pid})", file=out)
             print(f"  pid file: {pid_file}", file=out)
             print(f"  gateway: 127.0.0.1:{server.port}", file=out)
             return ExitCode.OK
-        os.setsid()
+        if hasattr(os, "setsid"):
+            os.setsid()
         pid_file.parent.mkdir(parents=True, exist_ok=True)
         pid_file.write_text(str(os.getpid()), encoding="utf-8")
 
@@ -3074,12 +3128,18 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
     def _shutdown(signum: int, frame: Any) -> None:
         server.shutdown()
-        if args.detach:
+        if args.detach or getattr(args, "pid_file", None):
             pid_file.unlink(missing_ok=True)
         sys.exit(0)
 
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
+    import threading
+
+    if threading.current_thread() is threading.main_thread():
+        try:
+            signal.signal(signal.SIGTERM, _shutdown)
+            signal.signal(signal.SIGINT, _shutdown)
+        except (ValueError, OSError):
+            pass
 
     try:
         server.serve_forever()
@@ -3087,7 +3147,7 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         pass
     finally:
         server.shutdown()
-        if args.detach:
+        if args.detach or getattr(args, "pid_file", None):
             pid_file.unlink(missing_ok=True)
     return ExitCode.OK
 
