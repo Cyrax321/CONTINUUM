@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Test counts: ~3,636 collected on a minimal env.
+Test counts: ~3,672 collected on a minimal env.
 
 ### Added
 
@@ -52,6 +52,23 @@ Test counts: ~3,636 collected on a minimal env.
   scorer is shipped and tested on its own rather than arriving with a heuristic
   that moves while the queue is built.
 ### Fixed
+
+- **A developer's own venv and scratch database are no longer committed as the
+  project's Continue registration (#1618).** PR #1612 added
+  `.continue/config.yaml` to the repository root, fully baked: a `command`
+  inside one contributor's home directory and a `--db` under
+  `/private/tmp/fix-1612/`. That path exists on one machine, so every other
+  clone was wired to a server that cannot start, the `CONNECTION_CLOSED` shape
+  `docs/api/mcp.md` documents, and `continuum doctor` ended at
+  `REQUIRES_REPAIR` on a clean checkout because the baked command does not
+  resolve. The file is gone, and the per-project files `continuum mcp install
+  --scope project` writes, `.continue/config.yaml`, `.cursor/mcp.json`,
+  `.codex/config.toml`, `.zed/settings.json` and `opencode.json`, are now
+  gitignored so the same thing cannot recur. `.mcp.json` is the exception and
+  stays tracked: it carries a path expression the host expands rather than a
+  command resolved on one machine, which is why `install.py` resolves paths on
+  the target machine in the first place. A test pins this per host, so a
+  committed project registration fails CI instead of failing a clone.
 
 - **A probe that prints `occurred:false` is now told the separator is the
   problem.** A command probe's verdict contract was documented only in the
@@ -1065,7 +1082,7 @@ Test counts: ~3,636 collected on a minimal env.
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (3,636 collected, ~3,636 passed, ~0 skipped on a minimal env).
+  (3,672 collected, ~3,672 passed, ~0 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
