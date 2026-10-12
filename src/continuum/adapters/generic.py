@@ -344,6 +344,7 @@ class GenericAgentAdapter(AgentAdapter):
     def record_attempt(
         self,
         run_id: str,
+        action_type: str | None = None,
         *,
         note: str = "",
         max_attempts: int | None = None,
@@ -357,6 +358,7 @@ class GenericAgentAdapter(AgentAdapter):
         """Record one recovery attempt via the underlying RecoveryEngine / RecoveryLedger."""
         return self.engine.record_attempt(
             run_id,
+            action_type=action_type,
             note=note,
             max_attempts=max_attempts,
             dependency=dependency,
@@ -370,6 +372,7 @@ class GenericAgentAdapter(AgentAdapter):
     def requires_human(
         self,
         run_id: str,
+        action_type: str | None = None,
         *,
         max_attempts: int = 3,
         dependency: str | None = None,
@@ -382,6 +385,7 @@ class GenericAgentAdapter(AgentAdapter):
         """Check whether human intervention is required via the underlying RecoveryEngine / RecoveryLedger."""
         return self.engine.requires_human(
             run_id,
+            action_type=action_type,
             max_attempts=max_attempts,
             dependency=dependency,
             dependencies=dependencies,
