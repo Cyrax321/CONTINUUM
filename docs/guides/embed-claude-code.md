@@ -18,6 +18,9 @@ continuum start my-task --goal "Summarize quarterly reports from dataset v3"
 
 # 2. Wire the harness. This installs SessionStart + PostToolUse + PreCompact hooks.
 #    Add --with-gate if you use an allowlist for side effects (see Gate section).
+#    --with-gate needs a registry first: a gate with nothing registered allows
+#    every call, so the install refuses rather than install a guard that is off.
+mkdir -p .continuum && echo '{"tools": {"Write": {"key_template": "{file_path}"}}}' > .continuum/gate.json
 continuum hooks install claude-code --with-gate
 
 # 3. Check what was written

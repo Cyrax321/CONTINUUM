@@ -107,6 +107,7 @@ mypy src/continuum               # CI 强制的三扇门禁
 
 ```bash
 continuum start my-task --goal "智能体应该做什么"
+mkdir -p .continuum && echo '{"tools": {"Write": {"key_template": "{file_path}"}}}' > .continuum/gate.json
 continuum hooks install claude-code --with-gate   # 同样支持：gemini、codex
 ```
 

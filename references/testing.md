@@ -56,10 +56,12 @@ continuum verify <run_id> --index           # add --repair-index to rebuild
 mkdir demo && cd demo
 continuum init
 continuum start demo-run --goal "<your task>"
+mkdir -p .continuum && echo '{"tools": {"Write": {"key_template": "{file_path}"}}}' > .continuum/gate.json
 continuum hooks install claude-code --with-gate
-echo '{"tools": {"Write": {"key_template": "{file_path}"}}}' > .continuum/gate.json
 claude    # then give the task; say "hi" in a fresh session to see the briefing
 ```
+
+The registry must exist first: `--with-gate` refuses to install without one, since a gate with nothing registered allows every call.
 
 Watch from another terminal:
 

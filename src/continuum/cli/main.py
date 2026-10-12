@@ -3236,14 +3236,14 @@ def cmd_hooks_install(args: argparse.Namespace, storage: Storage, out: Any, err:
     # --with-gate is a request for enforcement, and enforcement is the one
     # thing this flag cannot fake. The installed hook resolves the same
     # DEFAULT_GATE_CONFIG_PATH the gate command does, and the gate treats a
-    # *missing* registry as "no gate configured": Decision(True), exit 0 for an
-    # unclaimed side-effecting call. Wiring the hook in that state installs a
-    # guard that looks armed and disarms itself, which is worse than no guard
-    # at all. The README's onboarding promise, that unclaimed side effects
-    # registered in .continuum/gate.json are refused before they fire, reads as
-    # active to everyone who passes the flag while every call is allowed. Fail
-    # before touching settings, the way the gateway refuses to start as an open
-    # relay rather than forwarding everything. Re-running is idempotent
+    # *missing* registry as "no gate configured" -- Decision(True), exit 0 for
+    # an unclaimed side-effecting call. Wiring the hook in that state installs
+    # a guard that looks armed and disarms itself, which is worse than no
+    # guard at all: the README's onboarding promise ("unclaimed side effects
+    # registered in .continuum/gate.json are refused before they fire") reads
+    # as active to everyone who passes the flag, while every call is allowed.
+    # Fail before touching settings, the way the gateway refuses to start as
+    # an open relay rather than forwarding everything. Re-running is idempotent
     # (install_client_hook reports "present"), so the cost is one command.
     if getattr(args, "with_gate", False):
         registry = Path(DEFAULT_GATE_CONFIG_PATH)
@@ -3253,17 +3253,25 @@ def cmd_hooks_install(args: argparse.Namespace, storage: Storage, out: Any, err:
             print(f"error: --with-gate needs a readable gate registry: {exc}", file=err)
             return ExitCode.ERROR
         if tools is None:
+            # The recipe has to run as printed on the operator's shell, so it is
+            # built per platform: cmd has no mkdir -p and does not strip quotes
+            # from echo, and the registry path renders with its own separator.
+            starter = '{"tools": {"Write": {"key_template": "{file_path}"}}}'
+            if os.name == "nt":
+                recipe = (
+                    f"  if not exist .continuum mkdir .continuum && echo {starter} > {registry}\n"
+                )
+            else:
+                recipe = f"  mkdir -p .continuum && echo '{starter}' > {registry}\n"
             print(
                 f"error: --with-gate was passed but {registry} does not exist, so the "
                 "installed gate would allow every tool call: the gate reads a missing "
                 'registry as "no gate configured" and returns exit 0. Create one, '
                 "register your side-effecting tools, then re-run this command:\n"
-                "  mkdir -p .continuum && echo "
-                '\'{"tools": {"Write": {"key_template": "{file_path}"}}}\' '
-                f"> {registry}\n"
+                f"{recipe}"
                 "Each entry names the tool as the harness sees it and the key template "
-                "that identifies the operation; see docs/guides/embed-claude-code.md "
-                "and docs/guides/memory_governance.md.",
+                "that identifies the operation; see docs/guides/embed-claude-code.md and "
+                "docs/guides/memory_governance.md.",
                 file=err,
             )
             return ExitCode.ERROR

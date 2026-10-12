@@ -29,7 +29,7 @@ Verify the hook engine sees the flag:
 continuum hooks install codex --with-gate
 ```
 
-If the flag is absent the install prints:
+This needs a `.continuum/gate.json` registry first; without one it refuses to install rather than wire a gate that allows everything. Create one (any `tools` entry will do) and re-run. If the flag is absent the install prints:
 
 ```text
 note: 'codex_hooks' was not found in ~/.codex/config.toml; add '[features]
@@ -43,7 +43,11 @@ That notice is expected, it is not a failure.
 ```bash
 continuum start my-task --goal "Ship feature X with dataset v3"
 
-# Wires SessionStart + PostToolUse for Codex. Add --with-gate to enforce claims.
+# Register the side-effecting tools first: --with-gate refuses to install
+# without a registry, because a gate with nothing registered allows every call.
+mkdir -p .continuum && echo '{"tools": {"shell": {"key_template": "{command}"}}}' > .continuum/gate.json
+
+# Wires SessionStart + PostToolUse for Codex, plus the PreToolUse gate.
 continuum hooks install codex --with-gate
 
 cat .codex/hooks.json | python -m json.tool
@@ -278,7 +282,7 @@ Measured from a fresh `git clone`:
 
 1. `uv pip install -e ".[dev]"` (about 40s)
 2. `continuum start my-task --goal "trial"` (1s)
-3. `continuum hooks install codex --with-gate` (1s)
+3. `continuum hooks install codex --with-gate` (1s; needs a `.continuum/gate.json` registry first)
 4. Do work, claim an action, checkpoint (any adapter or raw events)
 5. `kill -9` (instant)
 6. `continuum --json resume my-task` shows `request_human` with reconciliate step when uncertain, `resume` when clean (under 1s)
