@@ -32,6 +32,7 @@ from continuum.mcp.doctor import (
     _check_resolution,
     _check_sdk,
     _handshake_command,
+    _observation_finding,
     _scripts_dir,
     find_registration,
     render_doctor,
@@ -868,6 +869,78 @@ def test_a_host_name_that_differs_from_the_baked_name_is_a_warning(
     assert "CONTINUUM_MCP_MUTATING_CLIENTS" in client_name["fix"]
     # The authorized side is unaffected by what was observed.
     assert permission["authorized"] is True
+
+
+def test_a_name_that_differs_only_by_case_is_the_same_client(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """A capitalisation difference must not become a warning (#1621).
+
+    ``install --host zed`` bakes ``Zed``, transcribed from zed's own source,
+    and a host that sends ``zed`` is admitted by the server because the
+    policy folds both sides. Comparing the two names raw then made this check
+    contradict the server it had just probed: it warned that the connection
+    was "refused as a mutating caller" while reporting the caller authorized,
+    and its fix told the operator to overwrite a correct name.
+
+    The observation is recorded through a real handshake so the name the
+    doctor reads is the one the server itself took off the wire, and the two
+    spellings cannot be made to agree by anything on the doctor's side.
+    """
+    _isolated_home(monkeypatch, tmp_path)
+    _write_registration(tmp_path, "Zed")
+    monkeypatch.setenv("PYTHONPATH", str(SRC_DIR))
+    registration = find_registration(tmp_path)
+    assert registration is not None
+    assert registration["baked_client"] == "Zed"
+
+    observed = _observe_via_a_real_connection(tmp_path / "continuum.db", "zed", allow="Zed")
+    assert "is not permitted" not in observed, observed
+    assert list(read_observed_clients(str(tmp_path / "continuum.db"))) == ["zed"]
+
+    client_name, permission = _check_mutation_access(_live_server(), registration, 20.0)
+
+    assert client_name["status"] == "pass", client_name["detail"]
+    assert client_name["baked_client"] == "Zed"
+    assert client_name["observed_client"] == "zed"
+    assert client_name["observed_clients"] == ["zed"]
+    # Both spellings are named, because the operator has to recognise both.
+    assert "zed" in client_name["detail"] and "Zed" in client_name["detail"]
+    assert "refused" not in client_name["detail"]
+    assert permission["status"] == "pass", permission["detail"]
+    assert permission["authorized"] is True
+
+
+def test_an_observed_name_is_compared_folded_not_stored_folded() -> None:
+    """The fold is in the comparison, not the record.
+
+    The observation file keeps what the host sent verbatim, because a name
+    read back has to be the string an operator would type to match it, and a
+    folded record would silently rewrite every capitalised client. Only the
+    comparison folds, so the stored history stays readable while the verdict
+    agrees with the server.
+    """
+    observed = {
+        " zed ": {"count": 1, "last_seen": "2026-01-01T00:00:00+00:00", "seq": 1},
+        "Cursor": {"count": 2, "last_seen": "2026-01-02T00:00:00+00:00", "seq": 2},
+    }
+
+    status, detail, fix = _observation_finding(observed, "Zed", "zed")
+
+    assert status == "pass", detail
+    assert fix == ""
+    # The stored spelling is reported, not the folded one.
+    assert "' zed '" in detail and "'Zed'" in detail
+
+    status, detail, _ = _observation_finding(observed, "cursor", "cursor")
+    assert status == "pass", detail
+    assert "'Cursor'" in detail
+
+    # A name no folding reconciles is still a warning.
+    status, detail, fix = _observation_finding(observed, "gemini-cli", "gemini")
+    assert status == "warn"
+    assert "gemini-cli" in detail
+    assert fix is not None and "CONTINUUM_MCP_MUTATING_CLIENTS" in fix
 
 
 def test_nothing_observed_is_a_warning_rather_than_a_pass(monkeypatch: Any, tmp_path: Path) -> None:
