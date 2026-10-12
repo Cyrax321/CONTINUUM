@@ -431,7 +431,9 @@ def reinject_constraint_pins(
         if not cid:
             continue
         if e.type is EventType.CONSTRAINT_PINNED:
-            live_pinned[cid] = e.payload.get("sha256")
+            sha = e.payload.get("sha256")
+            if isinstance(sha, str):
+                live_pinned[cid] = sha
         elif e.type in (EventType.CONSTRAINT_RETRACTED, EventType.CONSTRAINT_PIN_DROPPED):
             live_pinned.pop(cid, None)
 
