@@ -3107,7 +3107,11 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
     )
 
     if args.detach:
-        pid = os.fork()  # type: ignore[attr-defined]
+        fork_fn = getattr(os, "fork", None)
+        if fork_fn is None:
+            print("error: background daemon requires os.fork or Windows detached mode", file=err)
+            return ExitCode.ERROR
+        pid = fork_fn()
         if pid > 0:
             print(f"CONTINUUM daemon started (pid {pid})", file=out)
             print(f"  pid file: {pid_file}", file=out)
