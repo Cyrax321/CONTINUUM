@@ -66,10 +66,10 @@ EXPECTED: dict[tuple[str, int], tuple[str, str]] = {
     ("src/continuum/models.py", 117): ("StateStatus", "decl"),
     ("src/continuum/models.py", 220): ("Origin", "decl"),
     ("src/continuum/models.py", 255): ("EXTERNAL_MONITOR", "assign"),
-    ("src/continuum/models.py", 1451): ("EnvResource", "decl"),
-    ("src/continuum/models.py", 1463): ("EnvironmentSnapshot", "decl"),
-    ("src/continuum/models.py", 1510): ("RecoveryContract", "decl"),
-    ("src/continuum/models.py", 1598): ("StateCheckpoint", "decl"),
+    ("src/continuum/models.py", 1486): ("EnvResource", "decl"),
+    ("src/continuum/models.py", 1498): ("EnvironmentSnapshot", "decl"),
+    ("src/continuum/models.py", 1545): ("RecoveryContract", "decl"),
+    ("src/continuum/models.py", 1633): ("StateCheckpoint", "decl"),
 }
 
 
