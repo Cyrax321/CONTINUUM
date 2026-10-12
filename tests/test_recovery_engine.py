@@ -1024,3 +1024,53 @@ def test_generic_agent_adapter_per_dependency_budget_and_scoping(
     )
     assert d3.mode is RecoveryMode.REPAIR_AND_RESUME
     assert d3.contract.next_allowed_action == "revalidate_dependency:dataset"
+
+
+def test_engine_and_adapter_forward_action_type(store: SQLiteStorage) -> None:
+    """RecoveryEngine and GenericAgentAdapter forward action_type to RecoveryLedger (#1428)."""
+    from continuum.adapters import GenericAgentAdapter
+
+    ledger = RecoveryLedger(MemoryLedgerBackend())
+    engine = RecoveryEngine(store, ledger=ledger)
+    budgets = {"dependency_budgets": {"ext:weather-api": 2}}
+
+    # Via RecoveryEngine
+    assert (
+        engine.record_attempt(
+            "run_1",
+            action_type="send_invoice",
+            dependency="ext:weather-api",
+            dependency_budgets=budgets,
+        )
+        == 1
+    )
+    assert (
+        engine.requires_human(
+            "run_1",
+            action_type="send_invoice",
+            dependency="ext:weather-api",
+            dependency_budgets=budgets,
+        )
+        is False
+    )
+
+    # Via GenericAgentAdapter
+    adapter = GenericAgentAdapter(store, ledger=ledger)
+    assert (
+        adapter.record_attempt(
+            "run_1",
+            "send_invoice",
+            dependency="ext:weather-api",
+            dependency_budgets=budgets,
+        )
+        == 2
+    )
+    assert (
+        adapter.requires_human(
+            "run_1",
+            action_type="send_invoice",
+            dependency="ext:weather-api",
+            dependency_budgets=budgets,
+        )
+        is True
+    )
