@@ -92,6 +92,12 @@ compares against. Zed announces `Zed`, which is not the string `zed`; the
 comparison folds case and trims whitespace, so listing `zed` permits it. If a
 host ever announces a second name, that is an alias, declared below.
 
+`continuum mcp doctor` compares the name a host actually sent against the one
+the registration bakes by that same rule, so a host announcing `zed` against a
+registration that baked `Zed` is reported as the client it is rather than as a
+misconfiguration (#1621). The record it reads keeps the spelling the host sent,
+verbatim; only the comparison folds.
+
 The TOML and YAML paths need a parser the JSON ones do not. `tomli-w` backs
 TOML and `PyYAML` backs YAML, both declared in the `mcp` extra (PR #1600) and
 imported lazily, so a host that needs neither pays for neither and a clone

@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from continuum.mcp import configfmt
-from continuum.mcp.authz import POLICY_ENV_VAR, POLICY_ENV_VAR_ALIAS
+from continuum.mcp.authz import POLICY_ENV_VAR, POLICY_ENV_VAR_ALIAS, fold
 from continuum.mcp.install import HOST_PROFILES, SERVER_NAME, host_format, host_shape
 from continuum.mcp.observation import read_observed_clients
 
@@ -839,6 +839,16 @@ def _observation_finding(
     read from that same registration, so with no observation the check is
     comparing the baked name with itself, and reporting that as agreement
     would overstate what has been verified.
+
+    Names are compared folded, through the same function the server admits a
+    caller with. The two strings come from files that nothing keeps in step:
+    ``install`` writes the host profile's spelling into the registration and a
+    host writes its own into the observation record, and the profile can
+    disagree with the host about capitalisation (``zed`` is profiled as
+    ``Zed``, transcribed from zed's own source). Comparing them raw made this
+    check warn about a connection the server had just authorised, and its fix
+    told the operator to overwrite a correct name with the observed spelling
+    (#1621).
     """
     if not observed:
         return (
@@ -849,10 +859,21 @@ def _observation_finding(
             f"re-run {INSTALL_SERVER_COMMAND} after the host has connected once, or call "
             f"a tool from the host and re-run this check",
         )
-    if baked in observed:
+    wanted = fold(baked)
+    for declared in observed:
+        if fold(declared) != wanted:
+            continue
+        if declared == baked:
+            return (
+                "pass",
+                f"a host has connected as {baked!r}, the name the registration authorizes",
+                "",
+            )
         return (
             "pass",
-            f"a host has connected as {baked!r}, the name the registration authorizes",
+            f"a host has connected as {declared!r}, which the registration authorizes as "
+            f"{baked!r}: the comparison folds case and trims whitespace, so those spellings "
+            "are one client and the server admits the caller",
             "",
         )
     names = ", ".join(repr(name) for name in sorted(observed))

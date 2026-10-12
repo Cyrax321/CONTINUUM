@@ -53,6 +53,24 @@ Test counts: ~3,636 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **`continuum mcp doctor` compares client names the way the server does
+  (#1621).** `_observation_finding` matched the baked name against the names
+  hosts had sent with a raw `in`, while every comparison in `authz` goes
+  through the fold (strip and `casefold`), so the doctor warned about
+  registrations the server had just authorised. `install --host zed` bakes
+  `Zed`, transcribed from zed's own source, and a host announcing `zed` is
+  admitted by the policy, but the doctor reported it as a connection "refused
+  as mutating callers" and told the operator to overwrite a correct name with
+  the observed spelling, which would have replaced a right one with a
+  lowercase one and left the warning standing for any host that capitalises
+  differently. The two strings come from files nothing keeps in step, the
+  registration and the server's own connection record, so the comparison now
+  folds both sides through `authz.fold`, which was private and is now exported
+  as the one normalisation function for client names. A case-only difference
+  reads as a pass naming both spellings; the record still stores what the host
+  sent verbatim, because a folded history would silently rewrite every
+  capitalised client and stop being the string an operator would type.
+
 - **A probe that prints `occurred:false` is now told the separator is the
   problem.** A command probe's verdict contract was documented only in the
   module docstring, so the place an operator met it was the error, and the
