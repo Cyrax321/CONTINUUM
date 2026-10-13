@@ -87,6 +87,62 @@ def test_active_run_resolution_skips_terminal(storage: PostgresStorage) -> None:
     assert active.run_id == "pg_live"
 
 
+def test_run_completed_flips_the_run_row(storage: PostgresStorage) -> None:
+    """The log is the source of truth on this backend too.
+
+    ``append_event`` used to leave the run row alone on Postgres, so a run
+    closed by appending RUN_COMPLETED -- the path adapters and the MCP tool
+    take, with no access to ``update_run`` -- stayed "started" and kept being
+    returned as the active run. The shared-suite database already holds runs
+    from other tests, so the assert on ``get_active_run`` is scoped to this
+    run rather than to the whole store.
+    """
+    make_run(storage, "pg_complete", "close me")
+    storage.append_event("pg_complete", EventType.RUN_STARTED, {"goal": "close me"})
+    assert storage.get_run("pg_complete").status is RunStatus.STARTED
+
+    event = storage.append_event("pg_complete", EventType.RUN_COMPLETED, {"closed_by": "agent"})
+
+    row = storage.get_run("pg_complete")
+    assert row.status is RunStatus.COMPLETED
+    # The row names the moment the run finished, not a clock read later.
+    assert row.updated_at == event.timestamp
+
+
+def test_run_completed_is_idempotent_on_the_row(storage: PostgresStorage) -> None:
+    # A second RUN_COMPLETED (a double-click, a retried tool call) must not
+    # un-finish the row and must not raise: the run stays closed.
+    make_run(storage, "pg_twice", "close twice")
+    storage.append_event("pg_twice", EventType.RUN_STARTED, {"goal": "close twice"})
+    storage.append_event("pg_twice", EventType.RUN_COMPLETED, {})
+
+    storage.append_event("pg_twice", EventType.RUN_COMPLETED, {})
+
+    assert storage.get_run("pg_twice").status is RunStatus.COMPLETED
+
+
+def test_append_sealed_run_completed_also_flips_the_row(storage: PostgresStorage) -> None:
+    # ``append_sealed`` is the entry point for import/export and replay, and a
+    # log copied in through it holds the same truth on Postgres: RUN_COMPLETED
+    # means finished, and the row must agree.
+    make_run(storage, "pg_sealed", "replay me")
+    before = storage.append_event("pg_sealed", EventType.RUN_STARTED, {"goal": "replay me"})
+
+    from continuum.events import Event
+
+    storage.append_sealed(
+        Event(
+            run_id="pg_sealed",
+            sequence=before.sequence + 1,
+            type=EventType.RUN_COMPLETED,
+            payload={"closed_by": "replay"},
+            prev_hash=before.hash,
+        ).sealed()
+    )
+
+    assert storage.get_run("pg_sealed").status is RunStatus.COMPLETED
+
+
 def test_fork_lineage_survives_the_round_trip(storage: PostgresStorage) -> None:
     """A fork must persist and return parent_run_id (#1079).
 
