@@ -4,7 +4,7 @@
 and returns a value, with no curses, storage, or side effects. The tests below
 pin the two contracts the module docstring promises:
 
-* a frame of ``SETTLED`` (negative) means "nothing moves": every function
+* a frame of ``SETTLED`` (negative) means "nothing moves", so every function
   resolves to its complete, unemphasised result;
 * the functions never grow past their inputs, and the sheen band is always
   clamped inside ``[0, art_width)``.
@@ -35,8 +35,13 @@ from continuum.tui.animate import (
 # constants
 
 
-def test_emphasis_flags_are_distinct_bits() -> None:
-    assert {PLAIN, DIM, BRIGHT, ACCENT} == {0, 1, 2, 4}
+def test_documented_constants() -> None:
+    assert PLAIN == 0
+    assert DIM == 1
+    assert BRIGHT == 2
+    assert ACCENT == 4
+    assert SETTLED == -1
+    assert TICK_SECONDS == 0.09
 
 
 def test_spinner_frames_match_the_private_tuple() -> None:
@@ -54,8 +59,12 @@ def test_animation_enabled_when_env_is_unset(monkeypatch: pytest.MonkeyPatch) ->
     assert animation_enabled() is True
 
 
-def test_animation_disabled_when_env_var_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CONTINUUM_NO_ANIMATION", "1")
+@pytest.mark.parametrize("value", ["1", "0", "true", "false", ""])
+def test_animation_disabled_when_env_var_is_present(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # Presence alone disables animation, matching NO_COLOR semantics.
+    monkeypatch.setenv("CONTINUUM_NO_ANIMATION", value)
     monkeypatch.setenv("TERM", "xterm-256color")
     assert animation_enabled() is False
 
@@ -93,9 +102,6 @@ def test_typewriter_is_monotonic() -> None:
 
 def test_typewriter_respects_chars_per_second() -> None:
     # visible = int(cps * TICK_SECONDS * frame)
-    # frame=1 -> int(28 * 0.09 * 1) = int(2.52) = 2
-    # frame=2 -> int(28 * 0.09 * 2) = int(5.04) = 5
-    # frame=3 -> int(28 * 0.09 * 3) = int(7.56) = 7
     assert typewriter("abcdef", 1, chars_per_second=28.0) == "ab"
     assert typewriter("abcdef", 2, chars_per_second=28.0) == "abcde"
     assert typewriter("abcdef", 3, chars_per_second=28.0) == "abcdef"
@@ -151,19 +157,26 @@ def test_shimmer_band_is_clamped_inside_art() -> None:
 
 
 def test_shimmer_actually_moves_across_frames() -> None:
+    # A frozen shimmer (constant (0, band) for every frame) must fail.
     art_width, band = 40, 8
     half = max(1, round(1.8 / TICK_SECONDS))
-    starts = [
+    forward = [
         shimmer_span(f, art_width=art_width, band=band)[0]  # type: ignore[index]
-        for f in range(0, 2 * half)
+        for f in range(0, half)
     ]
-    # Not frozen: the band visits more than one position.
-    assert len(set(starts)) > 1
-    # Forward half sweeps left-to-right, ending at the far edge.
-    assert starts[:half] == sorted(starts[:half])
-    assert starts[half - 1] > starts[0]
-    # Return half comes back right-to-left.
-    assert starts[half:] == sorted(starts[half:], reverse=True)
+    backward = [
+        shimmer_span(f, art_width=art_width, band=band)[0]  # type: ignore[index]
+        for f in range(half, 2 * half)
+    ]
+    # Not frozen: more than one distinct position across the cycle.
+    assert len(set(forward)) > 1
+    # Reaches both edges: forward's end is at the far edge, backward's end
+    # returns to the near edge.
+    assert forward[-1] > forward[0]
+    assert backward[-1] < backward[0]
+    # Strictly non-decreasing on the way out, non-increasing on the way back.
+    assert forward == sorted(forward)
+    assert backward == sorted(backward, reverse=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -179,12 +192,19 @@ def test_pulse_only_returns_bright_or_dim() -> None:
         assert pulse(frame) in {BRIGHT, DIM}
 
 
-def test_pulse_breathes_within_a_cycle() -> None:
-    # period 1.6 s / 0.09 s per tick -> round(17.77...) == 18 frames per cycle.
+def test_pulse_breathing_split_and_repeat() -> None:
+    # period 1.6 s / 0.09 s per tick -> 18 frames per cycle.
     frames_per_cycle = max(2, round(1.6 / TICK_SECONDS))
     assert frames_per_cycle == 18
-    seen = {pulse(frame) for frame in range(frames_per_cycle)}
-    assert seen == {BRIGHT, DIM}
+    # First half bright, second half dim, exactly.
+    first = [pulse(f) for f in range(frames_per_cycle // 2)]
+    second = [pulse(f) for f in range(frames_per_cycle // 2, frames_per_cycle)]
+    assert set(first) == {BRIGHT}
+    assert set(second) == {DIM}
+    # Cycle repeats exactly.
+    assert [pulse(f) for f in range(frames_per_cycle)] == [
+        pulse(f + frames_per_cycle) for f in range(frames_per_cycle)
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -195,15 +215,14 @@ def test_spinner_settled_returns_space() -> None:
     assert spinner(SETTLED) == " "
 
 
-def test_spinner_actually_cycles() -> None:
-    # Distinct frames must be produced across one full period.
-    produced = {spinner(f) for f in range(len(animate._SPINNER_FRAMES))}
-    assert produced == SPINNER_FRAMES
-    # Adjacent frames differ (no repeats) within a cycle.
-    for f in range(len(animate._SPINNER_FRAMES) - 1):
-        assert spinner(f) != spinner(f + 1)
+def test_spinner_cycles_in_order() -> None:
+    # Four full rotations must equal the private tuple repeated four times.
+    expected = animate._SPINNER_FRAMES
+    actual = tuple(spinner(f) for f in range(4 * len(expected)))
+    assert actual == expected * 4
 
 
 def test_spinner_wraps_around() -> None:
     assert spinner(0) == spinner(len(animate._SPINNER_FRAMES))
     assert spinner(3) == spinner(3 + len(animate._SPINNER_FRAMES))
+
