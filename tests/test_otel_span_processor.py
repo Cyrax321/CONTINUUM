@@ -4,12 +4,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from opentelemetry.sdk.trace import SpanProcessor
 
 from continuum.events import EventType
 from continuum.models import Run
 from continuum.otel import make_span_processor
 from continuum.storage import SQLiteStorage
+
+otel_trace = pytest.importorskip("opentelemetry.sdk.trace")
+SpanProcessor = otel_trace.SpanProcessor
 
 
 @pytest.fixture
@@ -61,3 +63,35 @@ def test_on_end_records_a_failed_tool_span(db: str) -> None:
         event = store.read_events("run_1")[-1]
     assert event.type is EventType.TOOL_FAILED
     assert event.payload["tool"] == "send_invoice"
+
+
+def test_processor_handles_real_sdk_spans(db: str) -> None:
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.trace import Status, StatusCode
+
+    provider = TracerProvider()
+    provider.add_span_processor(make_span_processor(SQLiteStorage(db), run_id="run_1"))
+    tracer = provider.get_tracer(__name__)
+
+    with tracer.start_as_current_span(
+        "execute_tool",
+        attributes={"tool.name": "write_file", "file_path": "/tmp/output.txt"},
+    ):
+        pass
+    with tracer.start_as_current_span(
+        "execute_tool",
+        attributes={"tool.name": "send_invoice"},
+    ) as span:
+        span.set_status(Status(StatusCode.ERROR))
+
+    assert provider.force_flush()
+    provider.shutdown()
+
+    with SQLiteStorage(db) as store:
+        events = store.read_events("run_1")
+    assert [event.type for event in events[-2:]] == [
+        EventType.TOOL_COMPLETED,
+        EventType.TOOL_FAILED,
+    ]
+    assert events[-2].payload["span_id"]
+    assert events[-2].payload["trace_id"]
