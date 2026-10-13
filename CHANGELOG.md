@@ -54,11 +54,11 @@ Test counts: ~3705 collected on a minimal env.
 ### Fixed
 
 - **The documented test count is re-synced, so `main` builds again.** The
-  collected total had drifted to 3,705 against a documented 3,636, past the
+  collected total had drifted to 3,680 against a documented 3,636, past the
   30-test tolerance `test_documented_count_matches_suite` allows, so the
   guard failed every test job on `main` and would fail on any branch adding
   three or more tests for a reason that has nothing to do with the branch.
-  Every doc that states the total now states 3,705: `README.md`, the five
+  Every doc that states the total now states 3,680: `README.md`, the five
   translated READMEs, `docs/CONTRIBUTING_ONBOARDING.md`, `docs/index.html`,
   `references/install.md`, `references/testing.md`. Four phrasings that
   contradicted the new figure on the same line are corrected with it, and one
