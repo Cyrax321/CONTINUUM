@@ -109,7 +109,9 @@ def test_missing_version_after_checkpoint_is_rejected(
     SQLite event, environment, and version queries throughout the resolver.
     """
 
-    def checkpoint_without_persistence(self: CheckpointManager, run_id: str, **kwargs: object) -> None:
+    def checkpoint_without_persistence(
+        self: CheckpointManager, run_id: str, **kwargs: object
+    ) -> None:
         return None
 
     monkeypatch.setattr(CheckpointManager, "checkpoint", checkpoint_without_persistence)
