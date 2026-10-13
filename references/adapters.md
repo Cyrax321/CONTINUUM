@@ -469,16 +469,17 @@ run is dropped rather than raising, because tracing outlives any single run.
 
 Two limits worth stating. This seam is evidence only: it observes ended spans and
 never blocks, so an unclaimed effect is recorded rather than refused, which is the
-gateway's job. And the `[otel]` extra pins `opentelemetry-api`, while
-`make_span_processor` imports `SpanProcessor` from `opentelemetry.sdk.trace`; any
-app that constructs its own `TracerProvider` already has the SDK, but a bare
-`[otel]` install does not, and the call raises `RuntimeError` with an install hint
-rather than failing at import time.
+gateway's job. The `[otel]` extra pins both `opentelemetry-api` and
+`opentelemetry-sdk`, because `make_span_processor` imports `SpanProcessor` from
+the SDK. The SDK remains optional for core installs, and the call raises
+`RuntimeError` with an install hint rather than failing at import time when it is
+absent.
 
-Tests: `tests/test_otel.py`, which drives the pure core
-(`observation_from_span`, `record_span`) with duck-typed spans. Only
-`test_processor_end_to_end_when_sdk_present` needs the real SDK, and it skips
-without it; the missing-SDK hint is asserted too.
+Tests: `tests/test_otel.py` drives the pure core
+(`observation_from_span`, `record_span`) with duck-typed spans, while
+`tests/test_otel_span_processor.py` exercises the SDK-backed processor and its
+real provider callbacks. The SDK-backed module skips cleanly when the optional
+extra is absent; the missing-SDK hint is asserted too.
 
 Beyond these two, `continuum serve` exposes the same operations as the MCP tools
 over a language-agnostic JSON wire protocol (stdio, or `--transport http` with

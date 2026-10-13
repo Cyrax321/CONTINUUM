@@ -27,7 +27,7 @@ uv pip install -e .
 
 # Composable extras
 uv pip install -e ".[mcp]"           # MCP server (13 stdio tools), requires mcp>=2.0
-uv pip install -e ".[otel]"          # OpenTelemetry bridge, opentelemetry-api>=1.20
+uv pip install -e ".[otel]"          # OpenTelemetry bridge, API + SDK >=1.20
 uv pip install -e ".[langgraph]"     # LangGraph adapter
 uv pip install -e ".[openai]"        # OpenAI Agents SDK adapter (also pulls mcp transitively)
 uv pip install -e ".[langchain]"     # LangChain adapter
@@ -47,6 +47,7 @@ Combine freely: `[dev]` already includes `mcp`, `langgraph`, `langchain`, `opena
 | `pydantic>=2.7` | `pyproject.toml:30` (core `dependencies`) | Immutable models, hash-chained events | **Yes, always** |
 | `mcp>=2.0` | `pyproject.toml:53` (`[mcp]`), also in `[dev]` | MCP server (`continuum-mcp`) stdio transport | Only for MCP server (also pulled transitively by `openai-agents`) |
 | `opentelemetry-api>=1.20` | `pyproject.toml:55` (`[otel]`) | Span-processor bridge (`continuum.otel`) | Only for OTel directly; may appear transitively via `mcp`/`openai-agents` |
+| `opentelemetry-sdk>=1.20` | `pyproject.toml:55` (`[otel]`) | SDK span processor used by the OTel bridge | Only for OTel directly |
 | `langgraph>=0.2` | `pyproject.toml:58` (`[langgraph]`) | LangGraph adapter | Only for LangGraph (also pulled transitively by `langchain`) |
 | `openai-agents>=0.2` | `pyproject.toml:61` (`[openai]`) | OpenAI Agents SDK adapter | Only for OpenAI |
 | `langchain>=0.3` | `pyproject.toml:64` (`[langchain]`) | LangChain adapter | Only for LangChain |
