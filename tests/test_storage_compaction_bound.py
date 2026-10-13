@@ -64,6 +64,7 @@ def test_explicit_bound_cannot_consume_anchor_marker(storage: SQLiteStorage, off
     # compaction transaction appends EVENT_LOG_ANCHORED.
     prospective_anchor = storage.last_sequence(RUN_ID) + 2
     unsafe_through = prospective_anchor + offset
+    events_before = list(storage.read_events(RUN_ID))
 
     with pytest.raises(
         ValueError,
@@ -74,9 +75,13 @@ def test_explicit_bound_cannot_consume_anchor_marker(storage: SQLiteStorage, off
     ):
         resolve_compaction_bound(storage, RUN_ID, unsafe_through)
 
-    # The resolver is preflight only: it must not archive or delete any event.
+    # A rejected bound must preserve the entire prior log. The forced
+    # checkpoint annotation is the only additional event.
+    events_after = list(storage.read_events(RUN_ID))
+    assert events_after[: len(events_before)] == events_before
+    assert len(events_after) == len(events_before) + 1
+    assert events_after[-1].sequence == prospective_anchor - 1
     assert storage.read_archived_events(RUN_ID) == []
-    assert storage.read_events(RUN_ID)[-1].sequence == prospective_anchor - 1
 
 
 def test_projection_failure_is_reported_as_anchor_failure(
