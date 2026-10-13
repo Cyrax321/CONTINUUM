@@ -1539,7 +1539,7 @@ def test_cmd_daemon_runs_with_storage_none(tmp_path: Path) -> None:
     )
     out = io.StringIO()
     err = io.StringIO()
-    with patch("continuum.gateway.GatewayServer") as mock_server:
+    with patch("continuum.gateway.GatewayServer") as mock_server, patch("signal.signal"):
         mock_server.return_value.serve_forever.return_value = None
         mock_server.return_value.port = 8765
         code = cmd_daemon(args, None, out, err)
@@ -1585,7 +1585,7 @@ def test_cmd_daemon_resolves_active_run_when_storage_none(tmp_path: Path) -> Non
     )
     out = io.StringIO()
     err = io.StringIO()
-    with patch("continuum.gateway.GatewayServer") as mock_server:
+    with patch("continuum.gateway.GatewayServer") as mock_server, patch("signal.signal"):
         mock_server.return_value.serve_forever.return_value = None
         mock_server.return_value.port = 8765
         code = cmd_daemon(args, None, out, err)
@@ -1594,13 +1594,13 @@ def test_cmd_daemon_resolves_active_run_when_storage_none(tmp_path: Path) -> Non
 
 
 def test_cmd_daemon_detach_without_os_fork(tmp_path: Path) -> None:
-    """cmd_daemon --detach spawns background process when os.fork is unavailable (#1603)."""
+    """cmd_daemon detach spawns background process when os.fork is unavailable (#1603)."""
     import argparse
     import io
     import os
     from unittest.mock import MagicMock, patch
 
-    from continuum.cli.main import cmd_daemon
+    from continuum.cli.main import build_parser, cmd_daemon
 
     cfg = tmp_path / "gateway.json"
     cfg.write_text(
@@ -1644,9 +1644,18 @@ def test_cmd_daemon_detach_without_os_fork(tmp_path: Path) -> None:
             out_val = out.getvalue()
             assert "CONTINUUM daemon started (pid 99999)" in out_val
             assert str(pid_file) in out_val
+
+            # Validate child command against CLI parser
+            child_argv = mock_popen.call_args.args[0]
+            daemon_idx = child_argv.index("daemon")
+            parsed = build_parser().parse_args(child_argv[daemon_idx:])
+            assert parsed.port == 8765
+            assert parsed.pid_file == str(pid_file)
+            assert parsed.run_id == "run_123"
+            assert parsed.detach is False
     finally:
         if orig_fork is not None:
-            os.fork = orig_fork
+            setattr(os, "fork", orig_fork)  # noqa: B010
 
 
 def test_main_daemon_invocation_end_to_end(tmp_path: Path) -> None:
@@ -1672,11 +1681,205 @@ def test_main_daemon_invocation_end_to_end(tmp_path: Path) -> None:
     )
     out = io.StringIO()
     err = io.StringIO()
-    with patch("continuum.gateway.GatewayServer") as mock_server:
+    with patch("continuum.gateway.GatewayServer") as mock_server, patch("signal.signal"):
         mock_server.return_value.serve_forever.return_value = None
         mock_server.return_value.port = 8765
         code = main(["daemon", "--config", str(cfg), "--port", "8765"], out=out, err=err)
         assert code == 0
+
+
+def test_cmd_daemon_foreground_does_not_delete_foreign_or_stale_pid_file(tmp_path: Path) -> None:
+    """Foreground daemon never deletes an existing PID file it did not write (#1640)."""
+    import argparse
+    import io
+    from unittest.mock import patch
+
+    from continuum.cli.main import cmd_daemon
+
+    cfg = tmp_path / "gateway.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "upstreams": [
+                    {
+                        "host": "api.example.com",
+                        "action_type": "send",
+                        "key_template": "key:{id}",
+                    }
+                ]
+            }
+        )
+    )
+    stale_pid = tmp_path / "stale.pid"
+    stale_pid.write_text("12345", encoding="utf-8")
+
+    args = argparse.Namespace(
+        config=str(cfg),
+        tenant=None,
+        run_id=None,
+        db=str(tmp_path / "test.db"),
+        port=8765,
+        detach=False,
+        pid_file=str(stale_pid),
+    )
+    out = io.StringIO()
+    err = io.StringIO()
+    with patch("continuum.gateway.GatewayServer") as mock_server, patch("signal.signal"):
+        mock_server.return_value.serve_forever.return_value = None
+        mock_server.return_value.port = 8765
+        code = cmd_daemon(args, None, out, err)
+        assert code == 0
+
+    assert stale_pid.exists()
+    assert stale_pid.read_text(encoding="utf-8") == "12345"
+
+
+def test_cmd_daemon_child_unlinks_own_pid_file_on_exit(tmp_path: Path) -> None:
+    """A daemon cleanly unlinks a PID file when the PID matches its own (#1640)."""
+    import argparse
+    import io
+    import os
+    from unittest.mock import patch
+
+    from continuum.cli.main import cmd_daemon
+
+    cfg = tmp_path / "gateway.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "upstreams": [
+                    {
+                        "host": "api.example.com",
+                        "action_type": "send",
+                        "key_template": "key:{id}",
+                    }
+                ]
+            }
+        )
+    )
+    pid_file = tmp_path / "own.pid"
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
+    args = argparse.Namespace(
+        config=str(cfg),
+        tenant=None,
+        run_id=None,
+        db=str(tmp_path / "test.db"),
+        port=8765,
+        detach=False,
+        pid_file=str(pid_file),
+    )
+    out = io.StringIO()
+    err = io.StringIO()
+    with patch("continuum.gateway.GatewayServer") as mock_server, patch("signal.signal"):
+        mock_server.return_value.serve_forever.return_value = None
+        mock_server.return_value.port = 8765
+        code = cmd_daemon(args, None, out, err)
+        assert code == 0
+
+    assert not pid_file.exists()
+
+
+def test_cmd_daemon_corrupt_database_probe_warns(tmp_path: Path) -> None:
+    """cmd_daemon warns when probing an unreadable or corrupt db without crashing (#1640)."""
+    import argparse
+    import io
+    from unittest.mock import patch
+
+    from continuum.cli.main import cmd_daemon
+
+    cfg = tmp_path / "gateway.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "upstreams": [
+                    {
+                        "host": "api.example.com",
+                        "action_type": "send",
+                        "key_template": "key:{id}",
+                    }
+                ]
+            }
+        )
+    )
+    corrupt_db = tmp_path / "corrupt.db"
+    corrupt_db.write_bytes(b"garbage not a valid sqlite database header")
+
+    args = argparse.Namespace(
+        config=str(cfg),
+        tenant=None,
+        run_id=None,
+        db=str(corrupt_db),
+        port=8765,
+        detach=False,
+        pid_file=None,
+    )
+    out = io.StringIO()
+    err = io.StringIO()
+    with patch("continuum.gateway.GatewayServer") as mock_server, patch("signal.signal"):
+        mock_server.return_value.serve_forever.return_value = None
+        mock_server.return_value.port = 8765
+        code = cmd_daemon(args, None, out, err)
+        assert code == 0
+        assert mock_server.call_args.args[1] is None
+        assert "warning: failed to probe active run" in err.getvalue()
+
+
+def test_cmd_daemon_detach_windows_creationflags(tmp_path: Path) -> None:
+    """Windows detach passes DETACHED_PROCESS and CREATE_NEW_PROCESS_GROUP flags (#1640)."""
+    import argparse
+    import io
+    import os
+    from unittest.mock import MagicMock, patch
+
+    from continuum.cli.main import cmd_daemon
+
+    cfg = tmp_path / "gateway.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "upstreams": [
+                    {
+                        "host": "api.example.com",
+                        "action_type": "send",
+                        "key_template": "key:{id}",
+                    }
+                ]
+            }
+        )
+    )
+    pid_file = tmp_path / "daemon.pid"
+    args = argparse.Namespace(
+        config=str(cfg),
+        tenant=None,
+        run_id="run_123",
+        db=str(tmp_path / "test.db"),
+        port=8765,
+        detach=True,
+        pid_file=str(pid_file),
+    )
+    out = io.StringIO()
+    err = io.StringIO()
+
+    mock_proc = MagicMock()
+    mock_proc.pid = 88888
+
+    orig_fork = getattr(os, "fork", None)
+    if hasattr(os, "fork"):
+        delattr(os, "fork")
+    try:
+        with (
+            patch("sys.platform", "win32"),
+            patch("subprocess.Popen", return_value=mock_proc) as mock_popen,
+        ):
+            code = cmd_daemon(args, None, out, err)
+            assert code == 0
+            call_flags = mock_popen.call_args.kwargs.get("creationflags", 0)
+            expected_flags = 0x00000008 | 0x00000200
+            assert call_flags == expected_flags
+    finally:
+        if orig_fork is not None:
+            setattr(os, "fork", orig_fork)  # noqa: B010
 
 
 def test_match_route_falls_back_to_run_metadata_tenant(tmp_path: Path) -> None:

@@ -3020,6 +3020,7 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
     ``--detach`` to fork into the background and write a PID file.
     """
     import signal
+    import sqlite3
     import sys
 
     from continuum.gateway import (
@@ -3052,7 +3053,7 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
             run_id = active.run_id if active else None
         else:
             db_path = getattr(args, "db", None)
-            if db_path and (db_path == ":memory:" or Path(db_path).exists()):
+            if db_path and db_path != ":memory:" and Path(db_path).exists():
                 try:
                     probe_storage = open_storage(db_path)
                     try:
@@ -3060,10 +3061,15 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
                         run_id = active.run_id if active else None
                     finally:
                         probe_storage.close()
-                except Exception:
+                except (sqlite3.Error, StorageError, ValueError, OSError) as exc:
+                    print(
+                        f"warning: failed to probe active run from {db_path}: {exc}",
+                        file=err,
+                    )
                     run_id = None
 
     pid_file = Path(args.pid_file) if args.pid_file else Path(".continuum/daemon.pid")
+    wrote_pid_file = False
 
     if args.detach and not hasattr(os, "fork"):
         import subprocess
@@ -3088,15 +3094,31 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
             )
 
         pid_file.parent.mkdir(parents=True, exist_ok=True)
-        proc = subprocess.Popen(
-            cmd,
-            creationflags=creationflags,
-            close_fds=True,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        pid_file.write_text(str(proc.pid), encoding="utf-8")
+        try:
+            pid_file.touch(exist_ok=True)
+        except OSError as exc:
+            print(f"error: cannot write pid file {pid_file}: {exc}", file=err)
+            return ExitCode.ERROR
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                creationflags=creationflags,
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            print(f"error: failed to spawn daemon process: {exc}", file=err)
+            return ExitCode.ERROR
+
+        try:
+            pid_file.write_text(str(proc.pid), encoding="utf-8")
+        except OSError:
+            proc.terminate()
+            raise
+        wrote_pid_file = True
         print(f"CONTINUUM daemon started (pid {proc.pid})", file=out)
         print(f"  pid file: {pid_file}", file=out)
         print(f"  gateway: 127.0.0.1:{args.port}", file=out)
@@ -3108,9 +3130,7 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
 
     if args.detach:
         fork_fn = getattr(os, "fork", None)
-        if fork_fn is None:
-            print("error: background daemon requires os.fork or Windows detached mode", file=err)
-            return ExitCode.ERROR
+        assert fork_fn is not None
         pid = fork_fn()
         if pid > 0:
             print(f"CONTINUUM daemon started (pid {pid})", file=out)
@@ -3121,6 +3141,16 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
             os.setsid()
         pid_file.parent.mkdir(parents=True, exist_ok=True)
         pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        wrote_pid_file = True
+
+    if not wrote_pid_file and getattr(args, "pid_file", None):
+        try:
+            if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() == str(
+                os.getpid()
+            ):
+                wrote_pid_file = True
+        except OSError:
+            pass
 
     print(
         f"CONTINUUM daemon listening on 127.0.0.1:{server.port} "
@@ -3130,10 +3160,19 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
     if args.detach:
         print(f"  pid file: {pid_file}", file=err)
 
+    def _unlink_pid_file() -> None:
+        if wrote_pid_file:
+            try:
+                if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() == str(
+                    os.getpid()
+                ):
+                    pid_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def _shutdown(signum: int, frame: Any) -> None:
         server.shutdown()
-        if args.detach or getattr(args, "pid_file", None):
-            pid_file.unlink(missing_ok=True)
+        _unlink_pid_file()
         sys.exit(0)
 
     import threading
@@ -3151,8 +3190,7 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
         pass
     finally:
         server.shutdown()
-        if args.detach or getattr(args, "pid_file", None):
-            pid_file.unlink(missing_ok=True)
+        _unlink_pid_file()
     return ExitCode.OK
 
 
