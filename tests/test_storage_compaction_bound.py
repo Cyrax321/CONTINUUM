@@ -55,9 +55,7 @@ def test_resolves_explicit_prefix_below_future_anchor(storage: SQLiteStorage) ->
 
 
 @pytest.mark.parametrize("offset", [0, 1, 100])
-def test_explicit_bound_cannot_consume_anchor_marker(
-    storage: SQLiteStorage, offset: int
-) -> None:
+def test_explicit_bound_cannot_consume_anchor_marker(storage: SQLiteStorage, offset: int) -> None:
     """Regression for #705/#1078: deleting the >= guard must fail this test."""
     CheckpointManager(storage).checkpoint(RUN_ID)
     # resolve_compaction_bound adds one forced checkpoint annotation before the
@@ -111,9 +109,7 @@ def test_missing_version_after_checkpoint_is_rejected(
     SQLite event, environment, and version queries throughout the resolver.
     """
 
-    def checkpoint_without_persistence(
-        self: CheckpointManager, run_id: str, **kwargs: object
-    ) -> None:
+    def checkpoint_without_persistence(self: CheckpointManager, run_id: str, **kwargs: object) -> None:
         return None
 
     monkeypatch.setattr(CheckpointManager, "checkpoint", checkpoint_without_persistence)
