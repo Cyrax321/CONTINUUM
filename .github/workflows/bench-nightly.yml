@@ -11,6 +11,7 @@ concurrency:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   publish:
@@ -36,8 +37,21 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add README.md references/bench.md
-          git diff --cached --quiet || git commit -m "bench: nightly refresh of published tables"
-          git push
+          if git diff --cached --quiet; then
+            echo "No benchmark table changes to publish."
+            exit 0
+          fi
+          # main is branch-protected, so the refresh rides a pull request the
+          # maintainers merge instead of a push the branch ruleset declines.
+          # The branch is owned by this job alone, so a force push refreshes the
+          # pull request a previous night already opened rather than diverging.
+          git checkout -B bench/nightly-table-refresh
+          git commit -m "bench: nightly refresh of published tables"
+          git push --force origin bench/nightly-table-refresh
+          gh pr create --base main --head bench/nightly-table-refresh \
+            --title "bench: nightly refresh of published tables" \
+            --body "Refreshed by the ${{ github.workflow }} workflow (${{ github.run_id }}). The tables in README.md and references/bench.md are generated from the nightly run; the only changes in this pull request are those generated cells." \
+            || echo "a pull request is already open for this branch; the force push refreshed it"
 
   latency-matrix:
     name: Recovery latency SLO matrix

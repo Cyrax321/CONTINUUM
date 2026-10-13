@@ -62,6 +62,15 @@ Test counts: ~3,636 collected on a minimal env.
   unknown id is refused as `RunNotFound` (as `continuum_list_actions` already
   did) rather than as `run 'x' has no checkpoint and no events`.
 
+- **The nightly benchmark publish no longer pushes to `main` (#1641).** The
+  job committed the refreshed tables and ran `git push`, and `main` is
+  branch-protected, so the push was declined by the branch ruleset and the
+  workflow failed every night: the published tables stopped tracking the
+  benchmark on 2026-10-10. The refresh now commits to a branch the job owns
+  and opens a pull request from it, and a night that finds nothing to change
+  exits cleanly instead of pushing an empty commit. The pull request also
+  carries `pull-requests: write`, which the push path never needed.
+
 - **A probe that prints `occurred:false` is now told the separator is the
   problem.** A command probe's verdict contract was documented only in the
   module docstring, so the place an operator met it was the error, and the
