@@ -4,7 +4,7 @@
 and returns a value, with no curses, storage, or side effects. The tests below
 pin the two contracts the module docstring promises:
 
-* a frame of ``SETTLED`` (negative) means "nothing moves" — every function
+* a frame of ``SETTLED`` (negative) means "nothing moves": every function
   resolves to its complete, unemphasised result;
 * the functions never grow past their inputs, and the sheen band is always
   clamped inside ``[0, art_width)``.
@@ -150,19 +150,20 @@ def test_shimmer_band_is_clamped_inside_art() -> None:
         assert end - start == band
 
 
-def test_shimmer_is_left_to_right_then_back() -> None:
+def test_shimmer_actually_moves_across_frames() -> None:
     art_width, band = 40, 8
     half = max(1, round(1.8 / TICK_SECONDS))
-    forward = [
-        shimmer_span(frame, art_width=art_width, band=band)[0]  # type: ignore[index]
-        for frame in range(0, half)
+    starts = [
+        shimmer_span(f, art_width=art_width, band=band)[0]  # type: ignore[index]
+        for f in range(0, 2 * half)
     ]
-    assert forward == sorted(forward), "forward half must sweep left-to-right"
-    backward = [
-        shimmer_span(frame, art_width=art_width, band=band)[0]  # type: ignore[index]
-        for frame in range(half, 2 * half)
-    ]
-    assert backward == sorted(backward, reverse=True), "return half must sweep right-to-left"
+    # Not frozen: the band visits more than one position.
+    assert len(set(starts)) > 1
+    # Forward half sweeps left-to-right, ending at the far edge.
+    assert starts[:half] == sorted(starts[:half])
+    assert starts[half - 1] > starts[0]
+    # Return half comes back right-to-left.
+    assert starts[half:] == sorted(starts[half:], reverse=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -194,9 +195,13 @@ def test_spinner_settled_returns_space() -> None:
     assert spinner(SETTLED) == " "
 
 
-def test_spinner_cycles_through_frames() -> None:
-    for frame in range(0, 40):
-        assert spinner(frame) in SPINNER_FRAMES
+def test_spinner_actually_cycles() -> None:
+    # Distinct frames must be produced across one full period.
+    produced = {spinner(f) for f in range(len(animate._SPINNER_FRAMES))}
+    assert produced == SPINNER_FRAMES
+    # Adjacent frames differ (no repeats) within a cycle.
+    for f in range(len(animate._SPINNER_FRAMES) - 1):
+        assert spinner(f) != spinner(f + 1)
 
 
 def test_spinner_wraps_around() -> None:
