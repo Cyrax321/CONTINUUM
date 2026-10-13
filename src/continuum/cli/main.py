@@ -3075,6 +3075,10 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
     pid_file = Path(args.pid_file) if args.pid_file else Path(".continuum/daemon.pid")
 
     if args.detach and not hasattr(os, "fork"):
+        if args.port == 0:
+            print("error: --detach requires an explicit --port on this platform", file=err)
+            return ExitCode.ERROR
+
         # Check port availability before detaching so occupied ports fail immediately.
         if args.port > 0:
             import socket

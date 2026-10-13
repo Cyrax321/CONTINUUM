@@ -2097,6 +2097,55 @@ def test_cmd_daemon_detach_early_exit_fails(tmp_path: Path) -> None:
             setattr(os, "fork", orig_fork)  # noqa: B010
 
 
+def test_cmd_daemon_detach_port_zero_fails_on_non_fork(tmp_path: Path) -> None:
+    """cmd_daemon --detach with --port 0 fails on non-fork platforms (#1669)."""
+    import argparse
+    import io
+    import os
+    from unittest.mock import patch
+
+    from continuum.cli.main import cmd_daemon
+
+    cfg = tmp_path / "gateway.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "upstreams": [
+                    {
+                        "host": "api.example.com",
+                        "action_type": "send",
+                        "key_template": "key:{id}",
+                    }
+                ]
+            }
+        )
+    )
+    args = argparse.Namespace(
+        config=str(cfg),
+        tenant=None,
+        run_id="run_123",
+        db=str(tmp_path / "test.db"),
+        port=0,
+        detach=True,
+        pid_file=str(tmp_path / "daemon.pid"),
+    )
+    out = io.StringIO()
+    err = io.StringIO()
+
+    orig_fork = getattr(os, "fork", None)
+    if hasattr(os, "fork"):
+        delattr(os, "fork")
+    try:
+        with patch("subprocess.Popen") as mock_popen:
+            code = cmd_daemon(args, None, out, err)
+            assert code != 0
+            assert "error: --detach requires an explicit --port" in err.getvalue()
+            assert not mock_popen.called
+    finally:
+        if orig_fork is not None:
+            setattr(os, "fork", orig_fork)  # noqa: B010
+
+
 def test_match_route_falls_back_to_run_metadata_tenant(tmp_path: Path) -> None:
     """match_route extracts bound tenant from storage run metadata when bound_tenant is None (#1415)."""
     route = Route(
