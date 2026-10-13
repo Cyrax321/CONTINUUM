@@ -73,6 +73,21 @@ def confirm_run(storage: Storage, run_id: str) -> None:
     ``goal`` and ``progress`` components, mirroring what the CLI seals.
     """
     storage.get_run(run_id)
+    try:
+        from continuum.recovery.fatigue import open_parked_count, record_batch_approval
+
+        parked = open_parked_count(storage, run_id)
+        if parked:
+            record_batch_approval(
+                storage,
+                run_id,
+                item_count=parked,
+                reviewer="dashboard-operator",
+                complexity="high",
+                source=Origin.HUMAN,
+            )
+    except Exception:
+        pass
     storage.append_event(
         run_id,
         EventType.REVIEW_CONFIRMED,
