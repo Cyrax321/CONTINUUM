@@ -57,7 +57,9 @@ dev = [
 # is reported by name with the command that installs it.
 mcp = ["mcp>=2.0", "tomli-w>=1.0", "PyYAML>=6.0"]
 # The OpenTelemetry bridge is optional: the core library never imports it.
-otel = ["opentelemetry-api>=1.20"]
+# The SDK is included because the span processor factory and its tests use the
+# SDK's SpanProcessor base and ReadableSpan types.
+otel = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
 # The LangGraph adapter is optional: it wraps langgraph's StateGraph and tool
 # decorators with CONTINUUM's durability layer.
 langgraph = ["langgraph>=0.2"]

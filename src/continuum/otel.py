@@ -137,9 +137,9 @@ def make_span_processor(
         from opentelemetry.sdk.trace import SpanProcessor
     except Exception as exc:  # pragma: no cover - exercised only without SDK
         raise RuntimeError(
-            "OpenTelemetry is not installed. Install 'opentelemetry-api' "
-            "(and 'opentelemetry-sdk' if you create the provider here) to use "
-            "the CONTINUUM span processor."
+            "OpenTelemetry is not installed. Install 'opentelemetry-api' and "
+            "'opentelemetry-sdk' (the 'otel' extra includes both) to use the "
+            "CONTINUUM span processor."
         ) from exc
 
     from opentelemetry.sdk.trace import ReadableSpan
