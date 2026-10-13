@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Test counts: ~3,636 collected on a minimal env.
+Test counts: ~3,680 collected on a minimal env.
 
 ### Added
 
@@ -52,6 +52,17 @@ Test counts: ~3,636 collected on a minimal env.
   scorer is shipped and tested on its own rather than arriving with a heuristic
   that moves while the queue is built.
 ### Fixed
+
+- **The documented test count is re-synced to the suite.** The docs the guard
+  counts stated ~3,636 while `pytest --collect-only` collects 3,680, so
+  `test_documented_count_matches_suite` failed on every CI job and `main` went
+  red. The figure moves whenever a PR lands tests without re-syncing the docs,
+  and the last few merges pushed it past the tolerance. README.md, the
+  translated READMEs, CHANGELOG.md, `docs/CONTRIBUTING_ONBOARDING.md`,
+  `docs/index.html`, and `references/{install,testing}.md` now state 3,680.
+  The translated READMEs' date-stamped "N passed + M skipped at the 2026-08-24
+  audit" lines are a result from that run, not a current total, so they are
+  left alone.
 
 - **The read-only MCP tools say "no such run" for an unknown run id.**
   `continuum_validate`, `continuum_resume` and `continuum_list_actions` were
@@ -1086,7 +1097,7 @@ Test counts: ~3,636 collected on a minimal env.
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (3,636 collected, ~3,636 passed, ~0 skipped on a minimal env).
+  (3,680 collected, ~3,680 passed, ~0 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
