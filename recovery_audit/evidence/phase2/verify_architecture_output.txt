@@ -1,0 +1,35 @@
+========================================================================
+V1  re-claim of an interrupted action
+  1st claim fresh=True status=started key=46d211bba6f4
+  2nd claim raised UnknownSideEffect
+  action_key=46d211bba6f4 action_id=action_8c572
+  pending() -> [('send_email', 'unknown')]
+  PASS
+========================================================================
+V2  externally-held lease fences a second worker
+  A claimed fresh=True; lease holder now=worker-A
+  B blocked by ClaimLockError: run 'r1' is leased to 'worker-A'; 'worker-B' must not write to the act
+  PASS
+========================================================================
+V3  lease expiry allows takeover (no fencing token)
+  A holds=A
+  after expiry holder=None
+  B took over: True
+  PASS
+========================================================================
+V4  status guard fences a stale completion with NO lease
+  B reconciled not-occurred -> status=failed
+  A's late complete blocked by LedgerError: action 'charge_card' is failed, not in flight, so completing it would assert an outcome no
+  PASS
+========================================================================
+V5  re-claim after lease expiry raises rather than duplicating the slot
+  A claimed fresh=True
+  holder after expiry=None
+  B's re-claim raised UnknownSideEffect (no duplicate slot)
+  PASS
+========================================================================
+V6  a naive on_unknown callback reopens an uncertain action
+  on_unknown resolved -> fresh=True status=failed
+  PASS (documents assumption A5: the callback is trusted, not checked)
+========================================================================
+ALL PHASE-2 VERIFICATIONS PASSED

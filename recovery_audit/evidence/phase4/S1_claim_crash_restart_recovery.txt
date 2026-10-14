@@ -1,0 +1,27 @@
+SCENARIO S1_claim_crash_restart_recovery
+VERDICT SAFE
+EXECUTIONS 1
+RECOVERY probe + reconcile(occurred=False) + retry
+
+ASSERTIONS
+  [PASS] exactly_one_action_survived
+  [PASS] surviving_action_is_started
+  [PASS] effect_never_landed
+  [PASS] no_duplicate
+  [PASS] blind_reclaim_refused
+  [PASS] blind_retry_landed_nothing
+  [PASS] assess_escalates
+  [PASS] assess_names_the_uncertain_action
+  [PASS] probe_found_no_effect
+  [PASS] retry_after_reconcile_succeeded
+  [PASS] effect_landed_exactly_once
+  [PASS] still_no_duplicate
+
+TRACE
+  !!! CRASH: simulated process death after claim() returned for 'inv-1', before the external effect
+  !!! abandoning worker=worker-A storage_calls={'append_event': 2, 'read_archived_events': 2, 'read_events': 2, 'read_all_events': 1}
+  --- restart: new worker=worker-A storage=CrashingStorage
+  blind re-claim: refused with UnknownSideEffect
+  assess mode=request_human uncertain=1
+  world.receipt('inv-1') -> None
+  world.perform('inv-1') -> LANDED external_id=ext_inv-1_1

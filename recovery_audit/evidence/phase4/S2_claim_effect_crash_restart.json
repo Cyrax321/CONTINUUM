@@ -1,0 +1,37 @@
+{
+  "scenario_id": "S2_claim_effect_crash_restart",
+  "verdict": "SAFE",
+  "executions": 1,
+  "recovery_action": "probe + reconcile(occurred=True) + re-claim (no-op)",
+  "assertions": {
+    "effect_landed_before_crash": true,
+    "one_action_survived": true,
+    "surviving_action_is_started": true,
+    "external_id_lost": true,
+    "blind_reclaim_refused": true,
+    "blind_retry_landed_no_second_effect": true,
+    "no_duplicate": true,
+    "assess_escalates": true,
+    "reconcile_confirmed_with_receipt": true,
+    "receipt_recorded": true,
+    "reclaim_after_reconcile_is_a_noop": true,
+    "reclaim_did_not_reexecute": true,
+    "still_no_duplicate": true
+  },
+  "expected_false": [],
+  "informational": [],
+  "notes": [
+    "The effect landed externally but the completion record was lost, so the ledger could only see STARTED.",
+    "Blind re-claim raised UnknownSideEffect and fired nothing - the acceptance criterion, satisfied.",
+    "Reconciliation recorded the external receipt; the subsequent claim returned fresh=False and did not re-execute."
+  ],
+  "trace": [
+    "!!! CRASH: simulated process death after the external effect landed for 'inv-2', before complete() recorded it",
+    "!!! abandoning worker=worker-A storage_calls={'append_event': 2, 'read_archived_events': 2, 'read_events': 2, 'read_all_events': 1}",
+    "--- restart: new worker=worker-A storage=CrashingStorage",
+    "blind re-claim: refused with UnknownSideEffect",
+    "assess mode=request_human",
+    "world.perform('inv-2') -> LANDED external_id=ext_inv-2_1",
+    "world.receipt('inv-2') -> 'ext_inv-2_1'"
+  ]
+}

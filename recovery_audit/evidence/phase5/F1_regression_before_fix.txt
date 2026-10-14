@@ -1,0 +1,47 @@
+F.                                                                       [100%]
+=================================== FAILURES ===================================
+_________________ test_concurrent_claims_do_not_open_two_slots _________________
+
+store_path = '/var/folders/l1/tfdzj4_s2xx007v3jls4tnlc0000gn/T/tmp_hnc0dvo/run.db'
+
+    def test_concurrent_claims_do_not_open_two_slots(store_path):
+        """Two interleaved claims on one identity must not both succeed.
+    
+        This is the audit's acceptance criterion: an action whose outcome may be
+        uncertain must not be given a second execution slot.
+        """
+        store_a = InterleavingStorage(store_path)
+        store_b = SQLiteStorage(store_path)
+        ledger_a = ActionLedger(store_a, "r1", holder_id="A")
+        ledger_b = ActionLedger(store_b, "r1", holder_id="B")
+    
+        held = {}
+    
+        def worker_b_claims():
+            held["outcome"] = ledger_b.claim("charge_card", {"amount": 10})
+    
+        # B's whole claim runs inside A's, just before A's ACTION_RECORDED is
+        # written: after A's fold has already decided the slot is free.
+        store_a.arm(worker_b_claims, n=1)
+        outcome_a = ledger_a.claim("charge_card", {"amount": 10})
+        outcome_b = held.get("outcome")
+    
+        assert store_a.fired, "the interleave did not run; the test is misconfigured"
+        assert outcome_a.fresh, "A must still be able to claim an empty slot"
+        # The assertion the audit requires: B must NOT also have been told to go
+        # ahead, because A had already taken the identity.
+        assert outcome_b is not None
+>       assert not outcome_b.fresh, (
+            "B opened a second slot for the same identity: claim() resolved the "
+            "idempotency key, then wrote without a compare-and-set, so a concurrent "
+            "claim could not see the write. Both workers would perform the side "
+            "effect. Pass expected_sequence to append_event so the storage-level CAS "
+            "rejects the stale write."
+        )
+E       AssertionError: B opened a second slot for the same identity: claim() resolved the idempotency key, then wrote without a compare-and-set, so a concurrent claim could not see the write. Both workers would perform the side effect. Pass expected_sequence to append_event so the storage-level CAS rejects the stale write.
+E       assert not True
+E        +  where True = ActionOutcome(key='724e65baa0e62d1f71c37ea5bb69f0c823db0a42b17f012ed7f749a1a5a57c41', action=Action(action_id='action_...puts(checkpoint_seq=0, event_positions=[], component_ids=[], action_ids=[]), budget_authorization_id=None), fresh=True).fresh
+
+tests/test_recovery_audit_tocou.py:132: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_recovery_audit_tocou.py::test_concurrent_claims_do_not_open_two_slots

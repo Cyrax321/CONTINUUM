@@ -1,0 +1,48 @@
+{
+  "scenario_id": "S5a_concurrent_workers_no_lease",
+  "verdict": "SAFE",
+  "executions": 1,
+  "recovery_action": "5a: no duplicate occurred - the losing worker's claim was rejected by the compare-and-set and then refused on the re-fold, so it performed nothing and learned the identity was already in flight. 5b: the lease fenced the second worker.",
+  "assertions": {
+    "interleave_actually_fired": true,
+    "worker_b_claimed_a_fresh_slot": true,
+    "worker_a_claimed_a_fresh_slot": false,
+    "both_workers_believed_they_held_the_slot": false,
+    "at_most_one_fresh_slot": true,
+    "the_loser_was_refused_loudly": true,
+    "loser_refusal_type": "UnknownSideEffect",
+    "started_slots_opened": 1,
+    "exactly_one_started_slot": true,
+    "two_workers_perform_twice": false,
+    "duplicate_side_effect_observed": false,
+    "lease_fenced_worker_b": true,
+    "lease_held_by_a": true,
+    "leased_scenario_no_duplicate": true
+  },
+  "expected_false": [
+    "both_workers_believed_they_held_the_slot",
+    "duplicate_side_effect_observed",
+    "two_workers_perform_twice"
+  ],
+  "informational": [
+    "interleave_actually_fired",
+    "lease_fenced_worker_b",
+    "lease_held_by_a",
+    "loser_refusal_type",
+    "started_slots_opened",
+    "worker_a_claimed_a_fresh_slot",
+    "worker_b_claimed_a_fresh_slot"
+  ],
+  "notes": [
+    "Without a lease, inserting B's claim into the middle of A's used to produce two ACTION_RECORDED records for one identity and both workers performing. After the fix, exactly one worker is told to proceed and the other is refused loudly (UnknownSideEffect), which is the same answer a sequential caller gets for an interrupted attempt.",
+    "The claim's read-then-write is closed with the compare-and-set the storage layer already exposed (expected_sequence), re-folding on ConcurrentWriteError rather than surfacing it, so a lost race is retryable and the fold re-evaluates against the new head.",
+    "With a lease the second worker is fenced outright - which is why the lease exists, but it is opt-in and off by default; the CAS fix is what protects the default configuration."
+  ],
+  "trace": [
+    "A outcome=UnknownSideEffect fresh=n/a; interleave fired=True; B outcome=ActionOutcome fresh=True",
+    "ACTION_RECORDED events for charge_card: 2 (statuses: ['started', 'unknown'])",
+    "landings=1 duplicates=0",
+    "the lease fenced the interleaved worker: ClaimLockError: run 'r1' is leased to 'A'; 'B' must not write to the action ledger while another",
+    "world.perform('inv-5') -> LANDED external_id=ext_inv-5_1"
+  ]
+}

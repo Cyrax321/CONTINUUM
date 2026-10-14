@@ -1,0 +1,21 @@
+SCENARIO S7_partial_corrupted_state
+VERDICT UNKNOWN_OUTCOME
+EXECUTIONS 1
+RECOVERY degrade: mark the poisoned prefix INVALID and escalate
+
+ASSERTIONS
+  [PASS] baseline_was_completed
+  [PASS] effect_landed_once
+  [PASS] corrupted_read_fails_closed
+  [PASS] assess_degraded_to_a_verdict
+  [PASS] assess_escalated_or_aborted
+  [PASS] claim_on_poisoned_log_refused
+  [PASS] corruption_laundered_no_side_effect
+  [PASS] no_duplicate
+
+TRACE
+  !!! INJECTED FAULT: corrupted the payload at sequence 3
+  assess mode=request_human
+  assess rationale=['the event log stops folding at sequence 3 (unreadable: storage failed to load record); this verdict covers events through sequence 2 only', 'at least one repair needs a person']
+  claim on the poisoned log was refused with CorruptedRecord
+  world.perform('inv-7') -> LANDED external_id=ext_inv-7_1

@@ -1,0 +1,25 @@
+SCENARIO S3_completion_record_lost
+VERDICT SAFE
+EXECUTIONS 1
+RECOVERY probe + reconcile(occurred=True) to restore the lost record
+
+ASSERTIONS
+  [PASS] action_was_completed
+  [PASS] receipt_was_recorded
+  [PASS] effect_landed_once
+  [PASS] record_now_reads_started
+  [PASS] external_id_gone_from_record
+  [PASS] blind_reclaim_refused
+  [PASS] blind_retry_landed_no_second_effect
+  [PASS] no_duplicate
+  [PASS] reconcile_restored_completion
+  [PASS] receipt_restored
+  [PASS] effect_still_landed_once
+  [PASS] still_no_duplicate
+
+TRACE
+  !!! INJECTED FAULT: deleted the completion event at sequence 3 (1 row)
+  --- restart: new worker=worker-A storage=CrashingStorage
+  blind re-claim: refused with UnknownSideEffect
+  world.perform('inv-3') -> LANDED external_id=ext_inv-3_1
+  world.receipt('inv-3') -> 'ext_inv-3_1'

@@ -1,0 +1,26 @@
+SCENARIO S4_external_action_fails_retry
+VERDICT SAFE
+EXECUTIONS 2
+RECOVERY FAILED: retry directly. UNKNOWN: reconcile then retry.
+
+ASSERTIONS
+  [PASS] first_attempt_recorded_failed
+  [PASS] failed_attempt_landed_nothing
+  [PASS] record_is_not_uncertain
+  [PASS] retry_succeeded
+  [PASS] retry_landed_exactly_once
+  [PASS] no_duplicate
+  [PASS] timeout_recorded_unknown
+  [PASS] timeout_record_is_uncertain
+  [PASS] uncertain_retry_refused
+  [PASS] uncertain_retry_fired_nothing
+  [PASS] reconcile_settled_the_timeout
+  [PASS] retry_after_timeout_reconcile_succeeded
+  [PASS] timeout_retry_landed_once
+  [PASS] timeout_no_duplicate
+
+TRACE
+  uncertain retry: refused with UnknownSideEffect
+  --- restart: new worker=worker-A storage=CrashingStorage
+  world.perform('inv-4') -> RAISE configured failure
+  world.perform('inv-4') -> LANDED external_id=ext_inv-4_1

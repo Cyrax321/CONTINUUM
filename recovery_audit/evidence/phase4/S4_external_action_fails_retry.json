@@ -1,0 +1,35 @@
+{
+  "scenario_id": "S4_external_action_fails_retry",
+  "verdict": "SAFE",
+  "executions": 2,
+  "recovery_action": "FAILED: retry directly. UNKNOWN: reconcile then retry.",
+  "assertions": {
+    "first_attempt_recorded_failed": true,
+    "failed_attempt_landed_nothing": true,
+    "record_is_not_uncertain": true,
+    "retry_succeeded": true,
+    "retry_landed_exactly_once": true,
+    "no_duplicate": true,
+    "timeout_recorded_unknown": true,
+    "timeout_record_is_uncertain": true,
+    "uncertain_retry_refused": true,
+    "uncertain_retry_fired_nothing": true,
+    "reconcile_settled_the_timeout": true,
+    "retry_after_timeout_reconcile_succeeded": true,
+    "timeout_retry_landed_once": true,
+    "timeout_no_duplicate": true
+  },
+  "expected_false": [],
+  "informational": [],
+  "notes": [
+    "A genuine failure records FAILED with side_effect_uncertain=False, so retry is safe and needs no probe.",
+    "A timeout records UNKNOWN with side_effect_uncertain=True, and retry is refused until reconciliation supplies evidence.",
+    "Both paths landed exactly one side effect."
+  ],
+  "trace": [
+    "uncertain retry: refused with UnknownSideEffect",
+    "--- restart: new worker=worker-A storage=CrashingStorage",
+    "world.perform('inv-4') -> RAISE configured failure",
+    "world.perform('inv-4') -> LANDED external_id=ext_inv-4_1"
+  ]
+}

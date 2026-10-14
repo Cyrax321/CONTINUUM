@@ -1,0 +1,24 @@
+SCENARIO S8a_identical_arguments
+VERDICT SAFE
+EXECUTIONS 3
+RECOVERY idempotency key collapse (derived, caller-supplied, or store-wide)
+
+ASSERTIONS
+  [PASS] second_identical_claim_is_a_noop
+  [PASS] identical_submission_landed_once
+  [PASS] identical_no_duplicate
+  [PASS] explicit_key_second_claim_is_a_noop
+  [PASS] explicit_key_landed_once
+  [PASS] explicit_key_no_duplicate
+  [PASS] cross_run_claim_deduplicated
+  [PASS] cross_run_claim_did_not_open_a_parallel_slot
+  [PASS] cross_run_landed_once
+  [PASS] cross_run_no_duplicate
+  [PASS] drifted_arguments_mint_a_distinct_key
+  [PASS] drifted_reclaim_still_blocked_when_in_flight
+  [PASS] drifted_no_duplicate
+
+TRACE
+  second run's unscoped claim returned fresh=False status=completed
+  first drifted key=c4c8922bf78a... (distinct keys are documented behaviour for differing payloads)
+  world.perform('mail-8a') -> LANDED external_id=ext_mail-8a_1

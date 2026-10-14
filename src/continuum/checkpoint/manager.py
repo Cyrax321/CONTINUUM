@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -36,15 +37,16 @@ from continuum.checkpoint.policy import (
     PolicyContext,
     default_policy,
 )
-from continuum.events import EventType
+from continuum.events import Event, EventType
 from continuum.models import (
     EnvironmentSnapshot,
     SemanticState,
     StateCheckpoint,
+    StateStatus,
     utcnow,
 )
 from continuum.state.semantic import project
-from continuum.storage.base import Storage
+from continuum.storage.base import CorruptedRecord, Storage
 
 # Resume banner persistence (issue #394): written on every checkpoint so a
 # SessionStart hook can inject a banner without opening the database. The
@@ -261,15 +263,54 @@ class CheckpointManager:
         no state, so the cursor advances past it.
         """
         cursor = checkpoint.state.source_sequence
-        for event in self.storage.read_events(
-            checkpoint.run_id, after_sequence=cursor, upto=cursor + 1
-        ):
-            if (
-                event.type is EventType.STATE_CHECKPOINTED
-                and event.payload.get("checkpoint_id") == checkpoint.checkpoint_id
+        try:
+            for event in self.storage.read_events(
+                checkpoint.run_id, after_sequence=cursor, upto=cursor + 1
             ):
-                return event.sequence
+                if (
+                    event.type is EventType.STATE_CHECKPOINTED
+                    and event.payload.get("checkpoint_id") == checkpoint.checkpoint_id
+                ):
+                    return event.sequence
+        except Exception:
+            return cursor
         return cursor
+
+    def _read_for_restore(
+        self,
+        run_id: str,
+        *,
+        after_sequence: int = 0,
+        on_unprojectable: Literal["raise", "degrade"] = "raise",
+    ) -> tuple[Sequence[Event], int | None]:
+        """Read events for restore, degrading to readable prefix on corruption."""
+        try:
+            events = self.storage.read_events(run_id, after_sequence=after_sequence)
+            return events, None
+        except CorruptedRecord as exc:
+            if on_unprojectable != "degrade":
+                raise
+            m = re.search(r", seq (\d+)\)", str(exc))
+            first_bad = int(m.group(1)) if m else None
+            if first_bad is not None and first_bad > after_sequence:
+                readable = self.storage.read_events(
+                    run_id, after_sequence=after_sequence, upto=first_bad - 1
+                )
+                return readable, first_bad
+            return (), first_bad
+
+    def _mark_unreadable(self, state: SemanticState, unreadable_seq: int | None) -> SemanticState:
+        """Mark state INVALID when storage refused an unreadable event payload."""
+        if unreadable_seq is None:
+            return state
+        return state.model_copy(
+            update={
+                "status": StateStatus.INVALID,
+                "unprojectable_at_sequence": unreadable_seq,
+                "unprojectable_event_type": "unreadable",
+                "unprojectable_reason": "storage failed to load record",
+            }
+        )
 
     # -- restoring -------------------------------------------------------- #
 
@@ -295,12 +336,16 @@ class CheckpointManager:
         checkpoint = self.storage.latest_checkpoint(run_id)
 
         if checkpoint is None:
-            events = self.storage.read_events(run_id)
-            if not events:
+            events, unreadable_seq = self._read_for_restore(
+                run_id, on_unprojectable=on_unprojectable
+            )
+            if not events and unreadable_seq is None:
                 raise CheckpointError(f"run {run_id!r} has no checkpoint and no events")
+            state = project(run_id, events, on_unprojectable=on_unprojectable)
+            state = self._mark_unreadable(state, unreadable_seq)
             return RestoredRun(
                 run_id=run_id,
-                state=project(run_id, events, on_unprojectable=on_unprojectable),
+                state=state,
                 checkpoint=None,
                 pending_events=len(events),
                 replayed=True,
@@ -312,9 +357,11 @@ class CheckpointManager:
             )
 
         cursor = self._cursor_for(checkpoint)
-        pending = self.storage.read_events(run_id, after_sequence=cursor)
+        pending, unreadable_seq = self._read_for_restore(
+            run_id, after_sequence=cursor, on_unprojectable=on_unprojectable
+        )
 
-        if not replay or not pending:
+        if not replay or (not pending and unreadable_seq is None):
             return RestoredRun(
                 run_id=run_id,
                 state=checkpoint.state,
@@ -328,6 +375,7 @@ class CheckpointManager:
         state, _ = project_incremental(
             run_id, pending, base=checkpoint.state, on_unprojectable=on_unprojectable
         )
+        state = self._mark_unreadable(state, unreadable_seq)
         return RestoredRun(
             run_id=run_id,
             state=state,

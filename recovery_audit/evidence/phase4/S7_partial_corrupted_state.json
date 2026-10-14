@@ -1,0 +1,30 @@
+{
+  "scenario_id": "S7_partial_corrupted_state",
+  "verdict": "UNKNOWN_OUTCOME",
+  "executions": 1,
+  "recovery_action": "degrade: mark the poisoned prefix INVALID and escalate",
+  "assertions": {
+    "baseline_was_completed": true,
+    "effect_landed_once": true,
+    "corrupted_read_fails_closed": true,
+    "assess_degraded_to_a_verdict": true,
+    "assess_escalated_or_aborted": true,
+    "claim_on_poisoned_log_refused": true,
+    "corruption_laundered_no_side_effect": true,
+    "no_duplicate": true
+  },
+  "expected_false": [],
+  "informational": [],
+  "notes": [
+    "Corrupting the completion payload made the log unreadable at that sequence; the storage layer raised rather than returning garbage.",
+    "Pre-fix (finding F2) that raise escaped assess() entirely, so a damaged log could not be assessed at all. Post-fix assess degrades to request_human and names the sequence the log stops folding at, which is the issue #383 contract this scenario now exercises.",
+    "The verdict is UNKNOWN_OUTCOME, not SAFE: the durable state is untrustworthy, so a human must decide. Reporting SAFE would misrepresent what was actually verified."
+  ],
+  "trace": [
+    "!!! INJECTED FAULT: corrupted the payload at sequence 3",
+    "assess mode=request_human",
+    "assess rationale=['the event log stops folding at sequence 3 (unreadable: storage failed to load record); this verdict covers events through sequence 2 only', 'at least one repair needs a person']",
+    "claim on the poisoned log was refused with CorruptedRecord",
+    "world.perform('inv-7') -> LANDED external_id=ext_inv-7_1"
+  ]
+}

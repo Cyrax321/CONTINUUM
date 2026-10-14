@@ -1,0 +1,34 @@
+{
+  "scenario_id": "S3_completion_record_lost",
+  "verdict": "SAFE",
+  "executions": 1,
+  "recovery_action": "probe + reconcile(occurred=True) to restore the lost record",
+  "assertions": {
+    "action_was_completed": true,
+    "receipt_was_recorded": true,
+    "effect_landed_once": true,
+    "record_now_reads_started": true,
+    "external_id_gone_from_record": true,
+    "blind_reclaim_refused": true,
+    "blind_retry_landed_no_second_effect": true,
+    "no_duplicate": true,
+    "reconcile_restored_completion": true,
+    "receipt_restored": true,
+    "effect_still_landed_once": true,
+    "still_no_duplicate": true
+  },
+  "expected_false": [],
+  "informational": [],
+  "notes": [
+    "The completion record was durable and then destroyed; the projection fell back to STARTED.",
+    "Blind re-claim raised UnknownSideEffect rather than re-charging, so a lost record could not launder a duplicate.",
+    "The probe's receipt restored the completion without re-executing."
+  ],
+  "trace": [
+    "!!! INJECTED FAULT: deleted the completion event at sequence 3 (1 row)",
+    "--- restart: new worker=worker-A storage=CrashingStorage",
+    "blind re-claim: refused with UnknownSideEffect",
+    "world.perform('inv-3') -> LANDED external_id=ext_inv-3_1",
+    "world.receipt('inv-3') -> 'ext_inv-3_1'"
+  ]
+}

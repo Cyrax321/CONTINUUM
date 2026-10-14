@@ -1,0 +1,33 @@
+{
+  "scenario_id": "S8a_identical_arguments",
+  "verdict": "SAFE",
+  "executions": 3,
+  "recovery_action": "idempotency key collapse (derived, caller-supplied, or store-wide)",
+  "assertions": {
+    "second_identical_claim_is_a_noop": true,
+    "identical_submission_landed_once": true,
+    "identical_no_duplicate": true,
+    "explicit_key_second_claim_is_a_noop": true,
+    "explicit_key_landed_once": true,
+    "explicit_key_no_duplicate": true,
+    "cross_run_claim_deduplicated": true,
+    "cross_run_claim_did_not_open_a_parallel_slot": true,
+    "cross_run_landed_once": true,
+    "cross_run_no_duplicate": true,
+    "drifted_arguments_mint_a_distinct_key": true,
+    "drifted_reclaim_still_blocked_when_in_flight": true,
+    "drifted_no_duplicate": true
+  },
+  "expected_false": [],
+  "informational": [],
+  "notes": [
+    "Identical arguments, an explicit caller key, and a store-wide unscoped key each collapsed to a single execution.",
+    "For the unscoped key across runs, the second run's claim deferred to the first run's record rather than opening a parallel slot.",
+    "Drifted arguments mint a distinct derived key, which is documented: the ledger cannot know two differing payloads mean the same effect, and the in-flight state still blocked a re-fire."
+  ],
+  "trace": [
+    "second run's unscoped claim returned fresh=False status=completed",
+    "first drifted key=c4c8922bf78a... (distinct keys are documented behaviour for differing payloads)",
+    "world.perform('mail-8a') -> LANDED external_id=ext_mail-8a_1"
+  ]
+}

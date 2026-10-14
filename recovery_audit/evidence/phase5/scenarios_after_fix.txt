@@ -1,0 +1,7 @@
+======================================================================
+scenarios run     : 8 of 8
+SAFE              : 7  ['S1_claim_crash_restart_recovery', 'S2_claim_effect_crash_restart', 'S3_completion_record_lost', 'S4_external_action_fails_retry', 'S5a_concurrent_workers_no_lease', 'S6_restored_state_pending', 'S8a_identical_arguments']
+UNSAFE            : 0  []
+UNKNOWN_OUTCOME   : 1  ['S7_partial_corrupted_state']
+evidence          : /private/tmp/audit-recovery/recovery_audit/evidence/phase4
+======================================================================

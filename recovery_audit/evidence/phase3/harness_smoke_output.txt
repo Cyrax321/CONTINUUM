@@ -1,0 +1,71 @@
+
+== ExternalWorld: atomic landing, honest probe, no window ==
+  [PASS] perform lands and returns an id
+  [PASS] occurred records the first receipt
+  [PASS] probe reports the truth
+  [PASS] probe reports absence honestly
+  [PASS] one attempt recorded
+  [PASS] execution_count counts landings
+  [PASS] distinct_keys counts keys
+  [PASS] a repeat perform lands again
+  [PASS] duplicate_executions is 1
+  [PASS] the duplicate is visible in the trace
+  [PASS] attempts_of counts calls
+  [PASS] idempotent repeat returns the same receipt
+  [PASS] idempotent repeat lands nothing new
+  [PASS] idempotent repeat is recorded as a call
+  [PASS] configured failure raises
+  [PASS] failed perform does not land
+  [PASS] liar reports the opposite of the truth
+  [PASS] unavailable probe raises
+
+== Crash is a BaseException and cannot be swallowed ==
+  [PASS] Crash is a BaseException
+  [PASS] Crash is NOT an Exception (budget/metrics handlers swallow Exception)
+
+== CrashingStorage inherits real durability behaviour ==
+  [PASS] CrashingStorage subclasses SQLiteStorage
+  [PASS] unarmed storage appends normally
+
+== crash counts are absolute from storage creation ==
+  [PASS] arming after setup still counts absolutely
+
+== a Crash inside a write leaves no partial write (rollback) ==
+  [PASS] the crashed write did not land
+  [PASS] the write before the crash survived
+
+== a Crash after a write returns leaves that write committed ==
+  [PASS] the completed write DID land (after-return crash)
+
+== Worker: clean claim -> effect -> complete ==
+  [PASS] worker completed the action
+  [PASS] worker recorded the external id
+  [PASS] the effect landed once
+  [PASS] the ledger is settled
+  [PASS] no duplicate
+
+== SEAM-1: crash after claim, before the effect ==
+  [PASS] the crash fired
+  [PASS] restart built a fresh worker
+  [PASS] restart built a fresh storage object
+  [PASS] exactly one action survived the crash
+  [PASS] the surviving action is STARTED, not COMPLETED
+  [PASS] the effect never landed
+  [PASS] no durability cleanup ran in the crash window
+
+== SEAM-2: crash after the effect, before complete() ==
+  [PASS] the effect DID land before the crash
+  [PASS] one action survived
+  [PASS] the surviving action is still STARTED
+  [PASS] a blind re-claim of an interrupted action raises
+  [PASS] the blind retry did NOT land a second side effect
+
+== determinism: the same scenario run 3x gives an identical trace ==
+  [PASS] three traces are identical
+
+== evidence JSON round-trips ==
+  [PASS] verdict written
+  [PASS] assertions written
+
+============================================================
+HARNESS SMOKE PASSED - harness is sound and deterministic

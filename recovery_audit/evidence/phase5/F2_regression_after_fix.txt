@@ -1,0 +1,11 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.13.5, pytest-9.1.1, pluggy-1.6.0
+rootdir: /Users/adhinans/Desktop/Open source/Continuum
+configfile: pyproject.toml
+plugins: cov-7.1.0, asyncio-1.4.0, langsmith-0.11.1, anyio-4.14.2, hypothesis-6.165.10
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 5 items
+
+tests/test_recovery_audit_degrade.py .....                               [100%]
+
+============================== 5 passed in 0.14s ===============================

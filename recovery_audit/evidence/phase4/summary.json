@@ -1,0 +1,221 @@
+{
+  "S1_claim_crash_restart_recovery": {
+    "verdict": "SAFE",
+    "executions": 1,
+    "recovery_action": "probe + reconcile(occurred=False) + retry",
+    "assertions": {
+      "exactly_one_action_survived": true,
+      "surviving_action_is_started": true,
+      "effect_never_landed": true,
+      "no_duplicate": true,
+      "blind_reclaim_refused": true,
+      "blind_retry_landed_nothing": true,
+      "assess_escalates": true,
+      "assess_names_the_uncertain_action": true,
+      "probe_found_no_effect": true,
+      "retry_after_reconcile_succeeded": true,
+      "effect_landed_exactly_once": true,
+      "still_no_duplicate": true
+    },
+    "expected_false": [],
+    "informational": [],
+    "notes": [
+      "The claim was durable but the effect never ran, so the record was STARTED and a blind re-claim raised UnknownSideEffect.",
+      "RecoveryEngine.assess escalated to request_human rather than auto-retrying, which is the correct behaviour.",
+      "Reconciliation with evidence closed the loop and the retry then landed exactly once."
+    ]
+  },
+  "S2_claim_effect_crash_restart": {
+    "verdict": "SAFE",
+    "executions": 1,
+    "recovery_action": "probe + reconcile(occurred=True) + re-claim (no-op)",
+    "assertions": {
+      "effect_landed_before_crash": true,
+      "one_action_survived": true,
+      "surviving_action_is_started": true,
+      "external_id_lost": true,
+      "blind_reclaim_refused": true,
+      "blind_retry_landed_no_second_effect": true,
+      "no_duplicate": true,
+      "assess_escalates": true,
+      "reconcile_confirmed_with_receipt": true,
+      "receipt_recorded": true,
+      "reclaim_after_reconcile_is_a_noop": true,
+      "reclaim_did_not_reexecute": true,
+      "still_no_duplicate": true
+    },
+    "expected_false": [],
+    "informational": [],
+    "notes": [
+      "The effect landed externally but the completion record was lost, so the ledger could only see STARTED.",
+      "Blind re-claim raised UnknownSideEffect and fired nothing - the acceptance criterion, satisfied.",
+      "Reconciliation recorded the external receipt; the subsequent claim returned fresh=False and did not re-execute."
+    ]
+  },
+  "S3_completion_record_lost": {
+    "verdict": "SAFE",
+    "executions": 1,
+    "recovery_action": "probe + reconcile(occurred=True) to restore the lost record",
+    "assertions": {
+      "action_was_completed": true,
+      "receipt_was_recorded": true,
+      "effect_landed_once": true,
+      "record_now_reads_started": true,
+      "external_id_gone_from_record": true,
+      "blind_reclaim_refused": true,
+      "blind_retry_landed_no_second_effect": true,
+      "no_duplicate": true,
+      "reconcile_restored_completion": true,
+      "receipt_restored": true,
+      "effect_still_landed_once": true,
+      "still_no_duplicate": true
+    },
+    "expected_false": [],
+    "informational": [],
+    "notes": [
+      "The completion record was durable and then destroyed; the projection fell back to STARTED.",
+      "Blind re-claim raised UnknownSideEffect rather than re-charging, so a lost record could not launder a duplicate.",
+      "The probe's receipt restored the completion without re-executing."
+    ]
+  },
+  "S4_external_action_fails_retry": {
+    "verdict": "SAFE",
+    "executions": 2,
+    "recovery_action": "FAILED: retry directly. UNKNOWN: reconcile then retry.",
+    "assertions": {
+      "first_attempt_recorded_failed": true,
+      "failed_attempt_landed_nothing": true,
+      "record_is_not_uncertain": true,
+      "retry_succeeded": true,
+      "retry_landed_exactly_once": true,
+      "no_duplicate": true,
+      "timeout_recorded_unknown": true,
+      "timeout_record_is_uncertain": true,
+      "uncertain_retry_refused": true,
+      "uncertain_retry_fired_nothing": true,
+      "reconcile_settled_the_timeout": true,
+      "retry_after_timeout_reconcile_succeeded": true,
+      "timeout_retry_landed_once": true,
+      "timeout_no_duplicate": true
+    },
+    "expected_false": [],
+    "informational": [],
+    "notes": [
+      "A genuine failure records FAILED with side_effect_uncertain=False, so retry is safe and needs no probe.",
+      "A timeout records UNKNOWN with side_effect_uncertain=True, and retry is refused until reconciliation supplies evidence.",
+      "Both paths landed exactly one side effect."
+    ]
+  },
+  "S5a_concurrent_workers_no_lease": {
+    "verdict": "SAFE",
+    "executions": 1,
+    "recovery_action": "5a: no duplicate occurred - the losing worker's claim was rejected by the compare-and-set and then refused on the re-fold, so it performed nothing and learned the identity was already in flight. 5b: the lease fenced the second worker.",
+    "assertions": {
+      "interleave_actually_fired": true,
+      "worker_b_claimed_a_fresh_slot": true,
+      "worker_a_claimed_a_fresh_slot": false,
+      "both_workers_believed_they_held_the_slot": false,
+      "at_most_one_fresh_slot": true,
+      "the_loser_was_refused_loudly": true,
+      "loser_refusal_type": "UnknownSideEffect",
+      "started_slots_opened": 1,
+      "exactly_one_started_slot": true,
+      "two_workers_perform_twice": false,
+      "duplicate_side_effect_observed": false,
+      "lease_fenced_worker_b": true,
+      "lease_held_by_a": true,
+      "leased_scenario_no_duplicate": true
+    },
+    "expected_false": [
+      "both_workers_believed_they_held_the_slot",
+      "duplicate_side_effect_observed",
+      "two_workers_perform_twice"
+    ],
+    "informational": [
+      "interleave_actually_fired",
+      "lease_fenced_worker_b",
+      "lease_held_by_a",
+      "loser_refusal_type",
+      "started_slots_opened",
+      "worker_a_claimed_a_fresh_slot",
+      "worker_b_claimed_a_fresh_slot"
+    ],
+    "notes": [
+      "Without a lease, inserting B's claim into the middle of A's used to produce two ACTION_RECORDED records for one identity and both workers performing. After the fix, exactly one worker is told to proceed and the other is refused loudly (UnknownSideEffect), which is the same answer a sequential caller gets for an interrupted attempt.",
+      "The claim's read-then-write is closed with the compare-and-set the storage layer already exposed (expected_sequence), re-folding on ConcurrentWriteError rather than surfacing it, so a lost race is retryable and the fold re-evaluates against the new head.",
+      "With a lease the second worker is fenced outright - which is why the lease exists, but it is opt-in and off by default; the CAS fix is what protects the default configuration."
+    ]
+  },
+  "S6_restored_state_pending": {
+    "verdict": "SAFE",
+    "executions": 1,
+    "recovery_action": "probe + reconcile(occurred=True); restore did not launder the slot",
+    "assertions": {
+      "effect_landed_before_crash": true,
+      "restore_replayed_forward": true,
+      "checkpoint_predates_the_claim": true,
+      "reclaim_refused_despite_stale_projection": true,
+      "blind_retry_landed_nothing_new": true,
+      "no_duplicate": true,
+      "reconcile_confirmed": true,
+      "reclaim_after_reconcile_did_not_reexecute": true,
+      "still_no_duplicate": true
+    },
+    "expected_false": [],
+    "informational": [],
+    "notes": [
+      "The checkpoint predates the claim, so the restored projection carries no knowledge of the in-flight action.",
+      "The ledger folds the live log rather than the checkpoint, so the STARTED record still blocked a blind re-claim.",
+      "Restore is therefore not a way to resurrect a spent slot."
+    ]
+  },
+  "S7_partial_corrupted_state": {
+    "verdict": "UNKNOWN_OUTCOME",
+    "executions": 1,
+    "recovery_action": "degrade: mark the poisoned prefix INVALID and escalate",
+    "assertions": {
+      "baseline_was_completed": true,
+      "effect_landed_once": true,
+      "corrupted_read_fails_closed": true,
+      "assess_degraded_to_a_verdict": true,
+      "assess_escalated_or_aborted": true,
+      "claim_on_poisoned_log_refused": true,
+      "corruption_laundered_no_side_effect": true,
+      "no_duplicate": true
+    },
+    "expected_false": [],
+    "informational": [],
+    "notes": [
+      "Corrupting the completion payload made the log unreadable at that sequence; the storage layer raised rather than returning garbage.",
+      "Pre-fix (finding F2) that raise escaped assess() entirely, so a damaged log could not be assessed at all. Post-fix assess degrades to request_human and names the sequence the log stops folding at, which is the issue #383 contract this scenario now exercises.",
+      "The verdict is UNKNOWN_OUTCOME, not SAFE: the durable state is untrustworthy, so a human must decide. Reporting SAFE would misrepresent what was actually verified."
+    ]
+  },
+  "S8a_identical_arguments": {
+    "verdict": "SAFE",
+    "executions": 3,
+    "recovery_action": "idempotency key collapse (derived, caller-supplied, or store-wide)",
+    "assertions": {
+      "second_identical_claim_is_a_noop": true,
+      "identical_submission_landed_once": true,
+      "identical_no_duplicate": true,
+      "explicit_key_second_claim_is_a_noop": true,
+      "explicit_key_landed_once": true,
+      "explicit_key_no_duplicate": true,
+      "cross_run_claim_deduplicated": true,
+      "cross_run_claim_did_not_open_a_parallel_slot": true,
+      "cross_run_landed_once": true,
+      "cross_run_no_duplicate": true,
+      "drifted_arguments_mint_a_distinct_key": true,
+      "drifted_reclaim_still_blocked_when_in_flight": true,
+      "drifted_no_duplicate": true
+    },
+    "expected_false": [],
+    "informational": [],
+    "notes": [
+      "Identical arguments, an explicit caller key, and a store-wide unscoped key each collapsed to a single execution.",
+      "For the unscoped key across runs, the second run's claim deferred to the first run's record rather than opening a parallel slot.",
+      "Drifted arguments mint a distinct derived key, which is documented: the ledger cannot know two differing payloads mean the same effect, and the in-flight state still blocked a re-fire."
+    ]
+  }
+}

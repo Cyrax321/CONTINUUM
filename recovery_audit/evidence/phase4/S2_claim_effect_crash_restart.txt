@@ -1,0 +1,28 @@
+SCENARIO S2_claim_effect_crash_restart
+VERDICT SAFE
+EXECUTIONS 1
+RECOVERY probe + reconcile(occurred=True) + re-claim (no-op)
+
+ASSERTIONS
+  [PASS] effect_landed_before_crash
+  [PASS] one_action_survived
+  [PASS] surviving_action_is_started
+  [PASS] external_id_lost
+  [PASS] blind_reclaim_refused
+  [PASS] blind_retry_landed_no_second_effect
+  [PASS] no_duplicate
+  [PASS] assess_escalates
+  [PASS] reconcile_confirmed_with_receipt
+  [PASS] receipt_recorded
+  [PASS] reclaim_after_reconcile_is_a_noop
+  [PASS] reclaim_did_not_reexecute
+  [PASS] still_no_duplicate
+
+TRACE
+  !!! CRASH: simulated process death after the external effect landed for 'inv-2', before complete() recorded it
+  !!! abandoning worker=worker-A storage_calls={'append_event': 2, 'read_archived_events': 2, 'read_events': 2, 'read_all_events': 1}
+  --- restart: new worker=worker-A storage=CrashingStorage
+  blind re-claim: refused with UnknownSideEffect
+  assess mode=request_human
+  world.perform('inv-2') -> LANDED external_id=ext_inv-2_1
+  world.receipt('inv-2') -> 'ext_inv-2_1'

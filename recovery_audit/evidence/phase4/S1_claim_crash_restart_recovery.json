@@ -1,0 +1,36 @@
+{
+  "scenario_id": "S1_claim_crash_restart_recovery",
+  "verdict": "SAFE",
+  "executions": 1,
+  "recovery_action": "probe + reconcile(occurred=False) + retry",
+  "assertions": {
+    "exactly_one_action_survived": true,
+    "surviving_action_is_started": true,
+    "effect_never_landed": true,
+    "no_duplicate": true,
+    "blind_reclaim_refused": true,
+    "blind_retry_landed_nothing": true,
+    "assess_escalates": true,
+    "assess_names_the_uncertain_action": true,
+    "probe_found_no_effect": true,
+    "retry_after_reconcile_succeeded": true,
+    "effect_landed_exactly_once": true,
+    "still_no_duplicate": true
+  },
+  "expected_false": [],
+  "informational": [],
+  "notes": [
+    "The claim was durable but the effect never ran, so the record was STARTED and a blind re-claim raised UnknownSideEffect.",
+    "RecoveryEngine.assess escalated to request_human rather than auto-retrying, which is the correct behaviour.",
+    "Reconciliation with evidence closed the loop and the retry then landed exactly once."
+  ],
+  "trace": [
+    "!!! CRASH: simulated process death after claim() returned for 'inv-1', before the external effect",
+    "!!! abandoning worker=worker-A storage_calls={'append_event': 2, 'read_archived_events': 2, 'read_events': 2, 'read_all_events': 1}",
+    "--- restart: new worker=worker-A storage=CrashingStorage",
+    "blind re-claim: refused with UnknownSideEffect",
+    "assess mode=request_human uncertain=1",
+    "world.receipt('inv-1') -> None",
+    "world.perform('inv-1') -> LANDED external_id=ext_inv-1_1"
+  ]
+}

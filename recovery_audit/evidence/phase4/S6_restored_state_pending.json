@@ -1,0 +1,33 @@
+{
+  "scenario_id": "S6_restored_state_pending",
+  "verdict": "SAFE",
+  "executions": 1,
+  "recovery_action": "probe + reconcile(occurred=True); restore did not launder the slot",
+  "assertions": {
+    "effect_landed_before_crash": true,
+    "restore_replayed_forward": true,
+    "checkpoint_predates_the_claim": true,
+    "reclaim_refused_despite_stale_projection": true,
+    "blind_retry_landed_nothing_new": true,
+    "no_duplicate": true,
+    "reconcile_confirmed": true,
+    "reclaim_after_reconcile_did_not_reexecute": true,
+    "still_no_duplicate": true
+  },
+  "expected_false": [],
+  "informational": [],
+  "notes": [
+    "The checkpoint predates the claim, so the restored projection carries no knowledge of the in-flight action.",
+    "The ledger folds the live log rather than the checkpoint, so the STARTED record still blocked a blind re-claim.",
+    "Restore is therefore not a way to resurrect a spent slot."
+  ],
+  "trace": [
+    "checkpoint at source_sequence=1",
+    "!!! CRASH: simulated process death after the external effect landed for 'inv-6', before complete() recorded it",
+    "!!! abandoning worker=worker-A storage_calls={'append_event': 3, 'read_all_events': 2, 'read_archived_events': 3, 'read_events': 3}",
+    "--- restart: new worker=worker-A storage=CrashingStorage",
+    "blind re-claim: refused with UnknownSideEffect",
+    "world.perform('inv-6') -> LANDED external_id=ext_inv-6_1",
+    "world.receipt('inv-6') -> 'ext_inv-6_1'"
+  ]
+}

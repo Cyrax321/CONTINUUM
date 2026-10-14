@@ -355,7 +355,10 @@ class RecoveryEngine:
         try:
             archive_aware_events = self.storage.read_all_events(run_id)
         except Exception:
-            archive_aware_events = self.storage.read_events(run_id)
+            try:
+                archive_aware_events = self.storage.read_events(run_id)
+            except Exception:
+                archive_aware_events = ()
         for _ev in archive_aware_events:
             if _ev.type is not EventType.REVIEW_CONFIRMED:
                 continue
@@ -392,10 +395,14 @@ class RecoveryEngine:
             events=archive_aware_events,
         )
 
-        action_ledger = ActionLedger(self.storage, run_id)
+        try:
+            action_ledger = ActionLedger(self.storage, run_id)
+            all_actions = action_ledger.all()
+        except Exception:
+            all_actions = ()
         all_uncertain = tuple(
             a
-            for a in action_ledger.all()
+            for a in all_actions
             if a.status
             in (ActionStatus.UNKNOWN, ActionStatus.STARTED, ActionStatus.REQUIRES_REVIEW)
         )
@@ -431,7 +438,7 @@ class RecoveryEngine:
             if broken.status is StateStatus.INVALID and broken.unprojectable_at_sequence is not None
             else None
         )
-        admissibility = check_admissibility(restored.checkpoint, action_ledger.all())
+        admissibility = check_admissibility(restored.checkpoint, all_actions)
         if not admissibility.admissible:
             has_action_ref = any(d["consumed_inputs"]["action_ids"] for d in admissibility.details)
             status = StateStatus.REQUIRES_REVIEW if has_action_ref else StateStatus.STALE
@@ -683,7 +690,10 @@ class RecoveryEngine:
         latest_version = self.storage.latest_version(run_id)
         if latest_version is not None:
             after_sequence = latest_version.source_sequence
-        observations = collect_observations(self.storage, run_id, after_sequence=after_sequence)
+        try:
+            observations = collect_observations(self.storage, run_id, after_sequence=after_sequence)
+        except Exception:
+            observations = []
 
         # Build liveness section for contract
         liveness_section = None
@@ -718,13 +728,16 @@ class RecoveryEngine:
 
         # Informed retry (#265): derive the prior-attempt account from events
         # already in the chain. Read-only, deterministic, None without history.
-        informed_retry = build_informed_retry(
-            self.storage,
-            run_id,
-            validation_report=validation.report,
-            uncertain_actions=uncertain,
-            plan=plan,
-        )
+        try:
+            informed_retry = build_informed_retry(
+                self.storage,
+                run_id,
+                validation_report=validation.report,
+                uncertain_actions=uncertain,
+                plan=plan,
+            )
+        except Exception:
+            informed_retry = None
 
         decision = RecoveryDecision(
             run_id=run_id,

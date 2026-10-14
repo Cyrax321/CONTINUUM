@@ -1,0 +1,164 @@
+.F.F                                                                     [100%]
+=================================== FAILURES ===================================
+_____________ test_assess_degrades_to_a_verdict_on_a_poisoned_log ______________
+
+self = <continuum.storage.sqlite.SQLiteStorage object at 0x10ad86650>
+row = <sqlite3.Row object at 0x10ae04d30>, rehydrate = True
+
+    def _row_to_event(self, row: sqlite3.Row, *, rehydrate: bool = True) -> Event:
+        try:
+>           raw_payload = json.loads(row["payload"])
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/continuum/storage/sqlite.py:797: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x107fdf4d0>
+s = '{"key": "k1", "brok', idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           json.decoder.JSONDecodeError: Unterminated string starting at: line 1 column 15 (char 14)
+
+/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: JSONDecodeError
+
+The above exception was the direct cause of the following exception:
+
+poisoned_path = '/var/folders/l1/tfdzj4_s2xx007v3jls4tnlc0000gn/T/tmp83zwgm67/run.db'
+
+    def test_assess_degrades_to_a_verdict_on_a_poisoned_log(poisoned_path):
+        """assess must answer, not raise: a poisoned log is the run that needs one.
+    
+        This is the issue #383 contract the engine asserts at engine.py:348-352.
+        """
+        from continuum.recovery.engine import RecoveryEngine
+    
+        engine = RecoveryEngine(SQLiteStorage(poisoned_path))
+>       decision = engine.assess("r1")
+                   ^^^^^^^^^^^^^^^^^^^
+
+tests/test_recovery_audit_degrade.py:108: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src/continuum/recovery/engine.py:353: in assess
+    restored = self._manager.restore(run_id, replay=replay, on_unprojectable="degrade")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/continuum/checkpoint/manager.py:298: in restore
+    events = self.storage.read_events(run_id)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/continuum/storage/sqlite.py:785: in read_events
+    return [self._row_to_event(row, rehydrate=rehydrate) for row in rows]
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <continuum.storage.sqlite.SQLiteStorage object at 0x10ad86650>
+row = <sqlite3.Row object at 0x10ae04d30>, rehydrate = True
+
+    def _row_to_event(self, row: sqlite3.Row, *, rehydrate: bool = True) -> Event:
+        try:
+            raw_payload = json.loads(row["payload"])
+        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
+>           raise CorruptedRecord(
+                f"event {row['event_id']!r} (run {row['run_id']!r}, seq {row['sequence']}) "
+                f"failed to load: {exc}"
+            ) from exc
+E           continuum.storage.base.CorruptedRecord: event 'event_fa04cf6c7f402e6a51f0ed9e63eb8351' (run 'r1', seq 2) failed to load: Unterminated string starting at: line 1 column 15 (char 14)
+
+src/continuum/storage/sqlite.py:799: CorruptedRecord
+__________ test_the_poisoned_prefix_is_reported_not_silently_trusted ___________
+
+self = <continuum.storage.sqlite.SQLiteStorage object at 0x10ad9b350>
+row = <sqlite3.Row object at 0x10ae06da0>, rehydrate = True
+
+    def _row_to_event(self, row: sqlite3.Row, *, rehydrate: bool = True) -> Event:
+        try:
+>           raw_payload = json.loads(row["payload"])
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+src/continuum/storage/sqlite.py:797: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x107fdf4d0>
+s = '{"key": "k1", "brok', idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           json.decoder.JSONDecodeError: Unterminated string starting at: line 1 column 15 (char 14)
+
+/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: JSONDecodeError
+
+The above exception was the direct cause of the following exception:
+
+poisoned_path = '/var/folders/l1/tfdzj4_s2xx007v3jls4tnlc0000gn/T/tmpaccly6ez/run.db'
+
+    def test_the_poisoned_prefix_is_reported_not_silently_trusted(poisoned_path):
+        """Whatever the degraded verdict says, it must not claim the log is intact."""
+        from continuum.recovery.engine import RecoveryEngine
+    
+        engine = RecoveryEngine(SQLiteStorage(poisoned_path))
+>       decision = engine.assess("r1")
+                   ^^^^^^^^^^^^^^^^^^^
+
+tests/test_recovery_audit_degrade.py:147: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src/continuum/recovery/engine.py:353: in assess
+    restored = self._manager.restore(run_id, replay=replay, on_unprojectable="degrade")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/continuum/checkpoint/manager.py:298: in restore
+    events = self.storage.read_events(run_id)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/continuum/storage/sqlite.py:785: in read_events
+    return [self._row_to_event(row, rehydrate=rehydrate) for row in rows]
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <continuum.storage.sqlite.SQLiteStorage object at 0x10ad9b350>
+row = <sqlite3.Row object at 0x10ae06da0>, rehydrate = True
+
+    def _row_to_event(self, row: sqlite3.Row, *, rehydrate: bool = True) -> Event:
+        try:
+            raw_payload = json.loads(row["payload"])
+        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
+>           raise CorruptedRecord(
+                f"event {row['event_id']!r} (run {row['run_id']!r}, seq {row['sequence']}) "
+                f"failed to load: {exc}"
+            ) from exc
+E           continuum.storage.base.CorruptedRecord: event 'event_70f8c740f17b42e30e61fe5326c6f526' (run 'r1', seq 2) failed to load: Unterminated string starting at: line 1 column 15 (char 14)
+
+src/continuum/storage/sqlite.py:799: CorruptedRecord
+=========================== short test summary info ============================
+FAILED tests/test_recovery_audit_degrade.py::test_assess_degrades_to_a_verdict_on_a_poisoned_log
+FAILED tests/test_recovery_audit_degrade.py::test_the_poisoned_prefix_is_reported_not_silently_trusted

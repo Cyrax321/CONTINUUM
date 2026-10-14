@@ -1,0 +1,24 @@
+SCENARIO S6_restored_state_pending
+VERDICT SAFE
+EXECUTIONS 1
+RECOVERY probe + reconcile(occurred=True); restore did not launder the slot
+
+ASSERTIONS
+  [PASS] effect_landed_before_crash
+  [PASS] restore_replayed_forward
+  [PASS] checkpoint_predates_the_claim
+  [PASS] reclaim_refused_despite_stale_projection
+  [PASS] blind_retry_landed_nothing_new
+  [PASS] no_duplicate
+  [PASS] reconcile_confirmed
+  [PASS] reclaim_after_reconcile_did_not_reexecute
+  [PASS] still_no_duplicate
+
+TRACE
+  checkpoint at source_sequence=1
+  !!! CRASH: simulated process death after the external effect landed for 'inv-6', before complete() recorded it
+  !!! abandoning worker=worker-A storage_calls={'append_event': 3, 'read_all_events': 2, 'read_archived_events': 3, 'read_events': 3}
+  --- restart: new worker=worker-A storage=CrashingStorage
+  blind re-claim: refused with UnknownSideEffect
+  world.perform('inv-6') -> LANDED external_id=ext_inv-6_1
+  world.receipt('inv-6') -> 'ext_inv-6_1'
