@@ -20,6 +20,8 @@ may resume. The integration points, in order of most to least common, are:
   environment.
 - **MCP server** (`continuum.mcp`) exposes the same operations to any MCP client
   (for example Claude Code) over stdio, SSE, or HTTP.
+- **Sidecar HTTP API** (`continuum serve`) exposes those operations to non-Python
+  agents over a language-agnostic JSON wire protocol on stdio or HTTP.
 - **Security** (`continuum.security`, `continuum.mcp.authz`) signs chain
   attestations and authenticates callers.
 - **CLI** (`continuum`) is the command line surface, also usable in scripts.
@@ -32,6 +34,7 @@ may resume. The integration points, in order of most to least common, are:
 - [Recovery](recovery.md) - RecoveryEngine, RecoveryDecision
 - [Validation](validation.md) - StateValidator, validate_state, ValidationOutcome
 - [MCP server](mcp.md) - continuum-mcp, the thirteen tools, build_server
+- [Sidecar HTTP](serve-http.md) - `continuum serve`, the stdio and HTTP transports
 - [Security](security.md) - attestation and caller authentication
 - [CLI](cli.md) - the `continuum` command reference
 
