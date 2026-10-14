@@ -10,6 +10,22 @@ Test counts: ~3680 collected on a minimal env.
 
 ### Added
 
+- **Correlate observed tool events with ledger action attempts (#785).** An
+  optional bounded correlation identifier (`correlation_id`, 1-128 chars)
+  is now shared between ledger action attempts (`claim()`, `complete()`,
+  `reconcile()`, `Action`, `ActionRecordPayload`) and tool observations
+  (`TOOL_CALLED`, `TOOL_COMPLETED`, `TOOL_FAILED`). `correlate_action_events`
+  and `correlate_evidence` project read-only evidence chains (`EvidenceChain`),
+  classifying relationships as `matched`, `unmatched_action`,
+  `unmatched_observation`, `ambiguous`, or `missing_correlation`. Repeated
+  similar actions are disambiguated by distinct correlation IDs without
+  heuristic guesswork. The evidence chain survives compaction across archive
+  boundaries and remains verifiable under hash-chain tamper detection. A
+  correlated tool event never automatically settles an uncertain action,
+  preserving safe-by-default recovery semantics. Includes CLI commands
+  (`continuum evidence-chain <run-id>` and `continuum observe --correlation-id`)
+  and MCP action tool support.
+
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a
   repeatedly failing integration spends its own allowance instead of the run's:
