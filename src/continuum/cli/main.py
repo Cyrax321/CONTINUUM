@@ -1526,7 +1526,7 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     ])
     if has_wid_flags and not getattr(args, "attest", None):
         print("error: workload identity options require --attest", file=err)
-        return ExitCode.USAGE_ERROR
+        return ExitCode.ERROR
 
     if getattr(args, "attest", None):
         attest_file = Path(args.attest)

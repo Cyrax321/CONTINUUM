@@ -205,18 +205,14 @@ class SpiffeIdentityProvider:
             ) from exc
 
     def verify_identity(self, identity: WorkloadIdentity) -> bool:
-        """Verify the claim matches the SVID currently issued to this workload."""
+        """Verify that an identity matches expected format and trust domain constraints."""
         try:
             td = _parse_trust_domain(identity.spiffe_id)
         except ValueError:
             return False
-        if self.trust_domain is not None and td != self.trust_domain:
+        if not self.trust_domain:
             return False
-        try:
-            current = self.get_identity()
-        except WorkloadIdentityUnavailableError:
-            return False
-        return current.spiffe_id == identity.spiffe_id
+        return td == self.trust_domain
 
 
 def resolve_workload_provider(
