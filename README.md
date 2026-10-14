@@ -237,6 +237,8 @@ Two additive security extensions sit on top of the recovery and checkpoint subst
 
 See [docs/PROBLEM.md](docs/PROBLEM.md), [docs/RESULTS.md](docs/RESULTS.md), and [STATUS.md](STATUS.md).
 
+The adversary model is written down, not implied: [docs/threat_model.md](docs/threat_model.md) scopes what CONTINUUM protects against, what it merely detects, and what it explicitly does not, so a security reviewer can check the trust claims against the tests that back them. If you seal contracts with a key rather than a bare hash, [docs/signing_key_rotation.md](docs/signing_key_rotation.md) specifies the optional keyed HMAC seal and the rotation rules that keep older hash-only contracts verifiable. Both documents name the code paths and tests behind each claim.
+
 ## Empirical Verification
 
 CONTINUUM is verified against real LLM agents, live protocol boundaries, and hard process crashes, not just mock unit tests.
@@ -328,6 +330,8 @@ continuum resume <run_id>    # now reports RESUME
 ```
 
 Over MCP the equivalent is the `continuum_confirm` tool followed by `continuum_resume`. Confirmation is a one-time, human-attested event: the escape hatch for the self-certification safety, so an externally-driven run is never permanently stuck.
+
+When two agents share one `run_id`, their checkpoint writes and ledger appends can interleave; [docs/multi_agent_isolation.md](docs/multi_agent_isolation.md) documents the `LeaseCoordinator` behaviour in `RecoveryLedger`, `ActionLedger`, and the sidecar that keeps one agent's recovery anchor from overwriting another's.
 
 ## Core Concepts
 
@@ -510,6 +514,8 @@ Optional registries live beside your code and are data, not code: `.continuum/ga
 
 Most commands accept global `--json` **before** the subcommand (e.g. `continuum --json resume RUN`), and read-only commands never write, so they are safe against a live database while an agent is mid-run. The two exceptions are audit-only and fire solely for a run that is already parked: `resume` records its webhook delivery outcome when the verdict is `REQUEST_HUMAN` and an endpoint is subscribed, and `watch` records a liveness verdict flip; neither append projects onto state or moves the exit code. Exit codes are a safety contract (only a verified-safe run exits 0). Full command list, exit-code table, and state-diff output in [references/cli.md](references/cli.md).
 
+A `RecoveryContract` is a promise that travels: sealed by one build and verified by another, possibly a different framework's verifier reading only the JSON. [docs/contract_compatibility.md](docs/contract_compatibility.md) publishes the canonical serialization and the field set each version covers, with every rule made executable by the checked-in corpus (`src/continuum/recovery/corpus/`) and the `continuum.recovery.conformance` suite. If you plan to run CONTINUUM as a remote service instead of a library, [docs/cloud_api.md](docs/cloud_api.md) specifies the Phase 13 gateway, state, and event services over PostgreSQL; it is additive, so the system stays fully runnable locally and the cloud layer never becomes a hard dependency.
+
 ## Roadmap
 
 | Phase | Component | Status |
@@ -581,6 +587,8 @@ CONTINUUM was created by **Anandhu P Shaji** ([@Cyrax321](https://github.com/Cyr
 ## Contributing
 
 This project is open source under Apache 2.0 and deliberately built to be extended: by researchers validating the recovery semantics, by engineers porting the ledger or MCP server to other frameworks or languages, and by anyone turning the planned roadmap into reality. A good place to start is the `good first issue` label on the [issue tracker](https://github.com/Cyrax321/CONTINUUM/issues), or the open correctness bugs listed in STATUS.md.
+
+For a guided path from a fresh clone to a green test suite, [docs/CONTRIBUTING_ONBOARDING.md](docs/CONTRIBUTING_ONBOARDING.md) walks the architecture documents, `STATUS.md`, and the repo's review-enforced rules in order, so you do not have to re-derive which file holds what.
 
 Open an issue before submitting large PRs. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution guide, including the [Code of Conduct](CODE_OF_CONDUCT.md).
 
