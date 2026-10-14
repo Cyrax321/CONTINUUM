@@ -89,6 +89,7 @@ __all__ = [
     "RiskObservedPayload",
     "ObservedRisk",
     "validate_caused_by",
+    "validate_correlation_id",
     "PROJECTION_BOOKKEEPING",
 ]
 
@@ -1354,6 +1355,9 @@ class Action(BaseModel):
     claim.
     """
 
+    correlation_id: str | None = None
+    """Optional correlation identifier linking this action to observed tool events."""
+
     @field_validator("origin_digest")
     @classmethod
     def _origin_digest_is_sha256(cls, value: str | None) -> str | None:
@@ -1362,6 +1366,27 @@ class Action(BaseModel):
         if not _SHA256_PATTERN.fullmatch(value):
             raise ValueError("origin_digest must be 64 lowercase hex characters")
         return value
+
+    @field_validator("correlation_id")
+    @classmethod
+    def _validate_correlation_id(cls, value: str | None) -> str | None:
+        return validate_correlation_id(value)
+
+
+def validate_correlation_id(correlation_id: Any) -> str | None:
+    """Validate an optional correlation identifier.
+
+    Must be None, or a non-empty string between 1 and 128 characters.
+    Whitespace-only or non-string values raise ValueError.
+    """
+    if correlation_id is None:
+        return None
+    if not isinstance(correlation_id, str):
+        raise ValueError("correlation_id must be a string")
+    stripped = correlation_id.strip()
+    if not stripped or len(correlation_id) > 128:
+        raise ValueError("correlation_id must be 1-128 characters and non-empty")
+    return correlation_id
 
 
 class ActionRecordPayload(BaseModel):
@@ -1378,6 +1403,7 @@ class ActionRecordPayload(BaseModel):
     action_type: str
     arguments: Mapping[str, Any] = Field(default_factory=dict)
     caused_by: list[str] = Field(default_factory=list)
+    correlation_id: str | None = None
 
     @field_validator("caused_by")
     @classmethod
@@ -1390,6 +1416,11 @@ class ActionRecordPayload(BaseModel):
             if not 1 <= len(item) <= 128:
                 raise ValueError("caused_by entries must be 1-128 chars")
         return value
+
+    @field_validator("correlation_id")
+    @classmethod
+    def _validate_correlation_id(cls, value: str | None) -> str | None:
+        return validate_correlation_id(value)
 
 
 def _validate_caused_by_known(caused_by: list[str], known_ids: set[str]) -> None:

@@ -295,15 +295,16 @@ gap.
 
 ---
 
-## 15. CLI commands (55) `src/continuum/cli/main.py`
+## 15. CLI commands (56) `src/continuum/cli/main.py`
 
-Every subcommand is registered in `build_parser()` (`cli/main.py:4028`), which
+Every subcommand is registered in `build_parser()` (`cli/main.py:5137`), which
 is the single registry, a verb that is not there is not a command. The full
 set, alphabetically:
 
 `actions`, `agents`, `attest`, `attest-keygen`, `attest-verify`, `benchmark`,
 `briefing`, `budget`, `checkpoint`, `compact`, `complete`, `conformance`, `confirm`,
-`daemon`, `dashboard`, `diff`, `doctor`, `events`, `export-evidence`, `forget`, `fork`, `gate`,
+`daemon`, `dashboard`, `diff`, `doctor`, `events`, `evidence-chain`, `export-evidence`,
+`forget`, `fork`, `gate`,
 `gateway`, `health`, `history`, `hooks`, `impact`, `init`, `inspect`,
 `lineage-issue`, `lineage-verify`, `mcp`, `merge`, `notify-test`, `observe`,
 `policy-review`, `precompact`, `provenance`, `reconcile`, `record-plan`,
@@ -311,7 +312,7 @@ set, alphabetically:
 `show-contract`, `start`, `status`, `tree`, `tui`, `validate`,
 `verify`, `watch`.
 
-All accept `--json`, which is a flag on the top-level parser (`cli/main.py:4047`)
+All accept `--json`, which is a flag on the top-level parser (`cli/main.py:5158`)
 rather than one per subcommand.
 
 ---
