@@ -331,7 +331,7 @@ Over MCP the equivalent is the `continuum_confirm` tool followed by `continuum_r
 
 ## Core Concepts
 
-The deep reference for each concept lives in [references/concepts.md](references/concepts.md).
+The deep reference for each concept lives in [references/concepts.md](references/concepts.md), and the [glossary](docs/GLOSSARY.md) defines the vocabulary used across issues and code, with every entry pointing at the module and line that implements it so a definition can be verified rather than trusted.
 
 - **Semantic Checkpoints** - a compact, versioned representation of what the agent needs to continue.
 - **State Validation** - every component independently verified; staleness propagates through the dependency graph.
