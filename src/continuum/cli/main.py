@@ -1519,6 +1519,15 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         # UNSAFE (31): run exists but resuming is not safe (distinct from NOT_FOUND / 2).
         return ExitCode.UNSAFE
 
+    has_wid_flags = any([
+        getattr(args, "require_workload_identity", None),
+        getattr(args, "workload_provider", None),
+        getattr(args, "spiffe", False),
+    ])
+    if has_wid_flags and not getattr(args, "attest", None):
+        print("error: workload identity options require --attest", file=err)
+        return ExitCode.USAGE_ERROR
+
     if getattr(args, "attest", None):
         attest_file = Path(args.attest)
         if not attest_file.exists():
@@ -1536,6 +1545,8 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
         events = storage.read_events(run_id)
         live_hash = events[-1].hash if events else None
+        if not storage.verify_events(run_id).ok:
+            live_hash = None
 
         req_wid = getattr(args, "require_workload_identity", None)
         provider_name = getattr(args, "workload_provider", None)
@@ -4594,8 +4605,13 @@ def cmd_attest(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         from continuum.security.workload_identity import resolve_workload_provider
 
         provider_name = getattr(args, "workload_provider", None)
-        provider = resolve_workload_provider(provider_name)
-        wid = provider.get_identity()
+        from continuum.security.workload_identity import WorkloadIdentityError, WorkloadIdentityUnavailableError
+        try:
+            provider = resolve_workload_provider(provider_name)
+            wid = provider.get_identity()
+        except (WorkloadIdentityError, WorkloadIdentityUnavailableError, ValueError) as exc:
+            print(f"error: workload identity unavailable: {exc}", file=err)
+            return ExitCode.ERROR
 
     attest = sign_chain(
         private_pem,

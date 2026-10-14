@@ -70,7 +70,12 @@ class WorkloadIdentity:
     def __post_init__(self) -> None:
         if not self.spiffe_id or not isinstance(self.spiffe_id, str):
             raise ValueError("spiffe_id must be a non-empty string")
+        import re
+        if not re.match(r"^spiffe://[a-zA-Z0-9.\-_]+(/[a-zA-Z0-9.\-_/]*)*$", self.spiffe_id):
+            raise ValueError(f"Invalid SPIFFE ID: {self.spiffe_id}")
         td = _parse_trust_domain(self.spiffe_id)
+        if self.trust_domain is not None and self.trust_domain != td:
+            raise ValueError(f"trust_domain mismatch: {self.trust_domain} vs {td}")
         if self.trust_domain is None:
             object.__setattr__(self, "trust_domain", td)
 
@@ -200,12 +205,18 @@ class SpiffeIdentityProvider:
             ) from exc
 
     def verify_identity(self, identity: WorkloadIdentity) -> bool:
-        """Verify that an identity matches expected format and trust domain constraints."""
+        """Verify the claim matches the SVID currently issued to this workload."""
         try:
             td = _parse_trust_domain(identity.spiffe_id)
         except ValueError:
             return False
-        return self.trust_domain is None or td == self.trust_domain
+        if self.trust_domain is not None and td != self.trust_domain:
+            return False
+        try:
+            current = self.get_identity()
+        except WorkloadIdentityUnavailableError:
+            return False
+        return current.spiffe_id == identity.spiffe_id
 
 
 def resolve_workload_provider(

@@ -214,8 +214,14 @@ def verify_attestation(
         return False
 
     wid = data.get("workload_identity")
-    if require_workload_identity and not wid:
-        return False
+    if require_workload_identity:
+        if not wid or not isinstance(wid, dict):
+            return False
+        try:
+            from continuum.security.workload_identity import WorkloadIdentity
+            WorkloadIdentity.from_dict(wid)
+        except (ValueError, TypeError, KeyError):
+            return False
 
     if expected_workload_identity is not None:
         if not wid or not isinstance(wid, Mapping):
