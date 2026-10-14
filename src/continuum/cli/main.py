@@ -1518,6 +1518,60 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         _emit(payload, msg, as_json=args.json, stream=out)
         # UNSAFE (31): run exists but resuming is not safe (distinct from NOT_FOUND / 2).
         return ExitCode.UNSAFE
+
+    if getattr(args, "attest", None):
+        attest_file = Path(args.attest)
+        if not attest_file.exists():
+            msg = f"Attestation file not found: {args.attest}"
+            payload = {"run_id": run_id, "mode": "request_human", "safe": False, "reason": msg}
+            _emit(payload, msg, as_json=args.json, stream=out)
+            return ExitCode.UNSAFE
+        try:
+            attest_doc = json.loads(attest_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            msg = f"Failed to parse attestation JSON: {exc}"
+            payload = {"run_id": run_id, "mode": "request_human", "safe": False, "reason": msg}
+            _emit(payload, msg, as_json=args.json, stream=out)
+            return ExitCode.UNSAFE
+
+        events = storage.read_events(run_id)
+        live_hash = events[-1].hash if events else None
+
+        req_wid = getattr(args, "require_workload_identity", None)
+        provider_name = getattr(args, "workload_provider", None)
+        id_provider = None
+        if provider_name or getattr(args, "spiffe", False):
+            from continuum.security.workload_identity import resolve_workload_provider
+
+            try:
+                id_provider = resolve_workload_provider(provider_name)
+            except Exception as exc:
+                msg = f"Workload identity provider unavailable: {exc}"
+                payload = {"run_id": run_id, "mode": "request_human", "safe": False, "reason": msg}
+                _emit(payload, msg, as_json=args.json, stream=out)
+                return ExitCode.UNSAFE
+
+        attest_ok = verify_attestation(
+            attest_doc,
+            expected_chain_hash=live_hash,
+            expected_workload_identity=req_wid,
+            identity_provider=id_provider,
+            require_workload_identity=bool(req_wid),
+        )
+        if not attest_ok:
+            msg = (
+                f"Attestation verification failed for run {run_id!r}: "
+                f"workload identity mismatch, altered chain, or invalid signature."
+            )
+            payload = {
+                "run_id": run_id,
+                "mode": "request_human",
+                "safe": False,
+                "reason": msg,
+            }
+            _emit(payload, msg, as_json=args.json, stream=out)
+            return ExitCode.UNSAFE
+
     engine = RecoveryEngine(storage, strict_unknown=not args.tolerate_unknown)
     decision = engine.assess(
         run_id,
@@ -4531,12 +4585,25 @@ def cmd_attest(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     private_pem = Path(key_path).read_text(encoding="utf-8")
     signer = args.signer or os.environ.get("CONTINUUM_SIGNER")
 
+    wid = None
+    if getattr(args, "workload_identity", None):
+        from continuum.security.workload_identity import WorkloadIdentity
+
+        wid = WorkloadIdentity(spiffe_id=args.workload_identity)
+    elif getattr(args, "spiffe", False) or getattr(args, "workload_provider", None):
+        from continuum.security.workload_identity import resolve_workload_provider
+
+        provider_name = getattr(args, "workload_provider", None)
+        provider = resolve_workload_provider(provider_name)
+        wid = provider.get_identity()
+
     attest = sign_chain(
         private_pem,
         args.run_id,
         head.sequence,
         head.hash,
         signer=signer,
+        workload_identity=wid,
     )
     doc = attest.to_dict()
 
@@ -4554,10 +4621,11 @@ def cmd_attest(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 def cmd_attest_verify(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Verify a signed attestation against the run's live event chain.
 
-    Three outcomes:
-      SIGNED    : signature valid and the live chain still matches the signed point.
-      ALTERED   : signature valid but the chain changed after signing.
-      UNTRUSTED : the signature does not verify against the embedded public key.
+    Outcomes:
+      SIGNED             : signature valid and live chain still matches the signed point.
+      IDENTITY_MISMATCH  : signature valid but workload identity constraint was violated.
+      ALTERED            : signature valid but the chain changed after signing.
+      UNTRUSTED          : the signature does not verify against the embedded public key.
     """
     storage.get_run(args.run_id)
     doc = json.loads(Path(args.attest).read_text(encoding="utf-8"))
@@ -4566,21 +4634,68 @@ def cmd_attest_verify(args: argparse.Namespace, storage: Storage, out: Any, err:
     live_hash = events[-1].hash if events else None
     live_seq = events[-1].sequence if events else 0
 
-    # Recompute the chain before trusting any hash read out of it. `live_hash`
-    # above is the digest *stored* in the row, and an edit made straight through
-    # the database changes the payload while leaving that column untouched, so
-    # comparing the attestation against it reports "chain matches" on content
-    # that has demonstrably been altered. Only the recomputing walk in
-    # verify_events can tell, which is why the verdict has to consult it.
     integrity = storage.verify_events(args.run_id)
     chain_intact = integrity.ok
 
-    signature_valid = verify_attestation(doc)
+    expected_wid = getattr(args, "expected_workload_identity", None)
+    require_wid = getattr(args, "require_workload_identity", False)
+    provider_name = getattr(args, "workload_provider", None)
+
+    identity_provider = None
+    if getattr(args, "spiffe", False) or provider_name:
+        from continuum.security.workload_identity import resolve_workload_provider
+
+        try:
+            identity_provider = resolve_workload_provider(provider_name)
+        except Exception as exc:
+            payload = {
+                "run_id": args.run_id,
+                "verdict": "UNTRUSTED",
+                "reason": f"workload identity provider error: {exc}",
+            }
+            _emit(
+                payload,
+                f"Attestation UNTRUSTED: workload identity provider unavailable ({exc}).",
+                as_json=args.json,
+                stream=out,
+                palette=getattr(args, "_palette", None),
+            )
+            return ExitCode.CORRUPTED
+
+    signature_valid = verify_attestation(
+        doc,
+        expected_workload_identity=expected_wid,
+        identity_provider=identity_provider,
+        require_workload_identity=require_wid,
+    )
     chain_match = doc.get("chain_hash") == live_hash
     seq_match = doc.get("trusted_through_seq") == live_seq
 
-    if not signature_valid:
+    wid_bound = doc.get("workload_identity")
+    wid_match = True
+    if require_wid and not wid_bound:
+        wid_match = False
+    elif expected_wid:
+        if (
+            not wid_bound
+            or not isinstance(wid_bound, dict)
+            or wid_bound.get("spiffe_id") != expected_wid
+        ):
+            wid_match = False
+    elif identity_provider and wid_bound:
+        from continuum.security.workload_identity import WorkloadIdentity
+
+        try:
+            wid_obj = WorkloadIdentity.from_dict(wid_bound)
+            if not identity_provider.verify_identity(wid_obj):
+                wid_match = False
+        except Exception:
+            wid_match = False
+
+    if not signature_valid and wid_match:
         verdict = "UNTRUSTED"
+    elif not wid_match:
+        verdict = "IDENTITY_MISMATCH"
     elif not chain_intact or not chain_match or not seq_match:
         verdict = "ALTERED"
     else:
@@ -4596,16 +4711,23 @@ def cmd_attest_verify(args: argparse.Namespace, storage: Storage, out: Any, err:
         "signed_seq": doc.get("trusted_through_seq"),
         "live_seq": live_seq,
     }
+    if wid_bound:
+        payload["workload_identity"] = wid_bound
+
     if verdict == "SIGNED":
+        wid_str = f" [identity: {wid_bound.get('spiffe_id')}]" if wid_bound else ""
         text = (
-            f"Attestation SIGNED by {doc.get('signer')} for seq {doc.get('trusted_through_seq')}; "
+            f"Attestation SIGNED by {doc.get('signer')} for seq {doc.get('trusted_through_seq')}{wid_str}; "
             f"chain matches."
+        )
+    elif verdict == "IDENTITY_MISMATCH":
+        bound_id = wid_bound.get("spiffe_id") if isinstance(wid_bound, dict) else "none"
+        text = (
+            f"Attestation IDENTITY_MISMATCH: sealed identity {bound_id!r} does not match "
+            f"expected identity {expected_wid!r}."
         )
     elif verdict == "ALTERED":
         if not chain_intact:
-            # Name the tampering rather than reporting a sequence mismatch that
-            # is not the problem: the head can sit at the signed sequence while
-            # an earlier event's content has been rewritten underneath it.
             text = (
                 f"Attestation ALTERED: the event chain no longer verifies "
                 f"({len(integrity.violations)} violation(s)); run "
@@ -4993,6 +5115,26 @@ def build_parser() -> argparse.ArgumentParser:
         dest="webhooks_config",
         default=None,
         help="webhook registry to notify on request_human (default: .continuum/webhooks.json).",
+    )
+    resume.add_argument(
+        "--attest",
+        default=None,
+        help="path to signed attestation JSON that must verify before resuming (issue #745).",
+    )
+    resume.add_argument(
+        "--require-workload-identity",
+        default=None,
+        help="expected SPIFFE ID or requirement that attestation carries verified identity (issue #745).",
+    )
+    resume.add_argument(
+        "--workload-provider",
+        default=None,
+        help="workload provider to verify identity against ('spiffe' or 'fake', issue #745).",
+    )
+    resume.add_argument(
+        "--spiffe",
+        action="store_true",
+        help="verify identity against active SPIFFE Workload API (issue #745).",
     )
 
     notify_test = add(
@@ -5551,6 +5693,17 @@ def build_parser() -> argparse.ArgumentParser:
     attest.add_argument("--key", help="private key PEM path (or CONTINUUM_SIGNER_KEY).")
     attest.add_argument("--signer", help="signer name (or CONTINUUM_SIGNER env).")
     attest.add_argument("--out", help="write attestation JSON here (default: stdout).")
+    attest.add_argument(
+        "--workload-identity", help="SPIFFE ID to bind into the attestation (issue #745)."
+    )
+    attest.add_argument(
+        "--spiffe",
+        action="store_true",
+        help="acquire identity from SPIFFE Workload API (issue #745).",
+    )
+    attest.add_argument(
+        "--workload-provider", help="workload provider name ('spiffe' or 'fake', issue #745)."
+    )
 
     attest_verify = with_run(
         add(
@@ -5560,6 +5713,24 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     attest_verify.add_argument("--attest", required=True, help="path to attestation JSON.")
+    attest_verify.add_argument(
+        "--expected-workload-identity",
+        help="expected SPIFFE ID that the attestation must be bound to (issue #745).",
+    )
+    attest_verify.add_argument(
+        "--require-workload-identity",
+        action="store_true",
+        help="reject attestations lacking an embedded workload identity (issue #745).",
+    )
+    attest_verify.add_argument(
+        "--workload-provider",
+        help="workload provider to verify identity against ('spiffe' or 'fake', issue #745).",
+    )
+    attest_verify.add_argument(
+        "--spiffe",
+        action="store_true",
+        help="verify identity against active SPIFFE Workload API (issue #745).",
+    )
 
     lineage_issue = with_run(
         add(

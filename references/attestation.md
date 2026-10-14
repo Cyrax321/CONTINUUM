@@ -4,8 +4,9 @@ Status: implemented. `continuum attest` / `continuum attest-verify` and the
 signing primitives behind them (`src/continuum/security/attestation.py`,
 `tests/test_attestation.py`, the attest cases in `tests/test_cli.py`) are built.
 The propagation-token layer described in "Propagation tokens" below is built too
-(`src/continuum/security/lineage.py`, `tests/test_lineage.py`); the workload-
-identity binding in #745 and the real-time `resume` enforcement hook remain open.
+(`src/continuum/security/lineage.py`, `tests/test_lineage.py`), and the workload
+identity binding in #745 and `continuum resume --attest` verification are built
+(`src/continuum/security/workload_identity.py`, `tests/test_workload_identity.py`).
 
 ## Why
 
@@ -73,6 +74,41 @@ looking for a default.
 : The signer name embedded in the attestation document when `--signer` is not
 passed. It records who issued the signature; nothing derives authority from it,
 so a verifier that cares about identity must still check `public_key`.
+
+## Workload identity binding (issue #745)
+
+Key custody alone does not establish which executing workload produced an
+attestation. Workload identity binding attaches a cryptographically sealed
+identity claim (such as a SPIFFE ID) to the attestation document:
+
+```
+continuum attest <run_id> --key signer.pem --workload-identity "spiffe://example.org/ns/prod/sa/agent-worker"
+    # or --spiffe to acquire identity from the active SPIFFE Workload API.
+```
+
+The bound identity claim is embedded in the attestation document before signing,
+so tampering with the SPIFFE ID breaks the signature. Verification enforces
+identity constraints:
+
+```
+continuum attest-verify <run_id> --attest attest.json --expected-workload-identity "spiffe://example.org/ns/prod/sa/agent-worker"
+    # reports SIGNED, or IDENTITY_MISMATCH if the identity does not match.
+
+continuum attest-verify <run_id> --attest attest.json --require-workload-identity
+    # fails if the attestation carries no workload identity (no silent downgrade).
+```
+
+### Resume verification hook
+
+Resuming an agent run can be gated on attestation and identity verification:
+
+```
+continuum resume <run_id> --attest attest.json [--require-workload-identity "spiffe://example.org/ns/prod/sa/agent-worker"]
+```
+
+If the attestation signature fails, the chain has been altered since signing, or
+the required workload identity mismatches, `continuum resume` refuses to resume,
+exits with `ExitCode.UNSAFE` (31), and prints the failure reason.
 
 ## Propagation tokens: delegating work across a boundary
 
