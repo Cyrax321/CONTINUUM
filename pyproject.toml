@@ -79,6 +79,9 @@ langchain = ["langchain>=0.3"]
 # Optional Ed25519 attestation of the event chain (continuum attest), kept out
 # of the core so the recovery path needs no crypto dependency.
 attest = ["cryptography>=45.0"]
+# SPIFFE workload identity integration for binding attestations (issue #745).
+# Imported lazily so core installs remain zero-dependency.
+spiffe = ["pyspiffe>=0.2.0"]
 # The PostgreSQL storage backend (B2.3) for multi-process / multi-host durability.
 # The core stays SQLite-only so a plain install needs no database driver.
 postgres = ["psycopg>=3.2"]
@@ -123,6 +126,12 @@ files = ["src/continuum"]
 # pydantic, and the families below are what stand between that clone and 26
 # errors from `mypy src/continuum` that say nothing about the code (#315). An
 # optional import added without a family here brings the errors back.
+
+# pyspiffe is an optional runtime dependency (the [spiffe] extra). It is
+# imported lazily, so the module must type-check without it installed.
+[[tool.mypy.overrides]]
+module = ["pyspiffe", "pyspiffe.*"]
+ignore_missing_imports = true
 
 # psycopg is an optional runtime dependency (the [postgres] extra). It is
 # imported lazily, so the module must type-check without it installed.
