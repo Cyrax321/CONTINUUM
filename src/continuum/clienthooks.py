@@ -181,6 +181,16 @@ def observe_event_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
     payload: dict[str, Any] = {"tool": tool}
 
     tool_input = raw.get("tool_input")
+    raw_cid = raw.get("correlation_id")
+    if raw_cid is None and isinstance(tool_input, Mapping):
+        raw_cid = tool_input.get("correlation_id")
+    if raw_cid is not None:
+        from continuum.models import validate_correlation_id
+
+        cid = validate_correlation_id(raw_cid)
+        if cid is not None:
+            payload["correlation_id"] = cid
+
     path: str | None = None
     if isinstance(tool_input, Mapping):
         for key in _PATH_KEYS:

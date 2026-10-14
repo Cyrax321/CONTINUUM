@@ -2509,6 +2509,11 @@ def cmd_observe(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     storage.get_run(run_id)  # raises RunNotFound -> NOT_FOUND by the dispatcher
 
     payload = observe_event_payload(raw if isinstance(raw, dict) else {})
+    cli_cid = getattr(args, "correlation_id", None)
+    if cli_cid:
+        from continuum.models import validate_correlation_id
+
+        payload["correlation_id"] = validate_correlation_id(cli_cid)
     event = storage.append_event(
         run_id,
         EventType.TOOL_COMPLETED,
@@ -2523,6 +2528,63 @@ def cmd_observe(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
             **payload,
         },
         f"Observed {payload.get('tool') if payload.get('tool') != 'unknown' else '(no tool name)'} -> {run_id} (seq {event.sequence})",
+        as_json=args.json,
+        stream=out,
+        palette=getattr(args, "_palette", None),
+    )
+    return ExitCode.OK
+
+
+def cmd_evidence_chain(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+    """Show the correlated action-to-tool evidence chain for a run. Read-only."""
+    storage.get_run(args.run_id)
+    from continuum.provenance.correlation import correlate_action_events
+
+    chains = correlate_action_events(
+        storage,
+        args.run_id,
+        action_key=getattr(args, "action_key", None),
+        correlation_id=getattr(args, "correlation_id", None),
+    )
+    if getattr(args, "unmatched_only", False):
+        chains = [c for c in chains if c.status != "matched"]
+
+    payload = {
+        "run_id": args.run_id,
+        "count": len(chains),
+        "chains": [c.to_dict() for c in chains],
+    }
+
+    lines = [f"Evidence chain for run {args.run_id} ({len(chains)} chains):"]
+    if not chains:
+        lines.append("  (no correlated actions or observations recorded)")
+    for chain in chains:
+        cid_str = f" [cid: {chain.correlation_id}]" if chain.correlation_id else " [no cid]"
+        status_sigil = {
+            "matched": "[ok]",
+            "unmatched_action": "[!]",
+            "unmatched_observation": "[~]",
+            "ambiguous": "[!!]",
+            "missing_correlation": "[?]",
+        }.get(chain.status, "[info]")
+        lines.append(
+            f"  {status_sigil} {chain.status.upper()}: action={chain.action_key or '(none)'} "
+            f"({chain.action_type or 'unknown'}){cid_str}"
+        )
+        if chain.action_events:
+            act_strs = [f"seq {e.get('sequence')} ({e.get('type')})" for e in chain.action_events]
+            lines.append(f"      actions: {', '.join(act_strs)}")
+        if chain.tool_events:
+            tool_strs = [f"seq {e.get('sequence')} ({e.get('tool')})" for e in chain.tool_events]
+            lines.append(f"      tools:   {', '.join(tool_strs)}")
+        for obs in chain.observations:
+            lines.append(
+                f"      - obs: tool={obs.get('tool')} path={obs.get('path')} status={obs.get('status')}"
+            )
+
+    _emit(
+        payload,
+        "\n".join(lines),
         as_json=args.json,
         stream=out,
         palette=getattr(args, "_palette", None),
@@ -5155,6 +5217,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--payload-file",
         default=None,
         help="read the hook payload from this file instead of stdin.",
+    )
+    observe.add_argument(
+        "--correlation-id",
+        default=None,
+        help="optional correlation identifier linking observation to action attempts.",
+    )
+
+    evidence_chain = with_run(
+        add(
+            "evidence-chain",
+            cmd_evidence_chain,
+            "Show correlated action-to-tool evidence chain. Read-only.",
+        )
+    )
+    evidence_chain.add_argument(
+        "--action-key", default=None, help="filter to a specific action key"
+    )
+    evidence_chain.add_argument(
+        "--correlation-id",
+        default=None,
+        help="filter to a specific correlation identifier",
+    )
+    evidence_chain.add_argument(
+        "--unmatched-only",
+        action="store_true",
+        help="show only unmatched or ambiguous chains",
     )
 
     mcp = add("mcp", cmd_mcp_install, "Register the MCP server with a host.")
