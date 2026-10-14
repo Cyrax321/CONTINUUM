@@ -6,6 +6,52 @@ Maintainers cutting a release follow the manual gate in [docs/release-checklist.
 
 ---
 
+## Where to start: good first issues
+
+If this is your first contribution, start with a
+[good first issue](https://github.com/Cyrax321/CONTINUUM/issues?q=label%3A%22good+first+issue%22+is%3Aopen).
+The [tracking issue](https://github.com/Cyrax321/CONTINUUM/issues/1661) lists the
+current batch. Every entry on it names the exact file it touches and was verified
+against `main`, so you can tell before reading any code whether a task is yours.
+
+A first PR is expected to:
+
+- fix **one issue per PR**. Do not bundle several first issues into a single PR.
+- match the surrounding style. For a test task that means reading the nearest
+  existing test file first, and for a docs task, the section being extended.
+- run the check the issue names: `pytest tests/<your_file>.py -q` for a test
+  task, `ruff check <changed paths>` for any task.
+- comment on the issue if you get stuck. A stuck comment with a real question is
+  a useful contribution, not a failure.
+
+Comment `I would like to work on this` on the issue you pick, so two people do
+not fix the same thing, and open a draft PR early.
+
+---
+
+## Labels worth knowing
+
+| Label | What it means |
+|-------|---------------|
+| `good first issue` | A scoped task verified against `main`. The place to start. |
+| `help wanted` | The maintainers want outside help on this issue. |
+| `hacktoberfest` | Eligible for Hacktoberfest. Filter the tracker by this label in October. |
+| `documentation` | Docs work. Also applied to PRs that touch `docs/` or any `*.md` file. |
+| `tests` | Test suite work. Also applied to PRs that touch `tests/`. |
+| `bug` | Something is broken and needs fixing. |
+
+`good first issue`, `help wanted`, `hacktoberfest`, and `bug` are applied to
+issues by hand. The area labels, including `documentation` and `tests`, are
+applied to PRs by `.github/labeler.yml` from the paths a PR touches, so your PR
+labels itself. Help is wanted on every `hacktoberfest` issue, and each one also
+carries `good first issue`, so that filter alone finds the work.
+
+A concrete thing you can do today: open the
+[issue tracker](https://github.com/Cyrax321/CONTINUUM/issues), filter by
+`good first issue`, and pick one whose "Where" names a file you can open.
+
+---
+
 ## Prerequisites
 
 - Python **3.11+** (3.12 recommended for development)
