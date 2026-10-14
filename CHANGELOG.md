@@ -63,17 +63,30 @@ Test counts: ~3950 collected on a minimal env.
   first pull requests, a Table of Contents, and a reference table for issue
   labels (including hacktoberfest, help wanted, and good first issue).
 
-- **Observation provenance linkage and memory forensic lookup (#1416, #1407, #304).**
-  Link motivating observation digests to external memory mutation claims in `ActionLedger`.
-  The `Action` model and `ActionLedger.claim()` accept `origin_observation_digest` as an alias
-  for `origin_digest`, persisting the linkage on ledger events and `action_index` projections
-  so attribution survives event-log compaction. Added `get_memory_provenance()` to walk backward
-  from a memory record key to its initiating observation event in the hash-chained log and
-  enumerate sibling records originating from the same contaminated observation. The lookup
-  resolves a short key by rank (exact key or action id, then a namespace suffix, then a
+  The lookup resolves a short key by rank (exact key or action id, then a namespace suffix, then a
   substring) and raises `LedgerError` when two candidates tie, rather than blaming one of them
   by insertion order. Runs it cannot read are listed in the result's `skipped_runs` so a
   forensic answer never passes as complete when a log was unreadable.
+
+- **Correlate observed tool events with ledger action attempts (#785).** An
+  optional bounded correlation identifier (`correlation_id`, 1-128 chars)
+  is now shared between ledger action attempts (`claim()`, `complete()`,
+  `reconcile()`, `Action`, `ActionRecordPayload`) and tool observations
+  (`TOOL_CALLED`, `TOOL_COMPLETED`, `TOOL_FAILED`). `correlate_action_events`
+  and `correlate_evidence` project read-only evidence chains (`EvidenceChain`),
+  classifying relationships as `matched`, `unmatched_action`,
+  `unmatched_observation`, `ambiguous`, or `missing_correlation`. Repeated
+  similar actions are disambiguated by distinct correlation IDs without
+  heuristic guesswork. The evidence chain survives compaction across archive
+  boundaries and remains verifiable under hash-chain tamper detection. A
+  correlated tool event never automatically settles an uncertain action,
+  preserving safe-by-default recovery semantics. Includes CLI commands
+  (`continuum evidence-chain <run-id>` and `continuum observe --correlation-id`)
+  and MCP action tool support. Retry and re-claim paths validate the identifier
+  before it is written, so a malformed value cannot poison a later replay, and
+  a malformed identifier arriving from an untrusted hook payload is recorded as
+  flagged evidence instead of halting host tool observation. A dispatched tool
+  call that has not completed yet is reported as started, not failed.
 
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a
