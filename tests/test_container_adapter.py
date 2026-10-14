@@ -31,8 +31,10 @@ def test_run_in_container_happy_path():
     mock_completed.stdout = "hello"
     mock_completed.stderr = ""
 
-    with patch("continuum.adapters.container.shutil.which", return_value="/usr/bin/docker"), \
-         patch("continuum.adapters.container.subprocess.run", return_value=mock_completed):
+    with (
+        patch("continuum.adapters.container.shutil.which", return_value="/usr/bin/docker"),
+        patch("continuum.adapters.container.subprocess.run", return_value=mock_completed),
+    ):
         result = adapter.run_in_container("run_1", "echo hi")
         assert result.status == "completed"
         assert result.output == "hello"
@@ -50,8 +52,10 @@ def test_run_in_container_called_process_error():
         stderr="container failed",
     )
 
-    with patch("continuum.adapters.container.shutil.which", return_value="/usr/bin/docker"), \
-         patch("continuum.adapters.container.subprocess.run", side_effect=cpe):
+    with (
+        patch("continuum.adapters.container.shutil.which", return_value="/usr/bin/docker"),
+        patch("continuum.adapters.container.subprocess.run", side_effect=cpe),
+    ):
         result = adapter.run_in_container("run_1", "exit 1")
         assert result.status == "failed"
         assert result.error is not None
