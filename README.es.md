@@ -561,3 +561,9 @@ Material de referencia profundo:
 - [references/e2e.md](references/e2e.md) - recorrido de test de autonomía extremo a extremo
 - [references/testing.md](references/testing.md) - disposición y convenciones de la suite de tests
 - [references/related-work.md](references/related-work.md) - trabajo relacionado anotado y auditoría de citas
+
+## Enlaces rápidos
+
+- [Issues](https://github.com/Cyrax321/CONTINUUM/issues) para errores y funciones
+- [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) para propuestas de diseño
+

@@ -575,3 +575,8 @@ Apache 2.0，见 [LICENSE](LICENSE)。
 - [references/e2e.md](references/e2e.md) - 端到端自主测试 walkthrough
 - [references/testing.md](references/testing.md) - 测试套件布局和约定
 - [references/related-work.md](references/related-work.md) - 带注释的相关工作和引用审计
+
+## 快速链接
+
+- [Issues](https://github.com/Cyrax321/CONTINUUM/issues) 提交错误与功能需求
+- [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) 探讨设计与提案
