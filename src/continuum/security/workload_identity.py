@@ -119,100 +119,18 @@ class WorkloadIdentityProvider(Protocol):
         ...
 
     def verify_identity(self, identity: WorkloadIdentity) -> bool:
-        """Verify whether an identity claim is valid under this provider."""
-        ...
-
-
-class FakeWorkloadIdentityProvider:
-    """Deterministic workload identity provider for unit tests and local mock verification."""
-
-    def __init__(
-        self,
-        spiffe_id: str = "spiffe://example.org/ns/default/sa/test-agent",
-        *,
-        valid: bool = True,
-        available: bool = True,
-        attributes: Mapping[str, Any] | None = None,
-    ) -> None:
-        self.spiffe_id = spiffe_id
-        self.valid = valid
-        self.available = available
-        self.attributes = dict(attributes or {})
-
-    def get_identity(self) -> WorkloadIdentity:
-        if not self.available:
-            raise WorkloadIdentityUnavailableError(
-                "fake workload identity provider is configured as unavailable"
-            )
-        return WorkloadIdentity(
-            spiffe_id=self.spiffe_id,
-            provider="fake",
-            attributes=dict(self.attributes),
-        )
-
-    def verify_identity(self, identity: WorkloadIdentity) -> bool:
-        if not self.valid:
-            return False
-        return identity.spiffe_id == self.spiffe_id
-
-
-class SpiffeIdentityProvider:
-    """SPIFFE/SPIRE adapter connecting to the SPIFFE Workload API."""
-
-    def __init__(
-        self,
-        socket_path: str | None = None,
-        *,
-        trust_domain: str | None = None,
-    ) -> None:
-        self.socket_path = socket_path or os.environ.get("SPIFFE_ENDPOINT_SOCKET")
-        self.trust_domain = trust_domain or os.environ.get("SPIFFE_TRUST_DOMAIN")
-
-    def _require_pyspiffe(self) -> Any:
-        try:
-            import pyspiffe.workloadapi.default_workload_api_client as client_mod
-        except ImportError as exc:
-            raise WorkloadIdentityUnavailableError(
-                "SPIFFE workload identity requires the 'pyspiffe' package; "
-                "install continuum-agent[spiffe]"
-            ) from exc
-        return client_mod
-
-    def get_identity(self) -> WorkloadIdentity:
-        """Fetch the current X.509 SVID from the SPIFFE Workload API socket."""
-        if not self.socket_path:
-            raise WorkloadIdentityUnavailableError(
-                "no SPIFFE Workload API socket configured: pass socket_path or set "
-                "SPIFFE_ENDPOINT_SOCKET environment variable"
-            )
-
-        client_mod = self._require_pyspiffe()
-        try:
-            with client_mod.DefaultWorkloadApiClient(spiffe_socket_path=self.socket_path) as client:
-                x509_svid = client.fetch_x509_svid()
-                spiffe_id_str = str(x509_svid.spiffe_id)
-                td = str(x509_svid.spiffe_id.trust_domain)
-                return WorkloadIdentity(
-                    spiffe_id=spiffe_id_str,
-                    provider="spiffe",
-                    trust_domain=td,
-                )
-        except Exception as exc:
-            if isinstance(exc, WorkloadIdentityUnavailableError):
-                raise
-            raise WorkloadIdentityUnavailableError(
-                f"failed to fetch SPIFFE SVID from socket {self.socket_path!r}: {exc}"
-            ) from exc
-
-    def verify_identity(self, identity: WorkloadIdentity) -> bool:
-        """Verify that an identity matches expected format and trust domain constraints."""
+        """Verify that an identity matches expected format and live SVID."""
         try:
             td = _parse_trust_domain(identity.spiffe_id)
         except ValueError:
             return False
-        if not self.trust_domain:
+        if self.trust_domain and td != self.trust_domain:
             return False
-        return td == self.trust_domain
+        try:
+            current = self.get_identity()
+        except WorkloadIdentityUnavailableError:
+            return False
+        return current.spiffe_id == identity.spiffe_id
 
 
 def resolve_workload_provider(

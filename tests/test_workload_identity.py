@@ -82,10 +82,11 @@ def test_spiffe_provider_unavailable_without_socket(monkeypatch: pytest.MonkeyPa
         provider.get_identity()
 
 
-def test_spiffe_provider_verification() -> None:
+def test_spiffe_provider_verification(monkeypatch) -> None:
     provider = SpiffeIdentityProvider(trust_domain="example.org")
     good = WorkloadIdentity("spiffe://example.org/sa/agent")
     bad_domain = WorkloadIdentity("spiffe://evil.com/sa/agent")
+    monkeypatch.setattr(provider, "get_identity", lambda: good)
     assert provider.verify_identity(good) is True
     assert provider.verify_identity(bad_domain) is False
 

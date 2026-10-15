@@ -1544,9 +1544,17 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             return ExitCode.UNSAFE
 
         events = storage.read_events(run_id)
-        live_hash = events[-1].hash if events else None
-        if not storage.verify_events(run_id).ok:
-            live_hash = None
+        if not events or not storage.verify_events(run_id).ok:
+            msg = f"Event chain for run {run_id!r} failed integrity verification; refusing to resume."
+            payload = {"run_id": run_id, "mode": "request_human", "safe": False, "reason": msg}
+            _emit(payload, msg, as_json=args.json, stream=out)
+            return ExitCode.UNSAFE
+        live_hash = events[-1].hash
+        if attest_doc.get("trusted_through_seq") != events[-1].sequence:
+            msg = f"Attestation sequence mismatch for run {run_id!r}; refusing to resume."
+            payload = {"run_id": run_id, "mode": "request_human", "safe": False, "reason": msg}
+            _emit(payload, msg, as_json=args.json, stream=out)
+            return ExitCode.UNSAFE
 
         req_wid = getattr(args, "require_workload_identity", None)
         provider_name = getattr(args, "workload_provider", None)
@@ -2701,7 +2709,7 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     # covers; a file naming a run that is gone gets a note instead of a
     # resume command that cannot work (issue #1063).
     if resume_run and not resume_run_completed and run_id == resume_run:
-        lines.append(f"Interrupted run {resume_run} – resume pending")
+        lines.append(f"Interrupted run {resume_run} â€“ resume pending")
         lines.append(f"  run: continuum resume {resume_run} --json")
         lines.append("")
     elif unrecoverable_run:
