@@ -33,6 +33,14 @@ pip install pre-commit
 pre-commit install
 ```
 
+To work on an optional environment adapter, install its extra in the same
+virtual environment:
+
+```bash
+pip install -e ".[browser]"     # BrowserAdapter; run playwright install chromium separately
+pip install -e ".[kubernetes]"  # KubernetesAdapter; kubectl and a cluster are external
+```
+
 On **Windows PowerShell**, use the same steps with these commands instead:
 
 ```powershell
