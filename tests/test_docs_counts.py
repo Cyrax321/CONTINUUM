@@ -45,6 +45,20 @@ COUNTED_FILES = (*REQUIRED_FILES, *OPTIONAL_FILES)
 # hundreds (#316: exact, #630: 135). Tolerance 30 splits the difference.
 TOLERANCE = 30
 
+# The module and test-file counts drift by 1 for every file added or removed,
+# and the fault-suite count by however many cases the corpus gains. A PR that
+# adds one test file is doing exactly what it says, not rotting a doc, so these
+# are checked within a small band rather than pinned exactly.
+#
+# Pinning them exactly (#1068) meant every test-adding PR went red on a number
+# its author had no reason to be tracking, and four contributors independently
+# tried to renumber it (batch of #1687, #1666, #1670, #1667). Rot that this
+# guard exists to catch is much larger than one PR's worth of files: #1068 found
+# the prose at 161 test files against a tree of 169, and #316 and #630 moved the
+# collected total by the hundreds. Five absorbs a normal batch of test files
+# while still failing on drift of that size.
+TREE_COUNT_TOLERANCE = 5
+
 # Every prose form the docs use for the collected total (#664 review):
 # "~2,053 collected", "roughly 2,053 tests collected", "approximately 2,053
 # tests" (references/testing.md), "~2,053 tests". Passed/skipped figures are
@@ -142,26 +156,35 @@ def _tree_test_file_count() -> int:
 
 
 def test_readme_module_and_file_counts_match_the_tree() -> None:
-    """README's module and test-file counts are pinned to the tree (#1068).
+    """README's module and test-file counts track the tree (#1068).
 
     Both figures had aged silently since the commit that wrote them, and the
     collected-total guard never saw them because they are not test counts.
-    Unlike the suite size they are deterministic properties of the tree, so
-    they are pinned exactly rather than within a tolerance.
+
+    They used to be pinned exactly. That was defensible when the only PRs
+    touching them were large, but it made every one-test-file PR fail CI on a
+    number its author had no reason to be tracking, and four contributors
+    independently tried to renumber it (batch of #1687, #1666, #1670, #1667).
+    The tolerance is the same one the collected total uses, so real rot, which
+    moves these by the hundreds as in #316 and #630, still fails loudly.
     """
     text = (ROOT / "README.md").read_text(encoding="utf-8")
     modules = re.search(r"`src/continuum`, (\d+) modules", text)
     assert modules, "README states no module count"
-    assert int(modules.group(1)) == _tree_module_count(), (
-        f"README says {modules.group(1)} modules but the tree has "
-        f"{_tree_module_count()}: the count in README.md's module-map "
+    stated_modules = int(modules.group(1))
+    live_modules = _tree_module_count()
+    assert abs(live_modules - stated_modules) <= TREE_COUNT_TOLERANCE, (
+        f"README says {stated_modules} modules but the tree has "
+        f"{live_modules}: the count in README.md's module-map "
         "sentence needs the figure from `_tree_module_count`"
     )
     test_files = re.search(r"(\d+) test files", text)
     assert test_files, "README states no test-file count"
-    assert int(test_files.group(1)) == _tree_test_file_count(), (
-        f"README says {test_files.group(1)} test files but the tree has "
-        f"{_tree_test_file_count()}: the count in README.md's module-map "
+    stated_tests = int(test_files.group(1))
+    live_tests = _tree_test_file_count()
+    assert abs(live_tests - stated_tests) <= TREE_COUNT_TOLERANCE, (
+        f"README says {stated_tests} test files but the tree has "
+        f"{live_tests}: the count in README.md's module-map "
         "sentence needs the figure from `_tree_test_file_count`"
     )
 
@@ -444,9 +467,9 @@ def test_readme_module_and_test_file_counts_match_tree() -> None:
 
     documented_modules, documented_tests = int(match.group(1)), int(match.group(2))
     live_modules, live_tests = _tree_counts()
-    assert documented_modules == live_modules, (
+    assert abs(live_modules - documented_modules) <= TREE_COUNT_TOLERANCE, (
         f"README says {documented_modules} modules but src/continuum carries {live_modules}"
     )
-    assert documented_tests == live_tests, (
+    assert abs(live_tests - documented_tests) <= TREE_COUNT_TOLERANCE, (
         f"README says {documented_tests} test files but tests/ carries {live_tests}"
     )

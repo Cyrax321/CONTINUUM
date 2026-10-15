@@ -560,3 +560,8 @@ Apache 2.0、[LICENSE](LICENSE) を参照。
 - [references/e2e.md](references/e2e.md) - 端から端の自律テストウォークスルー
 - [references/testing.md](references/testing.md) - テストスイートの配置と規約
 - [references/related-work.md](references/related-work.md) - 注釈付き関連研究と引用監査
+
+## クイックリンク
+
+- [Issues](https://github.com/Cyrax321/CONTINUUM/issues) バグ報告や新機能の要望
+- [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) 設計や仕様の提案

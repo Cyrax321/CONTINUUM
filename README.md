@@ -81,11 +81,11 @@ cd CONTINUUM
 
 uv venv && source .venv/bin/activate     # macOS / Linux; Windows: .venv\Scripts\activate
 
-# Contributors (recommended): library + CLI + all test tooling + every adapter
+# Contributors (recommended): library + CLI + test tooling + framework integrations
 uv pip install -e ".[dev]"
 
-# Or pick only what you need: . (minimal), [mcp], [otel], [langgraph],
-# [openai], [langchain], [attest], [postgres]
+# Or pick only what you need: . (minimal), [mcp], [browser], [kubernetes],
+# [otel], [langgraph], [openai], [langchain], [attest], [postgres]
 
 # Or skip the clone entirely:
 uv pip install git+https://github.com/Cyrax321/CONTINUUM.git
@@ -93,6 +93,16 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```
 
 > **pip fallback:** replace `uv pip install` with `pip install` in every command above.
+
+Optional environment adapters:
+
+- `uv pip install -e ".[browser]"` enables `BrowserAdapter`; run
+  `playwright install chromium` separately to install the browser binary.
+- `uv pip install -e ".[kubernetes]"` enables `KubernetesAdapter`; `kubectl` and
+  a configured cluster remain external prerequisites.
+
+If you use pip instead of uv, run `pip install -e ".[browser]"` or
+`pip install -e ".[kubernetes]"` with the same external prerequisites.
 
 Verify:
 
@@ -428,7 +438,7 @@ Schema v6. SQLite is primary, Postgres is CI verified. One log, many projections
 
 ### Module map: one library, many surfaces
 
-CONTINUUM is one library (`src/continuum`, 148 modules) plus a large test suite (209 test files, ~3680 tests). All modules append to and replay one hash chained event log:
+CONTINUUM is one library (`src/continuum`, 148 modules) plus a large test suite (210 test files, ~3680 tests). All modules append to and replay one hash chained event log:
 
 | Module | Role |
 |:--|:--|
