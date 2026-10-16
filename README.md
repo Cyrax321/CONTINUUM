@@ -164,7 +164,7 @@ CONTINUUM separates **LLM context** (temporary) from **durable task state** (per
 
 ![CONTINUUM how it works](docs/assets/architecture.svg)
 
-The detailed explanation, the projection model, and the recovery context are in [references/architecture.md](references/architecture.md).
+The detailed explanation, the projection model, and the recovery context are in [references/architecture.md](references/architecture.md). The step-by-step guides for each integration seam and operator-configurable surface, from embedding CONTINUUM in a coding CLI to writing a validation rule, are indexed in [docs/guides/README.md](docs/guides/README.md).
 
 ## Where CONTINUUM sits
 
