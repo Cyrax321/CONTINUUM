@@ -41,7 +41,7 @@
 
 ## Contents
 
-[Why](#why) · [Quick Start](#quick-start) · [How it works](#how-it-works) · [Where CONTINUUM sits](#where-continuum-sits) · [Features](#features) · [Security Extension](#security-extension) · [Empirical Verification](#empirical-verification) · [MCP Integration](#mcp-integration) · [Framework Integration](#framework-integration) · [Core Concepts](#core-concepts) · [Architecture](#architecture) · [API and CLI](#api-and-cli) · [Roadmap](#roadmap) · [What CONTINUUM Is Not](#what-continuum-is-not) · [Related work](#related-work) · [Status and limitations](#status-and-limitations) · [Contributing](#contributing) · [License](#license)
+[Why](#why) · [Quick Start](#quick-start) · [How it works](#how-it-works) · [Where CONTINUUM sits](#where-continuum-sits) · [Features](#features) · [Security Extension](#security-extension) · [Empirical Verification](#empirical-verification) · [MCP Integration](#mcp-integration) · [Framework Integration](#framework-integration) · [Core Concepts](#core-concepts) · [Architecture](#architecture) · [API and CLI](#api-and-cli) · [Roadmap](#roadmap) · [What CONTINUUM Is Not](#what-continuum-is-not) · [Related work](#related-work) · [Research](#research) · [Status and limitations](#status-and-limitations) · [Contributing](#contributing) · [License](#license)
 
 ---
 
@@ -557,6 +557,10 @@ If you want the verdict enforced, wire a seam or gate your pipeline on the exit 
 ## Related work
 
 CONTINUUM sits at the overlap of durable execution, idempotent side-effect tracking, and crash recovery for LLM agents. The closest neighbors are machine-checked resume contracts (Khan 2026), agentic transaction processing with constraint-gated admission (Mnemosyne 2026), checkpoint-rollback attack analysis (ACRFence 2026), and design-level prompt-injection defense (CaMeL 2025). The full annotated list, foundations, and citation audit are in [references/related-work.md](references/related-work.md).
+
+## Research
+
+CONTINUUM's own design notes sit in [docs/research/README.md](docs/research/README.md): what weeks-long autonomy requires from the literature, what was measured (latency budget, human-gate rates), and what was proposed and then implemented or left as a design. Each note states what landed and what did not.
 
 ## Status and limitations
 
