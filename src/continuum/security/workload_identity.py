@@ -6,6 +6,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+__all__ = [
+    "FakeWorkloadIdentityProvider",
+    "SpiffeIdentityProvider",
+    "WorkloadIdentity",
+    "WorkloadIdentityError",
+    "WorkloadIdentityProvider",
+    "WorkloadIdentityUnavailableError",
+    "resolve_workload_provider",
+]
+
 
 class WorkloadIdentityError(Exception):
     """Base exception for workload identity errors."""
@@ -15,14 +25,21 @@ class WorkloadIdentityUnavailableError(WorkloadIdentityError):
     """Raised when workload identity cannot be acquired or is unavailable."""
 
 
+_TRUST_DOMAIN_RE = re.compile(r"^[a-z0-9.\-_]+$")
+_PATH_SEGMENT_RE = re.compile(r"^[a-zA-Z0-9.\-_]+$")
+
+
 def _parse_trust_domain(spiffe_id: str) -> str:
     if not isinstance(spiffe_id, str) or not spiffe_id.startswith("spiffe://"):
         raise ValueError("must begin with 'spiffe://'")
     remainder = spiffe_id[len("spiffe://") :]
+    if not remainder or remainder.startswith("/"):
+        raise ValueError("missing trust domain")
     parts = remainder.split("/", 1)
-    if not parts[0]:
-        raise ValueError("Invalid SPIFFE ID: missing trust domain")
-    return parts[0]
+    td = parts[0]
+    if not td or not _TRUST_DOMAIN_RE.fullmatch(td):
+        raise ValueError(f"Invalid SPIFFE ID: invalid trust domain '{td}'")
+    return td
 
 
 @dataclass
@@ -36,10 +53,17 @@ class WorkloadIdentity:
         if not self.spiffe_id or not isinstance(self.spiffe_id, str):
             raise ValueError("spiffe_id must be a non-empty string")
 
+        if "\n" in self.spiffe_id or "\r" in self.spiffe_id:
+            raise ValueError(f"Invalid SPIFFE ID: {self.spiffe_id}")
+
         td = _parse_trust_domain(self.spiffe_id)
 
-        if not re.fullmatch(r"^spiffe://[a-zA-Z0-9.\-_]+(/[a-zA-Z0-9.\-_/]+)*$", self.spiffe_id):
-            raise ValueError(f"Invalid SPIFFE ID: {self.spiffe_id}")
+        remainder = self.spiffe_id[len("spiffe://") :]
+        parts = remainder.split("/")
+        if len(parts) > 1:
+            for seg in parts[1:]:
+                if not seg or not _PATH_SEGMENT_RE.fullmatch(seg):
+                    raise ValueError(f"Invalid SPIFFE ID: invalid segment '{seg}'")
 
         if self.trust_domain is not None and self.trust_domain != td:
             raise ValueError(f"trust_domain mismatch: {self.trust_domain} vs {td}")
