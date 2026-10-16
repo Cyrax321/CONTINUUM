@@ -3617,7 +3617,13 @@ def cmd_doctor(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     to it, because the meanings map onto it exactly:
 
     * OK when every wired IDE is current and authorized. An IDE with nothing
-      configured is not a failure and never blocks a pipeline.
+      configured is not a failure and never blocks a pipeline. Neither is a
+      registration whose command is a shell path expression such as
+      ``${CLAUDE_PROJECT_DIR:-.}/.venv/bin/continuum-mcp``: the host expands
+      that at spawn time and the doctor cannot, so the row is reported
+      ``unresolved`` rather than read as a broken path. Re-running
+      ``install`` here would be actively wrong, since it would replace the
+      portable, committed expression with one machine's absolute path.
     * REQUIRES_REPAIR when a registration bakes a path that no longer
       resolves. Re-running ``continuum mcp install`` fixes it unaided, which
       is precisely what that code documents.
