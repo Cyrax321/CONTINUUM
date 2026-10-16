@@ -510,6 +510,10 @@ Optional registries live beside your code and are data, not code: `.continuum/ga
 
 Most commands accept global `--json` **before** the subcommand (e.g. `continuum --json resume RUN`), and read-only commands never write, so they are safe against a live database while an agent is mid-run. The two exceptions are audit-only and fire solely for a run that is already parked: `resume` records its webhook delivery outcome when the verdict is `REQUEST_HUMAN` and an endpoint is subscribed, and `watch` records a liveness verdict flip; neither append projects onto state or moves the exit code. Exit codes are a safety contract (only a verified-safe run exits 0). Full command list, exit-code table, and state-diff output in [references/cli.md](references/cli.md).
 
+### API reference
+
+The page-by-page reference for that surface lives in [docs/api/](docs/api/README.md): [adapters](docs/api/adapters.md), the [action ledger](docs/api/ledger.md), [checkpoints](docs/api/checkpoints.md), [recovery](docs/api/recovery.md), [validation](docs/api/validation.md), [security](docs/api/security.md), the [sidecar HTTP API](docs/api/serve-http.md), the [MCP server](docs/api/mcp.md), and the [CLI command reference](docs/api/cli.md).
+
 ## Roadmap
 
 | Phase | Component | Status |
