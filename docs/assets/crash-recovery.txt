@@ -30,22 +30,22 @@ State validation:
   [ok] progress - 400 completed
 
 Action ledger:
-  [!!] github.create_issue: outcome unknown (id action_009a7fc)
+  [!!] github.create_issue: outcome unknown (id action_5e296e0)
 
 Recovery decision: REQUEST_HUMAN
   because 1 external side effect(s) have unknown outcomes
   because at least one repair needs a person
 
 Repairs required:
-  1. [human] reconcile_action action_009a7fca6636c9f534335fd7db4d22e9 - github.create_issue was interrupted; the side effect may or may not have occurred
+  1. [human] reconcile_action action_5e296e037b5a2ccccab933670c5fc54d - github.create_issue was interrupted; the side effect may or may not have occurred
   2. [auto]  revalidate_dependency dataset - v3 -> v4
   3. [auto]  rederive_evidence paper_128 - source 'dataset' changed
   4. [auto]  rederive_finding finding_17 - rests on changed evidence: paper_128
 
-Next permitted action: reconcile_action:action_009a7fca6636c9f534335fd7db4d22e9
+Next permitted action: reconcile_action:action_5e296e037b5a2ccccab933670c5fc54d
 
 Next steps:
-  1. check whether 'github.create_issue' actually reached the outside world, then call continuum_reconcile_action(run_id=run_4821, action_key=action_009a7fca6636c9f534335fd7db4d22e9, occurred=true|false)  (no probe registered in .continuum/reconcilers.json)
+  1. check whether 'github.create_issue' actually reached the outside world, then call continuum_reconcile_action(run_id=run_4821, action_key=action_5e296e037b5a2ccccab933670c5fc54d, occurred=true|false)  (no probe registered in .continuum/reconcilers.json)
   2. re-pin dependency 'dataset': rerun with `--env dataset=<current version>` after confirming its real version
   3. re-derive paper_128 from its source, then re-validate
   4. re-derive finding_17 from its source, then re-validate
@@ -58,7 +58,9 @@ What previous attempts changed (informed retry):
   avoid repeating: evidence:paper_128: stale; re-derive from its source before citing it again
   avoid repeating: external_dependency:dataset: changed under the run; re-pin with --env before trusting cached results
   avoid repeating: finding:finding_17: stale; re-derive from its source before citing it again
-  avoid repeating: github.create_issue (action_009a7fc): outcome unknown; reconcile before any retry
+  avoid repeating: github.create_issue (action_5e296e0): outcome unknown; reconcile before any retry
+
+Liveness: ok, silence 0.6s within threshold 600s (phase open_claim).
 
 Run with --repair to record the repair plan, or resolve the items above first.
 [exit code 21 - refusal path, safe:false]
@@ -77,7 +79,7 @@ $ continuum resume run_4821 --env dataset=v3  # now safe to continue
 CONTINUUM RECOVERY
 
 Run: run_4821
-Checkpoint: v6
+Checkpoint: v5
 
 State validation:
   [ok] external dependency dataset - verified unchanged
@@ -94,6 +96,8 @@ Next permitted action: continue
 What previous attempts changed (informed retry):
   provenance: derived from deterministic
   settled github.create_issue: effect confirmed present
+
+Liveness: ok, silence 0.4s within threshold 3600s (phase otherwise).
 [exit code 0 - allow path when safe]
 
 $ # final audit: did we repeat work or duplicate the side effect?
