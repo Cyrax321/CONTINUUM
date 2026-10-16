@@ -3013,14 +3013,18 @@ def cmd_gateway(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     return ExitCode.OK
 
 
-def cmd_daemon(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err: Any) -> int:
     """Run CONTINUUM as a background daemon (gateway + watch).
 
     Starts the enforcing HTTP gateway as a long-running process. Use
     ``--detach`` to fork into the background and write a PID file.
     """
+    import contextlib
     import signal
+    import sqlite3
+    import subprocess
     import sys
+    import threading
 
     from continuum.gateway import (
         DEFAULT_GATEWAY_CONFIG_PATH,
@@ -3029,6 +3033,7 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         load_gateway_config,
         load_gateway_tenant,
     )
+    from continuum.storage.base import StorageError
 
     config_path = Path(args.config) if args.config else Path(DEFAULT_GATEWAY_CONFIG_PATH)
     try:
@@ -3045,22 +3050,142 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         return ExitCode.ERROR
 
     bound_tenant = getattr(args, "tenant", None) or load_gateway_tenant(config_path)
-    active = storage.get_active_run()
-    run_id = args.run_id or (active.run_id if active else None)
+    run_id = getattr(args, "run_id", None)
+    if run_id is None:
+        if storage is not None:
+            active = storage.get_active_run()
+            run_id = active.run_id if active else None
+        else:
+            db_path = getattr(args, "db", None)
+            if db_path and db_path != ":memory:" and Path(db_path).exists():
+                try:
+                    probe_storage = open_storage(db_path)
+                    try:
+                        active = probe_storage.get_active_run()
+                        run_id = active.run_id if active else None
+                    finally:
+                        probe_storage.close()
+                except (sqlite3.Error, StorageError, ValueError, OSError) as exc:
+                    print(
+                        f"warning: failed to probe active run from {db_path}: {exc}",
+                        file=err,
+                    )
+                    run_id = None
+
+    pid_file = Path(args.pid_file) if args.pid_file else Path(".continuum/daemon.pid")
+
+    if args.detach and not hasattr(os, "fork"):
+        if args.port == 0:
+            print("error: --detach requires an explicit --port on this platform", file=err)
+            return ExitCode.ERROR
+
+        # Check port availability before detaching so occupied ports fail immediately.
+        if args.port > 0:
+            import socket
+
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe_sock:
+                    probe_sock.bind(("127.0.0.1", args.port))
+            except OSError as exc:
+                print(f"error: cannot bind to 127.0.0.1:{args.port}: {exc}", file=err)
+                return ExitCode.ERROR
+
+        try:
+            pid_file.parent.mkdir(parents=True, exist_ok=True)
+            with pid_file.open("a", encoding="utf-8"):
+                pass
+        except OSError as exc:
+            print(f"error: cannot write pid file {pid_file}: {exc}", file=err)
+            return ExitCode.ERROR
+
+        cmd = [sys.executable, "-m", "continuum.cli.main"]
+        if getattr(args, "db", None):
+            cmd.extend(["--db", str(args.db)])
+        cmd.append("daemon")
+        cmd.extend(["--port", str(args.port)])
+        if getattr(args, "config", None):
+            cmd.extend(["--config", str(args.config)])
+        if getattr(args, "tenant", None):
+            cmd.extend(["--tenant", str(args.tenant)])
+        if run_id:
+            cmd.extend(["--run-id", str(run_id)])
+        cmd.extend(["--pid-file", str(pid_file)])
+        cmd.append("--write-pid")
+
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
+            )
+
+        log_path = pid_file.with_suffix(".log")
+        try:
+            with open(log_path, "ab") as log_file:
+                proc = subprocess.Popen(
+                    cmd,
+                    creationflags=creationflags,
+                    close_fds=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_file,
+                    stderr=log_file,
+                )
+        except OSError:
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    creationflags=creationflags,
+                    close_fds=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError as exc:
+                print(f"error: failed to spawn daemon process: {exc}", file=err)
+                return ExitCode.ERROR
+
+        try:
+            pid_file.write_text(str(proc.pid), encoding="utf-8")
+        except OSError as exc:
+            proc.terminate()
+            print(f"error: cannot write pid file {pid_file}: {exc}", file=err)
+            return ExitCode.ERROR
+
+        wait_fn = getattr(proc, "wait", None)
+        if callable(wait_fn):
+            try:
+                rc = wait_fn(timeout=0.2)
+                if isinstance(rc, int):
+                    pid_file.unlink(missing_ok=True)
+                    print(f"error: daemon exited during startup (code {rc})", file=err)
+                    return ExitCode.ERROR
+            except subprocess.TimeoutExpired:
+                pass
+
+        print(f"CONTINUUM daemon started (pid {proc.pid})", file=out)
+        print(f"  pid file: {pid_file}", file=out)
+        print(f"  gateway: 127.0.0.1:{args.port}", file=out)
+        return ExitCode.OK
+
     server = GatewayServer(
         lambda: open_storage(args.db), run_id, routes, port=args.port, bound_tenant=bound_tenant
     )
 
-    pid_file = Path(args.pid_file) if args.pid_file else Path(".continuum/daemon.pid")
+    if getattr(args, "write_pid", False):
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(OSError):
+            pid_file.write_text(str(os.getpid()), encoding="utf-8")
 
     if args.detach:
-        pid = os.fork()
+        fork_fn = getattr(os, "fork", None)
+        assert fork_fn is not None
+        pid = fork_fn()
         if pid > 0:
             print(f"CONTINUUM daemon started (pid {pid})", file=out)
             print(f"  pid file: {pid_file}", file=out)
             print(f"  gateway: 127.0.0.1:{server.port}", file=out)
             return ExitCode.OK
-        os.setsid()
+        if hasattr(os, "setsid"):
+            os.setsid()
         pid_file.parent.mkdir(parents=True, exist_ok=True)
         pid_file.write_text(str(os.getpid()), encoding="utf-8")
 
@@ -3072,14 +3197,24 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     if args.detach:
         print(f"  pid file: {pid_file}", file=err)
 
+    def _unlink_pid_file() -> None:
+        with contextlib.suppress(OSError):
+            if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() == str(
+                os.getpid()
+            ):
+                pid_file.unlink(missing_ok=True)
+
     def _shutdown(signum: int, frame: Any) -> None:
         server.shutdown()
-        if args.detach:
-            pid_file.unlink(missing_ok=True)
+        _unlink_pid_file()
         sys.exit(0)
 
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
+    if threading.current_thread() is threading.main_thread():
+        try:
+            signal.signal(signal.SIGTERM, _shutdown)
+            signal.signal(signal.SIGINT, _shutdown)
+        except (ValueError, OSError):
+            pass
 
     try:
         server.serve_forever()
@@ -3087,8 +3222,7 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         pass
     finally:
         server.shutdown()
-        if args.detach:
-            pid_file.unlink(missing_ok=True)
+        _unlink_pid_file()
     return ExitCode.OK
 
 
@@ -5326,6 +5460,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--pid-file",
         default=None,
         help="PID file path (default: .continuum/daemon.pid).",
+    )
+    daemon_cmd.add_argument(
+        "--write-pid",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
 
     gateway_cmd = add(
