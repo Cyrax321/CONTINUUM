@@ -172,10 +172,10 @@ class FakeWorkloadIdentityProvider:
 
 
 def resolve_workload_provider(
-    provider_type: str = "spiffe", **kwargs: Any
+    provider_type: str | None = "spiffe", **kwargs: Any
 ) -> WorkloadIdentityProvider:
     """Resolve an identity provider by type."""
-    norm = str(provider_type).strip().lower()
+    norm = str(provider_type or "spiffe").strip().lower()
     if norm == "fake":
         return FakeWorkloadIdentityProvider(**kwargs)
     elif norm == "spiffe":
