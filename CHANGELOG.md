@@ -10,6 +10,11 @@ Test counts: ~3680 collected on a minimal env.
 
 ### Added
 
+- **Good first issues and Hacktoberfest guidance in CONTRIBUTING.md (#1652).**
+  Added an on-ramp section pointing to tracking issue #1661, ground rules for
+  first pull requests, a Table of Contents, and a reference table for issue
+  labels (including hacktoberfest, help wanted, and good first issue).
+
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a
   repeatedly failing integration spends its own allowance instead of the run's:

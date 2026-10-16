@@ -6,6 +6,69 @@ Maintainers cutting a release follow the manual gate in [docs/release-checklist.
 
 ---
 
+## Table of Contents
+
+- [A Good First Issue Is the Right Place to Start](#a-good-first-issue-is-the-right-place-to-start)
+- [Labels Worth Knowing](#labels-worth-knowing)
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+- [Running the Tests](#running-the-tests)
+- [Troubleshooting](#troubleshooting)
+- [Linting & Type-Checking](#linting--type-checking)
+- [Project Structure](#project-structure)
+- [Design Principles](#design-principles)
+- [Versioning](#versioning)
+- [Submitting a Pull Request](#submitting-a-pull-request)
+- [Code of Conduct](#code-of-conduct)
+
+---
+
+## A Good First Issue Is the Right Place to Start
+
+If you are new to CONTINUUM, the best place to start is the tracking issue
+[#1661](https://github.com/Cyrax321/CONTINUUM/issues/1661). It gathers verified,
+scoped tasks across documentation, missing test coverage, and packaging. Each
+task names the exact file it touches so you never need to guess where to make
+changes.
+
+Here is what is expected of a first pull request:
+
+- **One issue per PR.** Do not bundle multiple issues or tasks into one PR.
+- **Match the surrounding style.** Follow the existing formatting, naming, and
+  code structure in the files you edit.
+- **Run the test file you touched.** Execute `pytest tests/<your_test_file>.py -q`
+  and confirm `ruff check` passes before opening your PR.
+- **Comment if you get stuck.** If a test fails, instructions are unclear, or
+  you encounter unexpected behavior, leave a comment on the issue describing
+  where you are blocked. Asking a question is a valuable contribution.
+
+To get started today, open [#1661](https://github.com/Cyrax321/CONTINUUM/issues/1661),
+choose an unclaimed task, leave a comment stating you would like to work on it,
+and follow the [Setup](#setup) section below.
+
+---
+
+## Labels Worth Knowing
+
+Issue labels identify where help is needed and how tasks are scoped:
+
+| Label | Description |
+|---|---|
+| `good first issue` | Well-scoped entry-level tasks that name the exact files to modify. |
+| `help wanted` | Open contributor items where community assistance is actively sought. |
+| `hacktoberfest` | Issues participating in Hacktoberfest. Help is wanted on all of them. |
+| `documentation` | Guides, API reference pages, translated READMEs, and doc links. |
+| `tests` | Unit tests, regression tests, and coverage for untested modules. |
+| `bug` | Confirmed behavioral bugs, regressions, or incorrect error handling. |
+
+Issues participating in Hacktoberfest carry both the `hacktoberfest` and
+`help wanted` labels. You can filter the issue tracker by the
+[`good first issue`](https://github.com/Cyrax321/CONTINUUM/labels/good%20first%20issue)
+or [`hacktoberfest`](https://github.com/Cyrax321/CONTINUUM/labels/hacktoberfest)
+labels today to find an unassigned issue and begin contributing.
+
+---
+
 ## Prerequisites
 
 - Python **3.11+** (3.12 recommended for development)
