@@ -219,6 +219,7 @@ def verify_attestation(
             return False
         try:
             from continuum.security.workload_identity import WorkloadIdentity
+
             WorkloadIdentity.from_dict(wid)
         except (ValueError, TypeError, KeyError):
             return False

@@ -1519,11 +1519,13 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         # UNSAFE (31): run exists but resuming is not safe (distinct from NOT_FOUND / 2).
         return ExitCode.UNSAFE
 
-    has_wid_flags = any([
-        getattr(args, "require_workload_identity", None),
-        getattr(args, "workload_provider", None),
-        getattr(args, "spiffe", False),
-    ])
+    has_wid_flags = any(
+        [
+            getattr(args, "require_workload_identity", None),
+            getattr(args, "workload_provider", None),
+            getattr(args, "spiffe", False),
+        ]
+    )
     if has_wid_flags and not getattr(args, "attest", None):
         print("error: workload identity options require --attest", file=err)
         return ExitCode.ERROR
@@ -1545,7 +1547,9 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
         events = storage.read_events(run_id)
         if not events or not storage.verify_events(run_id).ok:
-            msg = f"Event chain for run {run_id!r} failed integrity verification; refusing to resume."
+            msg = (
+                f"Event chain for run {run_id!r} failed integrity verification; refusing to resume."
+            )
             payload = {"run_id": run_id, "mode": "request_human", "safe": False, "reason": msg}
             _emit(payload, msg, as_json=args.json, stream=out)
             return ExitCode.UNSAFE
@@ -2709,7 +2713,7 @@ def cmd_briefing(args: argparse.Namespace, storage: Storage, out: Any, err: Any)
     # covers; a file naming a run that is gone gets a note instead of a
     # resume command that cannot work (issue #1063).
     if resume_run and not resume_run_completed and run_id == resume_run:
-        lines.append(f"Interrupted run {resume_run} â€“ resume pending")
+        lines.append(f"Interrupted run {resume_run} - resume pending")
         lines.append(f"  run: continuum resume {resume_run} --json")
         lines.append("")
     elif unrecoverable_run:
@@ -4613,7 +4617,11 @@ def cmd_attest(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         from continuum.security.workload_identity import resolve_workload_provider
 
         provider_name = getattr(args, "workload_provider", None)
-        from continuum.security.workload_identity import WorkloadIdentityError, WorkloadIdentityUnavailableError
+        from continuum.security.workload_identity import (
+            WorkloadIdentityError,
+            WorkloadIdentityUnavailableError,
+        )
+
         try:
             provider = resolve_workload_provider(provider_name)
             wid = provider.get_identity()
