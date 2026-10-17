@@ -327,9 +327,11 @@ def test_cli_attest_and_verify_with_workload_identity(tmp_path: Path) -> None:
     assert code == ExitCode.UNSAFE
     assert "Attestation verification failed" in out
 
+
 def test_workload_identity_coverage_extensions():
     import pytest
-    from continuum.security.workload_identity import WorkloadIdentity, FakeWorkloadIdentityProvider
+
+    from continuum.security.workload_identity import FakeWorkloadIdentityProvider, WorkloadIdentity
 
     # Test newline rejection
     with pytest.raises(ValueError, match="Invalid SPIFFE ID"):
