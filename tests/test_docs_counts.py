@@ -157,11 +157,52 @@ def _tree_test_file_count() -> int:
     return len([p for p in (ROOT / "tests").rglob("test_*.py") if "__pycache__" not in p.parts])
 
 
+# Module-map sentence figures across README.md and translated READMEs (#1068, #1702).
+_MODULE_MAP_MODULE_RES = (
+    re.compile(r"`src/continuum`[,，、]?\s*(\d+)\s*modules?\b"),
+    re.compile(r"`src/continuum`[,，、]?\s*(\d+)\s*módulos?\b"),
+    re.compile(r"`src/continuum`[,，、]?\s*(\d+)\s*モジュール"),
+    re.compile(r"`src/continuum`[,，、]?\s*(\d+)\s*모듈"),
+    re.compile(r"`src/continuum`[,，、]?\s*(\d+)\s*(?:个\s*)?模块"),
+)
+
+_MODULE_MAP_TEST_FILE_RES = (
+    re.compile(r"(\d+)\s+test files?\b"),
+    re.compile(r"(\d+)\s+archivos de test\b"),
+    re.compile(r"(\d+)\s+arquivos de teste\b"),
+    re.compile(r"(\d+)\s*テストファイル"),
+    re.compile(r"(\d+)\s*테스트\s*파일"),
+    re.compile(r"(\d+)\s*(?:个\s*)?测试文件"),
+)
+
+
+def documented_module_count(path: Path) -> int:
+    """The module figure in ``path``'s module-map sentence (#1068, #1702)."""
+    text = path.read_text(encoding="utf-8")
+    matches = [m for rx in _MODULE_MAP_MODULE_RES for m in rx.findall(text)]
+    assert matches, f"{path.name} states no module count in module-map sentence"
+    counts = {int(m.replace(",", "")) for m in matches}
+    assert len(counts) == 1, f"{path.name} states inconsistent module figures: {sorted(counts)}"
+    return counts.pop()
+
+
+def documented_test_file_count(path: Path) -> int:
+    """The test-file figure in ``path``'s module-map sentence (#1068, #1702)."""
+    text = path.read_text(encoding="utf-8")
+    matches = [m for rx in _MODULE_MAP_TEST_FILE_RES for m in rx.findall(text)]
+    assert matches, f"{path.name} states no test-file count in module-map sentence"
+    counts = {int(m.replace(",", "")) for m in matches}
+    assert len(counts) == 1, f"{path.name} states inconsistent test-file figures: {sorted(counts)}"
+    return counts.pop()
+
+
 def test_readme_module_and_file_counts_match_the_tree() -> None:
-    """README's module and test-file counts track the tree (#1068).
+    """README's module and test-file counts track the tree (#1068, #1702).
 
     Both figures had aged silently since the commit that wrote them, and the
     collected-total guard never saw them because they are not test counts.
+    The translated READMEs carry the same module-map sentence and drift when
+    only README.md is updated (#1702).
 
     They used to be pinned exactly. That was defensible when the only PRs
     touching them were large, but it made every one-test-file PR fail CI on a
@@ -170,25 +211,24 @@ def test_readme_module_and_file_counts_match_the_tree() -> None:
     The tolerance is the same one the collected total uses, so real rot, which
     moves these by the hundreds as in #316 and #630, still fails loudly.
     """
-    text = (ROOT / "README.md").read_text(encoding="utf-8")
-    modules = re.search(r"`src/continuum`, (\d+) modules", text)
-    assert modules, "README states no module count"
-    stated_modules = int(modules.group(1))
+    readme_files = (ROOT / "README.md", *sorted(ROOT.glob("README.*.md")))
     live_modules = _tree_module_count()
-    assert abs(live_modules - stated_modules) <= TREE_COUNT_TOLERANCE, (
-        f"README says {stated_modules} modules but the tree has "
-        f"{live_modules}: the count in README.md's module-map "
-        "sentence needs the figure from `_tree_module_count`"
-    )
-    test_files = re.search(r"(\d+) test files", text)
-    assert test_files, "README states no test-file count"
-    stated_tests = int(test_files.group(1))
     live_tests = _tree_test_file_count()
-    assert abs(live_tests - stated_tests) <= TREE_COUNT_TOLERANCE, (
-        f"README says {stated_tests} test files but the tree has "
-        f"{live_tests}: the count in README.md's module-map "
-        "sentence needs the figure from `_tree_test_file_count`"
-    )
+
+    for path in readme_files:
+        stated_modules = documented_module_count(path)
+        assert abs(live_modules - stated_modules) <= TREE_COUNT_TOLERANCE, (
+            f"{path.name} says {stated_modules} modules but the tree has "
+            f"{live_modules}: the count in {path.name}'s module-map "
+            "sentence needs the figure from `_tree_module_count`"
+        )
+
+        stated_tests = documented_test_file_count(path)
+        assert abs(live_tests - stated_tests) <= TREE_COUNT_TOLERANCE, (
+            f"{path.name} says {stated_tests} test files but the tree has "
+            f"{live_tests}: the count in {path.name}'s module-map "
+            "sentence needs the figure from `_tree_test_file_count`"
+        )
 
 
 #: Prose forms of the fault-injection suite's size ("7-fault", "7 fault").
@@ -358,6 +398,75 @@ def test_documented_narrative_count_forms(tmp_path: Path) -> None:
         path = tmp_path / f"doc-{index}.md"
         path.write_text(text, encoding="utf-8")
         assert documented_total(path) == expected
+
+
+def test_module_map_narrative_forms(tmp_path: Path) -> None:
+    """Module-map figures across translated READMEs must stay detectable (#1702)."""
+    cases = (
+        (
+            "CONTINUUM is one library (`src/continuum`, 148 modules) plus a large "
+            "test suite (210 test files, ~3680 tests).",
+            148,
+            210,
+        ),
+        (
+            "CONTINUUM es una librería (`src/continuum`, 148 módulos) más una "
+            "suite de tests grande (210 archivos de test, ~3680 tests).",
+            148,
+            210,
+        ),
+        (
+            "CONTINUUM は一つのライブラリ（`src/continuum`、148 モジュール）に加え"
+            "大規模なテストスイート（210 テストファイル、約 2,809 テスト）である。",
+            148,
+            210,
+        ),
+        (
+            "CONTINUUM은 하나의 라이브러리(`src/continuum`, 148 모듈) plus "
+            "대규모 테스트 스위트(210 테스트 파일, 약 2,809 테스트)이다.",
+            148,
+            210,
+        ),
+        (
+            "O CONTINUUM é uma biblioteca (`src/continuum`, 148 módulos) mais uma "
+            "suíte de testes grande (210 arquivos de teste, ~2,809 testes).",
+            148,
+            210,
+        ),
+        (
+            "CONTINUUM 是一个库（`src/continuum`，148 个模块）加上大型测试套件"
+            "（210 个测试文件，约 2,809 个测试）。",
+            148,
+            210,
+        ),
+    )
+    for index, (text, expected_modules, expected_tests) in enumerate(cases):
+        path = tmp_path / f"readme-{index}.md"
+        path.write_text(text, encoding="utf-8")
+        assert documented_module_count(path) == expected_modules
+        assert documented_test_file_count(path) == expected_tests
+
+    # Unparseable files must name the file in the assertion failure
+    unparseable = tmp_path / "README.unparseable.md"
+    unparseable.write_text("No counts here.", encoding="utf-8")
+    with pytest.raises(AssertionError, match="README.unparseable.md states no module count"):
+        documented_module_count(unparseable)
+    with pytest.raises(AssertionError, match="README.unparseable.md states no test-file count"):
+        documented_test_file_count(unparseable)
+
+    # Inconsistent figures must fail the assertion
+    inconsistent = tmp_path / "README.inconsistent.md"
+    inconsistent.write_text(
+        "(`src/continuum`, 148 modules) and (`src/continuum`, 132 modules) with "
+        "210 test files and 186 test files",
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="README.inconsistent.md states inconsistent module"):
+        documented_module_count(inconsistent)
+    with pytest.raises(
+        AssertionError, match="README.inconsistent.md states inconsistent test-file"
+    ):
+        documented_test_file_count(inconsistent)
 
 
 def test_index_html_test_figure_matches_the_docs() -> None:
