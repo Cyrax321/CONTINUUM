@@ -30,7 +30,7 @@ jobs:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY_YUKI }}
           GITHUB_TOKEN: ${{ secrets.YUKI_TOKEN }}
         with:
-          model: opencode/muse-spark-1.2
+          model: opencode/beam-free
           use_github_token: true
           mentions: "/yuki"
           share: false
