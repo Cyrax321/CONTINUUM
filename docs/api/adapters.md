@@ -312,12 +312,14 @@ install stays inside ten.
 ```python
 from continuum.adapters.generic import GenericAgentAdapter
 from continuum.storage import SQLiteStorage
+
 store = SQLiteStorage(":memory:")
 adapter = GenericAgentAdapter(store)
 run_id = "demo"
 adapter.start_run(goal="trial", run_id=run_id)
 res = adapter.intercept_action(run_id, "slack.notify", lambda: "sent", arguments={"channel": "#x"})
 from continuum.state.semantic import project
+
 state = project(run_id, store.read_events(run_id))
 adapter.capture_state(run_id, state, reason="pre-kill")
 # kill -9 here, then in a fresh process:

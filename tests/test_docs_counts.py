@@ -475,6 +475,8 @@ def test_readme_module_and_test_file_counts_match_tree() -> None:
     assert abs(live_tests - documented_tests) <= TREE_COUNT_TOLERANCE, (
         f"README says {documented_tests} test files but tests/ carries {live_tests}"
     )
+
+
 def test_pyproject_line_references_in_docs():
     """Verify pyproject.toml:NN references in docs point to valid dependency lines.
 

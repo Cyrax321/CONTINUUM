@@ -114,11 +114,17 @@ def continuum_resume(run_id: str | None = None,
 
 ```python
 def get_active_run(self) -> Run | None:
-    terminal = (RunStatus.COMPLETED.value, RunStatus.CRASHED.value,
-                RunStatus.ABORTED.value, RunStatus.FAILED.value)
+    terminal = (
+        RunStatus.COMPLETED.value,
+        RunStatus.CRASHED.value,
+        RunStatus.ABORTED.value,
+        RunStatus.FAILED.value,
+    )
     rows = conn.execute(
         "SELECT * FROM runs WHERE status NOT IN (?,?,?,?) "
-        "ORDER BY updated_at DESC, run_id DESC LIMIT 1", terminal)
+        "ORDER BY updated_at DESC, run_id DESC LIMIT 1",
+        terminal,
+    )
     return self._row_to_run(rows[0]) if rows else None
 ```
 
