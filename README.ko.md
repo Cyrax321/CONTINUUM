@@ -120,7 +120,9 @@ from continuum import EventType, Run, SQLiteStorage, project
 
 store = SQLiteStorage("agent.db")
 store.create_run(Run(run_id="run_4821", goal="10,000개 문서 분석"))
-store.append_event("run_4821", EventType.RUN_STARTED, {"goal": "10,000개 문서 분석", "total": 10_000})
+store.append_event(
+    "run_4821", EventType.RUN_STARTED, {"goal": "10,000개 문서 분석", "total": 10_000}
+)
 
 for i, doc in enumerate(documents):
     analyze(doc)
@@ -128,7 +130,7 @@ for i, doc in enumerate(documents):
 
 # 충돌 후, 새로운 프로세스는 중단된 지점에서 정확히 재개한다:
 state = project("run_4821", store.read_events("run_4821"))
-print(state.progress.completed)            # 이미 완료, 반복하지 않음
+print(state.progress.completed)  # 이미 완료, 반복하지 않음
 print(store.verify_events("run_4821").ok)  # True, 충돌 후에도 체인은 온전함
 ```
 

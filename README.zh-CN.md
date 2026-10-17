@@ -119,7 +119,9 @@ from continuum import EventType, Run, SQLiteStorage, project
 
 store = SQLiteStorage("agent.db")
 store.create_run(Run(run_id="run_4821", goal="分析 10,000 份文档"))
-store.append_event("run_4821", EventType.RUN_STARTED, {"goal": "分析 10,000 份文档", "total": 10_000})
+store.append_event(
+    "run_4821", EventType.RUN_STARTED, {"goal": "分析 10,000 份文档", "total": 10_000}
+)
 
 for i, doc in enumerate(documents):
     analyze(doc)
@@ -127,7 +129,7 @@ for i, doc in enumerate(documents):
 
 # 崩溃后，新进程从停止的地方精确接续：
 state = project("run_4821", store.read_events("run_4821"))
-print(state.progress.completed)            # 已完成，不会重复
+print(state.progress.completed)  # 已完成，不会重复
 print(store.verify_events("run_4821").ok)  # True，崩溃后链仍然完整
 ```
 
