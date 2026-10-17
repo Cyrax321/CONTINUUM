@@ -121,7 +121,9 @@ from continuum import EventType, Run, SQLiteStorage, project
 
 store = SQLiteStorage("agent.db")
 store.create_run(Run(run_id="run_4821", goal="Analizar 10,000 documentos"))
-store.append_event("run_4821", EventType.RUN_STARTED, {"goal": "Analizar 10,000 documentos", "total": 10_000})
+store.append_event(
+    "run_4821", EventType.RUN_STARTED, {"goal": "Analizar 10,000 documentos", "total": 10_000}
+)
 
 for i, doc in enumerate(documents):
     analyze(doc)
@@ -129,7 +131,7 @@ for i, doc in enumerate(documents):
 
 # Tras una caída, un proceso nuevo retoma exactamente donde se detuvo:
 state = project("run_4821", store.read_events("run_4821"))
-print(state.progress.completed)            # ya hecho, no se repite
+print(state.progress.completed)  # ya hecho, no se repite
 print(store.verify_events("run_4821").ok)  # True, cadena intacta tras la caída
 ```
 
