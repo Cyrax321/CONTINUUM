@@ -38,6 +38,15 @@ _STDLIB = set(sys.stdlib_module_names)
 
 _EXCLUDE_DIRS = (".venv", "venv", "node_modules", "__pycache__", ".git", "build", "dist")
 
+#: Distribution names whose import name is not a lower-cased spelling of the
+#: distribution name. ``packages_distributions`` covers these when the package
+#: is installed, but the graph has to stay correct on a checkout where it is
+#: not, so the well-known cases are pinned. Keys and values are lower-cased.
+_DIST_ALIASES = {
+    "pillow": "pil",
+    "pyyaml": "yaml",
+}
+
 
 def _top_level(name: str) -> str:
     return name.split(".")[0]
@@ -69,6 +78,7 @@ class DependencyGraph:
         self._file_imports: dict[Path, set[str]] = {}
         self._package_files: dict[str, set[Path]] = {}
         self._scan()
+        self._dep_to_imports = self._map_dep_to_imports()
 
     def _read_declared(self, requirements: Iterable[str] | None) -> set[str]:
         declared: set[str] = set()
@@ -110,12 +120,39 @@ class DependencyGraph:
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
-                        mods.add(_top_level(alias.name))
+                        mods.add(_top_level(alias.name).lower())
                 elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                    mods.add(_top_level(node.module))
+                    mods.add(_top_level(node.module).lower())
             self._file_imports[path] = mods
             for mod in mods:
                 self._package_files.setdefault(mod, set()).add(path)
+
+    def _map_dep_to_imports(self) -> dict[str, set[str]]:
+        """Map each declared dependency to the import names it provides.
+
+        Everything is lower-cased, so the case-folding the module applies to a
+        declared name is also applied to the import names that identify it. A
+        dependency whose import name is not its own name (``Pillow`` -> ``PIL``,
+        ``PyYAML`` -> ``yaml``) is added through ``importlib.metadata`` when the
+        package is installed, and through ``_DIST_ALIASES`` when it is not.
+        """
+        mapping: dict[str, set[str]] = {}
+        for dep in self.declared:
+            mapping.setdefault(dep, set()).add(_top_level(dep).lower())
+        try:
+            from importlib.metadata import packages_distributions
+
+            for import_name, dists in packages_distributions().items():
+                for dist in dists:
+                    key = _normalize_dep(dist)
+                    if key in self.declared:
+                        mapping.setdefault(key, set()).add(import_name.lower())
+        except Exception:
+            pass
+        for dist, import_name in _DIST_ALIASES.items():
+            if dist in self.declared:
+                mapping.setdefault(dist, set()).add(import_name)
+        return mapping
 
     @staticmethod
     def is_stdlib(name: str) -> bool:
@@ -125,13 +162,19 @@ class DependencyGraph:
     def owner_of(self, file: str | Path) -> set[str]:
         """Declared dependencies imported by ``file`` (empty if none)."""
         mods = self._file_imports.get(Path(file), set())
-        return {pkg for pkg in self.declared if _top_level(pkg) in mods}
+        return {dep for dep, imports in self._dep_to_imports.items() if imports & mods}
 
     def files_using(self, package: str) -> set[Path]:
-        """``.py`` files that import the top-level module of ``package``."""
-        return set(self._package_files.get(_top_level(package), set()))
+        """``.py`` files that import a module ``package`` provides."""
+        dep = _normalize_dep(package)
+        imports = self._dep_to_imports.get(dep, {_top_level(dep)})
+        files: set[Path] = set()
+        for import_name in imports:
+            files.update(self._package_files.get(import_name, set()))
+        return files
 
     def third_party_imports(self, file: str | Path) -> set[str]:
         """Top-level imports of ``file`` that are neither stdlib nor declared."""
         mods = self._file_imports.get(Path(file), set())
-        return {m for m in mods if m not in _STDLIB and m not in self.declared}
+        declared_imports = set().union(*self._dep_to_imports.values()) if self._dep_to_imports else set()
+        return {m for m in mods if m not in _STDLIB and m not in declared_imports}
