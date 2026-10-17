@@ -45,14 +45,13 @@ Combine freely: `[dev]` already includes `mcp`, `langgraph`, `langchain`, `opena
 | Package | Where declared | Purpose | Required? |
 |:--|:--|:--|:--|
 | `pydantic>=2.7` | `pyproject.toml:30` (core `dependencies`) | Immutable models, hash-chained events | **Yes, always** |
-| `mcp>=2.0` | `pyproject.toml:53` (`[mcp]`), also in `[dev]` | MCP server (`continuum-mcp`) stdio transport | Only for MCP server (also pulled transitively by `openai-agents`) |
-| `opentelemetry-api>=1.20` | `pyproject.toml:55` (`[otel]`) | Span-processor bridge (`continuum.otel`) | Only for OTel directly; may appear transitively via `mcp`/`openai-agents` |
-| `langgraph>=0.2` | `pyproject.toml:58` (`[langgraph]`) | LangGraph adapter | Only for LangGraph (also pulled transitively by `langchain`) |
-| `openai-agents>=0.2` | `pyproject.toml:61` (`[openai]`) | OpenAI Agents SDK adapter | Only for OpenAI |
-| `langchain>=0.3` | `pyproject.toml:64` (`[langchain]`) | LangChain adapter | Only for LangChain |
-| `cryptography>=45.0` | `pyproject.toml:69` (`[attest]`), also in `[dev]` | Ed25519 event-chain attestation | Only for `continuum attest` |
-| `psycopg>=3.2` | `pyproject.toml:72` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
-| **Dev / test tooling** (all in `pyproject.toml:33-50` `[dev]`) | | | Only for contributors |
+| `mcp>=2.0` | `pyproject.toml:58` (`[mcp]`), also in `[dev]` | MCP server (`continuum-mcp`) stdio transport | Only for MCP server (also pulled transitively by `openai-agents`) |
+| `opentelemetry-api>=1.20` | `pyproject.toml:60` (`[otel]`) | Span-processor bridge (`continuum.otel`) | Only for OTel directly; may appear transitively via `mcp`/`openai-agents` |
+| `langgraph>=0.2` | `pyproject.toml:63` (`[langgraph]`) | LangGraph adapter | Only for LangGraph (also pulled transitively by `langchain`) |
+| `openai-agents>=0.2` | `pyproject.toml:66` (`[openai]`) | OpenAI Agents SDK adapter | Only for OpenAI |
+| `langchain>=0.3` | `pyproject.toml:69` (`[langchain]`) | LangChain adapter | Only for LangChain |
+| `cryptography>=45.0` | `pyproject.toml:74` (`[attest]`), also in `[dev]` | Ed25519 event-chain attestation | Only for `continuum attest` |
+| `psycopg>=3.2` | `pyproject.toml:77` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
 | `pytest>=8.0`, `pytest-cov>=5.0`, `pytest-asyncio>=0.23` |  | Test runner + coverage + async MCP tests | Dev |
 | `hypothesis>=6.0` |  | Property-based tests (hashing, models) | Dev |
 | `ruff==0.16.10` |  | Lint + format (CI enforces `ruff check` + `ruff format --check`) | Dev |
