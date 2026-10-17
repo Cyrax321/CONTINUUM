@@ -142,6 +142,24 @@ Test counts: ~3680 collected on a minimal env.
   since declaring such fields `volatile` at every call site is not a fix: a
   caller that wants around the cap simply forgets to declare them.
 
+- **The dependency graph no longer drops mixed-case or renamed dependencies (#1606).**
+  `DependencyGraph` normalizes declared names to lower case but kept import
+  names as written, so `owner_of` and `files_using` compared a lower-cased
+  declared name against a case-sensitive import name and returned empty for a
+  dependency whose import name has an upper-case letter, and for one whose
+  import name is not a lower-casing of its distribution name (`Pillow` ->
+  `PIL`, `PyYAML` -> `yaml`). A miss is silent: the module documents that
+  recovery falls back to whole-state behaviour, so a mixed-case dependency
+  cost the localization the graph exists to provide without any report.
+
+  Import names are now folded to lower case when the graph scans a file, and
+  each declared dependency is mapped to the import names it provides through
+  `importlib.metadata.packages_distributions` plus a pinned alias table for
+  the well-known renames, so the two query spaces agree with each other and
+  with the recovery scope. `owner_of`, `files_using`, and `third_party_imports`
+  all route through the same mapping, so the three can no longer disagree.
+
+
 - **The doctor stops contradicting the server over client-name case (#1621).**
   `doctor._observation_finding` compared the baked client name against the
   names hosts actually sent with a raw `in`, while every comparison in
