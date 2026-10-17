@@ -453,10 +453,18 @@ def _check_pyproject_line_references(path: Path, pyproject_lines: list[str]) -> 
         for match in matches:
             checked += 1
             target_line_num = int(match.group(1))
+            end_line_group = match.group(2)
             assert 1 <= target_line_num <= len(pyproject_lines), (
                 f"{path.name}:{line_no} cites pyproject.toml:{target_line_num}, "
                 f"which is outside the file (1-{len(pyproject_lines)})"
             )
+            if end_line_group is not None:
+                end_line_num = int(end_line_group)
+                assert target_line_num <= end_line_num <= len(pyproject_lines), (
+                    f"{path.name}:{line_no} cites pyproject.toml range {target_line_num}-{end_line_num}, "
+                    f"which is reversed or outside the file (1-{len(pyproject_lines)})"
+                )
+
             actual_line = pyproject_lines[target_line_num - 1]
 
             if "core" in line.lower() and "dependencies" in line.lower():
@@ -509,7 +517,14 @@ def test_documented_pyproject_line_references_resolve() -> None:
 
 def test_documented_pyproject_line_references_resolve_failures(tmp_path: Path) -> None:
     """Out-of-bounds or misaligned pyproject.toml references fail with descriptive messages (#1701)."""
-    pyproject_lines = (ROOT / "pyproject.toml").read_text(encoding="utf-8").splitlines()
+    synthetic_toml = [
+        "# comment 1",
+        'dependencies = ["pydantic>=2.7"]',
+        "[project.optional-dependencies]",
+        "# comment 4",
+        'mcp = ["mcp>=2.0"]',
+        'browser = ["playwright>=1.40"]',
+    ]
 
     # Out of bounds line number
     oob = tmp_path / "oob.md"
@@ -517,25 +532,34 @@ def test_documented_pyproject_line_references_resolve_failures(tmp_path: Path) -
     with pytest.raises(
         AssertionError, match="oob.md:1 cites pyproject.toml:9999, which is outside the file"
     ):
-        _check_pyproject_line_references(oob, pyproject_lines)
+        _check_pyproject_line_references(oob, synthetic_toml)
+
+    # Reversed or out of bounds range
+    rev = tmp_path / "rev.md"
+    rev.write_text("`pyproject.toml:5-2` (`[mcp]`)", encoding="utf-8")
+    with pytest.raises(
+        AssertionError,
+        match="rev.md:1 cites pyproject.toml range 5-2, which is reversed or outside",
+    ):
+        _check_pyproject_line_references(rev, synthetic_toml)
 
     # Pointing at a comment line
     comment = tmp_path / "comment.md"
-    comment.write_text("`pyproject.toml:53` (`[mcp]`)", encoding="utf-8")
+    comment.write_text("`pyproject.toml:4` (`[mcp]`)", encoding="utf-8")
     with pytest.raises(
         AssertionError,
-        match=r"comment.md:1 cites pyproject.toml:53 for \[mcp\], but that line holds:",
+        match=r"comment.md:1 cites pyproject.toml:4 for \[mcp\], but that line holds: '# comment 4'",
     ):
-        _check_pyproject_line_references(comment, pyproject_lines)
+        _check_pyproject_line_references(comment, synthetic_toml)
 
     # Pointing at the wrong extra declaration
     wrong = tmp_path / "wrong.md"
-    wrong.write_text("`pyproject.toml:61` (`[mcp]`)", encoding="utf-8")
+    wrong.write_text("`pyproject.toml:6` (`[mcp]`)", encoding="utf-8")
     with pytest.raises(
         AssertionError,
-        match=r"wrong.md:1 cites pyproject.toml:61 for \[mcp\], but that line holds: 'browser =",
+        match=r"wrong.md:1 cites pyproject.toml:6 for \[mcp\], but that line holds: 'browser =",
     ):
-        _check_pyproject_line_references(wrong, pyproject_lines)
+        _check_pyproject_line_references(wrong, synthetic_toml)
 
 
 def _tree_counts() -> tuple[int, int]:
