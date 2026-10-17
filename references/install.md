@@ -28,6 +28,8 @@ uv pip install -e .
 # Composable extras
 uv pip install -e ".[mcp]"           # MCP server (13 stdio tools), requires mcp>=2.0
 uv pip install -e ".[otel]"          # OpenTelemetry bridge, opentelemetry-api>=1.20
+uv pip install -e ".[browser]"       # BrowserAdapter, Playwright (run playwright install chromium separately)
+uv pip install -e ".[kubernetes]"    # KubernetesAdapter, Kubernetes client; kubectl and a cluster remain external
 uv pip install -e ".[langgraph]"     # LangGraph adapter
 uv pip install -e ".[openai]"        # OpenAI Agents SDK adapter (also pulls mcp transitively)
 uv pip install -e ".[langchain]"     # LangChain adapter
@@ -52,6 +54,17 @@ Combine freely: `[dev]` already includes `mcp`, `langgraph`, `langchain`, `opena
 | `langchain>=0.3` | `pyproject.toml:69` (`[langchain]`) | LangChain adapter | Only for LangChain |
 | `cryptography>=45.0` | `pyproject.toml:74` (`[attest]`), also in `[dev]` | Ed25519 event-chain attestation | Only for `continuum attest` |
 | `psycopg>=3.2` | `pyproject.toml:77` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
+| `mcp>=2.0` | `pyproject.toml:53` (`[mcp]`), also in `[dev]` | MCP server (`continuum-mcp`) stdio transport | Only for MCP server (also pulled transitively by `openai-agents`) |
+| `opentelemetry-api>=1.20` | `pyproject.toml:55` (`[otel]`) | Span-processor bridge (`continuum.otel`) | Only for OTel directly; may appear transitively via `mcp`/`openai-agents` |
+| `playwright>=1.40` | `pyproject.toml:62` (`[browser]`) | Browser automation through `BrowserAdapter`; install Chromium separately | Only for BrowserAdapter |
+| `kubernetes>=29` | `pyproject.toml:66` (`[kubernetes]`) | Kubernetes availability check for `KubernetesAdapter`; `kubectl` and a configured cluster remain external | Only for KubernetesAdapter |
+| `langgraph>=0.2` | `pyproject.toml:58` (`[langgraph]`) | LangGraph adapter | Only for LangGraph (also pulled transitively by `langchain`) |
+| `openai-agents>=0.2` | `pyproject.toml:61` (`[openai]`) | OpenAI Agents SDK adapter | Only for OpenAI |
+| `langchain>=0.3` | `pyproject.toml:64` (`[langchain]`) | LangChain adapter | Only for LangChain |
+| `cryptography>=45.0` | `pyproject.toml:69` (`[attest]`), also in `[dev]` | Ed25519 event-chain attestation | Only for `continuum attest` |
+| `psycopg>=3.2` | `pyproject.toml:72` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
+| **Dev / test tooling** (all in `pyproject.toml:33-50` `[dev]`) | | | Only for contributors |
+>>>>>>> 9b5494a1892c15e7cd33a0860d8527c6caf03c51
 | `pytest>=8.0`, `pytest-cov>=5.0`, `pytest-asyncio>=0.23` |  | Test runner + coverage + async MCP tests | Dev |
 | `hypothesis>=6.0` |  | Property-based tests (hashing, models) | Dev |
 | `ruff==0.16.10` |  | Lint + format (CI enforces `ruff check` + `ruff format --check`) | Dev |

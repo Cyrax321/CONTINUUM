@@ -560,3 +560,9 @@ Apache 2.0, [LICENSE](LICENSE) 참조.
 - [references/e2e.md](references/e2e.md) - 엔드투엔드 자율 테스트 워크스루
 - [references/testing.md](references/testing.md) - 테스트 스위트 배치와 관례
 - [references/related-work.md](references/related-work.md) - 주석이 달린 관련 연구와 인용 감사
+
+
+## 빠른 링크
+
+- [Issues](https://github.com/Cyrax321/CONTINUUM/issues) 버그 보고 및 기능 제안
+- [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) 설계 및 디자인 제안
