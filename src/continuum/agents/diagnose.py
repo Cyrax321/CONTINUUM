@@ -183,13 +183,13 @@ def _resolve_state(command: str, *, home: Path) -> str:
 
     if _is_shell_expression(command):
         return UNRESOLVED
-    path = Path(os.path.expandvars(command)).expanduser()
-    if path.is_absolute():
-        return RESOLVES if path.exists() else MISSING
+    expanded = os.path.expanduser(os.path.expandvars(command))
+    if Path(expanded).is_absolute():
+        return RESOLVES if Path(expanded).exists() else MISSING
     return (
         RESOLVES
-        if shutil.which(str(path), path=str(home / ".local" / "bin")) is not None
-        or shutil.which(str(path)) is not None
+        if shutil.which(expanded, path=str(home / ".local" / "bin")) is not None
+        or shutil.which(expanded) is not None
         else MISSING
     )
 

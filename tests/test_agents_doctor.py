@@ -218,6 +218,30 @@ def test_shell_expression_in_a_hook_command_is_unresolved_not_stale(
     assert any(str(settings) in d for d in row.details)
 
 
+def test_relative_command_preserves_path_prefix(
+    env: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative command like ./cmd is checked directly and does not fall back to PATH.
+
+    If Path stripped the leading ./, passing the bare name to shutil.which would
+    search PATH instead of checking the named local file.
+    """
+
+    root, _ = env
+    cmd_name = "./nonexistent-local-cmd"
+    write_mcp(root / ".mcp.json", command=cmd_name, clients="claude-code")
+    # Even if a command with the same base name exists on PATH, the relative path must not resolve.
+    monkeypatch.setattr(
+        diagnose.shutil,
+        "which",
+        lambda cmd, **kwargs: (
+            "/bin/nonexistent-local-cmd" if cmd == "nonexistent-local-cmd" else None
+        ),
+    )
+    row = ide_for(scan(env), "claude-code", "mcp")
+    assert row.state == diagnose.STALE, "relative command must check local file, not search PATH"
+
+
 def test_read_only_degraded_client_is_reported_degraded_naming_both_strings(
     env: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
