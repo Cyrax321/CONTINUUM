@@ -162,14 +162,20 @@ def test_a_toml_file_that_will_not_parse_is_never_rewritten(tmp_path: Path) -> N
 
 
 @needs_toml
-def test_a_toml_document_that_is_not_a_table_is_refused(tmp_path: Path) -> None:
-    """A TOML array at the root has no place to put the registration."""
+def test_a_toml_array_value_is_read_as_a_table_not_refused(tmp_path: Path) -> None:
+    """A key holding an array is a table, so it is read rather than refused.
+
+    TOML has no root-level array: every document parses to a table, and
+    ``key = [1, 2, 3]`` is the table ``{key: [1, 2, 3]}``. JSON and YAML both
+    admit a non-mapping at the root, which is why they can be refused here;
+    TOML cannot, so the ``does not contain a TOML table`` branch is
+    unreachable for this format and pinning it would assert the opposite of
+    the correct behaviour.
+    """
     settings = tmp_path / "config.toml"
     settings.write_text("key = [1, 2, 3]\n", encoding="utf-8")
 
-    with pytest.raises(configfmt.ConfigError, match="does not contain a TOML table"):
-        configfmt.read_document("toml", settings)
-
+    assert configfmt.read_document("toml", settings) == {"key": [1, 2, 3]}
     assert settings.read_text(encoding="utf-8") == "key = [1, 2, 3]\n"
 
 
