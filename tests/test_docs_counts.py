@@ -450,3 +450,41 @@ def test_readme_module_and_test_file_counts_match_tree() -> None:
     assert documented_tests == live_tests, (
         f"README says {documented_tests} test files but tests/ carries {live_tests}"
     )
+def test_pyproject_line_references_in_docs():
+    """Verify pyproject.toml:NN references in docs point to valid dependency lines.
+
+    Design note: These are line numbers, and any added extra shifts them.
+    When pyproject.toml changes, references in docs must be updated.
+    """
+    import re
+
+    root_dir = Path(__file__).resolve().parents[1]
+    pyproject_path = root_dir / "pyproject.toml"
+    assert pyproject_path.exists(), "pyproject.toml not found"
+
+    pyproject_lines = [""] + pyproject_path.read_text(encoding="utf-8").splitlines()
+    ref_pattern = re.compile(r"pyproject\.toml:(\d+)")
+
+    docs_dir = root_dir / "references"
+    if not docs_dir.exists():
+        docs_dir = root_dir
+
+    for doc_path in docs_dir.glob("**/*.md"):
+        doc_lines = doc_path.read_text(encoding="utf-8").splitlines()
+        for doc_line_no, line_str in enumerate(doc_lines, start=1):
+            matches = ref_pattern.findall(line_str)
+            for line_ref in matches:
+                target_line_no = int(line_ref)
+                assert target_line_no < len(pyproject_lines), (
+                    f"Invalid line number {target_line_no} in {doc_path}:{doc_line_no}"
+                )
+
+                actual_content = pyproject_lines[target_line_no].strip()
+                is_valid = bool(actual_content) and not actual_content.startswith("#")
+
+                assert is_valid, (
+                    f"\n[STALE REFERENCE DETECTED]\n"
+                    f"Doc: {doc_path.name}:{doc_line_no}\n"
+                    f"Points to: pyproject.toml:{target_line_no}\n"
+                    f"Actual line content: '{actual_content}'"
+                )
