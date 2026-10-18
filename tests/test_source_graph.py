@@ -277,3 +277,56 @@ def test_malformed_pyproject_fallback(tmp_path: Path) -> None:
     _write(tmp_path, "pyproject.toml", "[invalid toml format ==\n")
     graph = DependencyGraph(tmp_path)
     assert graph.declared == set()
+
+
+def test_google_namespace_distribution_candidates(tmp_path: Path) -> None:
+    """google-* distributions map to google.<sub> imports without false matches."""
+    app = _write(
+        tmp_path,
+        "app.py",
+        "from google.cloud import storage\nimport google.auth\n",
+    )
+    graph = DependencyGraph(
+        tmp_path,
+        requirements=["google-cloud-storage", "google-auth>=2.0"],
+    )
+    assert graph.owner_of(app) == {"google-cloud-storage", "google-auth"}
+    assert graph.files_using("google-cloud-storage") == {app}
+    assert graph.files_using("google_cloud_storage") == {app}
+    assert graph.files_using("google-auth") == {app}
+    assert graph.third_party_imports(app) == set()
+
+    proto_graph = DependencyGraph(tmp_path, requirements=["protobuf"])
+    assert proto_graph.owner_of(app) == set()
+    assert proto_graph.files_using("protobuf") == set()
+
+
+def test_common_dist_to_imports_agrees_with_installed_packages_distributions() -> None:
+    """_COMMON_DIST_TO_IMPORTS must agree with packages_distributions() when installed."""
+    import importlib.metadata
+
+    from continuum.analysis.depends import _COMMON_DIST_TO_IMPORTS, _canonical_dist
+
+    try:
+        installed = importlib.metadata.packages_distributions()
+    except Exception:
+        return
+    if not installed:
+        return
+
+    installed_dist_to_imports: dict[str, set[str]] = {}
+    for imp, dists in installed.items():
+        imp_lower = imp.strip().lower()
+        for d in dists:
+            installed_dist_to_imports.setdefault(_canonical_dist(d), set()).add(imp_lower)
+
+    for dist, expected_imports in _COMMON_DIST_TO_IMPORTS.items():
+        canon = _canonical_dist(dist)
+        if canon in installed_dist_to_imports:
+            actual_imports = installed_dist_to_imports[canon]
+            for exp in expected_imports:
+                top_part = exp.split(".")[0]
+                assert top_part in actual_imports, (
+                    f"Distribution {dist!r} expects import {exp!r}, "
+                    f"but packages_distributions() reports {actual_imports}"
+                )

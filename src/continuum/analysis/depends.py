@@ -171,6 +171,10 @@ class DependencyGraph:
         canon_dist = _canonical_dist(norm)
         top = _top_level(norm)
         names = {norm, canon_dist, top, top.replace("-", "_"), canon_dist.replace("-", "_")}
+        if canon_dist.startswith("google-"):
+            parts = canon_dist.split("-")
+            if len(parts) > 1 and parts[1]:
+                names.add(f"google.{parts[1].replace('-', '_')}")
         for key in (canon_dist, norm, top):
             if key in self._custom_aliases:
                 names.update(self._custom_aliases[key])
