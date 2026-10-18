@@ -104,12 +104,19 @@ def _installed_import_to_dists() -> dict[str, set[str]]:
     return out
 
 
+_GCLOUD_VERSION_RE = re.compile(r"_v\d+(?:p\d+)?(?:(?:alpha|beta)\d*)?$")
+
+
+def _gcloud_service(sub: str) -> str:
+    return _GCLOUD_VERSION_RE.sub("", sub)
+
+
 def _top_level(name: str) -> str:
     name = name.strip().lower()
     parts = name.split(".")
     if parts[0] == "google" and len(parts) > 1:
         if parts[1] == "cloud" and len(parts) > 2:
-            return f"{parts[0]}.{parts[1]}.{parts[2]}"
+            return f"{parts[0]}.{parts[1]}.{_gcloud_service(parts[2])}"
         return f"{parts[0]}.{parts[1]}"
     return parts[0]
 
@@ -254,7 +261,7 @@ class DependencyGraph:
                         elif len(mod_parts) == 2 and mod_parts[1] == "cloud":
                             for alias in node.names:
                                 alias_sub = alias.name.strip().lower().split(".")[0]
-                                mods.add(f"google.cloud.{alias_sub}")
+                                mods.add(f"google.cloud.{_gcloud_service(alias_sub)}")
                         else:
                             mods.add(_top_level(node.module))
                     else:

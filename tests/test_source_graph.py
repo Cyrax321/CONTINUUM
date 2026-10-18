@@ -317,6 +317,24 @@ def test_google_namespace_distribution_candidates(tmp_path: Path) -> None:
     assert proto_graph.files_using("protobuf") == set()
 
 
+def test_versioned_google_cloud_service_imports(tmp_path: Path) -> None:
+    """Versioned client modules (e.g. tasks_v2, kms_v1) map to their service distribution."""
+    tasks_app = _write(
+        tmp_path,
+        "tasks.py",
+        "from google.cloud import tasks_v2\nimport google.cloud.kms_v1\n",
+    )
+    graph = DependencyGraph(
+        tmp_path,
+        requirements=["google-cloud-tasks", "google-cloud-kms"],
+    )
+    assert graph.owner_of(tasks_app) == {"google-cloud-tasks", "google-cloud-kms"}
+    assert graph.files_using("google-cloud-tasks") == {tasks_app}
+    assert graph.files_using("google-cloud-kms") == {tasks_app}
+    assert graph.files_using("google.cloud.tasks_v2") == {tasks_app}
+    assert graph.third_party_imports(tasks_app) == set()
+
+
 def test_common_dist_to_imports_agrees_with_installed_packages_distributions() -> None:
     """_COMMON_DIST_TO_IMPORTS must agree with packages_distributions() when installed."""
     import importlib.metadata
