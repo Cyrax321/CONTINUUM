@@ -4,6 +4,10 @@ Thank you for helping make CONTINUUM better. This document covers everything you
 need to go from a fresh clone to a passing test suite and a clean pull request.
 Maintainers cutting a release follow the manual gate in [docs/release-checklist.md](docs/release-checklist.md), including the pre-tag clean-tree and remote-tag collision checks.
 
+Already know your way around? [docs/CONTRIBUTING_ONBOARDING.md](docs/CONTRIBUTING_ONBOARDING.md)
+is the orientation guide: where the architecture north star lives, what `STATUS.md` and
+`CHANGELOG.md` are for, and the rules review enforces.
+
 ---
 
 ## Prerequisites
@@ -31,6 +35,14 @@ pip install -e ".[dev]"
 # 4. Install the pre-commit hooks (recommended, see below)
 pip install pre-commit
 pre-commit install
+```
+
+To work on an optional environment adapter, install its extra in the same
+virtual environment:
+
+```bash
+pip install -e ".[browser]"     # BrowserAdapter; run playwright install chromium separately
+pip install -e ".[kubernetes]"  # KubernetesAdapter; kubectl and a cluster are external
 ```
 
 On **Windows PowerShell**, use the same steps with these commands instead:
@@ -70,6 +82,19 @@ pytest tests/test_events.py -v
 # Property-based tests (hypothesis) - slow, good before PRs
 pytest tests/test_hashing.py tests/test_models.py -v
 ```
+
+### Documentation guards
+
+`tests/test_docs_counts.py` holds roughly twenty guards that fail CI when a figure
+documented in the READMEs, translated READMEs, or reference docs drifts from
+the code: collected test total, module count, test-file count, CLI subcommand
+count, event-type count, fault-suite size, and more. Several carry a failure
+message that names the exact files to edit.
+
+The module-map figures in `README.md` are pinned with zero tolerance. Adding a
+test file means bumping the test-file count; adding a module means bumping the
+module count. That is intended behaviour, and the guard's own error message is
+the authority on which line to change, so do not duplicate it here.
 
 ---
 

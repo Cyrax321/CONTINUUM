@@ -110,6 +110,7 @@ __all__ = [
     "load_auth",
     "load_confirm",
     "caller_name",
+    "fold_client_name",
     "token_from",
     "CLIENT_TOKENS_ENV_VAR",
 ]
@@ -143,6 +144,10 @@ ALLOW_ANY_CLIENT = "*"
 #: committed registration is itself the warning.
 ALLOW_ANY_CLIENT_ENV_VAR = "CONTINUUM_MCP_ALLOW_ANY_CLIENT"
 
+#: Spellings that switch the wildcard on. Everything else is read as not set,
+#: so ``0`` and ``false`` mean what they say. See :func:`_opted_in`.
+_OPT_IN_VALUES = frozenset({"*", "1", "true", "yes", "on"})
+
 #: Used when the handshake supplied no client name at all.
 UNKNOWN_CALLER = "<unidentified>"
 
@@ -159,7 +164,7 @@ class NotAuthenticated(PermissionError):
     """The caller did not prove possession of the expected shared secret."""
 
 
-def _fold(name: str) -> str:
+def fold_client_name(name: str) -> str:
     """Normalise a client name so one spelling is one identity (#1598).
 
     Both halves of the handshake key off the same ``clientInfo.name`` string,
@@ -212,7 +217,7 @@ class AuthPolicy:
         # itself ``cursor`` (#1598). Two entries that fold together cannot both
         # survive, so the later one wins rather than silently splitting the
         # identity the fold exists to keep whole.
-        self.tokens = {_fold(k): v for k, v in tokens.items()} if tokens else None
+        self.tokens = {fold_client_name(k): v for k, v in tokens.items()} if tokens else None
         self.source = source
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
@@ -241,7 +246,7 @@ class AuthPolicy:
             # caller sends reaches the entry the operator registered (#1598).
             # A nameless caller folds to nothing the map can hold, and the map
             # never carries an empty key, so it refuses here as before.
-            folded = _fold(caller) if caller else caller
+            folded = fold_client_name(caller) if caller else caller
             if folded not in self.tokens:
                 raise NotAuthenticated(f"caller {caller!r} is not registered for authentication")
             expected = self.tokens[folded]
@@ -512,7 +517,7 @@ class AuthorizationPolicy:
         _reject_inline_alias_syntax(declared)
         self.allow_any = ALLOW_ANY_CLIENT in declared
         names = [n for n in declared if n != ALLOW_ANY_CLIENT]
-        self.allowed = frozenset(_fold(name) for name in names)
+        self.allowed = frozenset(fold_client_name(name) for name in names)
         self.source = source
 
         # An alias is only kept when the canonical it belongs to is itself
@@ -522,9 +527,9 @@ class AuthorizationPolicy:
         live = {
             canonical: extra
             for canonical, extra in _parse_aliases(aliases).items()
-            if _fold(canonical) in self.allowed
+            if fold_client_name(canonical) in self.allowed
         }
-        self.aliases = frozenset(_fold(alias) for extra in live.values() for alias in extra)
+        self.aliases = frozenset(fold_client_name(alias) for extra in live.values() for alias in extra)
         self._identities = self.allowed | self.aliases
         # The spellings as written, so a refusal quotes back something the
         # operator recognises rather than a lowercased shadow of it.
@@ -558,7 +563,7 @@ class AuthorizationPolicy:
         """
         if caller is None:
             return False
-        name = _fold(caller)
+        name = fold_client_name(caller)
         if not name:
             return False
         if self.allow_any:
@@ -605,6 +610,26 @@ class AuthorizationPolicy:
             f"{ALIASES_ENV_VAR}='<canonical>:<alias>[,<alias>...]'. To permit every "
             f"named client, set {ALLOW_ANY_CLIENT_ENV_VAR}."
         )
+
+
+def _opted_in(value: str | None) -> bool:
+    """Whether the wildcard environment variable was deliberately switched on.
+
+    The variable waives the client-name comparison and authorizes every named
+    caller to mutate, so it is read as a deliberate statement rather than as
+    presence. Reading it as presence meant ``CONTINUUM_MCP_ALLOW_ANY_CLIENT=0``
+    and ``=false`` switched on exactly what the operator wrote to switch off:
+    with an empty allowlist beside it, every client on the machine was
+    authorized. A value nobody can mistake for consent is an off.
+
+    Every affirmative spelling keeps working, including the ``*`` the docs
+    recommend and the ``1`` and ``yes`` the tests have always asserted. Only the
+    negative and unrecognised spellings are refused, and they are refused the
+    way the variable is meant to be read: not set.
+    """
+    if value is None:
+        return False
+    return value.strip().casefold() in _OPT_IN_VALUES
 
 
 def _from_env(value: str | None) -> list[str]:
@@ -678,7 +703,7 @@ def load_policy(
         return AuthorizationPolicy(allow, aliases=aliases, source="argument")
 
     environ = os.environ if env is None else env
-    if environ.get(ALLOW_ANY_CLIENT_ENV_VAR):
+    if _opted_in(environ.get(ALLOW_ANY_CLIENT_ENV_VAR)):
         return AuthorizationPolicy([ALLOW_ANY_CLIENT], source=ALLOW_ANY_CLIENT_ENV_VAR)
 
     declared = environ.get(ALIASES_ENV_VAR)
@@ -711,3 +736,7 @@ def caller_name(context: Any) -> str | None:
         return None
     name = getattr(info, "name", None)
     return str(name) if name else None
+
+
+# Backwards-compatible alias for readers that still reach for the private name.
+_fold = fold_client_name

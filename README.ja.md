@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI エントリーポイント
 continuum-mcp --help             # MCP サーバーエントリーポイント（[mcp] または [dev] が必要）
-pytest -q                        # 最小環境で約 3,636 件収集、約 3,636 件通過、約 41 件スキップ（正確な数は異なる）
+pytest -q                        # 最小環境で約 3680 件収集、約 3,636 件通過、約 41 件スキップ（正確な数は異なる）
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI が強制する三つのゲート
 ```
@@ -520,7 +520,7 @@ CONTINUUM は **Anandhu P Shaji**（[@Cyrax321](https://github.com/Cyrax321) · 
 
 このプロジェクトは Apache 2.0 の下でオープンソースであり、意図的に拡張可能に構築されている。リカバリセマンティクスを検証する研究者、台帳や MCP サーバーを他のフレームワークや言語に移植するエンジニア、計画されたロードマップを現実にする誰にとっても拡張可能である。良い出発点は [issue トラッカー](https://github.com/Cyrax321/CONTINUUM/issues) の `good first issue` ラベル、または STATUS.md にリストされた未解決の正確性バグである。
 
-大きな PR を送信する前に issue を開いてください。完全なコントリビューションガイドは [CONTRIBUTING.md](CONTRIBUTING.md) を参照。 [Code of Conduct](CODE_OF_CONDUCT.md) を含む。
+大きな PR を送信する前に issue を開いてください。完全なコントリビューションガイドは [CONTRIBUTING.md](CONTRIBUTING.md) を参照。 [Code of Conduct](CODE_OF_CONDUCT.md) と [セキュリティポリシー](SECURITY.md) を含む。
 
 ### コントリビューター
 
@@ -560,3 +560,8 @@ Apache 2.0、[LICENSE](LICENSE) を参照。
 - [references/e2e.md](references/e2e.md) - 端から端の自律テストウォークスルー
 - [references/testing.md](references/testing.md) - テストスイートの配置と規約
 - [references/related-work.md](references/related-work.md) - 注釈付き関連研究と引用監査
+
+## クイックリンク
+
+- [Issues](https://github.com/Cyrax321/CONTINUUM/issues) バグ報告や新機能の要望
+- [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) 設計や仕様の提案

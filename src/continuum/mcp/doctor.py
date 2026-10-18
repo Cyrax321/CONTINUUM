@@ -37,8 +37,9 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from continuum.mcp.authz import POLICY_ENV_VAR, POLICY_ENV_VAR_ALIAS
-from continuum.mcp.install import HOST_PROFILES, SERVER_NAME
+from continuum.mcp import configfmt
+from continuum.mcp.authz import POLICY_ENV_VAR, POLICY_ENV_VAR_ALIAS, fold_client_name
+from continuum.mcp.install import HOST_PROFILES, SERVER_NAME, host_format, host_shape
 from continuum.mcp.observation import read_observed_clients
 
 __all__ = ["run_doctor", "render_doctor"]
@@ -109,6 +110,12 @@ _REFUSAL_MARKERS = (
 #: rather than whatever the operator's shell happened to export.
 _POLICY_ENV_VARS = frozenset({POLICY_ENV_VAR, POLICY_ENV_VAR_ALIAS})
 
+#: The only prefix a registration may contribute to the probe environment.
+#: Every variable the server reads to decide authorization is named
+#: ``CONTINUUM_*`` (see :mod:`continuum.mcp.authz`), and nothing else in a
+#: registration is needed to ask the permission question. See
+#: :func:`_probe_environment`.
+_REGISTRATION_ENV_PREFIX = "CONTINUUM_"
 #: Probe code for check 1: import the SDK in a fresh interpreter. The version
 #: print is best-effort metadata, not a requirement -- a working SDK without
 #: install metadata is still a working SDK.
@@ -605,7 +612,7 @@ def _check_handshake(
 # --------------------------------------------------------------------------- #
 
 
-def _baked_client(entry: Any) -> str | None:
+def _baked_client(entry: Any, env_key: str = "env") -> str | None:
     """The client name baked into a registration's environment, if any.
 
     ``install`` writes ``CONTINUUM_MCP_MUTATING_CLIENTS`` as a per-host
@@ -613,10 +620,12 @@ def _baked_client(entry: Any) -> str | None:
     probing. The primary spelling is accepted too, because a hand-written
     registration may use it; which of the two a given server honours is the
     server's business, not this function's.
+
+    ``env_key`` is the host's spelling, which is not always ``env``.
     """
     if not isinstance(entry, dict):
         return None
-    env = entry.get("env")
+    env = entry.get(env_key)
     if not isinstance(env, dict):
         return None
     for var in (POLICY_ENV_VAR_ALIAS, POLICY_ENV_VAR):
@@ -626,92 +635,99 @@ def _baked_client(entry: Any) -> str | None:
     return None
 
 
-def _servers_at(path: Path, container_key: str | None, container_id: str | None) -> dict[str, Any]:
-    """The ``mcpServers`` dict of one settings file, empty when unreadable.
+def _entry_at(path: Path, host: str, scope: str, project_root: Path) -> dict[str, Any] | None:
+    """Our registration in one settings file, or ``None`` when there is none.
 
-    A file that is absent, unreadable or not JSON yields an empty dict rather
-    than raising: the doctor is asked to run on a machine that is already
-    broken, and a settings file it cannot parse is a finding about the
-    registration, not a crash of the diagnosis.
+    Read through the host's own format and shape rather than by parsing JSON
+    and looking for an ``mcpServers`` dict. That guess only ever described the
+    hosts that shipped before this module did: codex files its servers in TOML
+    under ``mcp_servers``, continue in a YAML list, opencode under ``mcp``, and
+    zed under ``context_servers``. Every one of those read as no registration
+    at all, so the permission probe never ran for them, which is the probe
+    install points at for the client names it cannot verify.
+
+    A file that is absent, unreadable, or not a shape this host promises yields
+    ``None`` rather than raising: the doctor is asked to run on a machine that
+    is already broken, and a settings file it cannot parse is a finding about
+    the registration, not a crash of the diagnosis.
     """
-    if not path.is_file():
-        return {}
     try:
-        data: Any = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    if container_key is not None:
-        scoped = data.get(container_key)
-        if not isinstance(scoped, dict):
-            return {}
-        section = scoped.get(container_id or "")
-        if not isinstance(section, dict):
-            return {}
-        data = section
-    servers = data.get("mcpServers")
-    return servers if isinstance(servers, dict) else {}
+        data = configfmt.read_document(host_format(host), path)
+    except (configfmt.ConfigError, OSError, UnicodeDecodeError):
+        return None
+    if not data:
+        return None
+    try:
+        entry = host_shape(host).find(data, scope, project_root, SERVER_NAME)
+    except configfmt.ConfigError:
+        return None
+    return entry if isinstance(entry, dict) else None
 
 
 def _registration_sites(
     cwd: Path,
-) -> Iterator[tuple[str, Path, str | None, str | None, dict[str, Any]]]:
+) -> Iterator[tuple[str, Path, str, dict[str, Any] | None]]:
     """Every place a registration for this project could live, most specific first.
 
     Project scope leads because it is cwd-relative: its answer depends on the
     checkout rather than on whose account the process runs as. Local and user
     scope follow, in that order, because ``mcp install`` defaults to local and
-    local beats project in the host's own precedence. The container key and id
-    travel with each site so an entry found in a nested per-project section
-    can be read back out of the file later.
+    local beats project in the host's own precedence. The scope travels with
+    each site because a host whose per-user file nests by project can only be
+    read back once the checkout it belongs to is named again.
     """
-    for host, profile in HOST_PROFILES.items():
-        project = Path(profile["project_settings"])
-        path = project if project.is_absolute() else cwd / project
-        yield host, path, None, None, _servers_at(path, None, None)
-    for host, profile in HOST_PROFILES.items():
-        path = Path(profile["local_settings"]).expanduser()
-        key = profile["local_projects_key"]
-        yield host, path, key, str(cwd), _servers_at(path, key, str(cwd))
-    for host, profile in HOST_PROFILES.items():
-        path = Path(profile["user_settings"]).expanduser()
-        yield host, path, None, None, _servers_at(path, None, None)
+    for scope, key in (
+        ("project", "project_settings"),
+        ("local", "local_settings"),
+        ("user", "user_settings"),
+    ):
+        for host, profile in HOST_PROFILES.items():
+            path = Path(profile[key]).expanduser()
+            if not path.is_absolute():
+                path = cwd / path
+            yield host, path, scope, _entry_at(path, host, scope, cwd)
 
 
 def find_registration(cwd: Path) -> dict[str, Any] | None:
     """The registration written for this project, or ``None`` when there is none.
 
-    Returns the host it was written for, the file and section it lives in, and
+    Returns the host it was written for, the file and scope it lives in, and
     the client name its environment bakes, which is the value the permission
     check declares and then verifies.
     """
-    for host, settings_path, container_key, container_id, servers in _registration_sites(cwd):
-        entry = servers.get(SERVER_NAME)
-        baked = _baked_client(entry)
+    for host, settings_path, scope, entry in _registration_sites(cwd):
+        if entry is None:
+            continue
+        baked = _baked_client(entry, host_shape(host).env_key)
         if baked is None:
             continue
         return {
             "host": host,
             "settings_path": settings_path,
-            "container_key": container_key,
-            "container_id": container_id,
+            "scope": scope,
+            "project_root": cwd,
             "baked_client": baked,
-            "database": _registration_database(entry),
+            "database": _registration_database(entry, host),
         }
     return None
 
 
-def _registration_database(entry: Any) -> str | None:
+def _registration_database(entry: Any, host: str) -> str | None:
     """The ``--db`` a registration points the host at, when it names one.
 
     This is the database real host connections open, so it is where their
     declared client names are recorded. Read from the registration rather than
     guessed, because the doctor's own probe runs against a throwaway database
     and would otherwise observe only the name the doctor itself declared.
+
+    Through the host's own shape, because an argv-array host files the whole
+    command line under ``command`` and writes no ``args`` key at all. Reading
+    ``args`` directly found nothing for opencode, which meant its observed
+    clients were never read and the name it sends was never compared against
+    the name it grants.
     """
-    args = entry.get("args") if isinstance(entry, dict) else None
-    if not isinstance(args, list):
+    args = host_shape(host).argv_of(entry)
+    if not args:
         return None
     for index, arg in enumerate(args):
         if arg == "--db" and index + 1 < len(args):
@@ -731,9 +747,33 @@ def _probe_environment(registration: dict[str, Any]) -> dict[str, str]:
     is the silent failure this check exists to end. ``PATH`` and
     ``PYTHONPATH`` are untouched: the child still has to be spawnable and
     importable for the call to say anything at all.
+
+    A registration is data read from a file in a checkout, and it is never
+    allowed to decide how the interpreter starts. Only the ``CONTINUUM_*``
+    variables are taken from it, matched case-insensitively, leaving this
+    process's own values in place for everything else.
+
+    A ``PYTHONPATH`` written into a project config would otherwise be read back
+    out of that same file and handed to the probe child, where a
+    ``sitecustomize.py`` beside it runs before the probe does anything at all.
+
+    The allowlist is deliberate and a denylist was not. A denylist of
+    interpreter variables was in place first and had two holes: Windows treats
+    environment names case-insensitively, so a lowercase ``pythonpath`` passed
+    an exact-match filter, and the list was missing startup variables that run
+    code from the checkout, ``PYTHONPYCACHEPREFIX`` among them, which load
+    unchecked-hash bytecode in place of stdlib modules. Python also keeps
+    adding more. Naming what is allowed does not have that problem, and
+    nothing about authorization needs anything outside the prefix.
     """
     env = {key: value for key, value in os.environ.items() if key not in _POLICY_ENV_VARS}
-    env.update(_registration_env(registration))
+    env.update(
+        {
+            key: value
+            for key, value in _registration_env(registration).items()
+            if key.upper().startswith(_REGISTRATION_ENV_PREFIX)
+        }
+    )
     return env
 
 
@@ -746,12 +786,13 @@ def _registration_env(registration: dict[str, Any]) -> dict[str, str]:
     disk, which is the thing being verified: reading it out of a summary
     would verify the summary instead.
     """
-    entry = _servers_at(
+    entry = _entry_at(
         registration["settings_path"],
-        registration["container_key"],
-        registration["container_id"],
-    ).get(SERVER_NAME)
-    env = entry.get("env") if isinstance(entry, dict) else None
+        registration["host"],
+        registration["scope"],
+        registration["project_root"],
+    )
+    env = entry.get(host_shape(registration["host"]).env_key) if entry else None
     if not isinstance(env, dict):
         return {}
     return {str(key): str(value) for key, value in env.items()}
@@ -808,7 +849,7 @@ def _observation_finding(
             f"re-run {INSTALL_SERVER_COMMAND} after the host has connected once, or call "
             f"a tool from the host and re-run this check",
         )
-    if baked in observed:
+    if any(fold_client_name(name) == fold_client_name(baked) for name in observed):
         return (
             "pass",
             f"a host has connected as {baked!r}, the name the registration authorizes",

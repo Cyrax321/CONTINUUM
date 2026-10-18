@@ -299,6 +299,76 @@ def test_the_wildcard_env_var_permits_every_named_client(tmp_path: Path) -> None
     assert not policy.denies_everything
 
 
+@pytest.mark.parametrize(
+    "value", ["0", "false", "no", "off", "FALSE", "Off", "no thanks", "  ", "maybe"]
+)
+def test_the_wildcard_env_var_is_not_set_by_a_negative_spelling(tmp_path: Path, value: str) -> None:
+    """Writing the variable off must not switch the wildcard on.
+
+    It used to be read as presence, so ``CONTINUUM_MCP_ALLOW_ANY_CLIENT=0``
+    authorized every named client to mutate, which is the exact opposite of
+    what the operator wrote and the opposite of what this variable is for. With
+    no allowlist beside it the safe answer and the dangerous one differed only
+    by a character, and the dangerous one was what shipped.
+
+    The result here is the default deny, not an error: a value that is not an
+    opt-in is a value that is not set, so the policy falls through to whatever
+    the rest of the environment and the policy file say.
+    """
+
+    policy = load_policy(root=tmp_path, env={ALLOW_ANY_CLIENT_ENV_VAR: value})
+
+    assert not policy.allow_any, f"{value!r} read as an opt-in"
+    assert policy.source == "default (deny)"
+    assert not policy.permits("a-client-nobody-has-seen")
+    assert policy.denies_everything
+
+
+@pytest.mark.parametrize("value", ["*", "1", "true", "yes", "on", "TRUE", " on "])
+def test_the_wildcard_env_var_still_honours_every_affirmative_spelling(
+    tmp_path: Path, value: str
+) -> None:
+    """Closing the negative case must not close the positive one.
+
+    The docs recommend ``*`` and the tests have always asserted ``1`` and
+    ``yes``, so all three keep working, along with the other spellings an
+    operator would reach for.
+    """
+
+    policy = load_policy(root=tmp_path, env={ALLOW_ANY_CLIENT_ENV_VAR: value})
+
+    assert policy.allow_any, f"{value!r} stopped being an opt-in"
+    assert policy.source == ALLOW_ANY_CLIENT_ENV_VAR
+
+
+def test_the_wildcard_env_var_is_read_as_not_set_when_absent(tmp_path: Path) -> None:
+    """Absence, and only absence, is the same as writing it off."""
+
+    policy = load_policy(root=tmp_path, env={})
+    assert not policy.allow_any
+    assert policy.denies_everything
+
+
+def test_a_negative_spelling_still_defers_to_the_allowlist_beside_it(
+    tmp_path: Path,
+) -> None:
+    """Not opting in is not opting out of everything.
+
+    The negative spelling drops the wildcard and the ordinary allowlist
+    variables still apply, so an operator who set ``=false`` alongside a
+    real allowlist gets the allowlist rather than a lockout.
+    """
+
+    policy = load_policy(
+        root=tmp_path,
+        env={ALLOW_ANY_CLIENT_ENV_VAR: "0", POLICY_ENV_VAR: "cursor"},
+    )
+
+    assert not policy.allow_any
+    assert policy.permits("cursor")
+    assert not policy.permits("anything-else")
+
+
 def test_the_wildcard_grants_names_not_the_absence_of_one(tmp_path: Path) -> None:
     """It waives the comparison; it does not make an unidentified caller a grant."""
     policy = load_policy(root=tmp_path, env={ALLOW_ANY_CLIENT_ENV_VAR: "yes"})

@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI 진입점
 continuum-mcp --help             # MCP 서버 진입점 ([mcp] 또는 [dev] 필요)
-pytest -q                        # 최소 환경에서 약 3,636개 수집, 약 3,636개 통과, 약 41개 스킵 (정확한 수는 환경에 따라 다름)
+pytest -q                        # 최소 환경에서 약 3680개 수집, 약 3,636개 통과, 약 41개 스킵 (정확한 수는 환경에 따라 다름)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI가 강제하는 세 가지 게이트
 ```
@@ -520,7 +520,7 @@ CONTINUUM은 **Anandhu P Shaji**([@Cyrax321](https://github.com/Cyrax321) · [Li
 
 이 프로젝트는 Apache 2.0 하에 오픈 소스이며 의도적으로 확장 가능하게 구축되었다. 복구 시맨틱을 검증하는 연구자, 원장이나 MCP 서버를 다른 프레임워크나 언어로 포팅하는 엔지니어, 계획된 로드맵을 현실로 만드는 모든 사람을 위해 확장 가능하다. 좋은 출발점은 [issue 트래커](https://github.com/Cyrax321/CONTINUUM/issues)의 `good first issue` 레이블, 또는 STATUS.md에 나열된 열린 정확성 버그이다.
 
-큰 PR을 보내기 전에 이슈를 열어라. 완전한 기여 가이드는 [CONTRIBUTING.md](CONTRIBUTING.md)를 참조하라. [Code of Conduct](CODE_OF_CONDUCT.md)를 포함한다.
+큰 PR을 보내기 전에 이슈를 열어라. 완전한 기여 가이드는 [CONTRIBUTING.md](CONTRIBUTING.md)를 참조하라. [Code of Conduct](CODE_OF_CONDUCT.md)와 [보안 정책](SECURITY.md)을 포함한다.
 
 ### 기여자
 
@@ -560,3 +560,9 @@ Apache 2.0, [LICENSE](LICENSE) 참조.
 - [references/e2e.md](references/e2e.md) - 엔드투엔드 자율 테스트 워크스루
 - [references/testing.md](references/testing.md) - 테스트 스위트 배치와 관례
 - [references/related-work.md](references/related-work.md) - 주석이 달린 관련 연구와 인용 감사
+
+
+## 빠른 링크
+
+- [Issues](https://github.com/Cyrax321/CONTINUUM/issues) 버그 보고 및 기능 제안
+- [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) 설계 및 디자인 제안

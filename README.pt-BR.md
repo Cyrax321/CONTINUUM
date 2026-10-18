@@ -96,7 +96,7 @@ Verifique:
 ```bash
 continuum --help                 # ponto de entrada CLI
 continuum-mcp --help             # ponto de entrada do servidor MCP (precisa de [mcp] ou [dev])
-pytest -q                        # ~3,636 coletados, ~3,636 passando, ~41 pulados em um ambiente mínimo (as contagens exatas variam)
+pytest -q                        # ~3680 coletados, ~3,636 passando, ~41 pulados em um ambiente mínimo (as contagens exatas variam)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # os três portões que o CI exige
 ```
@@ -521,7 +521,7 @@ O CONTINUUM foi criado por **Anandhu P Shaji** ([@Cyrax321](https://github.com/C
 
 Este projeto é de código aberto sob Apache 2.0 e deliberadamente construído para ser estendido: por pesquisadores validando a semântica de recuperação, por engenheiros portando o ledger ou o servidor MCP para outros frameworks ou linguagens, e por qualquer pessoa que transforme o roteiro planejado em realidade. Um bom lugar para começar é a etiqueta `good first issue` no [rastreador de issues](https://github.com/Cyrax321/CONTINUUM/issues), ou os defeitos abertos de correção listados em STATUS.md.
 
-Abra uma issue antes de enviar PRs grandes. Veja [CONTRIBUTING.md](CONTRIBUTING.md) para o guia completo de contribuição, incluindo o [Code of Conduct](CODE_OF_CONDUCT.md).
+Abra uma issue antes de enviar PRs grandes. Veja [CONTRIBUTING.md](CONTRIBUTING.md) para o guia completo de contribuição, incluindo o [Code of Conduct](CODE_OF_CONDUCT.md) e a [política de segurança](SECURITY.md).
 
 ### Colaboradores
 
@@ -561,3 +561,8 @@ Material de referência profundo:
 - [references/e2e.md](references/e2e.md) - passo a passo de teste de autonomia ponta a ponta
 - [references/testing.md](references/testing.md) - disposição e convenções da suíte de testes
 - [references/related-work.md](references/related-work.md) - trabalho relacionado anotado e auditoria de citações
+
+## Links rápidos
+
+- [Issues](https://github.com/Cyrax321/CONTINUUM/issues) para bugs e recursos
+- [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) para propostas de design
