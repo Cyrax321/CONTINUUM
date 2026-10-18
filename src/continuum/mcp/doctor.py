@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from continuum.mcp import configfmt
-from continuum.mcp.authz import POLICY_ENV_VAR, POLICY_ENV_VAR_ALIAS
+from continuum.mcp.authz import POLICY_ENV_VAR, POLICY_ENV_VAR_ALIAS, fold_client_name
 from continuum.mcp.install import HOST_PROFILES, SERVER_NAME, host_format, host_shape
 from continuum.mcp.observation import read_observed_clients
 
@@ -849,7 +849,7 @@ def _observation_finding(
             f"re-run {INSTALL_SERVER_COMMAND} after the host has connected once, or call "
             f"a tool from the host and re-run this check",
         )
-    if baked in observed:
+    if any(fold_client_name(name) == fold_client_name(baked) for name in observed):
         return (
             "pass",
             f"a host has connected as {baked!r}, the name the registration authorizes",

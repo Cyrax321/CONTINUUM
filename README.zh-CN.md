@@ -535,7 +535,7 @@ CONTINUUM 由 **Anandhu P Shaji**（[@Cyrax321](https://github.com/Cyrax321) · 
 
 本项目基于 Apache 2.0 开源，并有意构建为可扩展：面向验证恢复语义的研究者、面向将账本或 MCP 服务器移植到其他框架或语言的工程师，以及面向将规划路线图变为现实的任何人。一个好的起点是 issue 跟踪器上的 `good first issue` 标签，或 STATUS.md 中列出的开放正确性缺陷。
 
-在提交大型 PR 前请先开 issue。完整贡献指南见 [CONTRIBUTING.md](CONTRIBUTING.md)，包括 [Code of Conduct](CODE_OF_CONDUCT.md)。
+在提交大型 PR 前请先开 issue。完整贡献指南见 [CONTRIBUTING.md](CONTRIBUTING.md)，包括 [Code of Conduct](CODE_OF_CONDUCT.md) 与 [安全策略](SECURITY.md)。
 
 ### 贡献者
 
@@ -575,3 +575,8 @@ Apache 2.0，见 [LICENSE](LICENSE)。
 - [references/e2e.md](references/e2e.md) - 端到端自主测试 walkthrough
 - [references/testing.md](references/testing.md) - 测试套件布局和约定
 - [references/related-work.md](references/related-work.md) - 带注释的相关工作和引用审计
+
+## 快速链接
+
+- [Issues](https://github.com/Cyrax321/CONTINUUM/issues) 提交错误与功能需求
+- [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) 探讨设计与提案

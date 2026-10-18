@@ -53,6 +53,7 @@ __all__ = [
     "STALE",
     "DEGRADED",
     "NOT_CONFIGURED",
+    "UNVERIFIED",
     "scan",
     "render_report",
 ]
@@ -62,6 +63,11 @@ STALE = "stale"
 DEGRADED = "read-only-degraded"
 NOT_CONFIGURED = "not-configured"
 CURRENT = "current"
+
+#: A registration whose command carries a shell expansion the doctor cannot
+#: evaluate. It is neither wired-and-fine nor broken: the host resolves the
+#: expression when it spawns, and the doctor only sees the literal text.
+UNVERIFIED = "unverified"
 
 #: Commands the hook clients install, keyed by the trailing word of the
 #: invocation. Used only to recognise a continuum hook in a settings file.
@@ -133,6 +139,29 @@ def _expand(raw: str, *, root: Path, home: Path) -> Path:
     return path if path.is_absolute() else root / path
 
 
+def _is_shell_expression(command: str) -> bool:
+    """Whether ``command`` carries a shell expansion the doctor cannot evaluate.
+
+    ``docs/api/mcp.md`` recommends committing the portable form
+
+    .. code-block:: text
+
+        ${CLAUDE_PROJECT_DIR:-.}/.venv/bin/continuum-mcp
+
+    and hosts expand it when they spawn. ``os.path.expandvars`` does not know
+    the shell's ``${VAR:-default}`` form, so the text reaches ``_resolves``
+    unchanged, is not absolute, and is looked up on PATH as a bare name. That
+    lookup failing says nothing about whether the host can start the server.
+
+    Any unexpanded ``$`` is treated this way, including the forms
+    ``os.path.expandvars`` does handle. Those expand to a real path when the
+    variable is set, and to a literal ``$NAME`` when it is not, so in the unset
+    case the doctor would otherwise report a path containing a ``$`` as broken.
+    """
+
+    return "$" in command
+
+
 def _resolves(command: str, *, home: Path) -> bool:
     """Whether a baked command still resolves the way a host would find it.
 
@@ -195,6 +224,17 @@ class IdeReport:
     remedy: str | None = None
     clients: tuple[str, ...] = ()
     state_override: str | None = None
+    unverified: tuple[str, ...] = ()
+    """Commands the doctor refused to judge because a host expands them first.
+
+    Kept apart from :attr:`stale` on purpose. A stale registration is one the
+    host cannot spawn, and the remedy is to re-bake the path. A command
+    carrying a shell expression may well be perfectly healthy; re-baking it is
+    the opposite of the fix, because it replaces a portable committed path
+    with an absolute one tied to one machine. Saying ``unverified`` is the
+    honest verdict and costs the run nothing: it does not read as stale, so it
+    does not drive the repair exit code.
+    """
     """Set when the surface's own vocabulary is more precise than the generic one.
 
     An instruction target distinguishes current, drifted, unmanaged and
@@ -239,6 +279,7 @@ class IdeReport:
             "details": list(self.details),
             "remedy": self.remedy,
             "clients": list(self.clients),
+            "unverified": list(self.unverified),
         }
 
 
@@ -305,6 +346,7 @@ def _scan_mcp_host(host: str, *, root: Path, home: Path, policy: AuthorizationPo
     found_in: list[str] = []
     details: list[str] = []
     stale_paths: list[str] = []
+    unverified_paths: list[str] = []
     granted: set[str] = set()
 
     for label, path in paths.items():
@@ -336,7 +378,13 @@ def _scan_mcp_host(host: str, *, root: Path, home: Path, policy: AuthorizationPo
         granted.update(_declared_clients(entry, shape.env_key))
         argv = shape.argv_of(entry)
         command = argv[0] if argv else None
-        if command is not None and not _resolves(command, home=home):
+        if command is not None and _is_shell_expression(command):
+            unverified_paths.append(f"{label}: {path} bakes {command}")
+            details.append(
+                f"{label}: {path} bakes {command}, a shell expression the host "
+                f"expands at spawn; the doctor cannot verify it"
+            )
+        elif command is not None and not _resolves(command, home=home):
             stale_paths.append(f"{label}: {path} bakes {command}")
             details.append(f"{label}: {path} bakes {command}, which no longer resolves")
         elif argv:
@@ -364,7 +412,8 @@ def _scan_mcp_host(host: str, *, root: Path, home: Path, policy: AuthorizationPo
         wired=bool(found_in),
         stale=bool(stale_paths),
         degraded=degraded,
-        summary=_summarise(found_in, stale_paths, degraded, host),
+        summary=_summarise(found_in, stale_paths, degraded, host, unverified_paths),
+        unverified=tuple(unverified_paths),
         config_paths=tuple(str(p) for p in paths.values()),
         found_in=tuple(found_in),
         details=tuple(details),
@@ -383,7 +432,11 @@ def _scan_mcp_host(host: str, *, root: Path, home: Path, policy: AuthorizationPo
 
 
 def _summarise(
-    found_in: Sequence[str], stale_paths: Sequence[str], degraded: bool, host: str
+    found_in: Sequence[str],
+    stale_paths: Sequence[str],
+    degraded: bool,
+    host: str,
+    unverified_paths: Sequence[str] = (),
 ) -> str:
     if stale_paths:
         return f"{host}: wired but stale in {len(stale_paths)} file(s)"
@@ -391,6 +444,11 @@ def _summarise(
         return f"{host}: nothing configured"
     if degraded:
         return f"{host}: wired but read-only-degraded"
+    if unverified_paths:
+        return (
+            f"{host}: wired in {len(found_in)} file(s), "
+            f"{len(unverified_paths)} path(s) the doctor cannot verify"
+        )
     return f"{host}: wired in {len(found_in)} file(s)"
 
 

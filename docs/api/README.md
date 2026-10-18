@@ -32,6 +32,7 @@ may resume. The integration points, in order of most to least common, are:
 - [Recovery](recovery.md) - RecoveryEngine, RecoveryDecision
 - [Validation](validation.md) - StateValidator, validate_state, ValidationOutcome
 - [MCP server](mcp.md) - continuum-mcp, the thirteen tools, build_server
+- [Sidecar HTTP API](serve-http.md) - continuum serve, the wire protocol for non-Python agents
 - [Security](security.md) - attestation and caller authentication
 - [CLI](cli.md) - the `continuum` command reference
 

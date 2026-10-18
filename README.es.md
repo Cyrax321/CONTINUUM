@@ -521,7 +521,7 @@ CONTINUUM fue creado por **Anandhu P Shaji** ([@Cyrax321](https://github.com/Cyr
 
 Este proyecto es de código abierto bajo Apache 2.0 y está deliberadamente construido para ser extendido: por investigadores que validan la semántica de recuperación, por ingenieros que portan el libro mayor o el servidor MCP a otros frameworks o lenguajes, y por cualquiera que convierta la hoja de ruta planificada en realidad. Un buen lugar para empezar es la etiqueta `good first issue` en el [rastreador de issues](https://github.com/Cyrax321/CONTINUUM/issues), o los defectos abiertos de corrección listados en STATUS.md.
 
-Abre un issue antes de enviar PRs grandes. Consulta [CONTRIBUTING.md](CONTRIBUTING.md) para la guía completa de contribución, incluido el [Code of Conduct](CODE_OF_CONDUCT.md).
+Abre un issue antes de enviar PRs grandes. Consulta [CONTRIBUTING.md](CONTRIBUTING.md) para la guía completa de contribución, incluido el [Code of Conduct](CODE_OF_CONDUCT.md) y la [política de seguridad](SECURITY.md).
 
 ### Colaboradores
 
@@ -561,3 +561,8 @@ Material de referencia profundo:
 - [references/e2e.md](references/e2e.md) - recorrido de test de autonomía extremo a extremo
 - [references/testing.md](references/testing.md) - disposición y convenciones de la suite de tests
 - [references/related-work.md](references/related-work.md) - trabajo relacionado anotado y auditoría de citas
+
+## Enlaces rápidos
+
+- [Issues](https://github.com/Cyrax321/CONTINUUM/issues) para errores y funciones
+- [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) para propuestas de diseño
