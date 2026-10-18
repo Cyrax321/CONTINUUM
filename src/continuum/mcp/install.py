@@ -80,31 +80,6 @@ INSTALL_COMMAND = 'pip install "continuum-agent[mcp]"'
 PROBE_TIMEOUT_SECONDS = 30.0
 
 
-#: Per-host wiring profiles, structured the way ``CLIENT_PROFILES`` is
-#: (``src/continuum/clienthooks.py``): everything that differs between hosts
-#: is data, not code. ``project_settings`` is the committed, per-project file
-#: (``--scope project``); ``local_settings`` is the per-user file that holds
-#: local-scope registrations under ``projects/<absolute project path>``
-#: (``--scope local``, the default). ``mutating_clients`` is the client name
-#: the registration allows to call mutating tools.
-#:
-#: The rest is how the host *spells* a registration, and it falls into two
-#: independent groups. ``format`` is the only one that can need a third-party
-#: parser. ``container``, ``servers_key``, ``nested_by_project``, ``argv_style``
-#: and ``env_key`` say where the entry sits in the document and what its keys
-#: are called, and they are plain structure that :mod:`continuum.mcp.configfmt`
-#: handles with no dependency at all.
-#:
-#: Adding a host that is JSON and dict-keyed and spells the command as
-#: ``command`` plus ``args`` really is one row. Adding one that is TOML or
-#: YAML, list-shaped, or argv-array-shaped is also one row, but it costs a
-#: config parser at install time (see ``configfmt``), and no amount of data
-#: removes that cost. That caveat used to be hidden behind a docstring
-#: claiming otherwise; it is stated here instead.
-#:
-#: ``local_projects_key`` predates the shape keys and is not read by anything.
-#: It is kept so its meaning, which is none, does not change under a caller
-#: that reads it. Per-project nesting is ``nested_by_project``.
 def _home() -> Path:
     """``Path.home()``, but never raising.
 
@@ -112,9 +87,10 @@ def _home() -> Path:
     profile needs a base directory to build a path from. Importing the CLI
     must not fail in an environment that cannot name a home directory
     (a stripped container, or a ``subprocess`` whose ``env`` was replaced
-    rather than inherited), so the fallback is ``~`` unresolved: the string
-    is wrong, but it is wrong at import time only, and it stays wrong instead
-    of taking down ``--help``.
+    rather than inherited), so the fallback is ``~`` unresolved. The fallback
+    yields a wrong path for the life of the process, but avoids crashing
+    commands like ``--help`` that only import the module without writing
+    configuration.
     """
     try:
         return Path.home()
@@ -141,6 +117,31 @@ def resolve_vscode_settings_path() -> Path:
     return base / "Code" / "User" / "settings.json"
 
 
+#: Per-host wiring profiles, structured the way ``CLIENT_PROFILES`` is
+#: (``src/continuum/clienthooks.py``): everything that differs between hosts
+#: is data, not code. ``project_settings`` is the committed, per-project file
+#: (``--scope project``); ``local_settings`` is the per-user file that holds
+#: local-scope registrations under ``projects/<absolute project path>``
+#: (``--scope local``, the default). ``mutating_clients`` is the client name
+#: the registration allows to call mutating tools.
+#:
+#: The rest is how the host *spells* a registration, and it falls into two
+#: independent groups. ``format`` is the only one that can need a third-party
+#: parser. ``container``, ``servers_key``, ``nested_by_project``, ``argv_style``
+#: and ``env_key`` say where the entry sits in the document and what its keys
+#: are called, and they are plain structure that :mod:`continuum.mcp.configfmt`
+#: handles with no dependency at all.
+#:
+#: Adding a host that is JSON and dict-keyed and spells the command as
+#: ``command`` plus ``args`` really is one row. Adding one that is TOML or
+#: YAML, list-shaped, or argv-array-shaped is also one row, but it costs a
+#: config parser at install time (see ``configfmt``), and no amount of data
+#: removes that cost. That caveat used to be hidden behind a docstring
+#: claiming otherwise; it is stated here instead.
+#:
+#: ``local_projects_key`` predates the shape keys and is not read by anything.
+#: It is kept so its meaning, which is none, does not change under a caller
+#: that reads it. Per-project nesting is ``nested_by_project``.
 HOST_PROFILES: dict[str, dict[str, str]] = {
     "claude-code": {
         "project_settings": ".mcp.json",

@@ -18,6 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -834,30 +835,18 @@ def test_mcp_settings_path_vscode_host_resolution() -> None:
     assert custom_path == Path("my_settings.json")
 
 
-def test_importing_the_module_does_not_need_a_home_directory() -> None:
-    """``HOST_PROFILES`` is built at import time, so import must survive a
-    process that cannot resolve a home directory (#1604).
+def test_home_fallback_when_path_home_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_home() falls back to Path('~') when Path.home() raises RuntimeError (#1604).
 
-    ``Path.home()`` raises ``RuntimeError`` when neither ``HOME`` nor
-    ``USERPROFILE`` is present, which is a real state for a subprocess whose
-    ``env`` was replaced rather than inherited. Before the fallback, importing
-    this module crashed and took ``continuum --help`` down with it.
+    On environments where Path.home() raises RuntimeError (such as a stripped Windows
+    environment missing USERPROFILE and HOME), _home() catches the error and returns
+    Path('~') so module import and settings path resolution do not crash.
     """
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "from continuum.mcp.install import HOST_PROFILES;"
-            "print(HOST_PROFILES['vscode']['user_settings'])",
-        ],
-        capture_output=True,
-        text=True,
-        # Replacing ``env`` instead of updating it is the point: nothing is
-        # inherited, so no variable names a home directory.
-        env={
-            "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
-            "PATH": os.environ["PATH"],
-        },
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip()
+    monkeypatch.setattr(Path, "home", MagicMock(side_effect=RuntimeError("no home directory")))
+    assert mcp_install._home() == Path("~")
+
+    # Prove resolve_vscode_settings_path completes with the fallback on all platforms
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    resolved = mcp_install.resolve_vscode_settings_path()
+    assert str(resolved).startswith("~")
