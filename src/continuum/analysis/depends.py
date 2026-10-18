@@ -108,6 +108,8 @@ def _top_level(name: str) -> str:
     name = name.strip().lower()
     parts = name.split(".")
     if parts[0] == "google" and len(parts) > 1:
+        if parts[1] == "cloud" and len(parts) > 2:
+            return f"{parts[0]}.{parts[1]}.{parts[2]}"
         return f"{parts[0]}.{parts[1]}"
     return parts[0]
 
@@ -171,7 +173,12 @@ class DependencyGraph:
         canon_dist = _canonical_dist(norm)
         top = _top_level(norm)
         names = {norm, canon_dist, top, top.replace("-", "_"), canon_dist.replace("-", "_")}
-        if canon_dist.startswith("google-"):
+        if canon_dist.startswith("google-cloud-"):
+            service = canon_dist[len("google-cloud-") :].replace("-", "_")
+            if service:
+                names.add(f"google.cloud.{service}")
+                names.add(f"google.cloud.{service.replace('_', '')}")
+        elif canon_dist.startswith("google-"):
             parts = canon_dist.split("-")
             if len(parts) > 1 and parts[1]:
                 names.add(f"google.{parts[1].replace('-', '_')}")
@@ -240,9 +247,16 @@ class DependencyGraph:
                         mods.add(_top_level(alias.name))
                 elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                     mod_parts = node.module.strip().lower().split(".")
-                    if mod_parts[0] == "google" and len(mod_parts) == 1:
-                        for alias in node.names:
-                            mods.add(f"google.{alias.name.strip().lower().split('.')[0]}")
+                    if mod_parts[0] == "google":
+                        if len(mod_parts) == 1:
+                            for alias in node.names:
+                                mods.add(_top_level(f"google.{alias.name.strip().lower()}"))
+                        elif len(mod_parts) == 2 and mod_parts[1] == "cloud":
+                            for alias in node.names:
+                                alias_sub = alias.name.strip().lower().split(".")[0]
+                                mods.add(f"google.cloud.{alias_sub}")
+                        else:
+                            mods.add(_top_level(node.module))
                     else:
                         mods.add(_top_level(node.module))
             self._file_imports[path] = mods

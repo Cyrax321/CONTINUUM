@@ -143,10 +143,10 @@ def test_google_namespace_and_protobuf_scoping(tmp_path: Path) -> None:
 
     assert graph.files_using("protobuf") == {mod_proto}
     assert graph.files_using("google.protobuf") == {mod_proto}
-    assert graph.files_using("google.cloud") == {mod_cloud}
+    assert graph.files_using("google.cloud.storage") == {mod_cloud}
 
     assert graph.third_party_imports(mod_proto) == set()
-    assert graph.third_party_imports(mod_cloud) == {"google.cloud"}
+    assert graph.third_party_imports(mod_cloud) == {"google.cloud.storage"}
 
 
 def test_pep503_canonicalization_and_distribution_spellings(tmp_path: Path) -> None:
@@ -286,15 +286,31 @@ def test_google_namespace_distribution_candidates(tmp_path: Path) -> None:
         "app.py",
         "from google.cloud import storage\nimport google.auth\n",
     )
+    bq_app = _write(
+        tmp_path,
+        "bq.py",
+        "from google.cloud import bigquery\n",
+    )
+    sub_app = _write(
+        tmp_path,
+        "sub.py",
+        "from google.cloud.storage import Client\nimport google.cloud.storage.blob\n",
+    )
     graph = DependencyGraph(
         tmp_path,
         requirements=["google-cloud-storage", "google-auth>=2.0"],
     )
     assert graph.owner_of(app) == {"google-cloud-storage", "google-auth"}
-    assert graph.files_using("google-cloud-storage") == {app}
-    assert graph.files_using("google_cloud_storage") == {app}
+    assert graph.files_using("google-cloud-storage") == {app, sub_app}
+    assert graph.files_using("google_cloud_storage") == {app, sub_app}
     assert graph.files_using("google-auth") == {app}
     assert graph.third_party_imports(app) == set()
+    assert graph.third_party_imports(sub_app) == set()
+
+    # google-cloud-storage must not claim files importing google.cloud.bigquery
+    assert graph.owner_of(bq_app) == set()
+    assert bq_app not in graph.files_using("google-cloud-storage")
+    assert graph.third_party_imports(bq_app) == {"google.cloud.bigquery"}
 
     proto_graph = DependencyGraph(tmp_path, requirements=["protobuf"])
     assert proto_graph.owner_of(app) == set()
