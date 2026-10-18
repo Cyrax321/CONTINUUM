@@ -23,17 +23,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "markdownlint.yml"
 # Top-level markdown files that are deliberately not linted, with the reason.
 EXCLUDED: dict[str, str] = {
     "AGENTS.md": "agent instructions, not documentation",
-    "ARCHITECTURE_RECORD.local.md": "local working note, gitignored content",
-    "CLAUDE.local.md": "local working note",
     "CONTINUUM_PROJECT_DOCUMENT.md": "generated project document, not hand-edited",
-    "NEXT_PHASE_STRATEGY.local.md": "local working note",
-    "PR_REVIEW_QUEUE.local.md": "local working note",
-    "RECORD.local.md": "local working note",
-    "RESEARCH_2026-09-15-gapfill.local.md": "local working note",
-    "RESEARCH_2026-09-15.local.md": "local working note",
-    "RESEARCH_2026-09-18.local.md": "local working note",
-    "SELFTEST_REPORT.local.md": "local working note",
-    "SESSION-2026-10-10.local.md": "local working note",
     "STATUS.md": "long-form status document, linted separately if at all",
     "WORKLOG.md": "working log, not documentation",
     "project.md": "project brief, not user-facing docs",
@@ -49,7 +39,7 @@ def lint_globs() -> set[str]:
 
 
 def top_level_markdown() -> set[str]:
-    return {path.name for path in ROOT.glob("*.md")}
+    return {path.name for path in ROOT.glob("*.md") if not path.name.endswith(".local.md")}
 
 
 def test_every_top_level_markdown_is_linted_or_explicitly_excluded() -> None:
