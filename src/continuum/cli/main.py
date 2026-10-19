@@ -3461,6 +3461,21 @@ def _agents_targets(args: argparse.Namespace) -> list[str]:
     return [args.target]
 
 
+def _agents_selector(args: argparse.Namespace) -> str:
+    """The target selector an invocation actually used.
+
+    ``--all`` acts on every registered target while ``args.target`` still
+    carries its default, so rendering a command from ``args.target`` alone
+    describes an invocation that repeats a fraction of what was done. The
+    JSON payload's ``command`` is copied back by scripts and CI steps, where
+    that fraction is a silent under-rebuild, and on ``remove`` seven of eight
+    generated files left behind (#1762).
+    """
+    if getattr(args, "all_targets", False):
+        return "--all"
+    return f"--target {args.target}"
+
+
 def cmd_agents_install(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Render the instruction targets an IDE reads, from one source.
 
@@ -3487,8 +3502,9 @@ def cmd_agents_install(args: argparse.Namespace, storage: Storage, out: Any, err
         except ValueError as exc:
             refused.append(str(exc))
 
+    source_flag = f" --source {args.source}" if getattr(args, "source", None) else ""
     payload = {
-        "command": f"{REGENERATE_COMMAND} --target {args.target}",
+        "command": f"{REGENERATE_COMMAND} {_agents_selector(args)}{source_flag}",
         "source": str(source_path),
         "installed": [
             {"target": r.target.id, "path": str(r.path), "status": r.status} for r in results
@@ -3529,7 +3545,7 @@ def cmd_agents_remove(args: argparse.Namespace, storage: Storage, out: Any, err:
             kept.append(TARGETS[target_id].path)
 
     payload = {
-        "command": f"continuum agents remove --target {args.target}",
+        "command": f"continuum agents remove {_agents_selector(args)}",
         "removed": removed,
         "left_alone": kept,
     }
@@ -3567,8 +3583,9 @@ def cmd_agents_check(args: argparse.Namespace, storage: Storage, out: Any, err: 
         print(f"error: {exc}", file=err)
         return ExitCode.ERROR
 
+    source_flag = f" --source {args.source}" if getattr(args, "source", None) else ""
     payload = {
-        "command": "continuum agents check",
+        "command": f"continuum agents check {_agents_selector(args)}{source_flag}",
         "clean": all(r.state in ("current", "absent", "unmanaged") for r in results),
         "targets": [
             {"target": r.target.id, "path": str(r.path), "state": r.state, "detail": r.detail}
