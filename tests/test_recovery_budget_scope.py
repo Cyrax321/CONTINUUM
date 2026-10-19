@@ -135,6 +135,53 @@ def test_scoped_escalation_marker_does_not_gate_another_scope(
     assert ledger.record_attempt("run_1", scope="b") == 1
 
 
+def test_scoped_escalation_writes_no_run_wide_gate(ledger: RecoveryLedger) -> None:
+    """A scope reaching its own budget escalates only itself (issue #1737).
+
+    A leftover block from the pre-scope implementation recomputed ``count`` as
+    the run-wide total plus one, dropped the scope filter, and wrote a second
+    ``human_required`` marker with no scope. ``_marker_covers`` reads a run-wide
+    marker as covering every scope, so one dependency's budget also gated every
+    other dependency and the whole run, and the method returned that run-wide
+    count instead of the scope's.
+    """
+    returned = ledger.record_attempt("run_1", scope="ext:db", max_attempts=1)
+
+    gates = [
+        e
+        for e in ledger.entries("run_1")
+        if e.kind == LedgerEntryKind.GATE.value and e.gate == HUMAN_REQUIRED
+    ]
+    assert len(gates) == 1
+    assert gates[0].scope == "ext:db"  # not the unscoped run-wide marker
+    assert gates[0].anchor is True
+    # The documented return is the scope's new count, not the run's.
+    assert returned == 1
+    assert ledger.requires_human("run_1", scope="ext:db", max_attempts=1) is True
+    # A sibling dependency never touched by an attempt stays ungated.
+    assert ledger.requires_human("run_1", scope="ext:other", max_attempts=3) is False
+
+
+def test_run_wide_escalation_writes_one_gate(ledger: RecoveryLedger) -> None:
+    """The run-wide path escalates once, not twice (issue #1737).
+
+    The same leftover block ran after the correct run-wide marker had been
+    written and, because ``entries`` predates that write, decided no gate
+    existed yet: a second ``human_required`` entry landed beside the first.
+    """
+    ledger.record_attempt("run_1", max_attempts=2)
+    ledger.record_attempt("run_1", max_attempts=2)
+
+    gates = [
+        e
+        for e in ledger.entries("run_1")
+        if e.kind == LedgerEntryKind.GATE.value and e.gate == HUMAN_REQUIRED
+    ]
+    assert len(gates) == 1
+    assert gates[0].scope is None
+    assert ledger.requires_human("run_1", max_attempts=2) is True
+
+
 def test_scoped_escalation_still_answers_the_run_wide_query(
     ledger: RecoveryLedger,
 ) -> None:
