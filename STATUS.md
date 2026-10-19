@@ -83,7 +83,7 @@ notices.
 
 ### Interfaces
 
-- **CLI** (`cli/`), 46 commands at `main` (`cef019d`, recounted on 2026-09-16
+- **CLI** (`cli/`), 54 commands at `main` (`bcbabe36`, recounted on 2026-10-20
   by enumerating the built parser's subparser choices), stdlib `argparse` only.
   Exit codes are a
   safety contract: only a verified-safe run exits `0`, so
@@ -95,11 +95,13 @@ notices.
   integration, optional `langgraph` dependency.
 - **`OpenAIAgentAdapter`** (`adapters/openai.py`), OpenAI Agents SDK
   integration, optional `openai-agents` dependency.
-- **MCP server** (`mcp/server.py`), 12 tools over stdio: 3 read-only by
+- **MCP server** (`mcp/server.py`), 13 tools over stdio: 3 read-only by
   `read_only_hint` annotation (`continuum_validate`, `continuum_resume`,
-  `continuum_list_actions`) and 9 mutating, recounted at `cef019d` on
-  2026-09-16 from the `@server.tool(` registrations. `continuum_confirm` was
-  added alongside the `REVIEW_CONFIRMED` event in the launch fixes.
+  `continuum_list_actions`) and 10 mutating, recounted at `bcbabe36` on
+  2026-10-20 from the `@server.tool(` registrations. `continuum_confirm` was
+  added alongside the `REVIEW_CONFIRMED` event in the launch fixes, and
+  `continuum_compensate_action` is the tenth mutating tool, wired when
+  compensation reached MCP and the sidecar (`c0fa99cf`).
 
 ### MCP two-phase action interception
 
