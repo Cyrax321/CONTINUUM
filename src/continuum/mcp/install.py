@@ -60,6 +60,7 @@ __all__ = [
     "install_server",
     "remove_server",
     "resolve_command",
+    "resolve_vscode_settings_path",
     "server_spec",
     "verify_sdk",
 ]
@@ -77,6 +78,44 @@ INSTALL_COMMAND = 'pip install "continuum-agent[mcp]"'
 
 #: How long the SDK probe may run before the install gives up on it.
 PROBE_TIMEOUT_SECONDS = 30.0
+
+
+def _home() -> Path:
+    """``Path.home()``, but never raising.
+
+    This module builds :data:`HOST_PROFILES` at import time, and the vscode
+    profile needs a base directory to build a path from. Importing the CLI
+    must not fail in an environment that cannot name a home directory
+    (a stripped container, or a ``subprocess`` whose ``env`` was replaced
+    rather than inherited), so the fallback is ``~`` unresolved. The fallback
+    yields a wrong path for the life of the process, but avoids crashing
+    commands like ``--help`` that only import the module without writing
+    configuration.
+    """
+    try:
+        return Path.home()
+    except RuntimeError:
+        return Path("~")
+
+
+def resolve_vscode_settings_path() -> Path:
+    """The default path to VS Code's user settings.json for the current platform.
+
+    The vscode profile's ``local_settings``/``user_settings`` point here, so
+    the path is resolved per platform instead of hardcoded to the macOS
+    location: on Windows and Linux the hardcoded value created a macOS-style
+    tree and the registration landed where VS Code never reads it (#1604).
+    """
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) if appdata else _home() / "AppData" / "Roaming"
+        return base / "Code" / "User" / "settings.json"
+    if sys.platform == "darwin":
+        return _home() / "Library" / "Application Support" / "Code" / "User" / "settings.json"
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(config_home) if config_home else _home() / ".config"
+    return base / "Code" / "User" / "settings.json"
+
 
 #: Per-host wiring profiles, structured the way ``CLIENT_PROFILES`` is
 #: (``src/continuum/clienthooks.py``): everything that differs between hosts
@@ -151,8 +190,8 @@ HOST_PROFILES: dict[str, dict[str, str]] = {
     },
     "vscode": {
         "project_settings": ".vscode/mcp.json",
-        "local_settings": "~/Library/Application Support/Code/User/settings.json",
-        "user_settings": "~/Library/Application Support/Code/User/settings.json",
+        "local_settings": str(resolve_vscode_settings_path()),
+        "user_settings": str(resolve_vscode_settings_path()),
         "local_projects_key": "mcpServers",
         "mutating_clients": "vscode",
         "format": "json",

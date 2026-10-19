@@ -18,6 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -750,3 +751,102 @@ def test_no_host_writes_outside_the_file_it_was_pointed_at(
     assert len(created) == 1, (host, created)
     assert "~" not in created[0], (host, created)
     assert not created[0].endswith(".db"), (host, created)
+
+
+def test_resolve_vscode_settings_path_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows, resolve to %APPDATA%\\Code\\User\\settings.json (#1604).
+
+    Expected paths are built from the same components the resolver joins, not
+    written as backslash literals: monkeypatching ``sys.platform`` does not
+    turn ``Path`` into ``WindowsPath``, so a literal Windows path compares
+    unequal on a POSIX runner.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+    appdata = r"C:\Users\tester\AppData\Roaming"
+    monkeypatch.setenv("APPDATA", appdata)
+    resolved = mcp_install.resolve_vscode_settings_path()
+    assert resolved == Path(appdata) / "Code" / "User" / "settings.json"
+
+    # Fallback when APPDATA is unset
+    monkeypatch.delenv("APPDATA", raising=False)
+    resolved_fallback = mcp_install.resolve_vscode_settings_path()
+    assert (
+        resolved_fallback == Path.home() / "AppData" / "Roaming" / "Code" / "User" / "settings.json"
+    )
+
+
+def test_resolve_vscode_settings_path_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On macOS, resolve to ~/Library/Application Support/Code/User/settings.json (#1604)."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    resolved = mcp_install.resolve_vscode_settings_path()
+    assert (
+        resolved
+        == Path.home() / "Library" / "Application Support" / "Code" / "User" / "settings.json"
+    )
+
+
+def test_resolve_vscode_settings_path_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Linux, resolve to ~/.config or XDG_CONFIG_HOME (#1604)."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/custom/config")
+    resolved = mcp_install.resolve_vscode_settings_path()
+    assert resolved == Path("/custom/config") / "Code" / "User" / "settings.json"
+
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    resolved_fallback = mcp_install.resolve_vscode_settings_path()
+    assert resolved_fallback == Path.home() / ".config" / "Code" / "User" / "settings.json"
+
+
+def test_vscode_profile_points_at_the_platforms_settings_path() -> None:
+    """The vscode profile's per-user files are the resolved path, not macOS's (#1604).
+
+    The profile is evaluated at import time, so this asserts agreement with
+    the resolver for the platform the suite is actually running on rather than
+    monkeypatching one in.
+    """
+    profile = mcp_install.HOST_PROFILES["vscode"]
+    expected = str(mcp_install.resolve_vscode_settings_path())
+    assert profile["local_settings"] == expected
+    assert profile["user_settings"] == expected
+
+
+def test_mcp_settings_path_vscode_host_resolution() -> None:
+    """``_mcp_settings_path`` hands the vscode profile's resolved path through (#1604)."""
+    import argparse
+
+    from continuum.cli.main import _mcp_settings_path
+
+    expected = Path(mcp_install.resolve_vscode_settings_path())
+
+    user_path = _mcp_settings_path(argparse.Namespace(host="vscode", scope="user", settings=None))
+    assert user_path == expected
+
+    local_path = _mcp_settings_path(argparse.Namespace(host="vscode", scope="local", settings=None))
+    assert local_path == expected
+
+    project_path = _mcp_settings_path(
+        argparse.Namespace(host="vscode", scope="project", settings=None)
+    )
+    assert project_path == Path(".vscode/mcp.json")
+
+    custom_path = _mcp_settings_path(
+        argparse.Namespace(host="vscode", scope="user", settings="my_settings.json")
+    )
+    assert custom_path == Path("my_settings.json")
+
+
+def test_home_fallback_when_path_home_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_home() falls back to Path('~') when Path.home() raises RuntimeError (#1604).
+
+    On environments where Path.home() raises RuntimeError (such as a stripped Windows
+    environment missing USERPROFILE and HOME), _home() catches the error and returns
+    Path('~') so module import and settings path resolution do not crash.
+    """
+    monkeypatch.setattr(Path, "home", MagicMock(side_effect=RuntimeError("no home directory")))
+    assert mcp_install._home() == Path("~")
+
+    # Prove resolve_vscode_settings_path completes with the fallback on all platforms
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    resolved = mcp_install.resolve_vscode_settings_path()
+    assert str(resolved).startswith("~")
