@@ -10,16 +10,22 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   publish:
     name: Run benchmarks and publish the table
+    permissions:
+      contents: write
+      pull-requests: write
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
+      # Pinned to main so a manual dispatch from a feature branch cannot
+      # publish that branch's unrelated commits as the table refresh.
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: main
 
       - uses: actions/setup-python@v7.0.0
         with:
@@ -33,25 +39,47 @@ jobs:
         run: python benchmarks/run.py --publish
 
       - name: Commit refreshed tables
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add README.md references/bench.md
-          if git diff --cached --quiet; then
+          # The Generated: header of each table rewrites the run time every
+          # night, so its diff alone is not evidence the numbers moved. Compare
+          # the staged tables to main with only that timestamp normalised, so
+          # an unchanged night exits cleanly instead of churning a pull
+          # request.
+          ts() { sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?/TS/g'; }
+          if [ "$(git show :README.md | ts)" = "$(git show HEAD:README.md | ts)" ] &&
+             [ "$(git show :references/bench.md | ts)" = "$(git show HEAD:references/bench.md | ts)" ]; then
             echo "No benchmark table changes to publish."
+            # main now matches the last published tables, so a refresh request
+            # an earlier night left open would offer stale numbers. Close it
+            # and drop its branch instead of leaving it mergeable.
+            if gh pr list --state open --base main --head bench/nightly-table-refresh \
+                 --json number --jq 'length' | grep -qx '1'; then
+              gh pr close bench/nightly-table-refresh --delete-branch
+              echo "Closed the stale refresh pull request."
+            fi
             exit 0
           fi
           # main is branch-protected, so the refresh rides a pull request the
           # maintainers merge instead of a push the branch ruleset declines.
-          # The branch is owned by this job alone, so a force push refreshes the
-          # pull request a previous night already opened rather than diverging.
+          # The checkout above is pinned to main, so the branch this job owns
+          # always builds on it, and the force push refreshes the pull request
+          # a previous night already opened rather than diverging.
           git checkout -B bench/nightly-table-refresh
           git commit -m "bench: nightly refresh of published tables"
           git push --force origin bench/nightly-table-refresh
-          gh pr create --base main --head bench/nightly-table-refresh \
-            --title "bench: nightly refresh of published tables" \
-            --body "Refreshed by the ${{ github.workflow }} workflow (${{ github.run_id }}). The tables in README.md and references/bench.md are generated from the nightly run; the only changes in this pull request are those generated cells." \
-            || echo "a pull request is already open for this branch; the force push refreshed it"
+          if gh pr list --state open --base main --head bench/nightly-table-refresh \
+               --json number --jq 'length' | grep -qx '1'; then
+            echo "The open refresh pull request was updated by the force push."
+          else
+            gh pr create --base main --head bench/nightly-table-refresh \
+              --title "bench: nightly refresh of published tables" \
+              --body "Refreshed by the ${{ github.workflow }} workflow (${{ github.run_id }}). The tables in README.md and references/bench.md are generated from the nightly run; the only changes in this pull request are those generated cells."
+          fi
 
   latency-matrix:
     name: Recovery latency SLO matrix
