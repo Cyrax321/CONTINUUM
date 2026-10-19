@@ -3,7 +3,7 @@
 * Status: Draft, proposed for review
 * Author: CONTINUUM maintainers, synthesis from live web sweep 2026-08-24
 * Created: 2026-08-24
-* Last updated: 2026-08-24
+* Last updated: 2026-10-20 (file inventory, event-type count, and CLI command count recounted at `bcbabe36`)
 * Branch: `docs/upgrade-spec` targeting `main`
 * Companion docs: `docs/research/WEB_SYNTHESIS.md` (live sweep), `docs/research/long_horizon_gaps.md` (gap audit), `STATUS.md` (verified vs believed), `docs/CONTINUUM_MASTER_PLAN.md` (phased plan), `docs/ARCHITECTURE_EVOLUTION.md` (north star), `references/related-work.md` and `citation-audit-2026-08-24.md`
 * Open issues referenced: #213, #244, #254, #288, #289, #292, #293, #294, #295, #296, #297, #301, #302, #303, #304, #307, #308, #309, #312, #313, plus 30 `good first issue` and 9 `bug`
@@ -55,14 +55,14 @@ Five integration seams, all funneling into `GenericAgentAdapter`:
 
 Three guarantees, enforced everywhere: no self-certification (`9738b9e`), side effects require claims (ledger plus gate), recovery decisions verify against reality before declaring safe.
 
-### 3.2 Current codebase snapshot (2026-08-24)
+### 3.2 Current codebase snapshot (2026-10-20)
 
-Source of truth: `git log --oneline -10` and file inventory on `main` plus the branch `fix/mcp-idempotency-and-diagnostics` which carries the full-gate audit at `8013f6a`.
+Source of truth: `git log --oneline -10` and file inventory on `main` plus the branch `fix/mcp-idempotency-and-diagnostics` which carries the full-gate audit at `8013f6a`. The inventory below was recounted on `main` at `bcbabe36` on 2026-10-20.
 
-* Tracked files: about 204. Python files: about 118. Total LOC: about 30,300. Core `src/continuum`: about 60 files and 14,800 LOC.
-* Test suite: 104 source files and 99 test files at the 2026-08-24 audit. `pytest` green: 1345 passed, 24 skipped, 0 failed. `ruff check` and `ruff format --check` pass on 216 files. `mypy src/continuum` passes in CI (local mypy versions skew).
+* Tracked files: 619. Python files: 414. Total Python LOC: about 131,200. Core `src/continuum`: 149 files and about 54,600 LOC.
+* Test suite: 220 Python files under `tests/`, 217 of them `test_*.py`, recounted at `bcbabe36` on 2026-10-20. `pytest --collect-only` reports 3,811 tests; the suite is enforced in CI on Python 3.11, 3.12, and 3.13, and skip counts vary with optional services (Postgres) and adapters (`langgraph`, `openai-agents`). `ruff check` and `ruff format --check` pass on `src/`, `tests/`, and `examples/`. `mypy src/continuum` passes in CI (local mypy versions skew).
 * Schema: v6 with parent_run_id, action_index, events_archive, lg_checkpoints. Storage: SQLite primary, Postgres via `psycopg` optional (`[postgres]`), both tested in CI (Postgres via service container since PR 238).
-* Event types: 34 plus interchange v1, hash-chained with `verify()` and `trusted_through`.
+* Event types: 55 plus interchange v1, hash-chained with `verify()` and `trusted_through`.
 * Recovery: 7 modes (RESUME, REPAIR_AND_RESUME, REPLAN, WAIT, REQUEST_HUMAN, ROLLBACK, ABORT) plus FORK semantics where needed (286), max severity ordering, sealed `RecoveryContract` with `evidence` and `reason` (Phase 1).
 * Distribution: GHCR Docker image (`docker run --rm ghcr.io/cyrax321/continuum` demos crash recovery), `.devcontainer` for Codespaces, `uvx`/`pipx run` from git, release wheels.
 
@@ -79,7 +79,7 @@ All rows below have tests and, where noted, live subprocess proofs:
 * Idempotent ledger with `UnknownSideEffect` (never `AssumeOccurred`), stable `key`, drift recognition via canonicalization plus token fallback, cross-run dedup (`action_index`), and reconciliation probes
 * Recovery engine with sealed contract and executable `human_steps` (guidance)
 * Checkpoint policies plus recovery anchors (`checkpoint_on_recovery`, `last_recovery_anchor`, `prune` with anchor preservation)
-* Health monitoring between crashes (`continuum health`, 5 detectors, advisory only)
+* Health monitoring between crashes (`continuum health`, advisory only: a prefix-trust score plus one silence/liveness signal from `recovery/health.py`)
 * Distribution surfaces (Docker, Codespaces, Trusted Publishing opt-in)
 
 Live proofs: `e2e-autonomy-test` 7 of 7, MCP Inspector CLI, Claude Code live MCP session, three real-LLM hard-kill harnesses (`examples/*_real_llm_crash.py` via OpenRouter `gpt-4o-mini`), and `continuum benchmark` issue 6 drift proof (0 duplicates).
@@ -184,7 +184,7 @@ Method: map `docs/research/WEB_SYNTHESIS.md` live sweep plus `long_horizon_gaps.
 | --- | --- | --- | --- |
 | Lossy task context: goal plus counters only | `continuum resume` returns goal text and counters, no per-unit status | `task_context.md` reproduction: create run with goal plus total, observe `state.plan` empty | Open, P1 |
 | Structured attempt memory missing | Ledger records attempts, no falsification artifact for next session | `policy_learning.md` weekly report sketch, `recovery/summary.py` only renders | Open, P1 |
-| Health was missing between crashes | Now shipped as `continuum health` 5 detectors, advisory only | `long_horizon_gaps.md` section 1 receipt, `health.py` | Closed |
+| Health was missing between crashes | Now shipped as `continuum health`, advisory only, one prefix-trust score plus a silence signal | `long_horizon_gaps.md` section 1 receipt, `recovery/health.py`, `analysis/prefix_trust.py` | Closed |
 | Env rewind not aligned with projection | Checkpoint restores projection, not workspace | `agentrewind` ablation, issue 292 | Open, P2 |
 | Idle consolidation missing | Compacted archive is not distilled | `long_horizon_gaps.md` section 6, WMT plus sleep-time | Open, P3 |
 | Resume taxes: instant detection, confirm tax, token floor | Each resume pays message plus inference plus tool schemas | `instant_detection.md`, `confirm_tax.md`, `token_floor.md` | Open, P2 |
@@ -424,7 +424,7 @@ Reviewers: check that no section invents a number that is not cited, that every 
 
 ## 19. Appendix C: file inventory for reviewers
 
-Core: 60 files in `src/continuum` as listed in section 3.2. Entry points: `continuum.cli.main:main`, `continuum.mcp.server:main`. Tests: 99 files. Examples: `crash_recovery_agent.py`, `context_compaction.py`, `model_switch.py`, `recovery_walkthrough.py`, plus real-LLM crash harnesses. Docs: `README.md` (13 tools, 33 commands, 5 seams), `docs/*` research notes, `references/*` specs.
+Core: 149 files in `src/continuum` as listed in section 3.2. Entry points: `continuum.cli.main:main`, `continuum.mcp.server:main`. Tests: 217 files. Examples: `crash_recovery_agent.py`, `context_compaction.py`, `model_switch.py`, `recovery_walkthrough.py`, plus real-LLM crash harnesses. Docs: `README.md` (13 tools, 54 commands, 5 seams), `docs/*` research notes, `references/*` specs.
 
 ---
 
