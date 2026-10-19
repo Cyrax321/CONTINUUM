@@ -68,6 +68,28 @@ def test__extract_run_id_reads_the_plain_run_id_kwarg() -> None:
     assert _extract_run_id((), {"run_id": "r2"}) == "r2"
 
 
+def test__extract_run_id_treats_a_null_kwarg_as_absent() -> None:
+    """A ``None`` id is absence, not a run named ``"None"``.
+
+    Stringifying the null value would point a side effect at a run that does
+    not exist, so the wrapped call would fail instead of running where it
+    belongs. Both keyword spellings must obey the rule.
+    """
+    assert _extract_run_id((), {"continuum_run_id": None}) is None
+    assert _extract_run_id((), {"run_id": None}) is None
+
+
+def test__extract_run_id_falls_through_a_null_continuum_id_to_run_id() -> None:
+    """An explicitly null ``continuum_run_id`` does not shadow a real one."""
+    assert _extract_run_id((), {"continuum_run_id": None, "run_id": "r2"}) == "r2"
+
+
+def test__extract_run_id_treats_an_empty_kwarg_as_absent() -> None:
+    """An empty string id would ledger onto a run named ``""``."""
+    assert _extract_run_id((), {"continuum_run_id": ""}) is None
+    assert _extract_run_id((), {"run_id": ""}) is None
+
+
 def test__extract_run_id_prefers_continuum_run_id_over_run_id() -> None:
     """Both keys present is a contradiction, and the explicit one wins."""
     assert _extract_run_id((), {"run_id": "plain", "continuum_run_id": "explicit"}) == "explicit"
@@ -96,7 +118,7 @@ def test__extract_run_id_returns_none_with_no_arguments_at_all() -> None:
 
 
 def test__extract_run_id_returns_none_for_plain_arguments() -> None:
-    """A tool called with no run context is un-identified, so it runs unintecepted."""
+    """A tool called with no run context is un-identified, so it runs un-intercepted."""
     assert _extract_run_id(("arg",), {"order_id": "O-1"}) is None
 
 
@@ -166,6 +188,22 @@ class TestWrapToolAndStartRun:
 
         assert notify({"continuum_run_id": "r_pos", "order_id": "O-2"}) == "sent"
         assert calls == ["O-2"]
+
+        # The return value and the call list pass whether or not the run id
+        # was honoured, so the ledger is the evidence that it was: the action
+        # is recorded under this run, and a repeat is served from the ledger
+        # instead of executing the tool a second time.
+        from continuum.actions.ledger import ActionLedger
+        from continuum.models import ActionStatus
+
+        ledger = ActionLedger(store, run_id="r_pos")
+        recorded = ledger.all()
+        assert [a.action_type for a in recorded] == ["notify.customer"]
+        assert recorded[0].run_id == "r_pos"
+        assert recorded[0].status is ActionStatus.COMPLETED
+
+        assert notify({"continuum_run_id": "r_pos", "order_id": "O-2"}) == "sent"
+        assert calls == ["O-2"], "a repeat must be served from the ledger, not re-executed"
 
     def test_start_run_refuses_a_run_that_does_not_begin_with_run_started(
         self, store: SQLiteStorage
