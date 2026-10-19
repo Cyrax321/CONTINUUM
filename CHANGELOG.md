@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Test counts: ~3680 collected on a minimal env.
+Test counts: ~3811 collected on a minimal env.
 
 ### Added
 
@@ -83,6 +83,16 @@ Test counts: ~3680 collected on a minimal env.
   total in the form `3,636 collected` with no tilde, which no pattern in the
   guard matches, so that line drifted with the suite while every guarded line
   held.
+
+- **The documented suite figures match the tree again, and the README calls the
+  MCP server by its real size.** The module-map sentence in `README.md` stated
+  210 test files and an aged total while the tree carries 217 files and
+  `pytest --collect-only` reports 3,811 tests, so the tree-count guard was
+  failing every test job on `main`. `README.md` now states 217 test files, and
+  every doc that states the total states the figure the suite collects
+  (#1738, #1745). The Quick Start also called the server "the twelve-tool
+  server" while it registers thirteen, which the MCP docs guard could not see
+  because the singular form escapes its patterns (#1739).
 
 - **The read-only MCP tools say "no such run" for an unknown run id.**
   `continuum_validate`, `continuum_resume` and `continuum_list_actions` were
