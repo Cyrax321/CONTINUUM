@@ -795,3 +795,24 @@ def test_no_baked_host_registration_is_committed(host: str) -> None:
         "baked absolute command; run `continuum mcp remove --host "
         f"{host} --scope project`, and the file is gitignored"
     )
+
+
+def test_the_host_help_names_every_host_the_choices_accept() -> None:
+    """The help sentence and the choices line cannot drift apart (#1765).
+
+    A reader who checks ``continuum mcp install --help`` learns which hosts are
+    supported from the prose sentence, so a sentence naming a subset next to a
+    choices line naming the rest teaches the wrong answer next to the right
+    one. The sentence is derived from the same profile table the choices come
+    from, and this test is what keeps the derivation honest.
+    """
+    from continuum.cli.main import build_parser
+
+    top = build_parser()._subparsers._group_actions[0].choices
+    install = top["mcp"]._subparsers._group_actions[0].choices["install"]
+
+    host_help = next(
+        action.help for action in install._actions if action.option_strings == ["--host"]
+    )
+    for host in mcp_install.HOST_PROFILES:
+        assert host in (host_help or ""), f"--host help omits {host}, which the parser accepts"

@@ -5165,7 +5165,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--host",
             choices=tuple(MCP_HOST_PROFILES),
             default="claude-code",
-            help="which host to configure (claude-code, gemini, cursor, vscode).",
+            help=f"which host to configure ({', '.join(MCP_HOST_PROFILES)}).",
         )
         p.add_argument(
             "--scope",
