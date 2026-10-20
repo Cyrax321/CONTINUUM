@@ -8,6 +8,7 @@ tests exercise the actual tool wrapping and hooks.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -140,6 +141,108 @@ class TestExtractRunIdFromToolContext:
         ctx.context = inner_ctx
         result = _extract_run_id_from_tool_context(ctx)
         assert result == "run_fallback"
+
+
+class TestFormatAnnotation:
+    """The wrapper source is built with ``exec``, so its annotations are text.
+
+    Typing every parameter ``Any`` makes the SDK emit a schema with no ``type``
+    key, which strict validators reject; the annotation text is what keeps the
+    real type on the generated function.
+    """
+
+    def test_any_stands_in_for_an_unannotated_parameter(self) -> None:
+        from continuum.adapters.openai import _format_annotation
+
+        assert _format_annotation(inspect.Parameter.empty) == "Any"
+
+    def test_renders_a_concrete_annotation_as_source_text(self) -> None:
+        from continuum.adapters.openai import _format_annotation
+
+        assert _format_annotation(str) == "str"
+        assert _format_annotation(list[str]) == "list[str]"
+        assert _format_annotation(int | None) == "int | None"
+
+
+class TestExtractContinuumContext:
+    def test_returns_the_context_itself(self) -> None:
+        from continuum.adapters.openai import ContinuumContext, _extract_continuum_context
+
+        ctx = ContinuumContext(continuum_run_id="run_direct")
+
+        assert _extract_continuum_context(ctx) is ctx
+
+    def test_unwraps_a_wrapper_carrying_one(self) -> None:
+        from continuum.adapters.openai import ContinuumContext, _extract_continuum_context
+
+        inner = ContinuumContext(continuum_run_id="run_wrapped")
+        wrapper = MagicMock()
+        wrapper.context = inner
+
+        assert _extract_continuum_context(wrapper) is inner
+
+    def test_returns_none_for_a_wrapper_with_no_context_attribute(self) -> None:
+        """A context that never carried ours leaves nothing to fall back on."""
+        from continuum.adapters.openai import _extract_continuum_context
+
+        assert _extract_continuum_context(object()) is None
+
+    def test_returns_none_for_a_wrapper_whose_context_is_not_ours(self) -> None:
+        """Tolerating any ``.context`` would let another framework's object be
+        read as a run id and used to ledger a side effect."""
+        from continuum.adapters.openai import _extract_continuum_context
+
+        wrapper = MagicMock()
+        wrapper.context = "someone else's context"
+
+        assert _extract_continuum_context(wrapper) is None
+
+
+class TestExtractRunIdFromToolContextFallbacks:
+    def test_returns_none_for_no_tool_context_at_all(self) -> None:
+        from continuum.adapters.openai import _extract_run_id_from_tool_context
+
+        assert _extract_run_id_from_tool_context(None) is None
+
+    def test_falls_back_when_the_tool_input_dict_has_no_run_id(self) -> None:
+        from continuum.adapters.openai import ContinuumContext, _extract_run_id_from_tool_context
+
+        inner = ContinuumContext(continuum_run_id="run_via_context")
+        ctx = MagicMock()
+        ctx.tool_input = {"endpoint": "/invoice", "x": 42}
+        ctx.context = inner
+
+        assert _extract_run_id_from_tool_context(ctx) == "run_via_context"
+
+    def test_ignores_an_empty_run_id_in_the_tool_input(self) -> None:
+        """An empty id is no id: falling back rather than using it keeps a side
+        effect off a run effectively named ""."""
+        from continuum.adapters.openai import ContinuumContext, _extract_run_id_from_tool_context
+
+        inner = ContinuumContext(continuum_run_id="run_via_context")
+        ctx = MagicMock()
+        ctx.tool_input = {"continuum_run_id": ""}
+        ctx.context = inner
+
+        assert _extract_run_id_from_tool_context(ctx) == "run_via_context"
+
+    def test_returns_none_when_neither_input_nor_context_names_a_run(self) -> None:
+        from continuum.adapters.openai import _extract_run_id_from_tool_context
+
+        ctx = MagicMock()
+        ctx.tool_input = None
+        ctx.context = "someone else's context"
+
+        assert _extract_run_id_from_tool_context(ctx) is None
+
+    def test_ignores_a_tool_input_that_is_not_a_dict(self) -> None:
+        from continuum.adapters.openai import _extract_run_id_from_tool_context
+
+        ctx = MagicMock()
+        ctx.tool_input = "a plain string"
+        ctx.context = "someone else's context"
+
+        assert _extract_run_id_from_tool_context(ctx) is None
 
 
 class TestAdapterConstruction:
