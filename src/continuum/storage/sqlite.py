@@ -565,6 +565,7 @@ class SQLiteStorage(Storage):
         genesis and fork the hash chain away from the archive.
         """
         from continuum.checkpoint.manager import CheckpointManager
+        from continuum.checkpoint.policy import CheckpointTrigger
 
         lv = self.latest_version(run_id)
         head = self.last_sequence(run_id)
@@ -592,6 +593,8 @@ class SQLiteStorage(Storage):
                 manager.checkpoint(
                     run_id,
                     state=state,
+                    trigger=CheckpointTrigger.RECOVERY,
+                    reason="compaction anchor",
                     force_version=True,
                     # The anchor carries the environment the run's newest
                     # checkpoint already recorded when none is supplied

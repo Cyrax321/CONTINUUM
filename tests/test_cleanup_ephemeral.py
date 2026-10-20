@@ -3,6 +3,7 @@ from continuum.checkpoint.policy import CheckpointTrigger
 from continuum.events import EventType
 from continuum.models import RecoveryContract, RecoverySafety, Run
 from continuum.recovery import MemoryLedgerBackend, RecoveryLedger, cleanup_ephemeral_artifacts
+from continuum.replayguard import protected_call
 from continuum.storage import SQLiteStorage
 
 
@@ -52,3 +53,36 @@ def test_unreferenced_non_anchor_is_removed() -> None:
 
     assert deleted == [only.checkpoint_id]
     assert list(storage.list_checkpoints("run_1")) == []
+
+
+def test_compaction_anchor_survives_cleanup_ephemeral_artifacts() -> None:
+    """Compaction anchor checkpoints must survive cleanup_ephemeral_artifacts (issue #1769).
+
+    compact_run creates an anchor checkpoint before archiving the event prefix.
+    When cleanup_ephemeral_artifacts(..., keep_anchors=True) runs, the anchor
+    checkpoint must be preserved so that the compacted run remains restorable.
+    """
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="test"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "test", "total": 10})
+    for i in range(5):
+        protected_call(storage, "run_1", action_type="doc", key=f"d:{i}", fn=lambda i=i: {"d": i})
+
+    storage.compact_run("run_1")
+
+    checkpoints = list(storage.list_checkpoints("run_1"))
+    assert len(checkpoints) == 1
+    anchor_cp = checkpoints[0]
+    assert anchor_cp.trigger == CheckpointTrigger.RECOVERY
+
+    ledger = RecoveryLedger(MemoryLedgerBackend())
+    deleted = cleanup_ephemeral_artifacts(storage, ledger, "run_1", keep_anchors=True)
+    assert deleted == []
+    remaining = list(storage.list_checkpoints("run_1"))
+    assert len(remaining) == 1
+    assert remaining[0].checkpoint_id == anchor_cp.checkpoint_id
+
+    mgr = CheckpointManager(storage)
+    restored = mgr.restore("run_1")
+    assert restored.state.goal.description == "test"
+
