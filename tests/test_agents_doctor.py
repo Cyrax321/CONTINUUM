@@ -114,6 +114,105 @@ def test_stale_baked_path_is_reported_stale(env: tuple[Path, Path]) -> None:
     assert report.healthy is False
 
 
+def test_committed_shell_path_expression_is_unresolved_not_stale(
+    env: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A portable path expression is not a broken path (issue #1619).
+
+    ``${CLAUDE_PROJECT_DIR:-.}/.venv/bin/continuum-mcp`` is the form a shared
+    ``.mcp.json`` is meant to carry, because an absolute path is wrong on every
+    machine except the one that wrote it. ``os.path.expandvars`` does not speak
+    the shell's ``${VAR:-default}``, so the doctor used to read that as a path
+    that does not exist on any machine, and tell every clean clone to re-bake
+    an absolute path over the committed expression.
+    """
+
+    root, _ = env
+    write_mcp(
+        root / ".mcp.json",
+        command="${CLAUDE_PROJECT_DIR:-.}/.venv/bin/continuum-mcp",
+        clients="claude-code",
+    )
+    for var in (POLICY_ENV_VAR_ALIAS, "CONTINUUM_MCP_ALLOW", "CLAUDE_PROJECT_DIR"):
+        monkeypatch.delenv(var, raising=False)
+
+    report = scan(env)
+    row = ide_for(report, "claude-code", "mcp")
+    assert row.wired is True
+    assert row.unresolved is True
+    assert row.stale is False, "an expression the doctor cannot expand is not a dead path"
+    assert row.degraded is False
+    assert row.state == diagnose.WIRED
+    assert row.remedy is None, (
+        "re-baking would replace a portable expression with one machine's path"
+    )
+    assert "no longer resolves" not in " ".join(row.details)
+    assert report.healthy is True, "an unverifiable expression is not something to act on"
+    assert doctor_exit_code(report) == ExitCode.OK
+
+
+def test_shell_expression_in_a_hook_command_is_unresolved_not_stale(
+    env: tuple[Path, Path],
+) -> None:
+    """Hook commands carry the same portable form and the same false positive."""
+
+    root, _ = env
+    settings = root / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "${CLAUDE_PROJECT_DIR:-.}/.venv/bin/continuum observe",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    row = ide_for(scan(env), "claude-code", "hooks")
+    assert row.wired is True
+    assert row.unresolved is True
+    assert row.stale is False
+    assert row.state == diagnose.WIRED
+    assert row.remedy is None
+    assert any("${CLAUDE_PROJECT_DIR:-.}" in d for d in row.details)
+    assert any(str(settings) in d for d in row.details)
+
+
+def test_relative_command_preserves_path_prefix(
+    env: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative command like ./cmd is checked directly and does not fall back to PATH.
+
+    If Path stripped the leading ./, passing the bare name to shutil.which would
+    search PATH instead of checking the named local file.
+    """
+
+    root, _ = env
+    cmd_name = "./nonexistent-local-cmd"
+    write_mcp(root / ".mcp.json", command=cmd_name, clients="claude-code")
+    # Even if a command with the same base name exists on PATH, the relative path must not resolve.
+    monkeypatch.setattr(
+        diagnose.shutil,
+        "which",
+        lambda cmd, **kwargs: (
+            "/bin/nonexistent-local-cmd" if cmd == "nonexistent-local-cmd" else None
+        ),
+    )
+    row = ide_for(scan(env), "claude-code", "mcp")
+    assert row.state == diagnose.STALE, "relative command must check local file, not search PATH"
+
+
 def test_read_only_degraded_client_is_reported_degraded_naming_both_strings(
     env: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -289,6 +388,7 @@ def test_json_form_matches_the_human_form(env: tuple[Path, Path]) -> None:
     assert payload["healthy"] == report.healthy
     assert payload["stale"] == [i.ide for i in report.stale]
     assert payload["degraded"] == [i.ide for i in report.degraded]
+    assert payload["unresolved"] == [i.ide for i in report.unresolved]
 
     by_key = {(row["ide"], row["surface"]): row for row in payload["ides"]}
     for ide in report.ides:
@@ -469,6 +569,7 @@ def test_health_never_reports_ok_when_unmapped(env: tuple[Path, Path]) -> None:
             diagnose.WIRED,
             diagnose.STALE,
             diagnose.DEGRADED,
+            diagnose.UNRESOLVED,
             diagnose.NOT_CONFIGURED,
             diagnose.CURRENT,
             "unmanaged",

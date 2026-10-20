@@ -53,6 +53,25 @@ Test counts: ~3680 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **`continuum doctor` no longer calls a portable path expression a broken
+  path (#1619).** A committed registration may bake
+  `${CLAUDE_PROJECT_DIR:-.}/.venv/bin/continuum-mcp`, the form for POSIX
+  environments, and `os.path.expandvars` does not speak the shell's
+  `${VAR:-default}`, so the expression survived the doctor's expansion
+  untouched, was not absolute, and fell through to `shutil.which`, which could
+  not find it either. Every clean clone therefore reported `stale` and exited
+  `REQUIRES_REPAIR`, and the remedy printed for it, re-running
+  `continuum mcp install`, would have replaced the committed expression with
+  one machine's absolute path, which is the exact thing the committed file
+  exists to avoid. Resolution is now three-valued in
+  `continuum.agents.diagnose`: a command that still contains a `$` after
+  expansion is `unresolved`, a state the row carries next to `wired`,
+  `stale` and `read-only-degraded`, and one that does not reach the exit code
+  or carry a remedy. What the doctor *can* expand it now verifies, so a
+  `${VAR}` form is checked against the path the host would spawn, and still
+  reported `stale` when that path is gone. Hook commands get the same
+  treatment, and the new state is exposed in the `--json` payload.
+
 - **The documented test count is re-synced, so `main` builds again.** The
   collected total had drifted to 3,680 against a documented 3,636, past the
   30-test tolerance `test_documented_count_matches_suite` allows, so the

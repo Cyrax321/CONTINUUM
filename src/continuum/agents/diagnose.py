@@ -11,6 +11,11 @@ different fix:
 * **stale**: a path baked at install time no longer resolves, which is what a
   deleted or renamed virtualenv looks like from here. The host cannot spawn
   anything, so every tool is missing.
+* **unresolved**: the registration bakes a shell path expression such as
+  ``${CLAUDE_PROJECT_DIR:-.}/.venv/bin/continuum-mcp``, which the host
+  evaluates at spawn time and this process cannot. Nothing is known to be
+  broken, so it is reported as a limit on what the doctor can verify rather
+  than as a fault, and it never reaches the exit code.
 * **read-only-degraded**: the server starts, lists its read-only tools, and
   refuses every mutating one. Nothing is visibly broken until an agent tries
   to record something, which is why it is worth naming explicitly.
@@ -27,6 +32,7 @@ being approximated here.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -52,6 +58,7 @@ __all__ = [
     "WIRED",
     "STALE",
     "DEGRADED",
+    "UNRESOLVED",
     "NOT_CONFIGURED",
     "UNVERIFIED",
     "scan",
@@ -68,6 +75,7 @@ CURRENT = "current"
 #: evaluate. It is neither wired-and-fine nor broken: the host resolves the
 #: expression when it spawns, and the doctor only sees the literal text.
 UNVERIFIED = "unverified"
+UNRESOLVED = UNVERIFIED
 
 #: Commands the hook clients install, keyed by the trailing word of the
 #: invocation. Used only to recognise a continuum hook in a settings file.
@@ -139,6 +147,19 @@ def _expand(raw: str, *, root: Path, home: Path) -> Path:
     return path if path.is_absolute() else root / path
 
 
+_SHELL_DEFAULT_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}")
+
+
+def _expand_known_shell_defaults(command: str) -> str:
+    """Expand ${VAR:-default} when VAR is set and non-empty in os.environ."""
+
+    def _sub(match: re.Match[str]) -> str:
+        val = os.environ.get(match.group(1))
+        return val if val else match.group(0)
+
+    return _SHELL_DEFAULT_RE.sub(_sub, command)
+
+
 def _is_shell_expression(command: str) -> bool:
     """Whether ``command`` carries a shell expansion the doctor cannot evaluate.
 
@@ -158,7 +179,6 @@ def _is_shell_expression(command: str) -> bool:
     variable is set, and to a literal ``$NAME`` when it is not, so in the unset
     case the doctor would otherwise report a path containing a ``$`` as broken.
     """
-
     return "$" in command
 
 
@@ -169,13 +189,27 @@ def _resolves(command: str, *, home: Path) -> bool:
     is what the host does, so a command that works from the user's shell is
     not reported stale by a doctor that only looked at the filesystem.
     """
-
-    path = Path(command).expanduser()
+    command = _expand_known_shell_defaults(command)
+    expanded = os.path.expanduser(os.path.expandvars(command))
+    path = Path(expanded)
     if path.is_absolute():
         return path.exists()
-    return shutil.which(command, path=str(home / ".local" / "bin")) is not None or (
-        shutil.which(command) is not None
+    if expanded.startswith((".", "/")):
+        return path.exists()
+    return shutil.which(expanded, path=str(home / ".local" / "bin")) is not None or (
+        shutil.which(expanded) is not None
     )
+
+
+RESOLVES = "resolves"
+MISSING = "missing"
+
+
+def _resolve_state(command: str, *, home: Path) -> str:
+    """How a baked command looks: ``resolves``, ``missing`` or ``unresolved``."""
+    if _is_shell_expression(command):
+        return UNRESOLVED
+    return RESOLVES if _resolves(command, home=home) else MISSING
 
 
 _SCOPE_OF_LABEL = {
@@ -223,6 +257,14 @@ class IdeReport:
     details: tuple[str, ...] = ()
     remedy: str | None = None
     clients: tuple[str, ...] = ()
+    unresolved: bool = False
+    """The command is an expression the host evaluates, so it is unverifiable.
+
+    Set when a baked path survives :func:`os.path.expandvars` because it uses
+    the shell's ``${VAR:-default}``. This is not a fault and never reaches the
+    exit code: the committed form is portable by design, and the only thing the
+    doctor could tell the operator to do about it would destroy that.
+    """
     state_override: str | None = None
     unverified: tuple[str, ...] = ()
     """Commands the doctor refused to judge because a host expands them first.
@@ -251,6 +293,9 @@ class IdeReport:
         Stale outranks degraded because a stale registration stops the server
         from starting at all, whereas a degraded one still answers read-only
         queries. Both are true at once often enough to need naming both.
+        Unresolved ranks below both, because it is not a fault at all: it says
+        the doctor cannot evaluate a path expression the host can, which is a
+        statement about the check and not about the installation.
         """
 
         if self.state_override is not None:
@@ -273,6 +318,7 @@ class IdeReport:
             "wired": self.wired,
             "stale": self.stale,
             "degraded": self.degraded,
+            "unresolved": self.unresolved,
             "summary": self.summary,
             "config_paths": list(self.config_paths),
             "found_in": list(self.found_in),
@@ -300,12 +346,19 @@ class DoctorReport:
         return tuple(i for i in self.ides if i.degraded)
 
     @property
+    def unresolved(self) -> tuple[IdeReport, ...]:
+        return tuple(i for i in self.ides if i.unresolved)
+
+    @property
     def healthy(self) -> bool:
         """Whether anything checked needs a human to act.
 
         Unconfigured IDEs do not count against health: an IDE nobody has
         wired yet is the normal state of a machine, and reporting it as a
-        problem would make the command useless as a health check.
+        problem would make the command useless as a health check. An
+        unverifiable path expression does not either, for a different reason:
+        it is a limit on what the doctor can see, and acting on it would mean
+        replacing a portable, committed expression with one machine's path.
         """
 
         return not self.stale and not self.degraded and self._server_healthy
@@ -320,6 +373,7 @@ class DoctorReport:
             "healthy": self.healthy,
             "stale": [i.ide for i in self.stale],
             "degraded": [i.ide for i in self.degraded],
+            "unresolved": [i.ide for i in self.unresolved],
             "ides": [i.to_dict() for i in self.ides],
             "server": self.server,
             "notes": list(self.notes),
@@ -412,6 +466,7 @@ def _scan_mcp_host(host: str, *, root: Path, home: Path, policy: AuthorizationPo
         wired=bool(found_in),
         stale=bool(stale_paths),
         degraded=degraded,
+        unresolved=bool(unverified_paths),
         summary=_summarise(found_in, stale_paths, degraded, host, unverified_paths),
         unverified=tuple(unverified_paths),
         config_paths=tuple(str(p) for p in paths.values()),
@@ -461,6 +516,7 @@ def _scan_hook_client(client: str, *, root: Path, home: Path) -> IdeReport:
     found = False
     details: list[str] = []
     stale: list[str] = []
+    unresolved: list[str] = []
     stale_command = ""
 
     if data is not None:
@@ -475,12 +531,21 @@ def _scan_hook_client(client: str, *, root: Path, home: Path) -> IdeReport:
                 continue
             found = True
             details.append(f"{dotted}: {kind} hook")
-            if not _resolves(tokens[0], home=home):
+            resolution = _resolve_state(tokens[0], home=home)
+            if resolution == UNRESOLVED:
+                unresolved.append(f"{path} bakes {tokens[0]}")
+                details.append(
+                    f"{dotted}: {path} bakes {tokens[0]}, a shell path expression the doctor "
+                    "cannot expand, so the host evaluates it and this check does not judge it"
+                )
+            elif resolution == MISSING:
                 stale.append(f"{path} bakes {tokens[0]}")
                 stale_command = tokens[0]
 
     if stale:
         summary = f"{client}: hook command no longer resolves ({stale_command})"
+    elif unresolved:
+        summary = f"{client}: hook command is a path expression the host evaluates"
     elif found:
         summary = f"{client}: {len(details)} continuum hook(s)"
     else:
@@ -492,6 +557,8 @@ def _scan_hook_client(client: str, *, root: Path, home: Path) -> IdeReport:
         wired=found,
         stale=bool(stale),
         degraded=False,
+        unresolved=bool(unresolved),
+        unverified=tuple(unresolved),
         summary=summary,
         config_paths=(str(path),),
         found_in=(str(path),) if found else (),
@@ -584,7 +651,7 @@ def render_report(report: DoctorReport) -> str:
     lines = ["CONTINUUM doctor: is CONTINUUM actually wired up here?", ""]
     for ide in report.ides:
         lines.append(f"{ide.ide:<{_WIDTH}} {ide.surface:<13} {ide.state:<20} {ide.summary}")
-        if ide.state in (STALE, DEGRADED, f"{STALE}+{DEGRADED}"):
+        if ide.unresolved or ide.state in (STALE, DEGRADED, f"{STALE}+{DEGRADED}", UNRESOLVED):
             for detail in ide.details:
                 if "read-only" in detail or "bakes" in detail:
                     lines.append(f"{'':<{_WIDTH}} -> {detail}")
