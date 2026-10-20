@@ -135,6 +135,29 @@ def test_scoped_escalation_marker_does_not_gate_another_scope(
     assert ledger.record_attempt("run_1", scope="b") == 1
 
 
+def test_scoped_escalation_writes_no_run_wide_gate(ledger: RecoveryLedger) -> None:
+    """A scope reaching its budget escalates only itself, and counts only itself.
+
+    A leftover from the pre-scope implementation recomputed the count run-wide
+    after writing the scoped marker, then wrote a second ``scope=None`` gate and
+    returned that run-wide count (issue #1737). Because a run-wide marker covers
+    every scope, one dependency reaching its own threshold gated the whole run.
+    """
+    ledger.record_attempt("run_1")  # a pre-scope, run-wide attempt
+    count = ledger.record_attempt("run_1", scope="a", max_attempts=1)
+
+    assert count == 1  # the scoped count, not the run-wide count
+    markers = [
+        e
+        for e in ledger.entries("run_1")
+        if e.kind == LedgerEntryKind.GATE.value and e.gate == HUMAN_REQUIRED
+    ]
+    assert [m.scope for m in markers] == ["a"]
+    # A dependency that was never attempted must not inherit A's escalation.
+    assert ledger.requires_human("run_1", scope="b", max_attempts=3) is False
+    assert ledger.verify("run_1") == (True, 3)
+
+
 def test_scoped_escalation_still_answers_the_run_wide_query(
     ledger: RecoveryLedger,
 ) -> None:

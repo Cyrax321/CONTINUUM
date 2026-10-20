@@ -53,6 +53,18 @@ Test counts: ~3680 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **A scoped attempt escalating its own dependency no longer gates the whole
+  run (#1737).** `RecoveryLedger.record_attempt` writes the correct scoped
+  `human_required` marker, then ran a leftover block from the pre-scope
+  implementation that recomputed the count run-wide (`scope is None`),
+  re-checked escalation without a scope filter, wrote a second, run-wide
+  marker, and returned that wrong count. Because `_marker_covers` treats a
+  run-wide marker as covering every scope, one dependency reaching its own
+  threshold incorrectly blocked every other dependency and the run, defeating
+  the per-dependency budget isolation of #744. The leftover block is gone:
+  escalation writes one scoped marker, the method returns the scoped attempt
+  count, and a dependency that was never attempted stays ungated.
+
 - **The documented test count is re-synced, so `main` builds again.** The
   collected total had drifted to 3,680 against a documented 3,636, past the
   30-test tolerance `test_documented_count_matches_suite` allows, so the
