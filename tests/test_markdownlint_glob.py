@@ -74,11 +74,19 @@ def test_linted_files_actually_exist() -> None:
     present = top_level_markdown()
     missing = lint_globs() - present
 
-    assert not missing, "the markdownlint glob names files that do not exist: " + ", ".join(sorted(missing))
+    assert not missing, "the markdownlint glob names files that do not exist: " + ", ".join(
+        sorted(missing)
+    )
 
 
 def test_translated_readmes_are_linted() -> None:
     linted = lint_globs()
 
-    for name in ("README.es.md", "README.ja.md", "README.ko.md", "README.pt-BR.md", "README.zh-CN.md"):
+    for name in (
+        "README.es.md",
+        "README.ja.md",
+        "README.ko.md",
+        "README.pt-BR.md",
+        "README.zh-CN.md",
+    ):
         assert name in linted, f"{name} is not in the markdownlint glob"
