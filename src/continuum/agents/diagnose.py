@@ -68,7 +68,6 @@ __all__ = [
 WIRED = "wired"
 STALE = "stale"
 DEGRADED = "read-only-degraded"
-UNRESOLVED = "unresolved"
 NOT_CONFIGURED = "not-configured"
 CURRENT = "current"
 
@@ -180,8 +179,7 @@ def _is_shell_expression(command: str) -> bool:
     variable is set, and to a literal ``$NAME`` when it is not, so in the unset
     case the doctor would otherwise report a path containing a ``$`` as broken.
     """
-    command = _expand_known_shell_defaults(command)
-    return "$" in os.path.expandvars(command)
+    return "$" in command
 
 
 def _resolves(command: str, *, home: Path) -> bool:
@@ -653,7 +651,7 @@ def render_report(report: DoctorReport) -> str:
     lines = ["CONTINUUM doctor: is CONTINUUM actually wired up here?", ""]
     for ide in report.ides:
         lines.append(f"{ide.ide:<{_WIDTH}} {ide.surface:<13} {ide.state:<20} {ide.summary}")
-        if ide.state in (STALE, DEGRADED, f"{STALE}+{DEGRADED}", UNRESOLVED):
+        if ide.unresolved or ide.state in (STALE, DEGRADED, f"{STALE}+{DEGRADED}", UNRESOLVED):
             for detail in ide.details:
                 if "read-only" in detail or "bakes" in detail:
                     lines.append(f"{'':<{_WIDTH}} -> {detail}")

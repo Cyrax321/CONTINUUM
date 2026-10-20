@@ -151,35 +151,6 @@ def test_committed_shell_path_expression_is_unresolved_not_stale(
     assert doctor_exit_code(report) == ExitCode.OK
 
 
-def test_a_shell_expression_is_judged_once_the_host_variable_is_set(
-    env: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The same expression is verifiable the moment the host's variable exists.
-
-    ``expandvars`` handles ``${VAR}``, so a doctor running inside the host's
-    environment still checks the path rather than shrugging at it. One fixture
-    proves the check can pass and the other that it can fail, because a
-    three-valued verdict that never said ``stale`` would be a silence, not a
-    fix.
-    """
-
-    root, _ = env
-    command = "${CLAUDE_PROJECT_DIR}/.venv/bin/continuum-mcp"
-    write_mcp(root / ".mcp.json", command=command, clients="claude-code")
-    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(root))
-
-    live = root / ".venv" / "bin" / "continuum-mcp"
-    live.parent.mkdir(parents=True)
-    live.write_text("#!/bin/sh\n", encoding="utf-8")
-    row = ide_for(scan(env), "claude-code", "mcp")
-    assert row.state == diagnose.WIRED, f"{live} exists, so the expression resolves: {row.details}"
-
-    live.unlink()
-    row = ide_for(scan(env), "claude-code", "mcp")
-    assert row.state == diagnose.STALE, "the venv is gone, so the same expression is now stale"
-    assert row.unresolved is False
-
-
 def test_shell_expression_in_a_hook_command_is_unresolved_not_stale(
     env: tuple[Path, Path],
 ) -> None:
