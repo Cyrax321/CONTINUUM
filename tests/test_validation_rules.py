@@ -15,6 +15,7 @@ finding rather than a silent gap.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import datetime
 
 import pytest
 
@@ -22,8 +23,11 @@ from continuum.checkpoint import CheckpointManager
 from continuum.environment import StaticProvider, capture
 from continuum.events import EventType
 from continuum.models import (
+    Approval,
+    ApprovalStatus,
     Component,
     ComponentValidationEntry,
+    Decision,
     EnvironmentSnapshot,
     Goal,
     RecoveryMode,
@@ -788,3 +792,127 @@ def test_conformance_accepts_a_callers_own_state() -> None:
 
 def test_the_builtin_rule_satisfies_the_protocol() -> None:
     assert isinstance(RevokedApprovalRule(), ValidationRule)
+
+
+# --- _approval_earlier: the None-granted_at ordering arms (#1749) -------------
+
+
+def _approval(
+    subject: str = "decision_1", granted_at: datetime | None = None, approval_id: str = "a1"
+) -> Approval:
+    return Approval(
+        approval_id=approval_id,
+        subject=subject,
+        status=ApprovalStatus.REVOKED,
+        granted_at=granted_at,
+    )
+
+
+def test_approval_earlier_says_a_missing_granted_at_is_not_earlier() -> None:
+    """The arm at line 146-147: an un-timestamped revocation is never ordered first.
+
+    ``granted_at`` is the evidence a revocation happened before some other
+    event; ``None`` is not an instant, so it cannot win an "earlier" test.
+    """
+    earlier = datetime(2026, 1, 1)
+    from continuum.plugins.validation_rules import _approval_earlier
+
+    assert _approval_earlier(_approval(granted_at=None), _approval(granted_at=earlier)) is False
+
+
+def test_approval_earlier_says_an_unstamped_other_is_earlier() -> None:
+    """The arm at line 148-149: a timestamped revocation beats an un-timestamped one.
+
+    A revocation that carries no timestamp cannot be demonstrated to precede
+    anything, so the one that does wins.
+    """
+    earlier = datetime(2026, 1, 1)
+    from continuum.plugins.validation_rules import _approval_earlier
+
+    assert _approval_earlier(_approval(granted_at=earlier), _approval(granted_at=None)) is True
+
+
+def test_approval_earlier_compares_the_timestamps() -> None:
+    """The arm at line 150: both known, the earlier instant wins."""
+    from continuum.plugins.validation_rules import _approval_earlier
+
+    jan = datetime(2026, 1, 1)
+    feb = datetime(2026, 2, 1)
+    assert (
+        _approval_earlier(
+            _approval(granted_at=jan, approval_id="first"),
+            _approval(granted_at=feb, approval_id="second"),
+        )
+        is True
+    )
+    assert (
+        _approval_earlier(
+            _approval(granted_at=feb, approval_id="second"),
+            _approval(granted_at=jan, approval_id="first"),
+        )
+        is False
+    )
+
+
+def test_the_rule_reports_the_earliest_revocation_for_a_repeated_subject() -> None:
+    """Two revoked approvals naming one subject: the earliest revocation is the one reported.
+
+    This is what ``_approval_earlier`` is for at its only call site. The rule
+    keeps whichever revocation came first, so the finding a reader sees
+    describes the earliest loss of authorisation.
+    """
+    revocations = SemanticState(
+        run_id="run_earliest",
+        goal=Goal(description="g"),
+        approvals=[
+            _approval(granted_at=datetime(2026, 2, 1), approval_id="later"),
+            _approval(granted_at=datetime(2026, 1, 1), approval_id="earlier"),
+        ],
+        decisions=[
+            Decision(decision_id="decision_1", decision="ship", reason="cites P-42"),
+        ],
+    )
+
+    findings = RevokedApprovalRule().evaluate(revocations)
+    assert len(findings) == 1
+    assert findings[0].component_id == "decision_1"
+    assert "earlier" in findings[0].detail
+
+
+# --- conformance: the contract rejections (#1749) ----------------------------
+
+
+class _UncallableEvaluateRule:
+    """A rule whose ``evaluate`` is a plain attribute, not a method (line 253-255)."""
+
+    name = "test:uncallable"
+
+    evaluate = "not a method"
+
+
+def test_conformance_detects_a_rule_whose_evaluate_is_not_callable() -> None:
+    report = check_validation_rule(_UncallableEvaluateRule())
+
+    assert not report.passed
+    assert report.rule_name == "test:uncallable"
+    assert any("no callable 'evaluate'" in failure for failure in report.failures)
+
+
+def test_conformance_rejects_an_evaluate_that_returns_a_non_list() -> None:
+    """The TypeError arm of ``_evaluate_all`` (line 321), surfaced as a failure.
+
+    A rule returning a scalar has broken the seam's return contract, so
+    conformance must fail it rather than let the caller blur the distinction.
+    """
+    report = check_validation_rule(_MalformedReturnRule())
+
+    assert not report.passed
+    assert any("expected a list" in failure for failure in report.failures)
+
+
+def test_conformance_rejects_an_evaluate_that_returns_a_bad_item() -> None:
+    """The TypeError arm of ``_evaluate_all`` (line 324): the list holds a foreign object."""
+    report = check_validation_rule(_MalformedItemRule())
+
+    assert not report.passed
+    assert any("expected ComponentValidationEntry" in failure for failure in report.failures)
