@@ -520,7 +520,7 @@ CONTINUUM은 **Anandhu P Shaji**([@Cyrax321](https://github.com/Cyrax321) · [Li
 
 이 프로젝트는 Apache 2.0 하에 오픈 소스이며 의도적으로 확장 가능하게 구축되었다. 복구 시맨틱을 검증하는 연구자, 원장이나 MCP 서버를 다른 프레임워크나 언어로 포팅하는 엔지니어, 계획된 로드맵을 현실로 만드는 모든 사람을 위해 확장 가능하다. 좋은 출발점은 [issue 트래커](https://github.com/Cyrax321/CONTINUUM/issues)의 `good first issue` 레이블, 또는 STATUS.md에 나열된 열린 정확성 버그이다.
 
-큰 PR을 보내기 전에 이슈를 열어라. 완전한 기여 가이드는 [CONTRIBUTING.md](CONTRIBUTING.md)를 참조하라. [Code of Conduct](CODE_OF_CONDUCT.md)를 포함한다.
+큰 PR을 보내기 전에 이슈를 열어라. 완전한 기여 가이드는 [CONTRIBUTING.md](CONTRIBUTING.md)를 참조하라. [Code of Conduct](CODE_OF_CONDUCT.md)와 [보안 정책](SECURITY.md)을 포함한다.
 
 ### 기여자
 

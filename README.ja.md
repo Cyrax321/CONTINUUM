@@ -520,7 +520,7 @@ CONTINUUM は **Anandhu P Shaji**（[@Cyrax321](https://github.com/Cyrax321) · 
 
 このプロジェクトは Apache 2.0 の下でオープンソースであり、意図的に拡張可能に構築されている。リカバリセマンティクスを検証する研究者、台帳や MCP サーバーを他のフレームワークや言語に移植するエンジニア、計画されたロードマップを現実にする誰にとっても拡張可能である。良い出発点は [issue トラッカー](https://github.com/Cyrax321/CONTINUUM/issues) の `good first issue` ラベル、または STATUS.md にリストされた未解決の正確性バグである。
 
-大きな PR を送信する前に issue を開いてください。完全なコントリビューションガイドは [CONTRIBUTING.md](CONTRIBUTING.md) を参照。 [Code of Conduct](CODE_OF_CONDUCT.md) を含む。
+大きな PR を送信する前に issue を開いてください。完全なコントリビューションガイドは [CONTRIBUTING.md](CONTRIBUTING.md) を参照。 [Code of Conduct](CODE_OF_CONDUCT.md) と [セキュリティポリシー](SECURITY.md) を含む。
 
 ### コントリビューター
 

@@ -142,7 +142,7 @@ def test_committed_shell_path_expression_is_unresolved_not_stale(
     assert row.unresolved is True
     assert row.stale is False, "an expression the doctor cannot expand is not a dead path"
     assert row.degraded is False
-    assert row.state == diagnose.UNRESOLVED
+    assert row.state == diagnose.WIRED
     assert row.remedy is None, (
         "re-baking would replace a portable expression with one machine's path"
     )
@@ -212,7 +212,7 @@ def test_shell_expression_in_a_hook_command_is_unresolved_not_stale(
     assert row.wired is True
     assert row.unresolved is True
     assert row.stale is False
-    assert row.state == diagnose.UNRESOLVED
+    assert row.state == diagnose.WIRED
     assert row.remedy is None
     assert any("${CLAUDE_PROJECT_DIR:-.}" in d for d in row.details)
     assert any(str(settings) in d for d in row.details)

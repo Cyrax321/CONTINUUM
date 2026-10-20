@@ -331,6 +331,8 @@ Over MCP the equivalent is the `continuum_confirm` tool followed by `continuum_r
 
 ## Core Concepts
 
+The vocabulary these sections use is defined in [docs/GLOSSARY.md](docs/GLOSSARY.md), with every term pointing at its implementation.
+
 The deep reference for each concept lives in [references/concepts.md](references/concepts.md).
 
 - **Semantic Checkpoints** - a compact, versioned representation of what the agent needs to continue.
@@ -438,7 +440,7 @@ Schema v6. SQLite is primary, Postgres is CI verified. One log, many projections
 
 ### Module map: one library, many surfaces
 
-CONTINUUM is one library (`src/continuum`, 148 modules) plus a large test suite (210 test files, ~3680 tests). All modules append to and replay one hash chained event log:
+CONTINUUM is one library (`src/continuum`, 148 modules) plus a large test suite (217 test files, ~3680 tests). All modules append to and replay one hash chained event log:
 
 | Module | Role |
 |:--|:--|
@@ -475,6 +477,8 @@ CONTINUUM is one library (`src/continuum`, 148 modules) plus a large test suite 
 Full reference in [references/architecture.md](references/architecture.md). And the months plane that builds on this (provenance causal graph, authority resurrection, admissibility, liveness) is pinned as board #550 with 20 sub issues #551 to #570.
 
 ## API and CLI
+
+Task guides are indexed in [docs/guides/README.md](docs/guides/README.md), the library and CLI reference in [docs/api/README.md](docs/api/README.md), worked end-to-end examples in [docs/recipes/README.md](docs/recipes/README.md), the mechanism behind constraint survival in [docs/concepts/README.md](docs/concepts/README.md), and the research notes behind each mechanism in [docs/research/README.md](docs/research/README.md).
 
 Python surface (`EventType`, `Run`, `SQLiteStorage`, `diff_states`, `project`) and the adapter API are documented with runnable examples in [references/api.md](references/api.md). The CLI is the same surface in shell form:
 
@@ -558,6 +562,31 @@ If you want the verdict enforced, wire a seam or gate your pipeline on the exit 
 
 CONTINUUM sits at the overlap of durable execution, idempotent side-effect tracking, and crash recovery for LLM agents. The closest neighbors are machine-checked resume contracts (Khan 2026), agentic transaction processing with constraint-gated admission (Mnemosyne 2026), checkpoint-rollback attack analysis (ACRFence 2026), and design-level prompt-injection defense (CaMeL 2025). The full annotated list, foundations, and citation audit are in [references/related-work.md](references/related-work.md).
 
+## Documentation map
+
+Every page under `docs/` and the reasoning behind it:
+
+- **Reference and API**: [docs/api/README.md](docs/api/README.md) (library, CLI, MCP, sidecar),
+  [docs/GLOSSARY.md](docs/GLOSSARY.md) (every recovery term, each pointing at its implementation),
+  [references/api.md](references/api.md), [references/cli.md](references/cli.md).
+- **Task guides**: [docs/guides/README.md](docs/guides/README.md),
+  [docs/recipes/README.md](docs/recipes/README.md), [docs/concepts/README.md](docs/concepts/README.md).
+- **Security**: [docs/threat_model.md](docs/threat_model.md) (what is protected, detected, and
+  explicitly not), [docs/signing_key_rotation.md](docs/signing_key_rotation.md) (rotating a keyed
+  seal without breaking verification of older hash-only contracts).
+- **Contracts and scale**: [docs/contract_compatibility.md](docs/contract_compatibility.md)
+  (a sealed promise verified by another build),
+  [docs/multi_agent_isolation.md](docs/multi_agent_isolation.md) (shared `run_id` isolation),
+  [docs/audit-provenance-compaction-294.md](docs/audit-provenance-compaction-294.md)
+  (provenance surviving compaction).
+- **Authoring and operations**: [docs/adapters_guide.md](docs/adapters_guide.md) (writing an
+  adapter), [docs/cloud_api.md](docs/cloud_api.md) (optional deployment layer),
+  [docs/TESTING_MCP.md](docs/TESTING_MCP.md) (adversarial MCP surface audit),
+  [docs/CONTRIBUTING_ONBOARDING.md](docs/CONTRIBUTING_ONBOARDING.md) (orientation).
+- **Plans**: [docs/ARCHITECTURE_EVOLUTION.md](docs/ARCHITECTURE_EVOLUTION.md) (the north star),
+  [docs/CONTINUUM_MASTER_PLAN.md](docs/CONTINUUM_MASTER_PLAN.md) (verified state and next work),
+  [docs/research/README.md](docs/research/README.md) (the notes those plans came from).
+
 ## Status and limitations
 
 - **Tested**: 3,680 collected, most passing; exact skips vary in a full run at the 2026-08-24 audit of this tree; CI enforces the suite on Python 3.11, 3.12, and 3.13, and counts vary by platform and optional services such as Postgres (see [STATUS.md](STATUS.md)). The MCP surface has also been audited adversarially over the live protocol; see [test.md](test.md).
@@ -582,7 +611,7 @@ CONTINUUM was created by **Anandhu P Shaji** ([@Cyrax321](https://github.com/Cyr
 
 This project is open source under Apache 2.0 and deliberately built to be extended: by researchers validating the recovery semantics, by engineers porting the ledger or MCP server to other frameworks or languages, and by anyone turning the planned roadmap into reality. A good place to start is the `good first issue` label on the [issue tracker](https://github.com/Cyrax321/CONTINUUM/issues), or the open correctness bugs listed in STATUS.md.
 
-Open an issue before submitting large PRs. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution guide, including the [Code of Conduct](CODE_OF_CONDUCT.md).
+Open an issue before submitting large PRs. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution guide, including the [Code of Conduct](CODE_OF_CONDUCT.md) and the [Security policy](SECURITY.md).
 
 ### Contributors
 
@@ -641,7 +670,26 @@ Deep reference material:
 - [references/testing.md](references/testing.md) - test suite layout and conventions
 - [references/related-work.md](references/related-work.md) - annotated related work and citation audit
 
+Architecture, in five related pages. Read them in this order if you want the
+whole picture, or start at the data if you already know the shape:
+
+- [references/architecture-spec.md](references/architecture-spec.md) - the authoritative text-only specification, written so it can be handed to an image model
+- [references/architecture-data.md](references/architecture-data.md) - every figure read from the code at the current `main` commit, with `file:line` citations (guarded by `tests/test_architecture_data.py`)
+- [references/architecture-diagram.md](references/architecture-diagram.md) - the complete system view: clients, adapters, the deny-by-default MCP server, SDK internals
+- [references/architecture-flow.md](references/architecture-flow.md) - verified Mermaid flow graph, every node label matching `architecture-data.md`
+- [references/architecture-drawing-prompt.md](references/architecture-drawing-prompt.md) - the prompt that turns the diagram into an image
+
+Integration and attestation:
+
+- [references/integration-architecture.md](references/integration-architecture.md) - attaching to any system, and what the field does about it
+- [references/auto-resume-integration.md](references/auto-resume-integration.md) - auto-resume architecture, current state, and open problems
+- [references/attestation.md](references/attestation.md) - event-chain attestation design (implemented)
+- [references/implementation-plan.md](references/implementation-plan.md) - remaining roadmap items, status verified against the tree
+- [references/citation-audit-2026-08-24.md](references/citation-audit-2026-08-24.md) - audit of external claims about the related-work list
+
 ## Quick links
 
 - [Issues](https://github.com/Cyrax321/CONTINUUM/issues) for bugs/features
 - [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) for design proposals
+- [Release Notes](docs/release-notes.md)
+- [Release Checklist](docs/release-checklist.md)
