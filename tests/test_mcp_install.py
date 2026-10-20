@@ -816,3 +816,151 @@ def test_the_host_help_names_every_host_the_choices_accept() -> None:
     )
     for host in mcp_install.HOST_PROFILES:
         assert host in (host_help or ""), f"--host help omits {host}, which the parser accepts"
+
+
+# --------------------------------------------------------------------------- #
+# VS Code's settings path, per platform (issue #1604)
+# --------------------------------------------------------------------------- #
+
+
+def _rebind_vscode_profile(monkeypatch: pytest.MonkeyPatch, *, home: Path) -> Path:
+    """Point the vscode profile at a sandboxed home, and return it.
+
+    ``HOST_PROFILES`` binds its vscode paths at import, from whatever
+    environment imported it, so patching the variables alone is too late: the
+    profile still holds the real machine's path. Rebinding the two entries in
+    place is what makes the sandboxed values the ones the CLI resolves, and
+    ``setitem`` restores the real ones afterwards. ``HOME`` and ``USERPROFILE``
+    are both set because ``expanduser`` reads the one the running platform
+    honours, and this helper has to work under both.
+    """
+    appdata = home / "AppData" / "Roaming"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("APPDATA", str(appdata))
+    for key in ("local_settings", "user_settings"):
+        monkeypatch.setitem(
+            mcp_install.HOST_PROFILES["vscode"], key, mcp_install._vscode_user_settings()
+        )
+    return home
+
+
+def test_the_vscode_settings_path_follows_the_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The three paths VS Code's documentation names, one per platform.
+
+    One macOS path for every platform was issue #1604: on Windows and Linux the
+    registration was written into a file no VS Code reads. Each expectation
+    here is the documented location for its platform, resolved under a
+    sandboxed home so the real profile never enters the comparison. On a
+    machine running one platform the others are still checked, because the
+    point is that the answer is not this machine's.
+    """
+    home = tmp_path / "home"
+    appdata = tmp_path / "appdata"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("APPDATA", str(appdata))
+
+    assert mcp_install._vscode_user_settings(platform="win32") == str(
+        appdata / "Code" / "User" / "settings.json"
+    )
+    assert (
+        mcp_install._vscode_user_settings(platform="darwin")
+        == "~/Library/Application Support/Code/User/settings.json"
+    )
+    assert (
+        mcp_install._vscode_user_settings(platform="linux") == "~/.config/Code/User/settings.json"
+    )
+
+    # XDG_CONFIG_HOME is ignored on purpose: VS Code hardcodes ~/.config
+    # (upstream microsoft/vscode#38476), so honouring the variable would write
+    # where VS Code does not read, which is the bug this guards against.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "elsewhere"))
+    assert (
+        mcp_install._vscode_user_settings(platform="linux") == "~/.config/Code/User/settings.json"
+    )
+
+    # With APPDATA at its standard roaming directory under the profile home, the
+    # answer stays `~`-relative rather than absolute: `agents/diagnose.py` weaves
+    # a caller's `home` override into `~`-prefixed paths only, so an absolute
+    # binding would send the doctor to the developer's real %APPDATA% instead of
+    # the sandbox a scan passes.
+    monkeypatch.setenv("APPDATA", str(home / "AppData" / "Roaming"))
+    assert (
+        mcp_install._vscode_user_settings(platform="win32")
+        == "~/AppData/Roaming/Code/User/settings.json"
+    )
+
+    # A session without APPDATA (a service account, a hardened shell) still
+    # names the roaming directory, from the profile home rather than a guess,
+    # and keeps the `~`-relative form for the same reason.
+    monkeypatch.delenv("APPDATA")
+    assert Path(mcp_install._vscode_user_settings(platform="win32")).expanduser() == (
+        home / "AppData" / "Roaming" / "Code" / "User" / "settings.json"
+    )
+
+    # An environment that cannot resolve a profile home at all must not crash:
+    # HOST_PROFILES binds this function at import, and 3.13's Path.home()
+    # raises there (a subprocess whose environment carries no USERPROFILE, the
+    # case test_agents_cli.py::test_help_lists_both_new_commands runs). The
+    # answer stays `~`-relative so each consumer's expanduser resolves it.
+    def no_home() -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(mcp_install.Path, "home", no_home)
+    assert (
+        mcp_install._vscode_user_settings(platform="win32")
+        == "~/AppData/Roaming/Code/User/settings.json"
+    )
+    # APPDATA, being absolute already, still wins when it is genuinely set.
+    monkeypatch.setenv("APPDATA", str(tmp_path / "redirected"))
+    assert mcp_install._vscode_user_settings(platform="win32") == str(
+        tmp_path / "redirected" / "Code" / "User" / "settings.json"
+    )
+
+
+def test_vscode_install_lands_where_this_platforms_vs_code_reads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The acceptance case (issue #1604): the file written is the file VS Code opens.
+
+    The install command used to write a macOS-only path on every platform,
+    growing a ``Library/Application Support/Code/User`` tree under the user's
+    profile on Windows and Linux while reporting ``status: installed``. The
+    registration now lands in the settings file the running VS Code actually
+    reads, and that tree is not created on platforms that do not use it.
+    """
+    home = _rebind_vscode_profile(monkeypatch, home=tmp_path / "home")
+
+    code, out, err = run("--json", "mcp", "install", "--host", "vscode", "--scope", "user")
+    assert code == ExitCode.OK, err
+
+    expected = Path(mcp_install.HOST_PROFILES["vscode"]["user_settings"]).expanduser()
+    settings = Path(json.loads(out)["settings"])
+    assert settings == expected, (settings, expected)
+    assert settings.is_file()
+    entry = json.loads(settings.read_text(encoding="utf-8"))["mcpServers"]["continuum-mcp"]
+    assert Path(entry["command"]).is_absolute()
+
+    # The default (local) scope is the same file, for the reason the profile
+    # records: VS Code has no per-project user settings file to point at. The
+    # file is removed first, so the default-scope call has to write the
+    # registration itself: a branch that only reported the path while writing
+    # nothing would pass a mere exit-code and path check.
+    settings.unlink()
+    monkeypatch.chdir(tmp_path)
+    code, out, err = run("--json", "mcp", "install", "--host", "vscode")
+    assert code == ExitCode.OK, err
+    assert Path(json.loads(out)["settings"]) == expected
+    assert settings.is_file(), (
+        "the default scope must write the registration, not just name its file"
+    )
+    entry = json.loads(settings.read_text(encoding="utf-8"))["mcpServers"]["continuum-mcp"]
+    assert Path(entry["command"]).is_absolute()
+
+    if sys.platform != "darwin":
+        assert not (home / "Library").exists(), (
+            "a non-macOS platform must not grow a macOS settings tree"
+        )
