@@ -14,7 +14,7 @@ Staleness propagation (issue #553) will later mark downstream nodes via BFS.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from continuum.events import EventType
@@ -49,6 +49,7 @@ class ProvenanceNode:
     type: EventType
     origin: Origin
     status: StateStatus = StateStatus.VALID
+    invalidated_reason: str | None = None
     caused_by: tuple[str, ...] = ()
     payload: dict[str, Any] = field(default_factory=dict)
 
@@ -163,19 +164,24 @@ def build_provenance_graph(events: Any) -> ProvenanceGraph:
             payload=dict(ev.payload) if isinstance(ev.payload, dict) else {},
         )
         graph.add_node(node)
+        pld: dict[str, Any] = ev.payload if isinstance(ev.payload, dict) else {}
         if ev.type == getattr(EventType, "DECISION_INVALIDATED", None):
-            dec_id = payload.get("decision_id")
-            if dec_id and dec_id in graph.nodes:
-                graph.nodes[dec_id].status = StateStatus.INVALID
-                graph.nodes[dec_id].invalidated_reason = payload.get("reason") or payload.get(
-                    "invalidated_reason"
+            dec_id = pld.get("decision_id")
+            if isinstance(dec_id, str) and dec_id in graph.nodes:
+                reason = pld.get("reason") or pld.get("invalidated_reason")
+                graph.nodes[dec_id] = replace(
+                    graph.nodes[dec_id],
+                    status=StateStatus.INVALID,
+                    invalidated_reason=str(reason) if reason is not None else None,
                 )
         elif ev.type == getattr(EventType, "FINDING_INVALIDATED", None):
-            find_id = payload.get("finding_id")
-            if find_id and find_id in graph.nodes:
-                graph.nodes[find_id].status = StateStatus.INVALID
-                graph.nodes[find_id].invalidated_reason = payload.get("reason") or payload.get(
-                    "invalidated_reason"
+            find_id = pld.get("finding_id")
+            if isinstance(find_id, str) and find_id in graph.nodes:
+                reason = pld.get("reason") or pld.get("invalidated_reason")
+                graph.nodes[find_id] = replace(
+                    graph.nodes[find_id],
+                    status=StateStatus.INVALID,
+                    invalidated_reason=str(reason) if reason is not None else None,
                 )
 
     # Second pass: edges
