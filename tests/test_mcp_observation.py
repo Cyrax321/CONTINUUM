@@ -331,18 +331,40 @@ def test_a_malformed_handshake_yields_no_name(params: Any, expected: str | None)
     assert declared_client_name(params) == expected
 
 
-def test_a_list_of_names_in_one_value_is_recorded_individually(tmp_path: Path) -> None:
-    """An allowlist naming three hosts records three names, not one string.
+def test_a_multi_word_name_is_recorded_verbatim_not_split(tmp_path: Path) -> None:
+    r"""One connection declares one name, and that name is what gets recorded.
 
-    ``authz`` splits on commas and whitespace, so ``"a, b"`` authorizes both
-    ``a`` and ``b``. Recording the raw value would make the doctor compare
-    ``"a, b"`` against ``"b"`` and report a healthy registration as a mismatch.
+    A host's ``clientInfo.name`` is whatever the host sent. Splitting it on the
+    separators an allowlist uses -- which is how ``authz`` reads a value that
+    names several authorized callers -- would record names the host never
+    declared: a connection from a host named ``"Visual Studio Code"`` used to
+    record three entries, and the doctor then reported a mismatch against
+    clients that do not exist (#1805).
+    """
+    db = tmp_path / "continuum.db"
+
+    record_observed_client(str(db), "Visual Studio Code")
+
+    clients = read_observed_clients(str(db))
+    assert list(clients) == ["Visual Studio Code"]
+    assert clients["Visual Studio Code"]["count"] == 1
+
+
+def test_an_allowlist_style_value_is_recorded_as_the_one_name_it_is(tmp_path: Path) -> None:
+    """The separators an allowlist splits on are not separators for a name.
+
+    ``authz`` splits a declared *allowlist value* on commas and whitespace, so
+    ``"a, b"`` authorizes both callers, but an observed name is not an
+    allowlist value: recording it whole is what keeps the doctor comparing the
+    name a host sent against the name the registration authorizes.
     """
     db = tmp_path / "continuum.db"
 
     record_observed_client(str(db), "cursor, gemini-cli claude-code")
 
-    assert sorted(read_observed_clients(str(db))) == ["claude-code", "cursor", "gemini-cli"]
+    clients = read_observed_clients(str(db))
+    assert list(clients) == ["cursor, gemini-cli claude-code"]
+    assert clients["cursor, gemini-cli claude-code"]["count"] == 1
 
 
 def test_the_file_cannot_grow_without_bound(tmp_path: Path) -> None:

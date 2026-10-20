@@ -53,6 +53,21 @@ Test counts: ~3680 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **An observed client name is recorded as the one name the host sent (#1805).**
+  `record_observed_client` split the `clientInfo.name` a single connection
+  declared on the separators an allowlist uses (`[\s,]+`), so a host whose name
+  contains spaces or commas was recorded as several names it never declared.
+  One connection from VS Code's MCP client, which declares `"Visual Studio
+  Code"`, wrote three entries: `Visual`, `Studio` and `Code`. The doctor's
+  `client-name` finding then reported `hosts have connected as 'Code',
+  'Studio', 'Visual'` against a registration that authorizes some other name,
+  sending an operator hunting for clients that do not exist, and each fragment
+  consumed its own slot in the 32-entry record and its own counter. Splitting
+  belongs to the allowlist path in `authz`, where one declared value
+  legitimately names several authorized callers; the record path now validates
+  the name exactly the way `declared_client_name` does and stores it verbatim.
+  `split_declared_names` had no other caller and is gone.
+
 - **A developer's own venv and scratch database are no longer committed as the
   project's Continue registration (#1618).** PR #1612 added
   `.continue/config.yaml` to the repository root, fully baked: a `command`
