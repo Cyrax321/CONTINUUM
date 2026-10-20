@@ -239,9 +239,7 @@ def test_a_stale_path_is_not_listed_as_unverified(env: tuple[Path, Path]) -> Non
         ("python3", False),
     ],
 )
-def test_a_dollar_sign_is_what_marks_a_command_unverifiable(
-    command: str, unverified: bool
-) -> None:
+def test_a_dollar_sign_is_what_marks_a_command_unverifiable(command: str, unverified: bool) -> None:
     assert diagnose._is_shell_expression(command) is unverified
 
 
