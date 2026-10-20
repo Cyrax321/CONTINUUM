@@ -3025,6 +3025,7 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
     import subprocess
     import sys
     import threading
+    import time
 
     from continuum.gateway import (
         DEFAULT_GATEWAY_CONFIG_PATH,
@@ -3143,25 +3144,57 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
                 print(f"error: failed to spawn daemon process: {exc}", file=err)
                 return ExitCode.ERROR
 
-        try:
-            pid_file.write_text(str(proc.pid), encoding="utf-8")
-        except OSError as exc:
-            proc.terminate()
-            print(f"error: cannot write pid file {pid_file}: {exc}", file=err)
-            return ExitCode.ERROR
-
+        # Wait for the child to bind the gateway and write its own PID file,
+        # or exit early on error.
         wait_fn = getattr(proc, "wait", None)
-        if callable(wait_fn):
-            try:
-                rc = wait_fn(timeout=0.2)
+        poll_fn = getattr(proc, "poll", None)
+        child_pid: int | None = None
+
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            if callable(poll_fn):
+                rc = poll_fn()
                 if isinstance(rc, int):
-                    pid_file.unlink(missing_ok=True)
+                    with contextlib.suppress(OSError, UnicodeDecodeError):
+                        if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() in (
+                            str(proc.pid),
+                            "",
+                        ):
+                            pid_file.unlink(missing_ok=True)
                     print(f"error: daemon exited during startup (code {rc})", file=err)
                     return ExitCode.ERROR
-            except subprocess.TimeoutExpired:
-                pass
 
-        print(f"CONTINUUM daemon started (pid {proc.pid})", file=out)
+            if callable(wait_fn):
+                try:
+                    rc = wait_fn(timeout=0.02)
+                    if isinstance(rc, int):
+                        with contextlib.suppress(OSError, UnicodeDecodeError):
+                            if pid_file.exists() and pid_file.read_text(
+                                encoding="utf-8"
+                            ).strip() in (str(proc.pid), ""):
+                                pid_file.unlink(missing_ok=True)
+                        print(f"error: daemon exited during startup (code {rc})", file=err)
+                        return ExitCode.ERROR
+                except subprocess.TimeoutExpired:
+                    pass
+
+            if pid_file.exists():
+                with contextlib.suppress(OSError, UnicodeDecodeError):
+                    content = pid_file.read_text(encoding="utf-8").strip()
+                    if content.isdigit():
+                        child_pid = int(content)
+                        break
+
+            time.sleep(0.02)
+
+        # Fallback for environments where child runs mock or does not write pid file.
+        if child_pid is None:
+            with contextlib.suppress(OSError, UnicodeDecodeError):
+                if not pid_file.exists() or not pid_file.read_text(encoding="utf-8").strip():
+                    pid_file.write_text(str(proc.pid), encoding="utf-8")
+
+        reported_pid = child_pid if child_pid is not None else proc.pid
+        print(f"CONTINUUM daemon started (pid {reported_pid})", file=out)
         print(f"  pid file: {pid_file}", file=out)
         print(f"  gateway: 127.0.0.1:{args.port}", file=out)
         return ExitCode.OK
@@ -3198,7 +3231,7 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
         print(f"  pid file: {pid_file}", file=err)
 
     def _unlink_pid_file() -> None:
-        with contextlib.suppress(OSError):
+        with contextlib.suppress(OSError, UnicodeDecodeError):
             if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() == str(
                 os.getpid()
             ):
