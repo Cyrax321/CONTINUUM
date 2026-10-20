@@ -94,7 +94,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI 入口
 continuum-mcp --help             # MCP 服务器入口（需要 [mcp] 或 [dev]）
-pytest -q                        # 最小环境中约 3,672 个收集，约 3,672 个通过，约 41 个跳过（具体数量因环境而异）
+pytest -q                        # 最小环境中约 3680 个收集，约 3,636 个通过，约 41 个跳过（具体数量因环境而异）
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI 强制的三扇门禁
 ```
@@ -513,7 +513,7 @@ CONTINUUM 位于持久执行、幂等副作用追踪和针对 LLM 智能体的�
 
 ## 状态与局限
 
-- **已测试**：在 2026-08-24 对本树的完整运行中为 3,672 通过 + 23 跳过，CI 在 Python 3.11、3.12 和 3.13 上强制执行套件，计数因平台和 Postgres 等可选服务而异（见 [STATUS.md](STATUS.md)）。MCP 面也已在真实协议上被对抗性审计，见 [test.md](test.md)。
+- **已测试**：在 2026-08-24 对本树的完整运行中为 3,636 通过 + 23 跳过，CI 在 Python 3.11、3.12 和 3.13 上强制执行套件，计数因平台和 Postgres 等可选服务而异（见 [STATUS.md](STATUS.md)）。MCP 面也已在真实协议上被对抗性审计，见 [test.md](test.md)。
 - **在 PyPI 上为 `continuum-agent` 0.1.2**（`pip install continuum-agent`，克隆仍可通过 `pip install .` 见 Quick Start）。
 - **MCP 调用者认证按部署可选。** 当设置 `CONTINUUM_MCP_TOKEN` 时，服务器会拒绝每个变更工具，除非调用者在 `initialize` 握手的 `_meta.authToken` 中出示该共享密钥，通过 `CONTINUUM_MCP_CLIENT_TOKENS`（`name:secret` 对）支持按调用者的密钥。未配置任何 token 时，鉴权仅按声明身份（历史默认值，为本地单用户使用保留）。
 - **通过 MCP 确认自我报告状态需要单独的密钥。** `continuum_confirm` 会拒绝每个调用者，直至操作员设置 `CONTINUUM_MCP_CONFIRM_TOKEN`，因为被允许记录进度的智能体不能同时被允许确认它。默认路径保持人类驱动：在主机上运行 `continuum confirm <run_id>`。
@@ -535,7 +535,7 @@ CONTINUUM 由 **Anandhu P Shaji**（[@Cyrax321](https://github.com/Cyrax321) · 
 
 本项目基于 Apache 2.0 开源，并有意构建为可扩展：面向验证恢复语义的研究者、面向将账本或 MCP 服务器移植到其他框架或语言的工程师，以及面向将规划路线图变为现实的任何人。一个好的起点是 issue 跟踪器上的 `good first issue` 标签，或 STATUS.md 中列出的开放正确性缺陷。
 
-在提交大型 PR 前请先开 issue。完整贡献指南见 [CONTRIBUTING.md](CONTRIBUTING.md)，包括 [Code of Conduct](CODE_OF_CONDUCT.md)。
+在提交大型 PR 前请先开 issue。完整贡献指南见 [CONTRIBUTING.md](CONTRIBUTING.md)，包括 [Code of Conduct](CODE_OF_CONDUCT.md) 与 [安全策略](SECURITY.md)。
 
 ### 贡献者
 
@@ -575,3 +575,8 @@ Apache 2.0，见 [LICENSE](LICENSE)。
 - [references/e2e.md](references/e2e.md) - 端到端自主测试 walkthrough
 - [references/testing.md](references/testing.md) - 测试套件布局和约定
 - [references/related-work.md](references/related-work.md) - 带注释的相关工作和引用审计
+
+## 快速链接
+
+- [Issues](https://github.com/Cyrax321/CONTINUUM/issues) 提交错误与功能需求
+- [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) 探讨设计与提案

@@ -1210,15 +1210,25 @@ def test_a_registration_cannot_decide_how_the_interpreter_starts(
     settings_path = _write_registration(tmp_path, "cursor")
     data = json.loads(settings_path.read_text(encoding="utf-8"))
     entry = data["mcpServers"][SERVER_NAME]
-    entry["env"].update(
-        {
-            "PYTHONPATH": "/tmp/attacker",
-            "PYTHONHOME": "/tmp/attacker",
-            "PYTHONSTARTUP": "/tmp/attacker/startup.py",
-            "LD_PRELOAD": "/tmp/attacker/evil.so",
-            "DYLD_INSERT_LIBRARIES": "/tmp/attacker/evil.dylib",
-        }
-    )
+    # Every spelling a registration could use to reach the interpreter, not
+    # just the two that happened to be tried first. Windows treats environment
+    # names case-insensitively, so the lowercase and mixed forms belong here
+    # too, and the startup variables that load code from the checkout belong
+    # here for the same reason.
+    injected = {
+        "PYTHONPATH": "/tmp/attacker/path",
+        "PYTHONHOME": "/tmp/attacker/home",
+        "PYTHONSTARTUP": "/tmp/attacker/startup.py",
+        "PYTHONPYCACHEPREFIX": "/tmp/attacker/pyc",
+        "PYTHONWARNINGS": "/tmp/attacker/warnings",
+        "PYTHONINSPECT": "/tmp/attacker/inspect",
+        "PYTHONPLATLIBDIR": "/tmp/attacker/platlib",
+        "LD_PRELOAD": "/tmp/attacker/evil.so",
+        "DYLD_INSERT_LIBRARIES": "/tmp/attacker/evil.dylib",
+        "pythonpath": "/tmp/attacker/lowercase",
+        "PythonPath": "/tmp/attacker/mixed",
+    }
+    entry["env"].update(injected)
     settings_path.write_text(json.dumps(data), encoding="utf-8")
     monkeypatch.setenv("PYTHONPATH", "/operator/value")
     registration = {
@@ -1231,14 +1241,12 @@ def test_a_registration_cannot_decide_how_the_interpreter_starts(
 
     env = doctor._probe_environment(registration)
 
-    for name in (
-        "PYTHONPATH",
-        "PYTHONHOME",
-        "PYTHONSTARTUP",
-        "LD_PRELOAD",
-        "DYLD_INSERT_LIBRARIES",
-    ):
-        assert env.get(name) != "/tmp/attacker", f"{name} came from the registration"
+    # Compared against the exact value that was injected. Comparing every one
+    # of them to a single shared string passed for the eight whose injected
+    # value is not that string, so it would not have caught the regression it
+    # was written for.
+    for name, value in injected.items():
+        assert env.get(name) != value, f"{name} came from the registration"
     assert env.get("PYTHONPATH") == "/operator/value", "the operator's own value stays"
     assert env["CONTINUUM_MCP_MUTATING_CLIENTS"] == "cursor", "authorization still comes through"
 
@@ -1336,6 +1344,9 @@ def test_every_host_registration_is_found_and_its_env_is_read(
             f"{registration['settings_path']}"
         )
     assert registration["baked_client"] == profile["mutating_clients"]
+    assert registration["database"] == str(root / "continuum.db"), (
+        f"{host} --db was not read, so its observed clients are never checked"
+    )
     assert (
         doctor._registration_env(registration).get("CONTINUUM_MCP_MUTATING_CLIENTS")
         == profile["mutating_clients"]

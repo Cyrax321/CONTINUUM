@@ -504,6 +504,24 @@ async def test_recording_progress_for_an_unknown_run_without_a_goal_fails(
 
 
 @pytest.mark.asyncio
+async def test_read_only_tools_say_the_run_does_not_exist(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """A mistyped run id must reach the caller as "no such run".
+
+    The read-only tools are what an agent calls first after an interruption.
+    Without the refusal conversion, mcp 2.1.0 reduces RunNotFound to the bare
+    "Error executing tool <name>", which gives no hint that the id is wrong.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, _ = server_ctx
+    for tool in ("continuum_validate", "continuum_resume", "continuum_list_actions"):
+        with pytest.raises(ToolError, match="no such run: 'ghost'"):
+            await server.call_tool(tool, {"run_id": "ghost"}, context=_ctx(TEST_CLIENT))
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_returns_a_sealed_record(server_ctx: tuple[Any, Any]) -> None:
     server, ctx = server_ctx
     await seed_run(server)

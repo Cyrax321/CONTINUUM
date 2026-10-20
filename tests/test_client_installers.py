@@ -690,3 +690,48 @@ def test_a_windows_path_stays_ours_under_the_cmd_exe_convention(
         "observe",
     ]
     assert clienthooks._is_managed_hook({"command": command}, "observe")
+
+
+def test_legacy_precompact_hook_recognises_windows_paths_cross_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy precompact hook recognition must use cross-platform command stems (#1622).
+
+    ``Path(token).stem`` answers from the host platform, so a Windows path like
+    ``C:\\venv\\Scripts\\continuum.exe`` when inspected on POSIX would retain
+    the backslashed directories as part of the stem, failing recognition.
+    ``_is_legacy_precompact_hook`` uses ``_command_stem`` to handle both
+    separators and extensions.
+    """
+    from continuum import clienthooks
+
+    for platform in ("nt", "posix"):
+        _as_windows(monkeypatch, platform)
+        hook = {
+            "command": (
+                r'"C:\Program Files\continuum\Scripts\continuum.exe" checkpoint my-task '
+                r"> .continuum/precompact-resume.json"
+            )
+        }
+        assert clienthooks._is_legacy_precompact_hook(hook)
+        assert clienthooks._is_continuum_hook(hook, "precompact")
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        (r"C:\Program Files\continuum\Scripts\continuum.exe", "continuum"),
+        (r"C:\venv\Scripts\continuum.exe", "continuum"),
+        (r"C:\venv\Scripts\continuum", "continuum"),
+        ("/usr/local/bin/continuum", "continuum"),
+        ("/home/user/.venv/bin/continuum", "continuum"),
+        ("continuum.exe", "continuum"),
+        ("continuum", "continuum"),
+        (r"C:\tools\other-tool.exe", "other-tool"),
+    ],
+)
+def test_command_stem_cross_platform(path: str, expected: str) -> None:
+    """``_command_stem`` drops directories and .exe extensions across platforms (#1622)."""
+    from continuum import clienthooks
+
+    assert clienthooks._command_stem(path) == expected

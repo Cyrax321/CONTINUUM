@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Test counts: ~3,672 collected on a minimal env.
+Test counts: ~3680 collected on a minimal env.
 
 ### Added
 
@@ -70,6 +70,41 @@ Test counts: ~3,672 collected on a minimal env.
   the target machine in the first place. A test pins this per host, so a
   committed project registration fails CI instead of failing a clone.
 
+- **The documented test count is re-synced, so `main` builds again.** The
+  collected total had drifted to 3,680 against a documented 3,636, past the
+  30-test tolerance `test_documented_count_matches_suite` allows, so the
+  guard failed every test job on `main` and would fail on any branch adding
+  three or more tests for a reason that has nothing to do with the branch.
+  Every doc that states the total now states 3,680: `README.md`, the five
+  translated READMEs, `docs/CONTRIBUTING_ONBOARDING.md`, `docs/index.html`,
+  `references/install.md`, `references/testing.md`. Four phrasings that
+  contradicted the new figure on the same line are corrected with it, and one
+  of them is why the drift was invisible: `README.md` stated a collected
+  total in the form `3,636 collected` with no tilde, which no pattern in the
+  guard matches, so that line drifted with the suite while every guarded line
+  held.
+
+- **The read-only MCP tools say "no such run" for an unknown run id.**
+  `continuum_validate`, `continuum_resume` and `continuum_list_actions` were
+  not wrapped in `_refusal_reaches_the_caller`, so under mcp 2.1.0 a mistyped
+  id reached the caller as the bare `Error executing tool <name>`. They now
+  carry a `refusals` decorator that applies the same conversion, and
+  `continuum_validate` and `continuum_resume` look up the run row first so an
+  unknown id is refused as `RunNotFound` (as `continuum_list_actions` already
+  did) rather than as `run 'x' has no checkpoint and no events`.
+
+- **Client names are now folded, so the mutating-tool allowlist and the
+  per-client token map agree (#1598).** Both halves of the handshake key off
+  the same `clientInfo.name` string, and neither normalised it, so the two
+  could disagree: a host naming itself `Cursor` against a grant registered as
+  `cursor` passed authorisation and then failed authentication, and the
+  message blamed the name as unregistered rather than naming the mismatch.
+  Every name comparison in `src/continuum/mcp/authz.py` now goes through one
+  fold (whitespace-stripped, `casefold`), so one spelling of a client name is
+  one identity across both halves. Secrets are still compared exactly, and
+  the refusal paths still fail closed. The match is documented as
+  case-insensitive in `docs/api/security.md`.
+
 - **A probe that prints `occurred:false` is now told the separator is the
   problem.** A command probe's verdict contract was documented only in the
   module docstring, so the place an operator met it was the error, and the
@@ -123,6 +158,44 @@ Test counts: ~3,672 collected on a minimal env.
   ledger can see and remains on the token fallback -- the documented residual,
   since declaring such fields `volatile` at every call site is not a fix: a
   caller that wants around the cap simply forgets to declare them.
+
+- **The doctor stops contradicting the server over client-name case (#1621).**
+  `doctor._observation_finding` compared the baked client name against the
+  names hosts actually sent with a raw `in`, while every comparison in
+  `authz` goes through the fold. The `zed` profile makes the discrepancy
+  visible immediately: `HOST_PROFILES["zed"]["mutating_clients"]` is `"Zed"`,
+  capital Z, transcribed from zed's own source, and `docs/api/mcp.md` tells
+  readers the comparison folds case. The server authorized the caller; the
+  doctor said it had been refused and that install reported success.
+
+  The comparison now folds both sides through the same normalisation, so the
+  doctor agrees with the server. The normaliser is also exported as
+  `authz.fold_client_name`, so there is one place to read the rule instead of
+  re-deriving it. The `_fold` alias is kept so existing readers still resolve.
+
+
+- **The doctor no longer reports a portable registration as stale (#1619).**
+  `.mcp.json` in this repository bakes the form `docs/api/mcp.md` tells people
+  to commit, `${CLAUDE_PROJECT_DIR:-.}/.venv/bin/continuum-mcp`.
+  `os.path.expandvars` does not understand the shell's `${VAR:-default}`
+  syntax, so the text reached `_resolves` unchanged, was not absolute, and fell
+  through to a PATH lookup for a name no PATH will ever contain. The row came
+  back `stale` on every machine, which is the state whose remedy is to re-bake
+  the path, and re-baking replaces a portable committed expression with an
+  absolute one tied to whichever machine ran it. A clean clone therefore
+  exited `REQUIRES_REPAIR` (10) and printed advice that would have made the
+  registration worse.
+
+  A command carrying a shell expression is now reported as `unverified`, a
+  third state carried on `IdeReport.unverified`. It is not stale, so it does
+  not drive the repair exit code; the summary and the detail row say plainly
+  that the host expands it at spawn and the doctor cannot check it. Detection
+  is a literal `$` in the command, which also covers `$VAR` and `$HOME`: those
+  expand to a real path when the variable is set and to a literal `$NAME` when
+  it is not, so the unset case would otherwise have reported a path containing
+  a `$` as broken. A genuinely deleted virtualenv is still `stale`, still
+  exits `REQUIRES_REPAIR`, and still prints the re-bake remedy. The hook
+  surface is untouched: it bakes absolute paths and has no expression form.
 
 ### Changed
 
@@ -889,6 +962,43 @@ Test counts: ~3,672 collected on a minimal env.
   bodies (still the empty params object, so a method needing no params stays
   callable), and the existing answers for genuinely malformed JSON are
   unchanged.
+
+### Tests
+
+- **`resolve_compaction_bound` is covered (#1653).**
+  `src/continuum/storage/compaction.py` was at 17%: the whole function body
+  was unexercised, including all four `ValueError` branches, in the module
+  both storage engines now share to decide what is safe to archive. That
+  matters because the comparison against `anchor_sequence` is the guard that
+  stops an explicit `through_sequence` from archiving the run's own anchor
+  marker, which is the regression fix for #705 and #1078.
+  `tests/test_storage_compaction_bound.py` drives a real `SQLiteStorage` in
+  `tmp_path` (the resolver calls the private `storage._anchor_environment`, so
+  a mock would skip the anchor logic under test) and covers the happy path,
+  the three re-anchor triggers, and each refusal. Coverage of the module is
+  97%, and removing the comparison fails three tests.
+- **The liveness cadence contract is covered (#1656).**
+  `src/continuum/recovery/health.py` was at 76%. `silence_seconds` had not a
+  single line of coverage, both `load_cadence_contract` refusals were
+  unexercised, and `CadenceContract._scopes_positive` had never been seen to
+  raise, so a change that stopped rejecting a blank scope key or a zero-second
+  scope would not have been caught. `tests/test_recovery_health_cadence.py`
+  covers all three exits of `silence_seconds`, both refusals, every validator
+  branch, `threshold_for` including the fallback for an absent scope,
+  `to_dict`, and `advisory_text`, which had no test at all. The module is now
+  at 90%. No test reads the operator's real `.continuum/liveness.json`; every
+  load points at a file in `tmp_path`, which is what keeps the suite from
+  depending on the machine it runs on.
+- **The splash animation frame math is pinned (#1655).**
+  `src/continuum/tui/animate.py` shipped with no test at all. Its only
+  appearance in a coverage report was
+  `tests/test_module_all_exports.py` importing it, which touches module-level
+  lines and no function body. `tests/test_tui_animate.py` covers all six public
+  functions and the exported constants, and asserts the `SETTLED` contract that
+  makes them safe: a negative frame resolves to the complete, unemphasised
+  result for every one of them. The module is still orphaned, and is left that
+  way on purpose; wiring it up is a design question with its own issue.
+  Coverage of the module is 100%.
 
 ## [0.1.2] - 2026-08-31
 

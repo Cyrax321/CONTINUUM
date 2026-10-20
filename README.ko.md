@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI 진입점
 continuum-mcp --help             # MCP 서버 진입점 ([mcp] 또는 [dev] 필요)
-pytest -q                        # 최소 환경에서 약 3,672개 수집, 약 3,672개 통과, 약 41개 스킵 (정확한 수는 환경에 따라 다름)
+pytest -q                        # 최소 환경에서 약 3680개 수집, 약 3,636개 통과, 약 41개 스킵 (정확한 수는 환경에 따라 다름)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI가 강제하는 세 가지 게이트
 ```
@@ -498,7 +498,7 @@ CONTINUUM은 내구성 있는 실행, 멱등한 사이드 이펙트 추적, LLM 
 
 ## 상태와 제한
 
-- **테스트됨**: 이 트리의 2026-08-24 감사에서 완전한 실행으로 3,672 통과 + 23 스킵. CI는 Python 3.11, 3.12, 3.13에서 스위트를 강제하며, 카운트는 플랫폼과 Postgres 같은 선택적 서비스에 따라 다르다([STATUS.md](STATUS.md) 참조). MCP 표면도 라이브 프로토콜 위에서 적대적으로 감사되었다. [test.md](test.md) 참조.
+- **테스트됨**: 이 트리의 2026-08-24 감사에서 완전한 실행으로 3,636 통과 + 23 스킵. CI는 Python 3.11, 3.12, 3.13에서 스위트를 강제하며, 카운트는 플랫폼과 Postgres 같은 선택적 서비스에 따라 다르다([STATUS.md](STATUS.md) 참조). MCP 표면도 라이브 프로토콜 위에서 적대적으로 감사되었다. [test.md](test.md) 참조.
 - **PyPI에서 `continuum-agent` 0.1.2**(`pip install continuum-agent`, 클론은 `pip install .`로 여전히 동작. 빠른 시작 참조).
 - **MCP 호출자 인증은 배포별로 선택 사항.** `CONTINUUM_MCP_TOKEN`이 설정되면, 서버는 호출자가 `initialize` 핸드셰이크의 `_meta.authToken`에서 그 공유 비밀을 제시하지 않는 한 모든 변경 도구를 거부한다. 호출자별 비밀은 `CONTINUUM_MCP_CLIENT_TOKENS`(`name:secret` 쌍)를 통해 이용 가능하다. 토큰이 아무것도 설정되지 않으면, 인가는 선언된 아이덴티티のみ에 의한다(역사적 기본값, 로컬 단일 사용자 사용을 위해 유지).
 - **MCP를 통해 자체 보고된 상태를 확인하려면 별도의 비밀이 필요하다.** `continuum_confirm`은 운영자가 `CONTINUUM_MCP_CONFIRM_TOKEN`을 설정할 때까지 모든 호출자를 거부한다. 진행 상황을 기록하도록 허용된 에이전트가 그것을 확인하는 것도 허용되어서는 안 되기 때문이다. 기본 경로는 인간이 이끄는 채로 유지된다. 호스트에서 `continuum confirm <run_id>`를 실행하라.
@@ -520,7 +520,7 @@ CONTINUUM은 **Anandhu P Shaji**([@Cyrax321](https://github.com/Cyrax321) · [Li
 
 이 프로젝트는 Apache 2.0 하에 오픈 소스이며 의도적으로 확장 가능하게 구축되었다. 복구 시맨틱을 검증하는 연구자, 원장이나 MCP 서버를 다른 프레임워크나 언어로 포팅하는 엔지니어, 계획된 로드맵을 현실로 만드는 모든 사람을 위해 확장 가능하다. 좋은 출발점은 [issue 트래커](https://github.com/Cyrax321/CONTINUUM/issues)의 `good first issue` 레이블, 또는 STATUS.md에 나열된 열린 정확성 버그이다.
 
-큰 PR을 보내기 전에 이슈를 열어라. 완전한 기여 가이드는 [CONTRIBUTING.md](CONTRIBUTING.md)를 참조하라. [Code of Conduct](CODE_OF_CONDUCT.md)를 포함한다.
+큰 PR을 보내기 전에 이슈를 열어라. 완전한 기여 가이드는 [CONTRIBUTING.md](CONTRIBUTING.md)를 참조하라. [Code of Conduct](CODE_OF_CONDUCT.md)와 [보안 정책](SECURITY.md)을 포함한다.
 
 ### 기여자
 
@@ -560,3 +560,9 @@ Apache 2.0, [LICENSE](LICENSE) 참조.
 - [references/e2e.md](references/e2e.md) - 엔드투엔드 자율 테스트 워크스루
 - [references/testing.md](references/testing.md) - 테스트 스위트 배치와 관례
 - [references/related-work.md](references/related-work.md) - 주석이 달린 관련 연구와 인용 감사
+
+
+## 빠른 링크
+
+- [Issues](https://github.com/Cyrax321/CONTINUUM/issues) 버그 보고 및 기능 제안
+- [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) 설계 및 디자인 제안

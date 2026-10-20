@@ -173,7 +173,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.ANYA_TOKEN }}
           MOCK_EVENT: ${{ steps.ctx.outputs.mock }}
         with:
-          model: opencode/muse-spark-1.3-contributor-free
+          model: opencode/muse-spark-1.3
           use_github_token: true
           mentions: "/anya"
           share: false

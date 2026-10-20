@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from continuum.mcp import configfmt
-from continuum.mcp.authz import POLICY_ENV_VAR, POLICY_ENV_VAR_ALIAS
+from continuum.mcp.authz import POLICY_ENV_VAR, POLICY_ENV_VAR_ALIAS, fold_client_name
 from continuum.mcp.install import HOST_PROFILES, SERVER_NAME, host_format, host_shape
 from continuum.mcp.observation import read_observed_clients
 
@@ -110,27 +110,12 @@ _REFUSAL_MARKERS = (
 #: rather than whatever the operator's shell happened to export.
 _POLICY_ENV_VARS = frozenset({POLICY_ENV_VAR, POLICY_ENV_VAR_ALIAS})
 
-#: Variables that decide how the interpreter itself starts. A registration is
-#: data from a file in a checkout, so these are never read out of one: see
+#: The only prefix a registration may contribute to the probe environment.
+#: Every variable the server reads to decide authorization is named
+#: ``CONTINUUM_*`` (see :mod:`continuum.mcp.authz`), and nothing else in a
+#: registration is needed to ask the permission question. See
 #: :func:`_probe_environment`.
-_INTERPRETER_ENV_VARS = frozenset(
-    {
-        # Python startup and search path.
-        "PYTHONPATH",
-        "PYTHONHOME",
-        "PYTHONSTARTUP",
-        "PYTHONUSERBASE",
-        "PYTHONEXECUTABLE",
-        # Dynamic loader. These precede anything Python gets to check.
-        "LD_PRELOAD",
-        "LD_LIBRARY_PATH",
-        "LD_AUDIT",
-        "DYLD_INSERT_LIBRARIES",
-        "DYLD_LIBRARY_PATH",
-        "DYLD_FRAMEWORK_PATH",
-    }
-)
-
+_REGISTRATION_ENV_PREFIX = "CONTINUUM_"
 #: Probe code for check 1: import the SDK in a fresh interpreter. The version
 #: print is best-effort metadata, not a requirement -- a working SDK without
 #: install metadata is still a working SDK.
@@ -722,21 +707,27 @@ def find_registration(cwd: Path) -> dict[str, Any] | None:
             "scope": scope,
             "project_root": cwd,
             "baked_client": baked,
-            "database": _registration_database(entry),
+            "database": _registration_database(entry, host),
         }
     return None
 
 
-def _registration_database(entry: Any) -> str | None:
+def _registration_database(entry: Any, host: str) -> str | None:
     """The ``--db`` a registration points the host at, when it names one.
 
     This is the database real host connections open, so it is where their
     declared client names are recorded. Read from the registration rather than
     guessed, because the doctor's own probe runs against a throwaway database
     and would otherwise observe only the name the doctor itself declared.
+
+    Through the host's own shape, because an argv-array host files the whole
+    command line under ``command`` and writes no ``args`` key at all. Reading
+    ``args`` directly found nothing for opencode, which meant its observed
+    clients were never read and the name it sends was never compared against
+    the name it grants.
     """
-    args = entry.get("args") if isinstance(entry, dict) else None
-    if not isinstance(args, list):
+    args = host_shape(host).argv_of(entry)
+    if not args:
         return None
     for index, arg in enumerate(args):
         if arg == "--db" and index + 1 < len(args):
@@ -758,20 +749,29 @@ def _probe_environment(registration: dict[str, Any]) -> dict[str, str]:
     importable for the call to say anything at all.
 
     A registration is data read from a file in a checkout, and it is never
-    allowed to decide how the interpreter starts. Interpreter and dynamic
-    loader variables are dropped from it, leaving this process's own values in
-    place. A ``PYTHONPATH`` written into a project config is otherwise read
-    back out of that same file and handed to the probe child, where a
+    allowed to decide how the interpreter starts. Only the ``CONTINUUM_*``
+    variables are taken from it, matched case-insensitively, leaving this
+    process's own values in place for everything else.
+
+    A ``PYTHONPATH`` written into a project config would otherwise be read back
+    out of that same file and handed to the probe child, where a
     ``sitecustomize.py`` beside it runs before the probe does anything at all.
-    Nothing about authorization needs those variables, so refusing them costs
-    the check nothing.
+
+    The allowlist is deliberate and a denylist was not. A denylist of
+    interpreter variables was in place first and had two holes: Windows treats
+    environment names case-insensitively, so a lowercase ``pythonpath`` passed
+    an exact-match filter, and the list was missing startup variables that run
+    code from the checkout, ``PYTHONPYCACHEPREFIX`` among them, which load
+    unchecked-hash bytecode in place of stdlib modules. Python also keeps
+    adding more. Naming what is allowed does not have that problem, and
+    nothing about authorization needs anything outside the prefix.
     """
     env = {key: value for key, value in os.environ.items() if key not in _POLICY_ENV_VARS}
     env.update(
         {
             key: value
             for key, value in _registration_env(registration).items()
-            if key not in _INTERPRETER_ENV_VARS
+            if key.upper().startswith(_REGISTRATION_ENV_PREFIX)
         }
     )
     return env
@@ -849,7 +849,7 @@ def _observation_finding(
             f"re-run {INSTALL_SERVER_COMMAND} after the host has connected once, or call "
             f"a tool from the host and re-run this check",
         )
-    if baked in observed:
+    if any(fold_client_name(name) == fold_client_name(baked) for name in observed):
         return (
             "pass",
             f"a host has connected as {baked!r}, the name the registration authorizes",

@@ -96,7 +96,7 @@ Verifique:
 ```bash
 continuum --help                 # ponto de entrada CLI
 continuum-mcp --help             # ponto de entrada do servidor MCP (precisa de [mcp] ou [dev])
-pytest -q                        # ~3,672 coletados, ~3,672 passando, ~41 pulados em um ambiente mínimo (as contagens exatas variam)
+pytest -q                        # ~3680 coletados, ~3,636 passando, ~41 pulados em um ambiente mínimo (as contagens exatas variam)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # os três portões que o CI exige
 ```
@@ -499,7 +499,7 @@ O CONTINUUM se situa na interseção de execução durável, rastreamento idempo
 
 ## Status e limitações
 
-- **Testado**: 3,672 passados + 23 pulados em uma execução completa na auditoria de 2026-08-24 desta árvore, CI impõe a suíte em Python 3.11, 3.12 e 3.13, e as contagens variam por plataforma e serviços opcionais como Postgres (ver [STATUS.md](STATUS.md)). A superfície MCP também foi auditada de forma adversarial sobre o protocolo ao vivo, ver [test.md](test.md).
+- **Testado**: 3,636 passados + 23 pulados em uma execução completa na auditoria de 2026-08-24 desta árvore, CI impõe a suíte em Python 3.11, 3.12 e 3.13, e as contagens variam por plataforma e serviços opcionais como Postgres (ver [STATUS.md](STATUS.md)). A superfície MCP também foi auditada de forma adversarial sobre o protocolo ao vivo, ver [test.md](test.md).
 - **No PyPI como `continuum-agent` 0.1.2** (`pip install continuum-agent`, o clone ainda funciona via `pip install .` ver Início rápido).
 - **Autenticação de chamador MCP é opcional por implantação.** Quando `CONTINUUM_MCP_TOKEN` é definido, o servidor recusa cada ferramenta mutante a menos que o chamador apresente esse segredo compartilhado no `_meta.authToken` do handshake `initialize`, segredos por chamador disponíveis via `CONTINUUM_MCP_CLIENT_TOKENS` (pares `name:secret`). Sem nenhum token configurado, a autorização é apenas por identidade declarada (o valor histórico padrão, preservado para uso local de usuário único).
 - **Confirmar estado auto reportado via MCP requer um segredo separado.** `continuum_confirm` recusa cada chamador até que o operador defina `CONTINUUM_MCP_CONFIRM_TOKEN`, porque um agente com permissão para registrar progresso não deve também ter permissão para confirmá-lo. O caminho padrão permanece conduzido por humano: execute `continuum confirm <run_id>` no host.
@@ -521,7 +521,7 @@ O CONTINUUM foi criado por **Anandhu P Shaji** ([@Cyrax321](https://github.com/C
 
 Este projeto é de código aberto sob Apache 2.0 e deliberadamente construído para ser estendido: por pesquisadores validando a semântica de recuperação, por engenheiros portando o ledger ou o servidor MCP para outros frameworks ou linguagens, e por qualquer pessoa que transforme o roteiro planejado em realidade. Um bom lugar para começar é a etiqueta `good first issue` no [rastreador de issues](https://github.com/Cyrax321/CONTINUUM/issues), ou os defeitos abertos de correção listados em STATUS.md.
 
-Abra uma issue antes de enviar PRs grandes. Veja [CONTRIBUTING.md](CONTRIBUTING.md) para o guia completo de contribuição, incluindo o [Code of Conduct](CODE_OF_CONDUCT.md).
+Abra uma issue antes de enviar PRs grandes. Veja [CONTRIBUTING.md](CONTRIBUTING.md) para o guia completo de contribuição, incluindo o [Code of Conduct](CODE_OF_CONDUCT.md) e a [política de segurança](SECURITY.md).
 
 ### Colaboradores
 
@@ -561,3 +561,8 @@ Material de referência profundo:
 - [references/e2e.md](references/e2e.md) - passo a passo de teste de autonomia ponta a ponta
 - [references/testing.md](references/testing.md) - disposição e convenções da suíte de testes
 - [references/related-work.md](references/related-work.md) - trabalho relacionado anotado e auditoria de citações
+
+## Links rápidos
+
+- [Issues](https://github.com/Cyrax321/CONTINUUM/issues) para bugs e recursos
+- [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) para propostas de design
