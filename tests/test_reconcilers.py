@@ -24,6 +24,7 @@ from continuum.reconcilers import (
     _DEFAULT_TIMEOUT,
     _VERDICT_CONTRACT,
     ReconcilerConfigError,
+    _parse_authority_verdict,
     _parse_verdict,
     _verdict_hint,
     load_reconcilers,
@@ -120,6 +121,63 @@ def test_an_empty_registry_file_is_still_a_valid_empty_registry(tmp_path: Path) 
     assert load_reconcilers(p) == {}
 
 
+def test_unknown_probe_type_is_refused(tmp_path: Path) -> None:
+    """A probe with an unrecognized type raises ReconcilerConfigError."""
+    p = tmp_path / "r.json"
+    p.write_text(json.dumps({"probes": {"act": {"type": "unsupported_type"}}}))
+    with pytest.raises(ReconcilerConfigError, match="unknown type 'unsupported_type'"):
+        load_reconcilers(p)
+
+
+def test_builtin_probe_rejects_unexpected_keys(tmp_path: Path) -> None:
+    """A built-in probe rejects keys outside its allowed set."""
+    p = tmp_path / "r.json"
+    p.write_text(
+        json.dumps(
+            {
+                "probes": {
+                    "act": {
+                        "type": "otel_span",
+                        "tool": "my_tool",
+                        "disallowed_key": "val",
+                    }
+                }
+            }
+        )
+    )
+    with pytest.raises(ReconcilerConfigError, match="does not accept \\['disallowed_key'\\]"):
+        load_reconcilers(p)
+
+
+def test_artifact_check_probe_requires_path_or_path_key(tmp_path: Path) -> None:
+    """artifact_check probe requires either path or path_key."""
+    p = tmp_path / "r.json"
+    p.write_text(json.dumps({"probes": {"act": {"type": "artifact_check", "expect_sha256": "abc"}}}))
+    with pytest.raises(ReconcilerConfigError, match="needs 'path' or 'path_key'"):
+        load_reconcilers(p)
+
+
+def test_builtin_probes_valid_configurations_load_successfully(tmp_path: Path) -> None:
+    """Valid built-in probe configurations load correctly."""
+    p = tmp_path / "r.json"
+    p.write_text(
+        json.dumps(
+            {
+                "probes": {
+                    "act_path": {"type": "artifact_check", "path": "/tmp/out.txt"},
+                    "act_key": {"type": "artifact_check", "path_key": "output_file"},
+                    "act_otel": {"type": "otel_span", "tool": "query", "identity": "arg1"},
+                }
+            }
+        )
+    )
+    loaded = load_reconcilers(p)
+    assert loaded["act_path"] == {"type": "artifact_check", "path": "/tmp/out.txt"}
+    assert loaded["act_key"] == {"type": "artifact_check", "path_key": "output_file"}
+    assert loaded["act_otel"] == {"type": "otel_span", "tool": "query", "identity": "arg1"}
+
+
+
 # --- verdict parsing -------------------------------------------------------------- #
 
 
@@ -146,6 +204,45 @@ def test_verdict_parsing(line: str, expected: bool | str) -> None:
 
 def test_last_line_wins() -> None:
     assert _parse_verdict("noise\nmore noise\noccurred=false") is False
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("valid=true", True),
+        ("VALID=TRUE", True),
+        ("valid=false", False),
+        ("VALID=FALSE", False),
+        ("valid=unknown", "unknown"),
+        ("valid=other", "unknown"),
+        ('{"valid": true}', True),
+        ('{"valid": false}', False),
+        ('{"valid": null}', "unknown"),
+        ('{"valid": "unknown"}', "unknown"),
+        ('{"valid": "UNKNOWN"}', "unknown"),
+        ('{"valid": "other"}', "unknown"),
+        ('{"valid": 123}', "unknown"),
+        ("[1, 2, 3]", "unknown"),
+        ("not json", "unknown"),
+        ("", "unknown"),
+        ("   ", "unknown"),
+    ],
+)
+def test_authority_verdict_parsing(line: str, expected: bool | str) -> None:
+    assert (
+        _parse_authority_verdict(line) is expected
+        if expected != "unknown"
+        else _parse_authority_verdict(line) == "unknown"
+    )
+
+
+def test_authority_verdict_last_line_wins() -> None:
+    """Only the last non-empty line of output determines the authority verdict."""
+    output = "checking authority...\npreliminary info\nvalid=true"
+    assert _parse_authority_verdict(output) is True
+    output_json = "checking authority...\npreliminary info\n{\"valid\": false}"
+    assert _parse_authority_verdict(output_json) is False
+
 
 
 @pytest.mark.parametrize("line", ["occurred:false", "occurred:true", "OCCURRED:FALSE"])
