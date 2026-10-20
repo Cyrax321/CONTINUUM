@@ -432,6 +432,83 @@ def test_project_scope_writes_the_shared_mcp_json(
     assert entry["args"][-1] == str((tmp_path / "continuum.db").resolve())
 
 
+def test_install_local_warns_and_reports_the_effective_scope_without_nesting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gemini has no per-project location, so 'local' cannot be honoured (#1761).
+
+    ``--scope local`` writes into ``~/.gemini/settings.json``, which Gemini
+    reads for every project on the machine, while the command used to print
+    "(local scope)" and mean it. The write is not refused: an operator may
+    want exactly that registration. What changes is that the command warns,
+    and names the scope it effectively wrote.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+
+    code, out, err = run("mcp", "install", "--host", "gemini")
+    assert code == ExitCode.OK, err
+    assert "per-project location" in err, err
+    assert "(user scope)" in out, out
+
+    # The written settings file carries no project key: the registration is
+    # user-wide, exactly as the warning says.
+    written = (tmp_path / "home" / ".gemini" / "settings.json").read_text(encoding="utf-8")
+    assert "projects" not in json.loads(written)
+
+    code, out, err = run("--json", "mcp", "install", "--host", "gemini")
+    assert code == ExitCode.OK, err
+    payload = json.loads(out)
+    assert payload["scope"] == "local"
+    assert payload["effective_scope"] == "user"
+
+
+def test_install_local_warning_names_the_hosts_own_project_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The remedy must point at the file the host reads, not at .mcp.json (#1761).
+
+    Six of the eight hosts do not use ``.mcp.json`` at project scope -- Cursor
+    reads ``.cursor/mcp.json`` -- so a warning that names ``.mcp.json`` sends
+    the operator after a file their host never opens.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+
+    code, out, err = run("mcp", "install", "--host", "cursor")
+    assert code == ExitCode.OK, err
+    assert ".cursor/mcp.json" in err, err
+
+    # --settings overrides the destination for every scope, so recommending
+    # --scope project would be wrong there: it would write to that same file.
+    target = tmp_path / "custom" / "settings.json"
+    target.parent.mkdir()
+    code, out, err = run("mcp", "install", "--host", "cursor", "--settings", str(target))
+    assert code == ExitCode.OK, err
+    assert "--settings overrides the destination" in err, err
+    assert ".cursor/mcp.json" not in err, err
+
+
+def test_install_local_is_reported_as_local_where_the_host_supports_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude-code nests by project, so its local scope is real and needs no caveat."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+
+    code, out, err = run("mcp", "install")
+    assert code == ExitCode.OK, err
+    assert "per-project location" not in err, err
+    assert "(local scope)" in out, out
+
+    code, out, err = run("--json", "mcp", "install")
+    assert code == ExitCode.OK, err
+    assert "effective_scope" not in json.loads(out)
+
+
 @pytest.mark.parametrize(
     ("entry", "ours"),
     [

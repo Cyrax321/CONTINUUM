@@ -3112,6 +3112,7 @@ def cmd_mcp_install(args: argparse.Namespace, storage: Storage, out: Any, err: A
         display_command,
         install_server,
         resolve_command,
+        scope_available,
         verify_sdk,
     )
 
@@ -3128,6 +3129,35 @@ def cmd_mcp_install(args: argparse.Namespace, storage: Storage, out: Any, err: A
 
     db = Path(args.db or Path.cwd() / "continuum.db").resolve()
     settings_path = _mcp_settings_path(args)
+    # A host with no per-project section cannot honour `local`, and saying
+    # nothing let the default scope of the default command claim a per-project
+    # write while performing a user-wide one (#1761). The registration still
+    # lands where it always did; what changes is that the command now says
+    # which scope it effectively wrote.
+    collapsed = args.scope == "local" and not scope_available(args.host, "local")
+    if collapsed:
+        # The remedy names the file the host actually reads at project scope:
+        # only claude-code and gemini use .mcp.json, and pointing a Cursor
+        # operator at it sends them after a file their host never opens (#1761).
+        # --settings overrides the destination for every scope, so the
+        # project-scope route has to be withdrawn rather than recommended.
+        if args.settings:
+            remedy = (
+                "Use --scope user to state that intent; --settings overrides the "
+                "destination for every scope, so --scope project would write to "
+                "that same file."
+            )
+        else:
+            remedy = (
+                "Use --scope user to state that intent, or --scope project for the "
+                f"shared {MCP_HOST_PROFILES[args.host]['project_settings']} "
+                "in the project root."
+            )
+        print(
+            f"warning: {args.host} has no per-project location in its settings file, "
+            "so a 'local' registration applies to every project on this machine. " + remedy,
+            file=err,
+        )
     try:
         status = install_server(
             settings_path,
@@ -3142,22 +3172,25 @@ def cmd_mcp_install(args: argparse.Namespace, storage: Storage, out: Any, err: A
         return ExitCode.ERROR
 
     lines = [
-        f"MCP server registered with {args.host} ({args.scope} scope)",
+        f"MCP server registered with {args.host} ({'user' if collapsed else args.scope} scope)",
         f"  [{status}] {SERVER_NAME} in {settings_path}",
         f"    command: {display_command([*command, '--db', str(db)])}",
         f"    form: {form} (resolved at install time, independent of the host's PATH)",
     ]
+    payload: dict[str, Any] = {
+        "host": args.host,
+        "scope": args.scope,
+        "settings": str(settings_path),
+        "server": SERVER_NAME,
+        "status": status,
+        "command": command,
+        "db": str(db),
+        "form": form,
+    }
+    if collapsed:
+        payload["effective_scope"] = "user"
     _emit(
-        {
-            "host": args.host,
-            "scope": args.scope,
-            "settings": str(settings_path),
-            "server": SERVER_NAME,
-            "status": status,
-            "command": command,
-            "db": str(db),
-            "form": form,
-        },
+        payload,
         "\n".join(lines),
         as_json=args.json,
         stream=out,

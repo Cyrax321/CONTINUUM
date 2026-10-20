@@ -383,6 +383,24 @@ def host_shape(host: str) -> configfmt.Shape:
     )
 
 
+def scope_available(host: str, scope: str) -> bool:
+    """Whether ``scope`` can mean what its name promises on ``host``.
+
+    Only ``claude-code`` carries a per-project section inside its per-user
+    settings file, and that section is what makes ``--scope local`` real there:
+    the entry lands under ``projects/<path>`` instead of the top-level
+    container. Every other host's ``local_settings`` and ``user_settings`` are
+    one and the same file with no nesting key, so a local write has nowhere to
+    nest and lands in the user-wide container, which the host then applies to
+    every project on the machine -- the opposite of what the command claims
+    (#1761). ``project`` and ``user`` are always available: they name a file,
+    not a section inside one.
+    """
+    if scope != "local":
+        return True
+    return bool(HOST_PROFILES[host]["nested_by_project"])
+
+
 def server_spec(command: list[str], db: Path, host: str) -> configfmt.ServerSpec:
     """The registration to write, stated format-free.
 
