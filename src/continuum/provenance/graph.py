@@ -167,15 +167,15 @@ def build_provenance_graph(events: Any) -> ProvenanceGraph:
             dec_id = payload.get("decision_id")
             if dec_id and dec_id in graph.nodes:
                 graph.nodes[dec_id].status = StateStatus.INVALID
-                graph.nodes[dec_id].invalidated_reason = (
-                    payload.get("reason") or payload.get("invalidated_reason")
+                graph.nodes[dec_id].invalidated_reason = payload.get("reason") or payload.get(
+                    "invalidated_reason"
                 )
         elif ev.type == getattr(EventType, "FINDING_INVALIDATED", None):
             find_id = payload.get("finding_id")
             if find_id and find_id in graph.nodes:
                 graph.nodes[find_id].status = StateStatus.INVALID
-                graph.nodes[find_id].invalidated_reason = (
-                    payload.get("reason") or payload.get("invalidated_reason")
+                graph.nodes[find_id].invalidated_reason = payload.get("reason") or payload.get(
+                    "invalidated_reason"
                 )
 
     # Second pass: edges
