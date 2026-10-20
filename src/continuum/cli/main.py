@@ -3099,6 +3099,11 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
             print(f"error: cannot write pid file {pid_file}: {exc}", file=err)
             return ExitCode.ERROR
 
+        initial_pid_content: str | None = None
+        if pid_file.exists():
+            with contextlib.suppress(OSError, UnicodeDecodeError):
+                initial_pid_content = pid_file.read_text(encoding="utf-8").strip()
+
         cmd = [sys.executable, "-m", "continuum.cli.main"]
         if getattr(args, "db", None):
             cmd.extend(["--db", str(args.db)])
@@ -3122,7 +3127,7 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
         log_path = pid_file.with_suffix(".log")
         try:
             with open(log_path, "ab") as log_file:
-                proc = subprocess.Popen(
+                proc = subprocess.Popen(  # nosec B603
                     cmd,
                     creationflags=creationflags,
                     close_fds=True,
@@ -3132,7 +3137,7 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
                 )
         except OSError:
             try:
-                proc = subprocess.Popen(
+                proc = subprocess.Popen(  # nosec B603
                     cmd,
                     creationflags=creationflags,
                     close_fds=True,
@@ -3181,7 +3186,7 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
             if pid_file.exists():
                 with contextlib.suppress(OSError, UnicodeDecodeError):
                     content = pid_file.read_text(encoding="utf-8").strip()
-                    if content.isdigit():
+                    if content.isdigit() and content != initial_pid_content:
                         child_pid = int(content)
                         break
 
@@ -3190,7 +3195,10 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
         # Fallback for environments where child runs mock or does not write pid file.
         if child_pid is None:
             with contextlib.suppress(OSError, UnicodeDecodeError):
-                if not pid_file.exists() or not pid_file.read_text(encoding="utf-8").strip():
+                if not pid_file.exists() or pid_file.read_text(encoding="utf-8").strip() in (
+                    initial_pid_content or "",
+                    "",
+                ):
                     pid_file.write_text(str(proc.pid), encoding="utf-8")
 
         reported_pid = child_pid if child_pid is not None else proc.pid

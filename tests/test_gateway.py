@@ -2418,6 +2418,7 @@ def test_cmd_daemon_unlink_pid_file_invalid_utf8_does_not_crash(tmp_path: Path) 
     mock_server.port = 8765
 
     with (
+        patch("signal.signal"),
         patch("continuum.gateway.GatewayServer", return_value=mock_server),
         patch.object(mock_server, "serve_forever", side_effect=KeyboardInterrupt),
     ):
@@ -2425,6 +2426,65 @@ def test_cmd_daemon_unlink_pid_file_invalid_utf8_does_not_crash(tmp_path: Path) 
         assert code == 0
         assert pid_file.exists()
         assert pid_file.read_bytes() == b"\xff\xfe\x00\x01\x80"
+
+
+def test_cmd_daemon_detach_ignores_stale_pid_file(tmp_path: Path) -> None:
+    """Detached daemon startup ignores a stale PID file from an earlier run (#1669)."""
+    import argparse
+    import io
+    import os
+    import subprocess
+    from unittest.mock import MagicMock, patch
+
+    from continuum.cli.main import cmd_daemon
+
+    cfg = tmp_path / "gateway.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "upstreams": [
+                    {
+                        "host": "api.example.com",
+                        "action_type": "send",
+                        "key_template": "key:{id}",
+                    }
+                ]
+            }
+        )
+    )
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text("12345", encoding="utf-8")
+
+    args = argparse.Namespace(
+        config=str(cfg),
+        tenant=None,
+        run_id="run_123",
+        db=str(tmp_path / "test.db"),
+        port=8765,
+        detach=True,
+        pid_file=str(pid_file),
+    )
+    out = io.StringIO()
+    err = io.StringIO()
+
+    mock_proc = MagicMock()
+    mock_proc.pid = 99999
+    mock_proc.poll.return_value = None
+    mock_proc.wait.side_effect = subprocess.TimeoutExpired(cmd=["mock"], timeout=0.02)
+
+    orig_fork = getattr(os, "fork", None)
+    if hasattr(os, "fork"):
+        delattr(os, "fork")
+    try:
+        with patch("subprocess.Popen", return_value=mock_proc):
+            code = cmd_daemon(args, None, out, err)
+            assert code == 0
+            assert "CONTINUUM daemon started (pid 99999)" in out.getvalue()
+            assert "pid 12345" not in out.getvalue()
+            assert pid_file.read_text(encoding="utf-8") == "99999"
+    finally:
+        if orig_fork is not None:
+            setattr(os, "fork", orig_fork)  # noqa: B010
 
 
 def test_match_route_falls_back_to_run_metadata_tenant(tmp_path: Path) -> None:
