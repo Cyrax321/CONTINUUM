@@ -208,9 +208,7 @@ def test_fit_evicts_in_priority_order() -> None:
 
     fitted = _fit(block)
 
-    assert len(json.dumps(fitted, sort_keys=True).encode()) <= (
-        INFORMED_RETRY_CAP_BYTES
-    )
+    assert len(json.dumps(fitted, sort_keys=True).encode()) <= (INFORMED_RETRY_CAP_BYTES)
     assert fitted["avoid"] == block["avoid"][:4]
     assert fitted["current_failures"] == [{"id": "failure-1", "detail": ""}]
     assert fitted["settled_effects"] == ["effect-1"]
