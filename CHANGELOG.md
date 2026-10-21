@@ -66,7 +66,12 @@ Test counts: ~3680 collected on a minimal env.
   belongs to the allowlist path in `authz`, where one declared value
   legitimately names several authorized callers; the record path now validates
   the name exactly the way `declared_client_name` does and stores it verbatim.
-  `split_declared_names` had no other caller and is gone.
+  `split_declared_names` had no other caller and is gone. A database that
+  already saw a multi-word host keeps the fragments the splitting code wrote,
+  so the observation file's schema version is bumped to 2: a reader treats the
+  old file as unknown rather than parsing it, and the next observation
+  replaces it, so an upgrade stops reporting the mismatch instead of carrying
+  the fragments into the doctor's finding.
 
 - **A developer's own venv and scratch database are no longer committed as the
   project's Continue registration (#1618).** PR #1612 added

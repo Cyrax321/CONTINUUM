@@ -26,6 +26,7 @@ import pytest
 from continuum.mcp.observation import (
     MAX_OBSERVED_CLIENTS,
     MAX_OBSERVED_NAME_LENGTH,
+    SCHEMA_VERSION,
     declared_client_name,
     observation_path,
     read_observed_clients,
@@ -252,7 +253,7 @@ def test_the_observed_name_never_reaches_the_hash_chained_event_log(tmp_path: Pa
         pytest.param("{not json", "unparseable", id="malformed-json"),
         pytest.param(json.dumps({"schema": 99}), "unknown schema", id="wrong-schema"),
         pytest.param(json.dumps({"observed_clients": "nope"}), "wrong shape", id="not-a-dict"),
-        pytest.param(json.dumps({"schema": 1, "observed_clients": [1, 2]}), "a list", id="list"),
+        pytest.param(json.dumps({"schema": 2, "observed_clients": [1, 2]}), "a list", id="list"),
         pytest.param("", "empty", id="empty-file"),
     ],
 )
@@ -365,6 +366,44 @@ def test_an_allowlist_style_value_is_recorded_as_the_one_name_it_is(tmp_path: Pa
     clients = read_observed_clients(str(db))
     assert list(clients) == ["cursor, gemini-cli claude-code"]
     assert clients["cursor, gemini-cli claude-code"]["count"] == 1
+
+
+def test_a_file_from_the_splitting_code_is_discarded_not_carried_forward(
+    tmp_path: Path,
+) -> None:
+    r"""An upgrade never reports the fragments the old code recorded.
+
+    Before #1805, one connection from a host named ``"Visual Studio Code"``
+    wrote three entries into the file, and those entries are still on disk for
+    a database that saw such a connection. Nothing prunes them in place: they
+    are dropped because the file's schema version no longer matches, so the
+    doctor reports "unknown" rather than the misleading mismatch, and the next
+    observation writes a current-format file that holds only names hosts sent.
+    """
+    db = tmp_path / "continuum.db"
+    path = observation_path(str(db))
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "observed_clients": {
+                    "Visual": {"count": 1, "last_seen": "2026-10-01T00:00:00", "seq": 1},
+                    "Studio": {"count": 1, "last_seen": "2026-10-01T00:00:00", "seq": 2},
+                    "Code": {"count": 1, "last_seen": "2026-10-01T00:00:00", "seq": 3},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert read_observed_clients(str(db)) == {}, "the fragments must not survive a version bump"
+
+    record_observed_client(str(db), "Visual Studio Code")
+
+    clients = read_observed_clients(str(db))
+    assert list(clients) == ["Visual Studio Code"]
+    assert json.loads(path.read_text(encoding="utf-8"))["schema"] == SCHEMA_VERSION
 
 
 def test_the_file_cannot_grow_without_bound(tmp_path: Path) -> None:

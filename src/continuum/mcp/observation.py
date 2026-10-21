@@ -58,8 +58,11 @@ OBSERVATION_DIRNAME = ".continuum"
 OBSERVATION_FILENAME = "mcp-client-observations.json"
 
 #: Bumped when the shape changes, so a reader can tell an old file from a
-#: broken one instead of parsing either as the current format.
-SCHEMA_VERSION = 1
+#: broken one instead of parsing either as the current format. 2: names are
+#: recorded verbatim (#1805); a file written by the 1 code that split a
+#: declared name on allowlist separators may hold fragments no host sent, so
+#: it is discarded rather than carried into the doctor's report.
+SCHEMA_VERSION = 2
 
 #: A client name arrives from an untrusted peer, so it is bounded before it
 #: reaches the filesystem: longer than any real host needs, short enough that a
