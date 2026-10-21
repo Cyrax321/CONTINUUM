@@ -177,7 +177,12 @@ cluster.
 
 Launches a one-shot pod job in the specified `namespace` using `kubectl run`,
 captures output, and records the step in the `ActionLedger` under action name
-`"k8s.job"`.
+`"k8s.job"`. The pod is created with `--rm`, so kubernetes deletes it once the
+job completes, and its name is derived from the run id plus the action's image
+and command: each job in a namespace gets its own name, while a replay of the
+same job reuses the one it already had. The name is a hex digest, not the run
+id verbatim, so a run id that kubernetes would reject as a pod name is never
+passed through.
 
 ```python
 from continuum.adapters import KubernetesAdapter
