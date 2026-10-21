@@ -53,6 +53,21 @@ Test counts: ~3680 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **A Kubernetes namespace can run more than one `run_job`, ever (#1807).**
+  `KubernetesAdapter.run_job` called `kubectl run` with the hardcoded pod
+  name `continuum-job` and no `--rm`, so the completed pod stayed in the
+  namespace and the API server refused the next call with
+  `pods "continuum-job" already exists`: the first job succeeded, every job
+  after it in the namespace failed, and two concurrent runs raced for the one
+  name. The name is now derived from the run id plus the action's image and
+  command, so distinct jobs get distinct names while a replay of the same
+  job lands on its own name again, and the pod is created with `--rm`, the
+  cleanup `docker run --rm` already gave the container adapter. Only hex
+  digest characters reach the name, so a run id that kubernetes would reject
+  as a DNS-1123 label cannot be passed through. The argv assertion in
+  `tests/test_kubernetes_adapter.py` moved with the fix and gained tests
+  for the second-call, replay, and invalid-name cases.
+
 - **A developer's own venv and scratch database are no longer committed as the
   project's Continue registration (#1618).** PR #1612 added
   `.continue/config.yaml` to the repository root, fully baked: a `command`
