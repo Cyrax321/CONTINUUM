@@ -13,7 +13,7 @@ import pytest
 
 from continuum.events import EventType
 from continuum.models import Origin, Run
-from continuum.otel import observation_from_span, record_span
+from continuum.otel import _attr, observation_from_span, record_span
 from continuum.storage import SQLiteStorage
 
 
@@ -57,9 +57,10 @@ def test_vendor_attribute_families_are_recognised() -> None:
         assert payload is not None and payload["tool"] == "search_web", key
 
 
-def test_non_tool_spans_are_ignored() -> None:
+def test_non_tool_spans_are_ignored(db: str) -> None:
     assert observation_from_span("llm_call", {"gen_ai.request.model": "gpt"}) is None
     assert observation_from_span("http get", {"url": "https://x"}) is None
+    assert record_span(SQLiteStorage(db), "http get", {"url": "https://x"}) is None
 
 
 def test_failed_tool_spans_record_as_failures(db: str) -> None:
@@ -122,3 +123,91 @@ def test_processor_factory_gives_install_hint_without_sdk(
 
     with pytest.raises(RuntimeError, match="opentelemetry-api"):
         make_span_processor(SQLiteStorage(db))
+
+
+def test_attr_fallback_when_lacking_get_or_raising_attribute_error() -> None:
+    """_attr handles non-mappings and dict subclasses raising AttributeError."""
+    assert _attr(12345, "key") is None
+    assert _attr("not_a_mapping", "key") is None
+    assert _attr(["item"], "key") is None
+
+    class DictRaisingAttributeError(dict):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)
+            self._raised = False
+
+        def get(self, key: str, default: object = None) -> object:
+            if not self._raised:
+                self._raised = True
+                raise AttributeError("simulated lookup failure")
+            return super().get(key, default)
+
+    d = DictRaisingAttributeError({"tool.name": "custom_tool"})
+    assert _attr(d, "tool.name") == "custom_tool"
+
+
+def test_record_span_with_span_id_and_trace_id(db: str) -> None:
+    """Explicit span_id and trace_id are recorded in the event payload."""
+    span = FakeSpan("execute_tool", {"tool.name": "send_invoice", "path": "/inv/1"})
+    run = record_span(
+        SQLiteStorage(db),
+        span.name,
+        span.attributes,
+        span_id="span-1234",
+        trace_id="trace-5678",
+    )
+    assert run == "run_1"
+    with SQLiteStorage(db) as store:
+        events = store.read_events("run_1")
+    payload = events[-1].payload
+    assert payload["span_id"] == "span-1234"
+    assert payload["trace_id"] == "trace-5678"
+    assert payload["tool"] == "send_invoice"
+
+
+def test_processor_lifecycle_methods_and_context_propagation(
+    db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ContinuumSpanProcessor methods on_start, shutdown, force_flush, and on_end context."""
+    import sys
+    import types
+
+    if "opentelemetry.sdk.trace" not in sys.modules:
+        trace_mod = types.ModuleType("opentelemetry.sdk.trace")
+
+        class DummySpanProcessor:
+            pass
+
+        class DummyReadableSpan:
+            pass
+
+        trace_mod.SpanProcessor = DummySpanProcessor  # type: ignore[attr-defined]
+        trace_mod.ReadableSpan = DummyReadableSpan  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "opentelemetry.sdk.trace", trace_mod)
+
+    from continuum.otel import make_span_processor
+
+    proc = make_span_processor(SQLiteStorage(db), run_id="run_1")
+    assert proc.on_start(None) is None
+    assert proc.shutdown() is True
+    assert proc.force_flush(15000) is True
+
+    class SpanContext:
+        span_id = "span-ctx-100"
+        trace_id = "trace-ctx-200"
+
+    class DuckSpan:
+        name = "tool_call"
+        attributes = {"tool.name": "query_db", "path": "/db/query"}
+        status = None
+        context = SpanContext()
+
+    proc.on_end(DuckSpan())  # type: ignore[arg-type]
+    with SQLiteStorage(db) as store:
+        events = store.read_events("run_1")
+    last_payload = events[-1].payload
+    assert last_payload["tool"] == "query_db"
+    assert last_payload["span_id"] == "span-ctx-100"
+    assert last_payload["trace_id"] == "trace-ctx-200"
+    assert last_payload["ok"] is True
+
