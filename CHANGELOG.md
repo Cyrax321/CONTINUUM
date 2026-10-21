@@ -53,6 +53,34 @@ Test counts: ~3680 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **A digest-less `TOOL_COMPLETED` no longer makes rewind delete a
+  pre-checkpoint file or freeze a post-checkpoint one (#1806).**
+  `rewind_to_checkpoint` keyed its whole "which files survive" decision on
+  whether a `TOOL_COMPLETED` observation carries a `sha256`, so an observation
+  that carries none was treated exactly like "no observation at all". A path
+  whose pre-checkpoint observation has no digest took the "created after the
+  checkpoint" branch and was unlinked even though the checkpoint-era log
+  records a write to it, with zero conflicts and `ok=True`. On the other side,
+  a post-checkpoint observation without a digest left nothing to compare
+  against, so the pre-delete check `file_digest(path) != expected_after` was
+  always true and the file was reported as "digest changed before delete"
+  forever; `--force` did not delete it either, because the `continue` skipped
+  the unlink, so a forced rewind left post-checkpoint files in the workspace
+  while reporting that it ran. Digest-less observations are honest evidence and
+  reachable in an ordinary run: `observe_event_payload` records the path
+  without `bytes`/`sha256` when the file cannot be read at hook time (the
+  PostToolUse hook races the writer, the file can be held exclusively or
+  unreadable, and a multi-step tool can move it between the write and the
+  read), and the gateway's `TOOL_COMPLETED` never carries a digest at all. The
+  pre-checkpoint side now distinguishes "an observation exists but records no
+  digest" from "no observation": the first means the file was already there and
+  cannot be restored, so it is left in place and reported as unrecoverable,
+  never deleted. The post-checkpoint side no longer compares a digest it does
+  not have: there is nothing to verify, so the file is deleted and listed in
+  `deleted_files`. The same guard lifts an unkillable "digest changed before
+  restore" conflict that blocked restoring a file whose post-checkpoint
+  observation had no digest.
+
 - **A developer's own venv and scratch database are no longer committed as the
   project's Continue registration (#1618).** PR #1612 added
   `.continue/config.yaml` to the repository root, fully baked: a `command`
