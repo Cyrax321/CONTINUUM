@@ -51,10 +51,12 @@ run_id = "demo-generic"
 adapter.start_run(goal="analyze batch", run_id=run_id)
 
 # side effects go through the ledger so a retry never duplicates
-res = adapter.intercept_action(run_id, "slack.notify",
-    lambda: "sent", arguments={"channel": "#alerts"})
+res = adapter.intercept_action(
+    run_id, "slack.notify", lambda: "sent", arguments={"channel": "#alerts"}
+)
 
 from continuum.state.semantic import project
+
 state = project(run_id, store.read_events(run_id))
 adapter.capture_state(run_id, state, reason="pre-kill")
 
@@ -81,19 +83,23 @@ adapter = LangChainAgentAdapter(store)
 run_id = "demo-lc"
 adapter.start_run(goal="LCEL batch", run_id=run_id)
 
+
 @adapter.wrap_tool("notify.customer", key="notify:O-9")
 def _notify(order_id: str, *, continuum_run_id: str = "") -> str:
     return f"notified {order_id}"
 
+
 def work(state: dict) -> dict:
     _notify(order_id=state["order_id"], continuum_run_id=state["continuum_run_id"])
     return {**state, "done": True}
+
 
 chain = RunnableLambda(work) | RunnableLambda(adapter.checkpoint_node)
 chain.invoke({"continuum_run_id": run_id, "order_id": "O-9"})
 
 # kill -9 here, then in a fresh process:
 from continuum.recovery import RecoveryEngine
+
 decision = RecoveryEngine(store).assess(run_id)
 assert decision.safe  # fails safe when the kill left an uncertain action
 ```
@@ -110,25 +116,31 @@ from continuum.storage import SQLiteStorage
 from langgraph.graph import StateGraph, START, END
 from typing import TypedDict
 
+
 class S(TypedDict):
     continuum_run_id: str
     order_id: str
+
 
 store = SQLiteStorage(":memory:")
 adapter = LangGraphAgentAdapter(store)
 run_id = "demo-lg"
 adapter.start_run(goal="graph batch", run_id=run_id)
 
+
 @adapter.wrap_tool("notify.customer", key="notify:O-9")
 def notify(order_id: str, *, continuum_run_id: str = "") -> str:
     return f"notified {order_id}"
+
 
 def work(state: S) -> S:
     notify(order_id=state["order_id"], continuum_run_id=state["continuum_run_id"])
     return state
 
+
 def checkpoint(state: S) -> S:
     return adapter.checkpoint_node(state)
+
 
 builder = StateGraph(S)
 builder.add_node("work", work)
@@ -160,9 +172,11 @@ adapter = OpenAIAgentAdapter(store)
 run_id = "demo-oa"
 adapter.start_run(goal="notify", run_id=run_id)
 
+
 @adapter.wrap_function_tool("notify.customer", key="notify:O-9")
 def _tool(ctx, order_id: str) -> str:
     return f"notified {order_id}"
+
 
 agent = Agent(name="n", instructions="Use notify.", tools=[_tool])
 ctx = ContinuumContext(continuum_run_id=run_id, goal="notify")
@@ -190,7 +204,7 @@ actually requested, so importing `continuum` never drags in `langchain` or
 ```python
 from continuum import list_adapters, get_adapter, recover
 
-list_adapters()            # ["generic", "langchain", "langgraph", "openai"]
+list_adapters()  # ["generic", "langchain", "langgraph", "openai"]
 adapter_cls = get_adapter("generic")
 
 # One call recovers any run through any registered adapter:

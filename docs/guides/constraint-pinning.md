@@ -49,6 +49,7 @@ import hashlib
 from continuum.events import EventType
 from continuum.models import ConstraintPinned
 
+
 def pin_at_session_start(storage, run_id: str, constraint_id: str, text: str) -> None:
     sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
     storage.append_event(
@@ -56,6 +57,7 @@ def pin_at_session_start(storage, run_id: str, constraint_id: str, text: str) ->
         EventType.CONSTRAINT_PINNED,
         ConstraintPinned(constraint_id=constraint_id, sha256=sha).model_dump(),
     )
+
 
 pin_at_session_start(storage, run_id, "no-delete", "never delete until asked")
 pin_at_session_start(storage, run_id, "no-send", "never send without confirmation")
@@ -78,7 +80,11 @@ for cid, text in [
     ("no-delete", "never delete until asked"),
 ]:
     sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    storage.append_event(run_id, EventType.CONSTRAINT_PINNED, ConstraintPinned(constraint_id=cid, sha256=sha).model_dump())
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        ConstraintPinned(constraint_id=cid, sha256=sha).model_dump(),
+    )
 ```
 
 Or in `hooks.json` call the script, not a nonexistent CLI subcommand:
@@ -160,7 +166,9 @@ accounting = account_pins_in_context(state, context_without, grace_seconds=3600)
 ### Example: unverifiable
 
 ```python
-truncated_context = context_without + "\n\n[context truncated to fit budget; omitted: ACTIVE CONSTRAINTS]"
+truncated_context = (
+    context_without + "\n\n[context truncated to fit budget; omitted: ACTIVE CONSTRAINTS]"
+)
 accounting = account_pins_in_context(state, truncated_context)
 
 # accounting["no-send"]["status"] == "unverifiable"
@@ -198,19 +206,25 @@ The JSON block surfaces `grace_deadline` per pin (`pinned_at + grace_seconds` as
 from continuum.state.semantic import check_pin_accounting
 
 # Advisory only
-accounting, flags, should_escalate = check_pin_accounting(state, context_without, grace_seconds=60, now=now_past, strict=False)
+accounting, flags, should_escalate = check_pin_accounting(
+    state, context_without, grace_seconds=60, now=now_past, strict=False
+)
 # flags == ["pin no-send:abc12345 absent past grace (100s > 60s)"]
 # should_escalate == False
 
 # Strict fail-closed
-accounting, flags, should_escalate = check_pin_accounting(state, context_without, grace_seconds=60, now=now_past, strict=True)
+accounting, flags, should_escalate = check_pin_accounting(
+    state, context_without, grace_seconds=60, now=now_past, strict=True
+)
 # should_escalate == True -> caller that enforces fail-closed should set mode=REQUEST_HUMAN, safe=False (accounting layer, not automatic in RecoveryEngine v1)
 ```
 
 Within grace, even `strict=True` does not escalate:
 
 ```python
-accounting, flags, should_escalate = check_pin_accounting(state, context_without, grace_seconds=60, now=now_within, strict=True)
+accounting, flags, should_escalate = check_pin_accounting(
+    state, context_without, grace_seconds=60, now=now_within, strict=True
+)
 # flags == [], should_escalate == False
 ```
 

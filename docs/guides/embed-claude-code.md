@@ -157,7 +157,11 @@ from continuum.storage import SQLiteStorage
 
 store = SQLiteStorage("continuum.db")
 sha = hashlib.sha256("Do not send customer data to external APIs".encode()).hexdigest()
-store.append_event("my-task", EventType.CONSTRAINT_PINNED, ConstraintPinned(constraint_id="no-external-egress", sha256=sha).model_dump())
+store.append_event(
+    "my-task",
+    EventType.CONSTRAINT_PINNED,
+    ConstraintPinned(constraint_id="no-external-egress", sha256=sha).model_dump(),
+)
 ```
 
 Retract similarly with `CONSTRAINT_RETRACTED`. Pins survive compaction and appear under `SemanticState.pins`.

@@ -23,9 +23,13 @@ Minimal polling loop:
 
 ```python
 import json, subprocess, time
+
+
 def fetch_contract(run_id, db="continuum.db"):
     out = subprocess.check_output(["continuum", "--db", db, "--json", "resume", run_id], text=True)
     return json.loads(out)
+
+
 while True:
     c = fetch_contract("run_42")
     print(c["mode"], c["safe"], c["contract"]["next_allowed_action"])
@@ -44,6 +48,8 @@ Each line is a JSON primitive with `content_hash`, `prev_hash`, `origin`, `seque
 
 ```python
 from continuum.security.hashing import stable_hash
+
+
 def verify_exported(primitives, expected_count, expected_head):
     prev = None
     for i, p in enumerate(primitives, start=1):

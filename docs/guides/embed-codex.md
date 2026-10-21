@@ -207,9 +207,14 @@ import hashlib
 from continuum.events import EventType
 from continuum.models import ConstraintPinned
 from continuum.storage import SQLiteStorage
+
 store = SQLiteStorage("continuum.db")
 sha = hashlib.sha256("No direct DB writes without review".encode()).hexdigest()
-store.append_event("my-task", EventType.CONSTRAINT_PINNED, ConstraintPinned(constraint_id="no-unreviewed-db", sha256=sha).model_dump())
+store.append_event(
+    "my-task",
+    EventType.CONSTRAINT_PINNED,
+    ConstraintPinned(constraint_id="no-unreviewed-db", sha256=sha).model_dump(),
+)
 ```
 
 Check drift on resume:
