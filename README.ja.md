@@ -496,6 +496,30 @@ continuum tree <parent_run_id>                   # マルチエージェント�
 
 CONTINUUM は耐久実行、冪等な副作用追跡、LLM エージェントのためのクラッシュリカバリの交差点に位置する。最も近い隣接領域は機械検証された再開契約（Khan 2026）、制約で保護された入場を伴うエージェントトランザクション処理（Mnemosyne 2026）、チェックポイントロールバック攻撃分析（ACRFence 2026）、設計レベルのプロンプトインジェクション防御（CaMeL 2025）である。完全な注釈付きリスト、基礎、引用監査は [references/related-work.md](references/related-work.md) にある。
 
+## ドキュメントマップ
+
+`docs/` 配下のすべてのページと、それぞれが存在する理由：
+
+- **リファレンスと API**: [docs/api/README.md](docs/api/README.md) （ライブラリ、CLI、MCP、サイドカー）、
+  [docs/GLOSSARY.md](docs/GLOSSARY.md) （すべての復旧用語、それぞれが実装を指す）、
+  [references/api.md](references/api.md)、[references/cli.md](references/cli.md)。
+- **タスクガイド**: [docs/guides/README.md](docs/guides/README.md)、
+  [docs/recipes/README.md](docs/recipes/README.md)、[docs/concepts/README.md](docs/concepts/README.md)。
+- **セキュリティ**: [docs/threat_model.md](docs/threat_model.md) （何が保護され、何が検出され、何が明示的に保護されないか）、
+  [docs/signing_key_rotation.md](docs/signing_key_rotation.md) （鍵付き封印をローテーションしながら、古いハッシュのみの契約の検証を壊さない方法）。
+- **契約とスケール**: [docs/contract_compatibility.md](docs/contract_compatibility.md)
+  （別のビルドで検証される封印済みの約束）、
+  [docs/multi_agent_isolation.md](docs/multi_agent_isolation.md) （共有 `run_id` の分離）、
+  [docs/audit-provenance-compaction-294.md](docs/audit-provenance-compaction-294.md)
+  （圧縮を生き延びる来歴）。
+- **作成と運用**: [docs/adapters_guide.md](docs/adapters_guide.md) （アダプターの書き方）、
+  [docs/cloud_api.md](docs/cloud_api.md) （任意のデプロイ層）、
+  [docs/TESTING_MCP.md](docs/TESTING_MCP.md) （MCP 表面の敵対的監査）、
+  [docs/CONTRIBUTING_ONBOARDING.md](docs/CONTRIBUTING_ONBOARDING.md) （オンボーディング）。
+- **計画**: [docs/ARCHITECTURE_EVOLUTION.md](docs/ARCHITECTURE_EVOLUTION.md) （北極星）、
+  [docs/CONTINUUM_MASTER_PLAN.md](docs/CONTINUUM_MASTER_PLAN.md) （検証済みの現状と次の作業）、
+  [docs/research/README.md](docs/research/README.md) （それらの計画の原点となったノート）。
+
 ## ステータスと制限
 
 - **テスト済み**：このツリーの 2026-08-24 監査での完全な実行で 3,636 合格 + 23 スキップ。CI は Python 3.11、3.12、3.13 でスイートを強制し、カウントはプラットフォームや Postgres などのオプションサービスにより異なる（[STATUS.md](STATUS.md) を参照）。MCP 面もライブプロトコル上で敵対的に監査済み。[test.md](test.md) を参照。
@@ -520,7 +544,7 @@ CONTINUUM は **Anandhu P Shaji**（[@Cyrax321](https://github.com/Cyrax321) · 
 
 このプロジェクトは Apache 2.0 の下でオープンソースであり、意図的に拡張可能に構築されている。リカバリセマンティクスを検証する研究者、台帳や MCP サーバーを他のフレームワークや言語に移植するエンジニア、計画されたロードマップを現実にする誰にとっても拡張可能である。良い出発点は [issue トラッカー](https://github.com/Cyrax321/CONTINUUM/issues) の `good first issue` ラベル、または STATUS.md にリストされた未解決の正確性バグである。
 
-大きな PR を送信する前に issue を開いてください。完全なコントリビューションガイドは [CONTRIBUTING.md](CONTRIBUTING.md) を参照。 [Code of Conduct](CODE_OF_CONDUCT.md) を含む。
+大きな PR を送信する前に issue を開いてください。完全なコントリビューションガイドは [CONTRIBUTING.md](CONTRIBUTING.md) を参照。 [Code of Conduct](CODE_OF_CONDUCT.md) と [セキュリティポリシー](SECURITY.md) を含む。
 
 ### コントリビューター
 
@@ -565,3 +589,5 @@ Apache 2.0、[LICENSE](LICENSE) を参照。
 
 - [Issues](https://github.com/Cyrax321/CONTINUUM/issues) バグ報告や新機能の要望
 - [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) 設計や仕様の提案
+- [リリースノート](docs/release-notes.md)
+- [リリースチェックリスト](docs/release-checklist.md)

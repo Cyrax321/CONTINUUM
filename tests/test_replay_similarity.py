@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import pytest
+
 from continuum.replay_similarity import (
     SimilarityConfig,
+    SimilarityKind,
     _cosine,
     classify_call,
     jaccard,
     similarity,
+    similarity_backend,
     token_set,
 )
 
@@ -147,3 +151,43 @@ def test_classify_call_embedding_ragged_vector_no_false_fork() -> None:
     )
     assert kind == "fresh"
     assert match is None
+
+
+# --- similarity_backend (issue #1654) --------------------------------------------- #
+
+
+def test_similarity_backend_passes_through_existing_config() -> None:
+    cfg = SimilarityConfig(kind="fuzzy", replay_threshold=0.7)
+    assert similarity_backend(cfg) is cfg
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_kind"),
+    [
+        ("exact", SimilarityKind.EXACT),
+        ("fuzzy", SimilarityKind.FUZZY),
+        ("embedding", SimilarityKind.EMBEDDING),
+    ],
+)
+def test_similarity_backend_maps_registry_name_to_kind(
+    name: str, expected_kind: SimilarityKind
+) -> None:
+    cfg = similarity_backend(name)
+    assert cfg.kind == expected_kind
+
+
+def test_similarity_backend_uses_config_defaults_for_thresholds() -> None:
+    cfg = similarity_backend("fuzzy")
+    assert cfg.replay_threshold == SimilarityConfig().replay_threshold
+    assert cfg.fork_threshold == SimilarityConfig().fork_threshold
+
+
+def test_similarity_backend_unknown_name_raises() -> None:
+    with pytest.raises(ValueError, match="unknown similarity backend 'nope'"):
+        similarity_backend("nope")
+
+
+def test_similarity_backend_unknown_name_quotes_input() -> None:
+    # The error message must show the offending value so operators can fix it.
+    with pytest.raises(ValueError, match="'not-a-backend'"):
+        similarity_backend("not-a-backend")
