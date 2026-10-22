@@ -58,6 +58,17 @@ Test counts: ~3680 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **The daemon CLI no longer crashes when dispatched without storage (#1603).**
+  `continuum daemon` was dispatched through the no-storage tuple, but called
+  `storage.get_active_run()` unconditionally and raised an `AttributeError`
+  before binding the gateway. It now handles `storage=None`, probing an active
+  run from an existing database file when present and warning gracefully on
+  unreadable databases. On non-fork platforms like Windows, `--detach` spawns
+  a background process with detached process flags, verifies port availability
+  and PID file writability beforehand, records the daemon's own PID safely,
+  reports early child startup failures, and unlinks the PID file only when it
+  matches the process's own PID on shutdown.
+
 - **A developer's own venv and scratch database are no longer committed as the
   project's Continue registration (#1618).** PR #1612 added
   `.continue/config.yaml` to the repository root, fully baked: a `command`
