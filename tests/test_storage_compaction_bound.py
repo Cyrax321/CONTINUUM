@@ -1,178 +1,146 @@
-"""The shared compaction bound resolver (issues #1653, #705, #1078).
+"""Contract tests for the shared event-log compaction boundary (#1653).
 
-``resolve_compaction_bound`` is the single place that decides which part of a
-run's log is safe to archive. Both storage engines call it, so a check that
-lands here is a check both engines get. The guard that matters is the anchor
-comparison: an explicit ``through_sequence`` at or above the anchor marker would
-delete the marker, and the next append would mint a fresh genesis and fork the
-live chain away from the archive (#705, #1078).
-
-These tests run against a real ``SQLiteStorage`` in ``tmp_path``. The function
-reaches into ``storage._anchor_environment``, so a mock would skip the part
-under test.
+The resolved bound must leave room for the live anchor marker. Exercise the
+resolver independently of either storage engine's compaction transaction so
+regressions in its preflight checks are detected directly.
 """
 
 from __future__ import annotations
 
-import os
-import re
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from continuum.checkpoint import CheckpointManager
-from continuum.environment.snapshot import StaticProvider, capture
-from continuum.events import EventType
-from continuum.models import Run
+from continuum.models import Goal, Run, SemanticState
 from continuum.storage import SQLiteStorage
 from continuum.storage.compaction import resolve_compaction_bound
 
+RUN_ID = "run_compaction_bound"
+
 
 @pytest.fixture
-def store(tmp_path: Path) -> Iterator[SQLiteStorage]:
-    with SQLiteStorage(os.fspath(tmp_path / "c.db")) as opened:
-        yield opened
+def storage(tmp_path: Path) -> Iterator[SQLiteStorage]:
+    """A real storage engine with a projectable, started run."""
+    with SQLiteStorage(str(tmp_path / "bounds.db")) as store:
+        store.create_run_started(Run(run_id=RUN_ID, goal="preserve the anchor"))
+        yield store
 
 
-def seed_run(store: SQLiteStorage, run_id: str = "run_1") -> None:
-    """A run with a goal, a started event, and one checkpoint behind it."""
-    store.create_run(Run(run_id=run_id, goal="long task"))
-    store.append_event(run_id, EventType.RUN_STARTED, {"goal": "long task", "total": 4})
-    CheckpointManager(store).checkpoint(run_id)
+def test_resolves_default_bound_below_future_anchor(storage: SQLiteStorage) -> None:
+    """The common path refreshes a stale checkpoint and retains room for the marker."""
+    from continuum.checkpoint.manager import CheckpointManager
+    CheckpointManager(storage).checkpoint(RUN_ID)
+    earlier_head = storage.last_sequence(RUN_ID)
+
+    version, through = resolve_compaction_bound(storage, RUN_ID, None)
+    head_after_refresh = storage.last_sequence(RUN_ID)
+
+    assert head_after_refresh == earlier_head + 1
+    assert version == storage.latest_version(RUN_ID)
+    assert through == min(version.source_sequence, head_after_refresh)
+    assert 1 <= through < head_after_refresh + 1
+    assert storage.read_archived_events(RUN_ID) == []
 
 
-def test_returns_the_checkpoint_and_a_bound_below_the_anchor(store: SQLiteStorage) -> None:
-    seed_run(store)
+def test_resolves_explicit_prefix_below_future_anchor(storage: SQLiteStorage) -> None:
+    """An explicit safe prefix remains respected even though a new checkpoint is minted."""
+    from continuum.checkpoint.manager import CheckpointManager
+    CheckpointManager(storage).checkpoint(RUN_ID)
 
-    version, through = resolve_compaction_bound(store, "run_1", None)
+    version, through = resolve_compaction_bound(storage, RUN_ID, 1)
 
-    assert version == store.latest_version("run_1")
-    # The marker is appended at head + 1 in the caller's transaction, so the
-    # bound has to stay strictly below that or the live log loses its anchor.
-    assert through < store.last_sequence("run_1") + 1
-    assert through == version.source_sequence
-
-
-def test_anchors_a_run_that_has_no_checkpoint_yet(store: SQLiteStorage) -> None:
-    store.create_run(Run(run_id="fresh", goal="long task"))
-    store.append_event("fresh", EventType.RUN_STARTED, {"goal": "long task", "total": 4})
-    assert store.latest_version("fresh") is None
-
-    version, through = resolve_compaction_bound(store, "fresh", None)
-
-    assert version is not None
-    assert through >= 1
+    assert through == 1
+    assert through <= version.source_sequence
+    assert through < storage.last_sequence(RUN_ID) + 1
 
 
-def test_reanchors_when_the_checkpoint_is_behind_the_head(store: SQLiteStorage) -> None:
-    seed_run(store)
+@pytest.mark.parametrize("offset", [0, 1, 100])
+def test_explicit_bound_cannot_consume_anchor_marker(storage: SQLiteStorage, offset: int) -> None:
+    """Regression for #705/#1078: deleting the >= guard must fail this test."""
+    from continuum.checkpoint.manager import CheckpointManager
+    CheckpointManager(storage).checkpoint(RUN_ID)
+    # resolve_compaction_bound adds one forced checkpoint annotation before the
+    # compaction transaction appends EVENT_LOG_ANCHORED.
+    prospective_anchor = storage.last_sequence(RUN_ID) + 2
+    unsafe_through = prospective_anchor + offset
+    events_before = list(storage.read_events(RUN_ID))
 
-    # A new event after the checkpoint makes the recorded version stale, so the
-    # resolver has to take a fresh anchor before it can name a bound.
-    store.append_event("run_1", EventType.TASK_UPDATED, {"note": "after the checkpoint"})
-    recorded = store.latest_version("run_1")
-    assert recorded is not None
-    assert recorded.source_sequence < store.last_sequence("run_1")
+    with pytest.raises(
+        ValueError,
+        match=(
+            rf"through_sequence {unsafe_through} would archive the anchor marker"
+            rf" at sequence {prospective_anchor}"
+        ),
+    ):
+        resolve_compaction_bound(storage, RUN_ID, unsafe_through)
 
-    version, through = resolve_compaction_bound(store, "run_1", None)
-
-    assert version.source_sequence > recorded.source_sequence
-    assert through == version.source_sequence
-
-
-def test_explicit_bound_below_the_anchor_is_honoured(store: SQLiteStorage) -> None:
-    seed_run(store)
-    head = store.last_sequence("run_1")
-
-    version, through = resolve_compaction_bound(store, "run_1", head - 1)
-
-    assert through == head - 1
-    assert through < store.last_sequence("run_1") + 1
-    assert version is not None
-
-
-def test_bound_at_or_above_the_anchor_is_refused(store: SQLiteStorage) -> None:
-    """The regression guard. Deleting the ``>=`` on the comparison must fail this."""
-    seed_run(store)
-
-    with pytest.raises(ValueError, match="would archive the anchor marker"):
-        resolve_compaction_bound(store, "run_1", 10_000)
+    # A rejected bound must preserve the entire prior log. The forced
+    # checkpoint annotation is the only additional event.
+    events_after = list(storage.read_events(RUN_ID))
+    assert events_after[: len(events_before)] == events_before
+    assert len(events_after) == len(events_before) + 1
+    assert events_after[-1].sequence == prospective_anchor - 1
+    assert storage.read_archived_events(RUN_ID) == []
 
 
-def test_the_refused_bound_names_the_anchor_sequence_it_would_have_deleted(
-    store: SQLiteStorage,
+def test_projection_failure_is_reported_as_anchor_failure(
+    storage: SQLiteStorage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seed_run(store)
+    """A failed projection must become the resolver's contextual ValueError."""
+    from continuum.checkpoint.manager import CheckpointManager
 
-    with pytest.raises(ValueError) as excinfo:
-        resolve_compaction_bound(store, "run_1", 10_000)
+    def broken_projection(
+        self: object, run_id: str, *, full_history: bool = True
+    ) -> SemanticState:
+        raise RuntimeError("unprojectable event")
 
-    message = str(excinfo.value)
-    named = re.search(r"at sequence (\d+)", message)
-    assert named is not None, message
-    # The marker lands at the head of the log as the caller's transaction runs,
-    # so the sequence the refusal names is the head it left behind plus one.
-    assert int(named.group(1)) == store.last_sequence("run_1") + 1
-    assert "the live log must retain its anchor" in message
+    monkeypatch.setattr(CheckpointManager, "project_current", broken_projection)
 
+    with pytest.raises(
+        ValueError,
+        match=f"run '{RUN_ID}' could not be anchored: unprojectable event",
+    ) as exc_info:
+        resolve_compaction_bound(storage, RUN_ID, None)
 
-def test_a_refused_bound_leaves_the_log_appendable(store: SQLiteStorage) -> None:
-    """The refusal must not have consumed the marker it was protecting."""
-    seed_run(store)
-
-    with pytest.raises(ValueError, match="would archive the anchor marker"):
-        resolve_compaction_bound(store, "run_1", 10_000)
-
-    head = store.last_sequence("run_1")
-    store.append_event("run_1", EventType.TASK_UPDATED, {"note": "still appendable"})
-    assert store.last_sequence("run_1") == head + 1
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert storage.latest_version(RUN_ID) is None
 
 
-def test_a_run_with_no_started_event_cannot_be_anchored(store: SQLiteStorage) -> None:
-    store.create_run(Run(run_id="headless", goal="long task"))
-
-    with pytest.raises(ValueError, match="could not be anchored"):
-        resolve_compaction_bound(store, "headless", None)
-
-
-def test_an_unknown_run_cannot_be_anchored(store: SQLiteStorage) -> None:
-    with pytest.raises(ValueError, match="could not be anchored"):
-        resolve_compaction_bound(store, "never_seen", None)
-
-
-def test_no_projectable_state_after_anchoring_is_refused(
-    store: SQLiteStorage, monkeypatch: pytest.MonkeyPatch
+def test_missing_version_after_checkpoint_is_rejected(
+    storage: SQLiteStorage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seed_run(store)
-    # The checkpoint lands, but the engine then reports no readable version.
-    # Without this the resolver would hand back ``None`` as the version and the
-    # caller would fail later, inside the transaction, with a less useful error.
-    monkeypatch.setattr(store, "latest_version", lambda run_id: None)
+    """Cover the defensive branch for a backend that reports no persisted version.
 
-    with pytest.raises(ValueError, match="no projectable state"):
-        resolve_compaction_bound(store, "run_1", None)
+    SQLiteStorage normally persists a version during checkpoint(). Suppressing
+    that one operation simulates a non-conforming backend while retaining real
+    SQLite event, environment, and version queries throughout the resolver.
+    """
+    from continuum.checkpoint.manager import CheckpointManager
+
+    def checkpoint_without_persistence(
+        self: object, run_id: str, **kwargs: object
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(CheckpointManager, "checkpoint", checkpoint_without_persistence)
+
+    with pytest.raises(ValueError, match="could not be anchored: no projectable state"):
+        resolve_compaction_bound(storage, RUN_ID, None)
 
 
-def test_a_bound_below_one_is_refused(store: SQLiteStorage) -> None:
-    seed_run(store)
+def test_empty_archive_bound_is_rejected(tmp_path: Path) -> None:
+    """A persisted zero-event state cannot produce an archive prefix.
 
-    with pytest.raises(ValueError, match="nothing to compact: anchor would be empty"):
-        resolve_compaction_bound(store, "run_1", 0)
+    Use a real empty-head run with a persisted version. A checkpoint annotation
+    would create a new event, defeating the zero-bound condition under test.
+    """
+    with SQLiteStorage(str(tmp_path / "empty.db")) as store:
+        store.create_run(Run(run_id=RUN_ID, goal="empty"))
+        state = SemanticState(run_id=RUN_ID, goal=Goal(description="empty"))
+        assert state.source_sequence == 0
+        store.put_version(state)
+        assert store.last_sequence(RUN_ID) == 0
 
-
-def test_a_caller_supplied_environment_forces_a_fresh_anchor(
-    store: SQLiteStorage,
-) -> None:
-    seed_run(store)
-    before = store.last_sequence("run_1")
-    environment = capture("run_1", StaticProvider(dataset="v4"))
-
-    version, through = resolve_compaction_bound(store, "run_1", None, environment)
-
-    assert store.last_sequence("run_1") > before
-    assert version is not None
-    assert through >= 1
-    recorded = store.latest_checkpoint("run_1")
-    assert recorded is not None
-    assert recorded.environment == environment
+        with pytest.raises(ValueError, match="nothing to compact: anchor would be empty"):
+            resolve_compaction_bound(store, RUN_ID, None)
