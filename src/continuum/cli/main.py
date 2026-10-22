@@ -3146,9 +3146,7 @@ def cmd_mcp_install(args: argparse.Namespace, storage: Storage, out: Any, err: A
                 else (Path.cwd() / project_setting).resolve()
             )
             user_dest = Path(profile["user_settings"]).expanduser().resolve()
-            if dest_resolved == project_dest:
-                effective_scope = "project"
-            elif dest_resolved == user_dest:
+            if dest_resolved == user_dest:
                 effective_scope = "user"
                 print(
                     f"warning: {args.host} has no per-project location in its settings file, "
@@ -3156,6 +3154,8 @@ def cmd_mcp_install(args: argparse.Namespace, storage: Storage, out: Any, err: A
                     "Use --scope user to state that intent.",
                     file=err,
                 )
+            elif dest_resolved == project_dest:
+                effective_scope = "project"
             else:
                 effective_scope = "unknown"
                 print(

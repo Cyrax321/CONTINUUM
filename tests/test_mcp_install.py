@@ -508,6 +508,14 @@ def test_install_local_warning_names_the_hosts_own_project_file(
     assert code == ExitCode.OK, err
     assert json.loads(out)["effective_scope"] == "user"
 
+    # Running from HOME where project_dest and user_dest coincide is user-wide.
+    monkeypatch.chdir(tmp_path / "home")
+    code, out, err = run("mcp", "install", "--host", "cursor", "--settings", ".cursor/mcp.json")
+    assert code == ExitCode.OK, err
+    assert "per-project location" in err, err
+    assert "(user scope)" in out, out
+    monkeypatch.chdir(tmp_path)
+
     # An unknown custom destination warns that its scope is unknown.
     target = tmp_path / "custom" / "settings.json"
     target.parent.mkdir(parents=True, exist_ok=True)
