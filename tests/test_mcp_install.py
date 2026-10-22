@@ -481,14 +481,51 @@ def test_install_local_warning_names_the_hosts_own_project_file(
     assert code == ExitCode.OK, err
     assert ".cursor/mcp.json" in err, err
 
-    # --settings overrides the destination for every scope, so recommending
-    # --scope project would be wrong there: it would write to that same file.
+    # --settings pointing to the host's project settings file is project scope,
+    # with no warning claiming the registration is user-wide (#1761).
+    project_target = tmp_path / ".cursor" / "mcp.json"
+    project_target.parent.mkdir(parents=True, exist_ok=True)
+    code, out, err = run("mcp", "install", "--host", "cursor", "--settings", str(project_target))
+    assert code == ExitCode.OK, err
+    assert "per-project location" not in err, err
+    assert "(project scope)" in out, out
+    code, out, err = run(
+        "--json", "mcp", "install", "--host", "cursor", "--settings", str(project_target)
+    )
+    assert code == ExitCode.OK, err
+    assert json.loads(out)["effective_scope"] == "project"
+
+    # --settings pointing to the user settings file is user scope and warns.
+    user_target = tmp_path / "home" / ".cursor" / "mcp.json"
+    user_target.parent.mkdir(parents=True, exist_ok=True)
+    code, out, err = run("mcp", "install", "--host", "cursor", "--settings", str(user_target))
+    assert code == ExitCode.OK, err
+    assert "per-project location" in err, err
+    assert "(user scope)" in out, out
+    code, out, err = run(
+        "--json", "mcp", "install", "--host", "cursor", "--settings", str(user_target)
+    )
+    assert code == ExitCode.OK, err
+    assert json.loads(out)["effective_scope"] == "user"
+
+    # An unknown custom destination warns that its scope is unknown.
     target = tmp_path / "custom" / "settings.json"
-    target.parent.mkdir()
+    target.parent.mkdir(parents=True, exist_ok=True)
     code, out, err = run("mcp", "install", "--host", "cursor", "--settings", str(target))
     assert code == ExitCode.OK, err
-    assert "--settings overrides the destination" in err, err
-    assert ".cursor/mcp.json" not in err, err
+    assert "unknown scope" in err, err
+    assert "(unknown scope)" in out, out
+    code, out, err = run("--json", "mcp", "install", "--host", "cursor", "--settings", str(target))
+    assert code == ExitCode.OK, err
+    assert json.loads(out)["effective_scope"] == "unknown"
+
+
+def test_scope_available_for_non_local_scopes() -> None:
+    """Non-local scopes are always available; local depends on project nesting."""
+    assert mcp_install.scope_available("gemini", "user") is True
+    assert mcp_install.scope_available("gemini", "project") is True
+    assert mcp_install.scope_available("gemini", "local") is False
+    assert mcp_install.scope_available("claude-code", "local") is True
 
 
 def test_install_local_is_reported_as_local_where_the_host_supports_it(

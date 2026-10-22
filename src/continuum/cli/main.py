@@ -3134,30 +3134,46 @@ def cmd_mcp_install(args: argparse.Namespace, storage: Storage, out: Any, err: A
     # write while performing a user-wide one (#1761). The registration still
     # lands where it always did; what changes is that the command now says
     # which scope it effectively wrote.
-    collapsed = args.scope == "local" and not scope_available(args.host, "local")
-    if collapsed:
-        # The remedy names the file the host actually reads at project scope:
-        # only claude-code and gemini use .mcp.json, and pointing a Cursor
-        # operator at it sends them after a file their host never opens (#1761).
-        # --settings overrides the destination for every scope, so the
-        # project-scope route has to be withdrawn rather than recommended.
+    effective_scope: str | None = None
+    if args.scope == "local" and not scope_available(args.host, "local"):
+        profile = MCP_HOST_PROFILES[args.host]
         if args.settings:
-            remedy = (
-                "Use --scope user to state that intent; --settings overrides the "
-                "destination for every scope, so --scope project would write to "
-                "that same file."
+            dest_resolved = settings_path.resolve()
+            project_setting = profile["project_settings"]
+            project_dest = (
+                Path(project_setting).expanduser().resolve()
+                if project_setting.startswith("~")
+                else (Path.cwd() / project_setting).resolve()
             )
+            user_dest = Path(profile["user_settings"]).expanduser().resolve()
+            if dest_resolved == project_dest:
+                effective_scope = "project"
+            elif dest_resolved == user_dest:
+                effective_scope = "user"
+                print(
+                    f"warning: {args.host} has no per-project location in its settings file, "
+                    "so a 'local' registration applies to every project on this machine. "
+                    "Use --scope user to state that intent.",
+                    file=err,
+                )
+            else:
+                effective_scope = "unknown"
+                print(
+                    f"warning: destination '{args.settings}' has an unknown scope for {args.host}, "
+                    "so CONTINUUM cannot determine whether this registration applies per-project or machine-wide.",
+                    file=err,
+                )
         else:
+            effective_scope = "user"
             remedy = (
                 "Use --scope user to state that intent, or --scope project for the "
-                f"shared {MCP_HOST_PROFILES[args.host]['project_settings']} "
-                "in the project root."
+                f"shared {profile['project_settings']} in the project root."
             )
-        print(
-            f"warning: {args.host} has no per-project location in its settings file, "
-            "so a 'local' registration applies to every project on this machine. " + remedy,
-            file=err,
-        )
+            print(
+                f"warning: {args.host} has no per-project location in its settings file, "
+                "so a 'local' registration applies to every project on this machine. " + remedy,
+                file=err,
+            )
     try:
         status = install_server(
             settings_path,
@@ -3172,7 +3188,7 @@ def cmd_mcp_install(args: argparse.Namespace, storage: Storage, out: Any, err: A
         return ExitCode.ERROR
 
     lines = [
-        f"MCP server registered with {args.host} ({'user' if collapsed else args.scope} scope)",
+        f"MCP server registered with {args.host} ({effective_scope or args.scope} scope)",
         f"  [{status}] {SERVER_NAME} in {settings_path}",
         f"    command: {display_command([*command, '--db', str(db)])}",
         f"    form: {form} (resolved at install time, independent of the host's PATH)",
@@ -3187,8 +3203,8 @@ def cmd_mcp_install(args: argparse.Namespace, storage: Storage, out: Any, err: A
         "db": str(db),
         "form": form,
     }
-    if collapsed:
-        payload["effective_scope"] = "user"
+    if effective_scope is not None:
+        payload["effective_scope"] = effective_scope
     _emit(
         payload,
         "\n".join(lines),
