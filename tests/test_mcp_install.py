@@ -773,6 +773,16 @@ def _tracked_paths() -> set[str] | None:
     return set(proc.stdout.split())
 
 
+def test_tracked_paths_returns_none_when_git_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_tracked_paths returns None instead of raising when git is missing (#1803)."""
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert _tracked_paths() is None
+
+
 @pytest.mark.parametrize("host", sorted(mcp_install.HOST_PROFILES))
 def test_no_baked_host_registration_is_committed(host: str) -> None:
     """A project-scope registration is baked for one machine, so it is never committed.
