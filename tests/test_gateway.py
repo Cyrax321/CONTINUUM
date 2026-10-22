@@ -2487,6 +2487,118 @@ def test_cmd_daemon_detach_ignores_stale_pid_file(tmp_path: Path) -> None:
             setattr(os, "fork", orig_fork)  # noqa: B010
 
 
+def test_cmd_daemon_normalizes_sqlite_url_for_active_run_probe(tmp_path: Path) -> None:
+    """Active run probe normalizes sqlite:// URLs to filesystem paths (#1603)."""
+    import argparse
+    import io
+    from unittest.mock import patch
+
+    from continuum.cli.main import cmd_daemon
+    from continuum.models import Run
+
+    db_path = tmp_path / "sqlite_url.db"
+    store = SQLiteStorage(str(db_path))
+    store.create_run(Run(run_id="run_active_123", goal="probe test"))
+    store.close()
+
+    cfg = tmp_path / "gateway.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "upstreams": [
+                    {
+                        "host": "api.example.com",
+                        "action_type": "send",
+                        "key_template": "key:{id}",
+                    }
+                ]
+            }
+        )
+    )
+
+    args = argparse.Namespace(
+        config=str(cfg),
+        tenant=None,
+        run_id=None,
+        db=f"sqlite:///{db_path.as_posix()}",
+        port=0,
+        detach=False,
+        pid_file=None,
+        write_pid=False,
+    )
+    out = io.StringIO()
+    err = io.StringIO()
+
+    captured_run_id = None
+
+    class FakeGatewayServer:
+        def __init__(self, storage_fn, run_id, routes, port=0, bound_tenant=None):
+            nonlocal captured_run_id
+            captured_run_id = run_id
+            self.port = 8765
+
+        def serve_forever(self):
+            pass
+
+        def shutdown(self):
+            pass
+
+    with patch("continuum.gateway.GatewayServer", FakeGatewayServer):
+        code = cmd_daemon(args, None, out, err)
+        assert code == 0
+        assert captured_run_id == "run_active_123"
+
+
+def test_cmd_daemon_unlinks_pid_file_on_gateway_construction_failure(tmp_path: Path) -> None:
+    """Child unlinks pid file if GatewayServer constructor raises an error (#1603)."""
+    import argparse
+    import io
+    import os
+    from unittest.mock import patch
+
+    import pytest
+
+    from continuum.cli.main import cmd_daemon
+
+    cfg = tmp_path / "gateway.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "upstreams": [
+                    {
+                        "host": "api.example.com",
+                        "action_type": "send",
+                        "key_template": "key:{id}",
+                    }
+                ]
+            }
+        )
+    )
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
+    args = argparse.Namespace(
+        config=str(cfg),
+        tenant=None,
+        run_id="run_123",
+        db=None,
+        port=8765,
+        detach=False,
+        pid_file=str(pid_file),
+        write_pid=False,
+    )
+    out = io.StringIO()
+    err = io.StringIO()
+
+    with (
+        patch("continuum.gateway.GatewayServer", side_effect=RuntimeError("bind failure")),
+        pytest.raises(RuntimeError, match="bind failure"),
+    ):
+        cmd_daemon(args, None, out, err)
+
+    assert not pid_file.exists()
+
+
 def test_match_route_falls_back_to_run_metadata_tenant(tmp_path: Path) -> None:
     """match_route extracts bound tenant from storage run metadata when bound_tenant is None (#1415)."""
     route = Route(

@@ -3035,6 +3035,7 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
         load_gateway_tenant,
     )
     from continuum.storage.base import StorageError
+    from continuum.storage.sqlite import _resolve_path
 
     config_path = Path(args.config) if args.config else Path(DEFAULT_GATEWAY_CONFIG_PATH)
     try:
@@ -3058,7 +3059,14 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
             run_id = active.run_id if active else None
         else:
             db_path = getattr(args, "db", None)
-            if db_path and db_path != ":memory:" and Path(db_path).exists():
+            probe_path = (
+                Path(_resolve_path(db_path))
+                if db_path and str(db_path).startswith("sqlite://")
+                else Path(db_path)
+                if db_path
+                else None
+            )
+            if db_path and db_path != ":memory:" and probe_path and probe_path.exists():
                 try:
                     probe_storage = open_storage(db_path)
                     try:
@@ -3207,9 +3215,24 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
         print(f"  gateway: 127.0.0.1:{args.port}", file=out)
         return ExitCode.OK
 
-    server = GatewayServer(
-        lambda: open_storage(args.db), run_id, routes, port=args.port, bound_tenant=bound_tenant
-    )
+    def _unlink_pid_file() -> None:
+        with contextlib.suppress(OSError, UnicodeDecodeError):
+            if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() == str(
+                os.getpid()
+            ):
+                pid_file.unlink(missing_ok=True)
+
+    try:
+        server = GatewayServer(
+            lambda: open_storage(args.db),
+            run_id,
+            routes,
+            port=args.port,
+            bound_tenant=bound_tenant,
+        )
+    except Exception:
+        _unlink_pid_file()
+        raise
 
     if getattr(args, "write_pid", False):
         pid_file.parent.mkdir(parents=True, exist_ok=True)
@@ -3237,13 +3260,6 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
     )
     if args.detach:
         print(f"  pid file: {pid_file}", file=err)
-
-    def _unlink_pid_file() -> None:
-        with contextlib.suppress(OSError, UnicodeDecodeError):
-            if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() == str(
-                os.getpid()
-            ):
-                pid_file.unlink(missing_ok=True)
 
     def _shutdown(signum: int, frame: Any) -> None:
         server.shutdown()
