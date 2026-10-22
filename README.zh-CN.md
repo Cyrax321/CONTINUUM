@@ -511,6 +511,30 @@ continuum tree <parent_run_id>                   # 多智能体层级视图
 
 CONTINUUM 位于持久执行、幂等副作用追踪和针对 LLM 智能体的崩溃恢复的交叉点。最近的邻域是经机器检查的恢复合约（Khan 2026）、带约束门控准入的智能体事务处理（Mnemosyne 2026）、检查点回滚攻击分析（ACRFence 2026）和设计级 prompt 注入防御（CaMeL 2025）。完整的带注释列表、基础和引用审计见 [references/related-work.md](references/related-work.md)。
 
+## 文档地图
+
+`docs/` 下的每一页及其存在理由：
+
+- **参考与 API**：[docs/api/README.md](docs/api/README.md)（库、CLI、MCP、sidecar），
+  [docs/GLOSSARY.md](docs/GLOSSARY.md)（每个恢复术语，各自指向其实现），
+  [references/api.md](references/api.md)、[references/cli.md](references/cli.md)。
+- **任务指南**：[docs/guides/README.md](docs/guides/README.md)，
+  [docs/recipes/README.md](docs/recipes/README.md)、[docs/concepts/README.md](docs/concepts/README.md)。
+- **安全**：[docs/threat_model.md](docs/threat_model.md)（保护什么、检测什么、明确不保护什么），
+  [docs/signing_key_rotation.md](docs/signing_key_rotation.md)（轮换带密钥的封印，同时不破坏对旧的纯哈希契约的验证）。
+- **契约与规模**：[docs/contract_compatibility.md](docs/contract_compatibility.md)
+  （由另一构建验证的已封印承诺），
+  [docs/multi_agent_isolation.md](docs/multi_agent_isolation.md)（共享 `run_id` 的隔离），
+  [docs/audit-provenance-compaction-294.md](docs/audit-provenance-compaction-294.md)
+  （在压缩后依然存续的溯源）。
+- **编写与运维**：[docs/adapters_guide.md](docs/adapters_guide.md)（编写适配器），
+  [docs/cloud_api.md](docs/cloud_api.md)（可选的部署层），
+  [docs/TESTING_MCP.md](docs/TESTING_MCP.md)（对 MCP 表面的对抗性审计），
+  [docs/CONTRIBUTING_ONBOARDING.md](docs/CONTRIBUTING_ONBOARDING.md)（入门指引）。
+- **规划**：[docs/ARCHITECTURE_EVOLUTION.md](docs/ARCHITECTURE_EVOLUTION.md)（北极星），
+  [docs/CONTINUUM_MASTER_PLAN.md](docs/CONTINUUM_MASTER_PLAN.md)（已验证的状态与下一步工作），
+  [docs/research/README.md](docs/research/README.md)（这些计划所源出的笔记）。
+
 ## 状态与局限
 
 - **已测试**：在 2026-08-24 对本树的完整运行中为 3,636 通过 + 23 跳过，CI 在 Python 3.11、3.12 和 3.13 上强制执行套件，计数因平台和 Postgres 等可选服务而异（见 [STATUS.md](STATUS.md)）。MCP 面也已在真实协议上被对抗性审计，见 [test.md](test.md)。
@@ -580,3 +604,5 @@ Apache 2.0，见 [LICENSE](LICENSE)。
 
 - [Issues](https://github.com/Cyrax321/CONTINUUM/issues) 提交错误与功能需求
 - [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) 探讨设计与提案
+- [发布说明](docs/release-notes.md)
+- [发布检查清单](docs/release-checklist.md)

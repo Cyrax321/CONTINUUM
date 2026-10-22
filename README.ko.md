@@ -496,6 +496,30 @@ continuum tree <parent_run_id>                   # 다중 에이전트 계층 �
 
 CONTINUUM은 내구성 있는 실행, 멱등한 사이드 이펙트 추적, LLM 에이전트를 위한 크래시 복구의 교차점에 위치한다. 가장 가까운 이웃은 기계 검증된 재개 계약(Khan 2026), 제약으로 보호된 입장을 동반한 에이전트 트랜잭션 처리(Mnemosyne 2026), 체크포인트 롤백 공격 분석(ACRFence 2026)과 설계 수준의 프롬프트 인젝션 방어(CaMeL 2025)이다. 완전한 주석이 달린 목록, 기초, 인용 감사는 [references/related-work.md](references/related-work.md)에 있다.
 
+## 문서 지도
+
+`docs/` 아래의 모든 페이지와, 각각이 존재하는 이유:
+
+- **참조와 API**: [docs/api/README.md](docs/api/README.md) (라이브러리, CLI, MCP, 사이드카),
+  [docs/GLOSSARY.md](docs/GLOSSARY.md) (모든 복구 용어, 각자 구현을 가리킴),
+  [references/api.md](references/api.md), [references/cli.md](references/cli.md).
+- **작업 가이드**: [docs/guides/README.md](docs/guides/README.md),
+  [docs/recipes/README.md](docs/recipes/README.md), [docs/concepts/README.md](docs/concepts/README.md).
+- **보안**: [docs/threat_model.md](docs/threat_model.md) (무엇이 보호되고, 무엇이 탐지되며, 무엇이 명시적으로 보호되지 않는지),
+  [docs/signing_key_rotation.md](docs/signing_key_rotation.md) (키가 걸린 봉인을 회전하면서도 이전 해시 전용 계약의 검증을 깨뜨리지 않기).
+- **계약과 규모**: [docs/contract_compatibility.md](docs/contract_compatibility.md)
+  (다른 빌드에서 검증되는 봉인된 약속),
+  [docs/multi_agent_isolation.md](docs/multi_agent_isolation.md) (공유 `run_id` 격리),
+  [docs/audit-provenance-compaction-294.md](docs/audit-provenance-compaction-294.md)
+  (압축 후에도 남아 있는 출처).
+- **저술과 운영**: [docs/adapters_guide.md](docs/adapters_guide.md) (어댑터 작성),
+  [docs/cloud_api.md](docs/cloud_api.md) (선택적 배포 계층),
+  [docs/TESTING_MCP.md](docs/TESTING_MCP.md) (MCP 표면에 대한 적대적 감사),
+  [docs/CONTRIBUTING_ONBOARDING.md](docs/CONTRIBUTING_ONBOARDING.md) (오리엔테이션).
+- **계획**: [docs/ARCHITECTURE_EVOLUTION.md](docs/ARCHITECTURE_EVOLUTION.md) (북극성),
+  [docs/CONTINUUM_MASTER_PLAN.md](docs/CONTINUUM_MASTER_PLAN.md) (검증된 상태와 다음 작업),
+  [docs/research/README.md](docs/research/README.md) (그 계획들이 나온 노트).
+
 ## 상태와 제한
 
 - **테스트됨**: 이 트리의 2026-08-24 감사에서 완전한 실행으로 3,636 통과 + 23 스킵. CI는 Python 3.11, 3.12, 3.13에서 스위트를 강제하며, 카운트는 플랫폼과 Postgres 같은 선택적 서비스에 따라 다르다([STATUS.md](STATUS.md) 참조). MCP 표면도 라이브 프로토콜 위에서 적대적으로 감사되었다. [test.md](test.md) 참조.
@@ -566,3 +590,5 @@ Apache 2.0, [LICENSE](LICENSE) 참조.
 
 - [Issues](https://github.com/Cyrax321/CONTINUUM/issues) 버그 보고 및 기능 제안
 - [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) 설계 및 디자인 제안
+- [릴리스 노트](docs/release-notes.md)
+- [릴리스 체크리스트](docs/release-checklist.md)
