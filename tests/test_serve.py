@@ -984,30 +984,36 @@ def test_run_serve_http_survives_ctrl_c_and_still_shuts_down(monkeypatch, capsys
     import continuum.serve
     from continuum.serve import run_serve
 
+    events: list[str] = []
+
     class FakeHTTP:
         def __init__(self, server, port: int = 8765) -> None:
+            events.append(f"init:{port}")
             self.port = port
 
         def serve_forever(self) -> None:
             raise KeyboardInterrupt
 
         def shutdown(self) -> None:
-            self.shut = True
+            events.append("shutdown")
 
     class FakeServer:
         def __init__(self, database=None) -> None:
-            pass
+            events.append(f"server:{database}")
 
         def serve_stdio(self, instream, outstream) -> int:  # pragma: no cover
             return 0
 
         def close(self) -> None:
-            self.closed = True
+            events.append("close")
 
     monkeypatch.setattr(continuum.serve, "SidecarServer", FakeServer)
     monkeypatch.setattr("continuum.serve.server.SidecarHTTP", FakeHTTP)
 
     assert run_serve(db=None, transport="http") == 0
+    # The finally block is the whole point: shutdown then close must still run
+    # after the interrupt, in that order.
+    assert events == ["server:None", "init:8765", "shutdown", "close"]
     assert "CONTINUUM sidecar listening on http://127.0.0.1:8765" in capsys.readouterr().out
 
 
@@ -1026,7 +1032,9 @@ def test_cmd_serve_runs_over_stdio_and_closes_the_storage(tmp_path) -> None:
     s = TrackingStorage(str(tmp_path / "cmd_serve2.db"))
 
     class Args:
-        db = None
+        # run_serve builds a real SidecarServer from this, so None (or
+        # CONTINUUM_DB) would open continuum.db in the working directory.
+        db = str(tmp_path / "cmd_serve.db")
         transport = "stdio"
         port = 8765
 
@@ -1043,12 +1051,14 @@ def test_cmd_serve_runs_over_stdio_and_closes_the_storage(tmp_path) -> None:
     assert closed == [True]
 
 
-def test_cmd_serve_leaves_a_non_storage_object_alone() -> None:
+def test_cmd_serve_leaves_a_non_storage_object_alone(tmp_path) -> None:
     """Only a real ``Storage`` is closed; anything else is passed through."""
     from continuum.serve import cmd_serve
 
     class Args:
-        db = None
+        # As above: an explicit path keeps the test from opening the default
+        # continuum.db in whatever directory pytest runs from.
+        db = str(tmp_path / "non_storage.db")
         transport = "stdio"
         port = 8765
 
