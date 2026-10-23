@@ -110,6 +110,19 @@ Test counts: ~3680 collected on a minimal env.
   the refusal paths still fail closed. The match is documented as
   case-insensitive in `docs/api/security.md`.
 
+- **The nightly benchmark publish no longer pushes to `main` (#1641).** The
+  job committed the refreshed tables and ran `git push`, and `main` is
+  branch-protected, so the push was declined by the branch ruleset and the
+  workflow failed every night: the published tables stopped tracking the
+  benchmark on 2026-10-10. The refresh now commits to a branch the job owns
+  and opens a pull request from it, and a night that finds nothing to change
+  exits cleanly instead of pushing an empty commit. The `pull-requests: write`
+  grant the push path never needed is scoped to the publishing job alone, the
+  branch always builds on `main` rather than on whatever ref a manual dispatch
+  happened to select, the `Generated:` timestamp the run rewrites every night
+  no longer counts as a table change, and a night with nothing to publish
+  closes the refresh request an earlier night left open instead of leaving it
+  stale.
 - **A probe that prints `occurred:false` is now told the separator is the
   problem.** A command probe's verdict contract was documented only in the
   module docstring, so the place an operator met it was the error, and the
