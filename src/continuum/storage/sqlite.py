@@ -857,6 +857,10 @@ class SQLiteStorage(Storage):
         events or editing history in the archive fails here instead of
         minting a fresh genesis out of whatever live rows survive.
 
+        ``checked`` covers every row audited, archived and live alike, and
+        ``trusted_through`` keeps a fully verified archived prefix even when a
+        live event further down the chain fails (#1814).
+
         When deep=True, also audits all referenced out-of-band blobs across
         both live and archived events.
         """
@@ -882,10 +886,19 @@ class SQLiteStorage(Storage):
                 is not None
             )
             if has_archive or any(r["type"] == "EVENT_LOG_ANCHORED" for r in rows):
-                archive_violations, archive_edge = self._audit_archive(conn, run_id, deep=deep)
+                archive_violations, archive_edge, archive_checked = self._audit_archive(
+                    conn, run_id, deep=deep
+                )
                 violations.extend(archive_violations)
+                checked += archive_checked
                 if archive_violations:
                     intact = False
+                elif archive_edge is not None:
+                    # The archived prefix verified in full, so it stays the
+                    # trusted prefix even when a live event later fails: the
+                    # report must describe the last verified sequence, not the
+                    # last verified live row (#1814).
+                    last_good = archive_edge[0]
 
         if archive_edge is not None:
             # The live chain must pick up exactly where the archive ends.
@@ -978,18 +991,20 @@ class SQLiteStorage(Storage):
 
     def _audit_archive(
         self, conn: sqlite3.Connection, run_id: str, *, deep: bool = False
-    ) -> tuple[list[IntegrityViolation], tuple[int, str] | None]:
+    ) -> tuple[list[IntegrityViolation], tuple[int, str] | None, int]:
         """Deep-audit one run archived prefix (issue #239).
 
         The archive holds the run verbatim beginning, so it can be held to
         the full genesis standard: sequence 1 with no predecessor, unbroken
         sequencing and hash linkage throughout, and every stored hash equal
-        to the recomputed digest. Returns the violations found plus the
-        ``(sequence, hash)`` edge the live chain must continue from, or
-        ``None`` when nothing is archived.
+        to the recomputed digest. Returns the violations found, the
+        ``(sequence, hash)`` edge the live chain must continue from (``None``
+        when nothing is archived), and how many archived rows were audited
+        so the caller can account for them in its own tally (#1814).
         """
         violations: list[IntegrityViolation] = []
         edge: tuple[int, str] | None = None
+        checked = 0
         prev_hash: str | None = None
         expected_sequence = 1
 
@@ -997,6 +1012,7 @@ class SQLiteStorage(Storage):
             "SELECT * FROM events_archive WHERE run_id = ? ORDER BY sequence ASC", (run_id,)
         ).fetchall()
         for row in rows:
+            checked += 1
             try:
                 event = self._row_to_event(row, rehydrate=False)
             except CorruptedRecord as exc:
@@ -1064,7 +1080,7 @@ class SQLiteStorage(Storage):
             expected_sequence = event.sequence + 1
             edge = (event.sequence, event.hash) if event.hash is not None else None
 
-        return violations, edge
+        return violations, edge, checked
 
     # -- versions --------------------------------------------------------- #
 
