@@ -30,6 +30,7 @@ def storage(tmp_path: Path) -> Iterator[SQLiteStorage]:
 def test_resolves_default_bound_below_future_anchor(storage: SQLiteStorage) -> None:
     """The common path refreshes a stale checkpoint and retains room for the marker."""
     from continuum.checkpoint.manager import CheckpointManager
+    
     CheckpointManager(storage).checkpoint(RUN_ID)
     earlier_head = storage.last_sequence(RUN_ID)
 
@@ -90,9 +91,7 @@ def test_projection_failure_is_reported_as_anchor_failure(
     """A failed projection must become the resolver's contextual ValueError."""
     from continuum.checkpoint.manager import CheckpointManager
 
-    def broken_projection(
-        self: object, run_id: str, *, full_history: bool = True
-    ) -> SemanticState:
+    def broken_projection(self: object, run_id: str, *, full_history: bool = True) -> SemanticState:
         raise RuntimeError("unprojectable event")
 
     monkeypatch.setattr(CheckpointManager, "project_current", broken_projection)
@@ -107,9 +106,8 @@ def test_projection_failure_is_reported_as_anchor_failure(
     assert storage.latest_version(RUN_ID) is None
 
 
-def test_missing_version_after_checkpoint_is_rejected(
-    storage: SQLiteStorage, monkeypatch: pytest.MonkeyPatch
-) -> None:
+    def checkpoint_without_persistence(self: object, run_id: str, **kwargs: object) -> None:
+        return None    
     """Cover the defensive branch for a backend that reports no persisted version.
 
     SQLiteStorage normally persists a version during checkpoint(). Suppressing
