@@ -49,13 +49,16 @@ def test_tuple_and_list_arguments_open_one_attempt_not_two(
 ) -> None:
     """The same resource in a tuple and in a list is one unit of work.
 
-    A list-shaped claim already matches a tuple-shaped prior claim, so the two
-    shapes must not be able to each claim the action independently.
+    The stored side canonicalises and serialises its arguments, so a tuple
+    arrives there as a list; the shape that has to survive is the *incoming*
+    claim's. Both claims rename the field so the argument hash cannot match and
+    the ledger has to recognise the resource through identity tokens, where a
+    tuple on the incoming side used to yield no tokens and open a second slot.
     """
-    ledger.claim("file.process", {"files": ("invoice-101.pdf",)})
+    ledger.claim("file.process", {"files": ["invoice-101.pdf"]})
 
     with pytest.raises(UnknownSideEffect):
-        ledger.claim("file.process", {"files": ["invoice-101.pdf"]})
+        ledger.claim("file.process", {"items": ("invoice-101.pdf",)})
 
 
 def test_a_different_resource_in_a_tuple_still_claims_freshly(
@@ -65,9 +68,11 @@ def test_a_different_resource_in_a_tuple_still_claims_freshly(
 
     The guard against false matches is unchanged -- containment of token sets
     plus location agreement -- so a different filename stays separate work.
+    The re-claim renames the field and arrives as a tuple, so it is the drift
+    fallback that has to decline the match, not the argument hash.
     """
-    ledger.claim("file.process", {"files": ("invoice-101.pdf",)})
+    ledger.claim("file.process", {"files": ["invoice-101.pdf"]})
 
-    other = ledger.claim("file.process", {"files": ("invoice-202.pdf",)})
+    other = ledger.claim("file.process", {"items": ("invoice-202.pdf",)})
     assert other.fresh
-    assert other.action.arguments == {"files": ("invoice-202.pdf",)}
+    assert other.action.arguments == {"items": ("invoice-202.pdf",)}
