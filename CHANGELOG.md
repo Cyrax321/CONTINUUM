@@ -58,6 +58,21 @@ Test counts: ~3680 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **`verify_events` now accounts for archived events and keeps a verified
+  archive prefix trusted (#1814).** On a compacted run the audit re-digested
+  and chain-linked every archived row, but `checked` was incremented only in
+  the live loop (8 instead of 13 on the issue's repro), so `continuum verify`
+  and every report consumer understated the audit and contradicted
+  `trusted_through`. `last_good` was also seeded at 0 rather than from the
+  archive edge, so one tampered live row discarded a fully verified archived
+  prefix and a recovery engine would rebuild from nothing instead of from the
+  prefix that still holds. `_audit_archive` now returns how many archived
+  rows it audited, `verify_events` folds that count into `checked`, and when
+  the archive verifies in full `last_good` is seeded from the archive edge
+  before the live walk, so a later live violation stops trust exactly where
+  it should: at the last verified sequence. Both engines (SQLite and
+  Postgres) carry the fix and a regression test each.
+
 - **A developer's own venv and scratch database are no longer committed as the
   project's Continue registration (#1618).** PR #1612 added
   `.continue/config.yaml` to the repository root, fully baked: a `command`
