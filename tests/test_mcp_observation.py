@@ -450,8 +450,13 @@ def test_a_corrupt_count_does_not_break_the_next_write(tmp_path: Path) -> None:
     db = tmp_path / "continuum.db"
     path = observation_path(str(db))
     path.parent.mkdir(parents=True)
+    # The fixture must carry the current schema, or read_observed_clients
+    # discards the whole file before the writer ever sees the bad count and the
+    # test passes without exercising the repair it claims to check.
     path.write_text(
-        json.dumps({"schema": 1, "observed_clients": {"claude-code": {"count": "many"}}}),
+        json.dumps(
+            {"schema": SCHEMA_VERSION, "observed_clients": {"claude-code": {"count": "many"}}}
+        ),
         encoding="utf-8",
     )
 
