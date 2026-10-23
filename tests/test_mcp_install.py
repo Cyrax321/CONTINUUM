@@ -777,6 +777,7 @@ def test_tracked_paths_returns_none_when_git_missing(monkeypatch: pytest.MonkeyP
     """_tracked_paths returns None instead of raising when git is missing (#1803)."""
 
     def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Simulate missing git executable by raising FileNotFoundError."""
         raise FileNotFoundError(2, "No such file or directory: 'git'")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
