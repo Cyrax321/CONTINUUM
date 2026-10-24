@@ -1798,8 +1798,39 @@ def cmd_review(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     queue = ReviewQueue(storage, policy=policy)
 
     approve_id = getattr(args, "approve", None)
+    revoke_id = getattr(args, "revoke", None)
     approve_low_risk = getattr(args, "approve_low_risk", False)
     reviewer = getattr(args, "reviewer", None) or "operator"
+    reason = getattr(args, "reason", None)
+
+    action_count = sum(bool(x) for x in (approve_id, revoke_id, approve_low_risk))
+    if action_count > 1:
+        print("error: --approve, --revoke, and --approve-low-risk are mutually exclusive", file=err)
+        return ExitCode.ERROR
+
+    if revoke_id:
+        item = queue.get_item(args.run_id, revoke_id)
+        if item is None:
+            print(f"error: review item {revoke_id!r} not found for run {args.run_id!r}", file=err)
+            return ExitCode.NOT_FOUND
+        if item.status == "revoked":
+            print(
+                f"error: review item {revoke_id!r} is already revoked for run {args.run_id!r}",
+                file=err,
+            )
+            return ExitCode.ERROR
+        revoked = queue.revoke(args.run_id, revoke_id, revoker=reviewer, reason=reason)
+        payload = {
+            "run_id": args.run_id,
+            "review_id": revoke_id,
+            "status": "revoked",
+            "revoked_by": reviewer,
+            "reason": reason or "revoked via review queue",
+            "item": revoked.to_dict(),
+        }
+        text = f"Revoked review item '{revoke_id}' for run '{args.run_id}' (reviewer: {reviewer})."
+        _emit(payload, text, as_json=args.json, stream=out, palette=getattr(args, "_palette", None))
+        return ExitCode.OK
 
     if approve_id:
         item = queue.get_item(args.run_id, approve_id)
@@ -5427,6 +5458,17 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="REVIEW_ID",
         default=None,
         help="approve an individual review item by id.",
+    )
+    review.add_argument(
+        "--revoke",
+        metavar="REVIEW_ID",
+        default=None,
+        help="revoke a review item by id.",
+    )
+    review.add_argument(
+        "--reason",
+        default=None,
+        help="reason for revoking a review item.",
     )
     review.add_argument(
         "--approve-low-risk",

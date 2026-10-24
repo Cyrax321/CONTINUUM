@@ -214,3 +214,114 @@ def test_review_approve_already_approved_item_returns_error(storage: SQLiteStora
     code = args.func(args, storage, out, err)
     assert code == ExitCode.ERROR
     assert "already approved, nothing to approve" in err.getvalue()
+
+
+def test_review_revoke_item(storage: SQLiteStorage) -> None:
+    queue = ReviewQueue(storage)
+    item = queue.enqueue("run_1", "read_query")
+
+    out = io.StringIO()
+    err = io.StringIO()
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "review",
+            "run_1",
+            "--revoke",
+            item.review_id,
+            "--reviewer",
+            "sec_team",
+            "--reason",
+            "risky operation",
+        ]
+    )
+
+    code = args.func(args, storage, out, err)
+    assert code == ExitCode.OK
+    assert (
+        f"Revoked review item '{item.review_id}' for run 'run_1' (reviewer: sec_team)."
+        in out.getvalue()
+    )
+
+    reloaded = queue.get_item("run_1", item.review_id)
+    assert reloaded is not None
+    assert reloaded.status == "revoked"
+    assert len(queue.list_pending("run_1")) == 0
+
+
+def test_review_revoke_item_json(storage: SQLiteStorage) -> None:
+    queue = ReviewQueue(storage)
+    item = queue.enqueue("run_1", "read_query")
+
+    out = io.StringIO()
+    err = io.StringIO()
+    parser = build_parser()
+    args = parser.parse_args(["review", "run_1", "--revoke", item.review_id, "--json"])
+
+    code = args.func(args, storage, out, err)
+    assert code == ExitCode.OK
+    payload = json.loads(out.getvalue())
+    assert payload["run_id"] == "run_1"
+    assert payload["status"] == "revoked"
+    assert payload["review_id"] == item.review_id
+
+
+def test_review_revoke_missing_item_returns_not_found(storage: SQLiteStorage) -> None:
+    out = io.StringIO()
+    err = io.StringIO()
+    parser = build_parser()
+    args = parser.parse_args(["review", "run_1", "--revoke", "rev_missing"])
+
+    code = args.func(args, storage, out, err)
+    assert code == ExitCode.NOT_FOUND
+    assert "error: review item 'rev_missing' not found for run 'run_1'" in err.getvalue()
+
+
+def test_review_revoke_already_revoked_returns_error(storage: SQLiteStorage) -> None:
+    queue = ReviewQueue(storage)
+    item = queue.enqueue("run_1", "read_query")
+    queue.revoke("run_1", item.review_id)
+
+    out = io.StringIO()
+    err = io.StringIO()
+    parser = build_parser()
+    args = parser.parse_args(["review", "run_1", "--revoke", item.review_id])
+
+    code = args.func(args, storage, out, err)
+    assert code == ExitCode.ERROR
+    assert "already revoked for run 'run_1'" in err.getvalue()
+
+
+def test_review_approve_and_revoke_mutually_exclusive(storage: SQLiteStorage) -> None:
+    out = io.StringIO()
+    err = io.StringIO()
+    parser = build_parser()
+    args = parser.parse_args(["review", "run_1", "--approve", "rev_1", "--revoke", "rev_2"])
+
+    code = args.func(args, storage, out, err)
+    assert code == ExitCode.ERROR
+    assert "mutually exclusive" in err.getvalue()
+
+
+def test_review_revocation_blocks_recovery_validation(storage: SQLiteStorage) -> None:
+    from continuum.events import EventType
+    from continuum.models import Component, StateStatus
+    from continuum.state.semantic import project
+    from continuum.state.validator import StateValidator
+
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "test revocation validation"})
+    queue = ReviewQueue(storage)
+    item = queue.enqueue("run_1", "read_query")
+
+    # Revoke via CLI
+    parser = build_parser()
+    args = parser.parse_args(["review", "run_1", "--revoke", item.review_id])
+    assert args.func(args, storage, io.StringIO(), io.StringIO()) == ExitCode.OK
+
+    events = list(storage.read_events("run_1"))
+    state = project("run_1", events)
+    outcome = StateValidator().validate(state, events=events)
+    approval_entries = [e for e in outcome.report.statuses if e.component is Component.APPROVAL]
+    assert len(approval_entries) == 1
+    assert approval_entries[0].status is StateStatus.INVALID
+    assert "approval was revoked" in approval_entries[0].detail
