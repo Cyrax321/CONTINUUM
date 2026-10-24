@@ -703,7 +703,7 @@ class RecoveryEngine:
             plan=plan,
             reason=reason,
             scope=scope,
-            budget=self._budget_for(run_id, scope, plan),
+            budget=self._budget_for(run_id, scope, plan, active_budgets),
             post_checkpoint_observations=observations,
             liveness=liveness_section,
             triggering_risks=triggering_risks,
@@ -755,7 +755,11 @@ class RecoveryEngine:
         return decision
 
     def _budget_for(
-        self, run_id: str, scope: Iterable[str] | None, plan: RepairPlan
+        self,
+        run_id: str,
+        scope: Iterable[str] | None,
+        plan: RepairPlan,
+        dependency_budgets: Mapping[str, Any] | None = None,
     ) -> BudgetStatus | None:
         """The attempt budget this decision charges, or ``None`` when unknown.
 
@@ -770,7 +774,11 @@ class RecoveryEngine:
         if self._ledger is None:
             return None
         try:
-            return self._ledger.budget(run_id, scope=resolve_scope(scope, *plan.scopes))
+            return self._ledger.budget(
+                run_id,
+                scope=resolve_scope(scope, *plan.scopes),
+                dependency_budgets=dependency_budgets,
+            )
         except Exception:
             return None
 

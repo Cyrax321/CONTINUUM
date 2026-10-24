@@ -351,6 +351,72 @@ def test_dependency_without_an_explicit_budget_uses_the_global_default(
     )
 
 
+def test_scoped_query_honors_dependency_budget_without_a_marker(
+    ledger: RecoveryLedger,
+) -> None:
+    """A scoped query applies the dependency's configured ceiling even when
+    attempts were recorded before the caller supplied the budget registry.
+    """
+    ledger.record_attempt("run_1", dependency="ext:weather-api")
+    ledger.record_attempt("run_1", dependency="ext:payments")
+    ledger.record_attempt("run_1", dependency="ext:payments")
+    budgets = {
+        "default_max_attempts": 2,
+        "dependency_budgets": {"ext:weather-api": 1},
+    }
+
+    assert (
+        ledger.requires_human("run_1", scope=["ext:weather-api"], dependency_budgets=budgets)
+        is True
+    )
+    assert (
+        ledger.requires_human("run_1", scope=["ext:payments"], dependency_budgets=budgets) is True
+    )
+
+
+def test_run_wide_query_honors_default_max_attempts(ledger: RecoveryLedger) -> None:
+    """The run-wide query uses the registry default, not only max_attempts."""
+    ledger.record_attempt("run_1")
+    ledger.record_attempt("run_1")
+    budgets = {"default_max_attempts": 2}
+
+    assert ledger.requires_human("run_1", dependency_budgets=budgets) is True
+    assert ledger.requires_human("run_1", max_attempts=5, dependency_budgets=budgets) is True
+
+
+def test_run_wide_default_budget_marker_survives_compaction(
+    ledger: RecoveryLedger,
+) -> None:
+    """Recording at the configured run-wide threshold anchors escalation."""
+    budgets = {"default_max_attempts": 2}
+    ledger.record_attempt("run_1", dependency_budgets=budgets)
+    ledger.record_attempt("run_1", dependency_budgets=budgets)
+
+    assert ledger.requires_human("run_1", dependency_budgets=budgets) is True
+    assert any(
+        entry.kind == LedgerEntryKind.GATE.value
+        and entry.gate == "human_required"
+        and entry.anchor
+        and entry.scope is None
+        for entry in ledger.entries("run_1")
+    )
+
+    removed = ledger.compact("run_1", keep=1)
+
+    assert removed == 2
+    assert ledger.attempts("run_1") == 0
+    assert ledger.requires_human("run_1", dependency_budgets=budgets) is True
+
+
+def test_run_wide_default_respects_global_max_attempts(ledger: RecoveryLedger) -> None:
+    """The global ceiling can tighten, but never loosen, the registry default."""
+    ledger.record_attempt("run_1")
+    ledger.record_attempt("run_1")
+    budgets = {"default_max_attempts": 5}
+
+    assert ledger.requires_human("run_1", dependency_budgets=budgets, global_max_attempts=2) is True
+
+
 def test_dependency_budget_takes_precedence_over_the_global_default(
     ledger: RecoveryLedger,
 ) -> None:

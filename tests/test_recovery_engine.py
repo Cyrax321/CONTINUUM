@@ -954,6 +954,27 @@ def test_flaky_dependency_exhausting_budget_escalates_to_request_human(
     assert decision_scoped.plan.first.requires_human is False
 
 
+def test_assess_honors_run_wide_default_recovery_budget(store: SQLiteStorage) -> None:
+    """An exhausted run-wide default budget must reach the recovery verdict."""
+    seed(store)
+    ledger = RecoveryLedger(MemoryLedgerBackend())
+    ledger.record_attempt("run_1")
+    ledger.record_attempt("run_1")
+    engine = RecoveryEngine(
+        store,
+        ledger=ledger,
+        dependency_budgets={"default_max_attempts": 2},
+    )
+
+    decision = engine.assess("run_1", current_environment=env("v3"))
+
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    assert "recovery budget exhausted for run" in " ".join(decision.rationale)
+    assert any(
+        "2 of 2 attempts used, 0 remaining" in evidence for evidence in decision.contract.evidence
+    )
+
+
 def test_engine_record_attempt_and_requires_human_delegates(
     store: SQLiteStorage,
 ) -> None:
