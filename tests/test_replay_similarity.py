@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from continuum.replay_similarity import (
     SimilarityConfig,
     _cosine,
@@ -142,6 +144,29 @@ def test_classify_call_embedding_ragged_vector_no_false_fork() -> None:
                 "status": "completed",
             }
         },
+        config=cfg,
+        run_id="run_1",
+    )
+    assert kind == "fresh"
+    assert match is None
+
+
+@pytest.mark.parametrize("non_completed_status", ["failed", "started", "unknown", "compensated"])
+def test_non_completed_prior_actions_never_matched_as_replay(non_completed_status: str) -> None:
+    # issue #1837: similarity scan must skip non-completed actions
+    cfg = SimilarityConfig(kind="fuzzy", replay_threshold=0.85)
+    prior = {
+        "k_prior": {
+            "action_type": "send_invoice",
+            "status": non_completed_status,
+            "arguments": {"customer": "acme", "invoice_id": "INV-001"},
+        }
+    }
+    kind, match = classify_call(
+        new_key="paraphrased_key",
+        new_args={"invoice_id": "INV-001", "customer": "acme"},
+        action_type="send_invoice",
+        prior_actions=prior,
         config=cfg,
         run_id="run_1",
     )

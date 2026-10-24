@@ -153,6 +153,8 @@ def classify_call(
     for key, action in prior_actions.items():
         if action.get("action_type") != action_type:
             continue
+        if action.get("status") != "completed":
+            continue
         prior_args_raw = action.get("arguments") or {}
         if not isinstance(prior_args_raw, dict):
             continue

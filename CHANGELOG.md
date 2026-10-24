@@ -53,6 +53,15 @@ Test counts: ~3680 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **Similarity replay classification skips non-completed prior actions (#1837).**
+  `replay_similarity.classify_call` is documented to classify against completed
+  prior actions, but while its exact-key branch verified `status == "completed"`,
+  the similarity scan loop evaluated every prior action of the same action type.
+  Failed, started, unknown, or compensated actions with matching arguments were
+  incorrectly returned as replay hits rather than fresh calls, blocking retry
+  attempts when an LLM rephrased its arguments. The similarity scan now skips any
+  prior action whose status is not completed.
+
 - **The documented test count is re-synced, so `main` builds again.** The
   collected total had drifted to 3,680 against a documented 3,636, past the
   30-test tolerance `test_documented_count_matches_suite` allows, so the
