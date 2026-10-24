@@ -56,7 +56,9 @@ _COMMON_DIST_TO_IMPORTS: dict[str, set[str]] = {
     "python-dateutil": {"dateutil"},
     "attrs": {"attr", "attrs"},
     "protobuf": {"google.protobuf"},
-    "setuptools": {"pkg_resources", "setuptools"},
+    # setuptools >= 82 no longer ships pkg_resources, so only the setuptools
+    # import itself is pinned (#1606).
+    "setuptools": {"setuptools"},
     "pydantic-core": {"pydantic_core"},
     "typing-extensions": {"typing_extensions"},
 }
