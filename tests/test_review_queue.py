@@ -294,3 +294,86 @@ def test_parked_review_item_does_not_block_validation(queue: ReviewQueue) -> Non
     assert len(approval_entries) == 1
     assert approval_entries[0].status is StateStatus.VALID
     assert "parked for deferred review" in approval_entries[0].detail
+
+
+def test_revocation_with_approval_id_only_updates_queue_item(queue: ReviewQueue) -> None:
+    # If another caller writes APPROVAL_REVOKED carrying only approval_id
+    # (matching standard format), list_all matches it against the review item.
+    item = queue.enqueue("run_1", "read_query")
+    queue.storage.append_event(
+        "run_1",
+        EventType.APPROVAL_REVOKED,
+        {"approval_id": item.review_id, "reason": "operator rejected via legacy format"},
+    )
+
+    reloaded = queue.get_item("run_1", item.review_id)
+    assert reloaded is not None
+    assert reloaded.status == "revoked"
+    assert reloaded.is_pending is False
+    assert len(queue.list_pending("run_1")) == 0
+
+
+def test_grant_with_approval_id_only_updates_queue_item(queue: ReviewQueue) -> None:
+    # If another caller writes APPROVAL_GRANTED carrying only approval_id,
+    # list_all matches it against the review item.
+    item = queue.enqueue("run_1", "read_query")
+    queue.storage.append_event(
+        "run_1",
+        EventType.APPROVAL_GRANTED,
+        {"approval_id": item.review_id, "granted_by": "legacy_operator"},
+    )
+
+    reloaded = queue.get_item("run_1", item.review_id)
+    assert reloaded is not None
+    assert reloaded.status == "approved"
+    assert reloaded.approved_by == "legacy_operator"
+    assert reloaded.is_pending is False
+    assert len(queue.list_pending("run_1")) == 0
+
+
+def test_queue_revoke_method(queue: ReviewQueue) -> None:
+    item = queue.enqueue("run_1", "read_query")
+    revoked = queue.revoke("run_1", item.review_id, revoker="operator_1", reason="unsafe operation")
+    assert revoked.status == "revoked"
+    assert revoked.is_pending is False
+
+    # Durable event recorded
+    events = queue.storage.read_all_events("run_1")
+    rev_events = [e for e in events if e.type is EventType.APPROVAL_REVOKED]
+    assert len(rev_events) == 1
+    assert rev_events[0].payload["review_id"] == item.review_id
+    assert rev_events[0].payload["revoked_by"] == "operator_1"
+    assert rev_events[0].payload["reason"] == "unsafe operation"
+
+    # Revoking already revoked item raises ValueError
+    with pytest.raises(ValueError, match="already revoked"):
+        queue.revoke("run_1", item.review_id)
+
+    # Revoking unknown item raises KeyError
+    with pytest.raises(KeyError):
+        queue.revoke("run_1", "rev_unknown")
+
+
+def test_approve_retries_on_concurrent_write_conflict(
+    queue: ReviewQueue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from continuum.storage import ConcurrentWriteError
+
+    item = queue.enqueue("run_1", "read_query")
+
+    original_append = queue.storage.append_event
+    calls = 0
+
+    def flaky_append(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            # Advance sequence behind the scenes
+            original_append("run_1", EventType.TASK_UPDATED, {"progress": 1})
+            raise ConcurrentWriteError("simulated concurrency race")
+        return original_append(*args, **kwargs)
+
+    monkeypatch.setattr(queue.storage, "append_event", flaky_append)
+    approved = queue.approve("run_1", item.review_id, reviewer="operator_race")
+    assert approved.status == "approved"
+    assert calls == 2
