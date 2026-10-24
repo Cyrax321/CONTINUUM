@@ -89,6 +89,12 @@ Test counts: ~3680 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **The Ruff format gate on `main` is restored (#1822).**
+  `tests/test_storage_compaction_bound.py` landed with missing blank lines under
+  imports and multi-line function signatures, causing `ruff format --check` to
+  fail in the `Lint & Type-check` CI job on `main` and all branches opened
+  against it. The file is now reformatted.
+
 - **A developer's own venv and scratch database are no longer committed as the
   project's Continue registration (#1618).** PR #1612 added
   `.continue/config.yaml` to the repository root, fully baked: a `command`
