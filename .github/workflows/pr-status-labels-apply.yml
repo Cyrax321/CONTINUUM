@@ -161,17 +161,7 @@ jobs:
               if (isFirstContribution) {
                 body.push(
                   "",
-                  "### 🎉 First Contribution Milestone Reached",
-                  `Your changes are approved and will become part of CONTINUUM. Thank you for contributing your time and skill, @${author}!`,
-                  "",
-                  "⭐ **Showcase your work:** Consider starring the repository to follow future releases containing your code and feature the project on your profile.",
-                  "",
-                  "🚀 **Keep your streak going:** When you are ready for your next quest, check out [`good first issue`](https://github.com/Cyrax321/CONTINUUM/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) tickets or start a discussion for a feature you would like to see."
-                );
-              } else {
-                body.push(
-                  "",
-                  "Welcome back, and thank you for continuing to shape CONTINUUM!"
+                  "**Welcome aboard!** Don't forget to **star the repo ⭐** to follow upcoming releases containing your work and get your contributions noticed."
                 );
               }
 
