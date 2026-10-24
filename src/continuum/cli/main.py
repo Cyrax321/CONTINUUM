@@ -683,24 +683,40 @@ def cmd_status(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         f"{state.progress.pending} pending, {state.progress.failed} failed",
         f"decisions: {len(state.valid_decisions())}/{len(state.decisions)} valid",
     ]
+    status_payload: dict[str, Any] = {
+        "run_id": state.run_id,
+        "goal": (
+            {
+                "description": state.goal.description,
+                "version": state.goal.version,
+            }
+            if state.goal
+            else None
+        ),
+        "version": state.version,
+        "progress": {
+            "completed": state.progress.completed,
+            "pending": state.progress.pending,
+            "failed": state.progress.failed,
+            "total": state.progress.total,
+        },
+        "decisions": {
+            "valid": len(state.valid_decisions()),
+            "total": len(state.decisions),
+        },
+    }
     if degraded:
         lines.append("")
         lines += _degraded_lines(state)
-    text_payload: dict[str, Any] = (
-        {
-            "projection_failed_at": {
-                "sequence": state.unprojectable_at_sequence,
-                "type": state.unprojectable_event_type,
-                "reason": state.unprojectable_reason,
-            }
+        status_payload["projection_failed_at"] = {
+            "sequence": state.unprojectable_at_sequence,
+            "type": state.unprojectable_event_type,
+            "reason": state.unprojectable_reason,
         }
-        if degraded
-        else {}
-    )
     _emit(
-        text_payload,
+        status_payload,
         "\n".join(lines),
-        as_json=False,
+        as_json=args.json,
         stream=out,
         palette=getattr(args, "_palette", None),
     )
