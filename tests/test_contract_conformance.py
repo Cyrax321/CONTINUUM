@@ -24,6 +24,9 @@ import pytest
 
 from continuum.models import RecoveryContract
 from continuum.recovery.conformance import (
+    ConformanceFailure,
+    ContractFixture,
+    _covered_fields,
     check_fixture,
     corpus_summary,
     load_corpus,
@@ -289,3 +292,144 @@ def test_checker_reports_a_fixture_that_disagrees(tmp_path: Path) -> None:
     result = check_fixture(fixture)
     assert not result.passed
     assert "does not match its stored hash" in result.detail
+
+
+def test_covered_fields_unknown_version_raises() -> None:
+    """Requesting covered fields for an unknown contract version raises ConformanceFailure."""
+    with pytest.raises(ConformanceFailure, match="unknown contract version 999"):
+        _covered_fields(999)
+
+
+def test_check_fixture_unsupported_version_expecting_verified() -> None:
+    """An unsupported contract version expecting verified=True fails conformance."""
+    fixture = ContractFixture(
+        name="unsupported_expect_verified",
+        category="forward-extension",
+        contract={"run_id": "r1", "checkpoint_version": 1},
+        contract_version=999,
+        digest_input=None,
+        expected_verified=True,
+        expected_reason="claims to verify on unsupported version",
+        note="test unsupported version expecting verified",
+    )
+    result = check_fixture(fixture)
+    assert not result.passed
+    assert "unsupported version 999 is expected to verify" in result.detail
+
+
+def test_check_fixture_malformed_payload_expecting_verified() -> None:
+    """A fixture whose payload fails model validation but expects verified=True fails conformance."""
+    fixture = ContractFixture(
+        name="malformed_expect_verified",
+        category="malformed",
+        contract={"run_id": 12345},
+        contract_version=1,
+        digest_input="some-digest",
+        expected_verified=True,
+        expected_reason="invalid model payload expecting verified",
+        note="test malformed payload expecting verified",
+    )
+    result = check_fixture(fixture)
+    assert not result.passed
+    assert "payload does not load under the current model but is expected to verify" in result.detail
+
+
+def test_check_fixture_supported_version_missing_digest_input() -> None:
+    """A supported version with digest_input=None fails conformance."""
+    contract = seal_contract(
+        RecoveryContract.model_validate(
+            {
+                "run_id": "run_no_digest",
+                "checkpoint_version": 1,
+                "recovery_status": "safe_to_resume",
+                "verified": ["goal"],
+            }
+        )
+    )
+    fixture = ContractFixture(
+        name="supported_missing_digest_input",
+        category="current",
+        contract=contract.model_dump(mode="json"),
+        contract_version=1,
+        digest_input=None,
+        expected_verified=True,
+        expected_reason="verified",
+        note="test supported version with None digest input",
+    )
+    result = check_fixture(fixture)
+    assert not result.passed
+    assert "is supported, so the fixture must declare the canonical digest input" in result.detail
+
+
+def test_load_corpus_empty_dir_raises(tmp_path: Path) -> None:
+    """Loading a corpus from a directory with no json fixtures raises ConformanceFailure."""
+    with pytest.raises(ConformanceFailure, match="no fixtures found in"):
+        load_corpus(tmp_path)
+
+
+def test_check_fixture_digest_input_mismatch() -> None:
+    """A fixture whose declared digest_input differs from recomputed fails conformance."""
+    contract = seal_contract(
+        RecoveryContract.model_validate(
+            {
+                "run_id": "run_mismatch",
+                "checkpoint_version": 1,
+                "recovery_status": "safe_to_resume",
+                "verified": ["goal"],
+            }
+        )
+    )
+    fixture = ContractFixture(
+        name="digest_input_mismatch",
+        category="current",
+        contract=contract.model_dump(mode="json"),
+        contract_version=1,
+        digest_input="differing_digest_input",
+        expected_verified=True,
+        expected_reason="verified",
+        note="test digest input mismatch",
+    )
+    result = check_fixture(fixture)
+    assert not result.passed
+    assert "recomputed digest input does not match the fixture's declared input" in result.detail
+
+
+def test_contract_fixture_expects_rejection_property() -> None:
+    """expects_rejection reflects whether verified is expected."""
+    f1 = ContractFixture(
+        name="f1",
+        category="c",
+        contract={},
+        contract_version=1,
+        digest_input=None,
+        expected_verified=False,
+        expected_reason="r",
+    )
+    assert f1.expects_rejection is True
+
+    f2 = ContractFixture(
+        name="f2",
+        category="c",
+        contract={},
+        contract_version=1,
+        digest_input=None,
+        expected_verified=True,
+        expected_reason="r",
+    )
+    assert f2.expects_rejection is False
+
+
+def test_conformance_result_truthiness() -> None:
+    """ConformanceResult bool matches passed status."""
+    from continuum.recovery.conformance import ConformanceResult
+
+    assert bool(ConformanceResult("f", "c", passed=True)) is True
+    assert bool(ConformanceResult("f", "c", passed=False)) is False
+
+
+def test_load_corpus_default_directory() -> None:
+    """load_corpus with no directory defaults to the checked-in corpus."""
+    fixtures = load_corpus()
+    assert len(fixtures) > 0
+
+
