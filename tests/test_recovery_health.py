@@ -1,4 +1,4 @@
-"""Cadence contracts and read-path liveness evaluation (issue #1656).
+"""Cadence contracts and read-path liveness evaluation (issue #302).
 
 ``recovery.health`` is a pure comparative module: it reports
 ``now - last_event_ts`` against an operator-set threshold, with an injected
