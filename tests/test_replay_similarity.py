@@ -115,6 +115,66 @@ def test_cross_type_matching_is_never_performed() -> None:
     del match
 
 
+@pytest.mark.parametrize("status", ["failed", "started", "unknown", None])
+def test_non_completed_prior_action_is_not_replayed(status: str | None) -> None:
+    # A prior action that failed, timed out, or remains started must not turn a
+    # similar post-restore call into a replay hit -- the work has to run again.
+    prior = {
+        "k_failed": {
+            "action_type": "send_invoice",
+            "status": status,
+            "arguments": {"customer": "acme", "invoice_id": "INV-001"},
+        }
+    }
+    kind, match = classify_call(
+        new_key="paraphrased-key",
+        new_args={"invoice_id": "INV-001", "customer": "acme"},
+        action_type="send_invoice",
+        prior_actions=prior,
+        config=_cfg(),
+        run_id="run_1",
+    )
+    assert kind == "fresh"
+    assert match is None
+
+
+def test_non_completed_prior_action_is_not_matched_as_fork() -> None:
+    # Same gate for the fork band: a non-completed action must not be reported
+    # as a near-miss match either, otherwise callers would treat it as related.
+    prior = {
+        "k_failed": {
+            "action_type": "send_invoice",
+            "status": "failed",
+            "arguments": {"customer": "acme", "invoice_id": "INV-001"},
+        }
+    }
+    kind, match = classify_call(
+        new_key="paraphrased-key",
+        new_args={"invoice_id": "INV-001", "customer": "acme"},
+        action_type="send_invoice",
+        prior_actions=prior,
+        config=_cfg(),
+        run_id="run_1",
+    )
+    assert kind == "fresh"
+    assert match is None
+
+
+def test_completed_action_still_matches_below_and_above_fork_threshold() -> None:
+    # The status gate must not weaken matching for genuinely completed actions.
+    kind, match = classify_call(
+        new_key="paraphrased-key",
+        new_args={"invoice_id": "INV-001", "customer": "acme"},
+        action_type="send_invoice",
+        prior_actions=PRIOR,
+        config=_cfg(),
+        run_id="run_1",
+    )
+    assert kind == "replay"
+    assert match is not None
+    assert match["status"] == "completed"
+
+
 def test_cosine_unequal_length_embeddings_norm() -> None:
     # issue #1608: _cosine computes norm over the full vectors, not truncated zip pairs
     a = [1.0, 0.0]

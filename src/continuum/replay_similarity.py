@@ -137,7 +137,9 @@ def classify_call(
     of ``"replay"``, ``"fork"``, or ``"fresh"``.
 
     Only actions of the SAME type are compared; cross-type matching is never
-    performed regardless of similarity score.
+    performed regardless of similarity score. Only COMPLETED actions are
+    matched: a prior action that failed, timed out, or remains started must
+    not replay, so a similar call is treated as fresh and re-executed.
     """
     from continuum.actions.idempotency import idempotency_key
 
@@ -152,6 +154,8 @@ def classify_call(
     best_action: dict[str, Any] | None = None
     for key, action in prior_actions.items():
         if action.get("action_type") != action_type:
+            continue
+        if action.get("status") != "completed":
             continue
         prior_args_raw = action.get("arguments") or {}
         if not isinstance(prior_args_raw, dict):
