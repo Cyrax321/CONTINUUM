@@ -26,7 +26,7 @@ from continuum.recovery.escalation import (
     load_escalation_policy,
 )
 from continuum.security.hashing import make_id
-from continuum.storage import Storage
+from continuum.storage import ConcurrentWriteError, Storage
 
 __all__ = [
     "ReviewItem",
@@ -212,14 +212,14 @@ class ReviewQueue:
                     batch_id=str(batch_id) if batch_id is not None else None,
                 )
             elif event.type is EventType.APPROVAL_GRANTED:
-                review_id = str(payload.get("review_id") or "")
+                review_id = str(payload.get("review_id") or payload.get("approval_id") or "")
                 if review_id in items:
                     target = items[review_id]
                     target.status = "approved"
                     target.approved_by = str(payload.get("granted_by") or "operator")
                     target.approved_at = event.timestamp
             elif event.type is EventType.APPROVAL_REVOKED:
-                review_id = str(payload.get("review_id") or "")
+                review_id = str(payload.get("review_id") or payload.get("approval_id") or "")
                 if review_id in items:
                     target = items[review_id]
                     target.status = "revoked"
@@ -272,30 +272,35 @@ class ReviewQueue:
         reviewer: str = "operator",
     ) -> ReviewItem:
         """Approve an individual review item and record the durable event."""
-        item = self.get_item(run_id, review_id)
-        if item is None:
-            raise KeyError(f"no review item with id {review_id!r} in run {run_id!r}")
-        if not item.is_pending:
-            raise ValueError(f"review item {review_id!r} is already {item.status}")
+        while True:
+            item = self.get_item(run_id, review_id)
+            if item is None:
+                raise KeyError(f"no review item with id {review_id!r} in run {run_id!r}")
+            if not item.is_pending:
+                raise ValueError(f"review item {review_id!r} is already {item.status}")
 
-        payload: dict[str, Any] = {
-            "approval_id": review_id,
-            "review_id": review_id,
-            "granted_by": reviewer,
-            "reason": "approved via review queue",
-        }
+            expected_seq = self.storage.last_sequence(run_id)
+            payload: dict[str, Any] = {
+                "approval_id": review_id,
+                "review_id": review_id,
+                "granted_by": reviewer,
+                "reason": "approved via review queue",
+            }
 
-        event = self.storage.append_event(
-            run_id,
-            EventType.APPROVAL_GRANTED,
-            payload,
-            source=Origin.HUMAN,
-        )
-
-        item.status = "approved"
-        item.approved_by = reviewer
-        item.approved_at = event.timestamp
-        return item
+            try:
+                event = self.storage.append_event(
+                    run_id,
+                    EventType.APPROVAL_GRANTED,
+                    payload,
+                    expected_sequence=expected_seq,
+                    source=Origin.HUMAN,
+                )
+                item.status = "approved"
+                item.approved_by = reviewer
+                item.approved_at = event.timestamp
+                return item
+            except ConcurrentWriteError:
+                continue
 
     def approve_low_risk(
         self,
@@ -314,19 +319,29 @@ class ReviewQueue:
             if max_risk is not None
             else float(self.policy.get("blast_radius_threshold", 0.8))
         )
-        pending = self.list_pending(run_id)
         batch_id = make_id("batch")
-
         approved: list[ReviewItem] = []
-        for item in pending:
-            # Immediate blockers always require individual review. A caller
-            # passing a custom threshold must not be able to widen the batch
-            # over the blast radius threshold and clear high-risk items nobody
-            # looked at, so the guard is unconditional rather than only in the
-            # default-threshold path (issue #1410 review).
-            if item.immediate:
-                continue
-            if item.risk_score <= threshold:
+
+        while True:
+            pending = self.list_pending(run_id)
+            approved_ids = {it.review_id for it in approved}
+            candidates = [
+                it
+                for it in pending
+                if it.review_id not in approved_ids
+                and not it.immediate
+                and it.risk_score <= threshold
+            ]
+            if not candidates:
+                break
+
+            conflict = False
+            for item in candidates:
+                fresh = self.get_item(run_id, item.review_id)
+                if fresh is None or not fresh.is_pending:
+                    continue
+
+                expected_seq = self.storage.last_sequence(run_id)
                 payload: dict[str, Any] = {
                     "approval_id": item.review_id,
                     "review_id": item.review_id,
@@ -334,15 +349,59 @@ class ReviewQueue:
                     "reason": f"bulk-approved low-risk (threshold {threshold})",
                     "batch_id": batch_id,
                 }
-                event = self.storage.append_event(
-                    run_id,
-                    EventType.APPROVAL_GRANTED,
-                    payload,
-                    source=Origin.HUMAN,
-                )
-                item.status = "approved"
-                item.approved_by = reviewer
-                item.approved_at = event.timestamp
-                approved.append(item)
+                try:
+                    event = self.storage.append_event(
+                        run_id,
+                        EventType.APPROVAL_GRANTED,
+                        payload,
+                        expected_sequence=expected_seq,
+                        source=Origin.HUMAN,
+                    )
+                    item.status = "approved"
+                    item.approved_by = reviewer
+                    item.approved_at = event.timestamp
+                    approved.append(item)
+                except ConcurrentWriteError:
+                    conflict = True
+                    break
+
+            if not conflict:
+                break
 
         return approved
+
+    def revoke(
+        self,
+        run_id: str,
+        review_id: str,
+        revoker: str = "operator",
+        reason: str | None = None,
+    ) -> ReviewItem:
+        """Revoke a review item and record the durable APPROVAL_REVOKED event."""
+        while True:
+            item = self.get_item(run_id, review_id)
+            if item is None:
+                raise KeyError(f"no review item with id {review_id!r} in run {run_id!r}")
+            if item.status == "revoked":
+                raise ValueError(f"review item {review_id!r} is already revoked")
+
+            expected_seq = self.storage.last_sequence(run_id)
+            payload: dict[str, Any] = {
+                "approval_id": review_id,
+                "review_id": review_id,
+                "revoked_by": revoker,
+                "reason": reason or "revoked via review queue",
+            }
+
+            try:
+                self.storage.append_event(
+                    run_id,
+                    EventType.APPROVAL_REVOKED,
+                    payload,
+                    expected_sequence=expected_seq,
+                    source=Origin.HUMAN,
+                )
+                item.status = "revoked"
+                return item
+            except ConcurrentWriteError:
+                continue
