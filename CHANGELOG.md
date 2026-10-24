@@ -89,6 +89,19 @@ Test counts: ~3680 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **Kubernetes jobs no longer share one pod name, and pods are cleaned up (#1807).**
+  `KubernetesAdapter.run_job` invoked `kubectl run continuum-job` with a
+  hardcoded pod name and no `--rm`, so `kubectl run` left the completed pod
+  behind and the API server refused the next call in the namespace with
+  `pods "continuum-job" already exists`. A namespace could run exactly one
+  `run_job`, ever, and completed pods accumulated one per invocation. Each job
+  now gets a name derived from the run id and the job's arguments — the same
+  inputs the action ledger keys its claim on, so a retry of one attempt re-uses
+  its own name — sanitized and length-bounded to stay a valid DNS subdomain,
+  and the pod is removed when the command finishes via `--rm`, matching the
+  container adapter's `docker run --rm`.
+
+
 - **A developer's own venv and scratch database are no longer committed as the
   project's Continue registration (#1618).** PR #1612 added
   `.continue/config.yaml` to the repository root, fully baked: a `command`
