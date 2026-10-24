@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from continuum.events import EventType
-from continuum.models import Run
+from continuum.models import Run, StateStatus
 from continuum.provenance.graph import build_provenance_graph, downstream_of
 from continuum.storage.sqlite import SQLiteStorage
 
@@ -155,3 +155,135 @@ def test_cli_impact_json(tmp_path: Path):
     assert payload["evidence"] == ev.event_id
     assert any(n["event_id"] == dec.event_id for n in payload["downstream"])
     s2.close()
+
+
+def test_invalidated_decision_and_finding_mark_nodes_invalid_with_reason(tmp_path: Path):
+    db = str(tmp_path / "invalidation.db")
+    storage = SQLiteStorage(db)
+    run_id = "run_inv_1"
+    storage.create_run(Run(run_id=run_id, goal="test invalidation"))
+    dec_event = storage.append_event(
+        run_id,
+        EventType.DECISION_CREATED,
+        {"decision_id": "d1", "decision": "adopt P-42"},
+    )
+    storage.append_event(
+        run_id,
+        EventType.DECISION_INVALIDATED,
+        {"decision_id": "d1", "reason": "superseded by P-43"},
+    )
+    find_event = storage.append_event(
+        run_id,
+        EventType.FINDING_ADDED,
+        {"finding_id": "f1", "claim": "detected leak"},
+    )
+    storage.append_event(
+        run_id,
+        EventType.FINDING_INVALIDATED,
+        {"finding_id": "f1", "invalidated_reason": "benign buffer"},
+    )
+    events = list(storage.read_all_events(run_id))
+    storage.close()
+
+    graph = build_provenance_graph(events)
+    assert dec_event.event_id in graph.nodes
+    dec_node = graph.nodes[dec_event.event_id]
+    assert dec_node.status == StateStatus.INVALID
+    assert dec_node.invalidated_reason == "superseded by P-43"
+
+    assert find_event.event_id in graph.nodes
+    find_node = graph.nodes[find_event.event_id]
+    assert find_node.status == StateStatus.INVALID
+    assert find_node.invalidated_reason == "benign buffer"
+
+    dict_data = graph.to_dict()
+    nodes_by_id = {n["event_id"]: n for n in dict_data["nodes"]}
+    assert nodes_by_id[dec_event.event_id]["status"] == "invalid"
+    assert nodes_by_id[dec_event.event_id]["invalidated_reason"] == "superseded by P-43"
+    assert nodes_by_id[find_event.event_id]["status"] == "invalid"
+    assert nodes_by_id[find_event.event_id]["invalidated_reason"] == "benign buffer"
+
+    # Verify CLI --json output reflects the invalid status and reason
+    code, out, _ = _run("provenance", run_id, "--json", db=db)
+    assert code == 0
+    import json
+
+    cli_payload = json.loads(out)
+    cli_nodes = {n["event_id"]: n for n in cli_payload["nodes"]}
+    assert cli_nodes[dec_event.event_id]["status"] == "invalid"
+    assert cli_nodes[dec_event.event_id]["invalidated_reason"] == "superseded by P-43"
+    assert cli_nodes[find_event.event_id]["status"] == "invalid"
+    assert cli_nodes[find_event.event_id]["invalidated_reason"] == "benign buffer"
+
+
+def test_synthetic_event_id_invalidation_and_payload_initial_status():
+    from continuum.events import Event
+
+    events = [
+        Event(
+            run_id="r_syn",
+            sequence=1,
+            type=EventType.DECISION_CREATED,
+            event_id="d_syn",
+            payload={"decision_id": "d_syn", "decision": "synthetic decision"},
+        ),
+        Event(
+            run_id="r_syn",
+            sequence=2,
+            type=EventType.DECISION_INVALIDATED,
+            event_id="d_inv",
+            payload={"decision_id": "d_syn", "reason": "superseded"},
+        ),
+        Event(
+            run_id="r_syn",
+            sequence=3,
+            type=EventType.FINDING_ADDED,
+            event_id="f_syn",
+            payload={
+                "finding_id": "f_syn",
+                "claim": "already invalid finding",
+                "status": "invalid",
+                "invalidated_reason": "rejected on entry",
+            },
+        ),
+        Event(
+            run_id="r_syn",
+            sequence=4,
+            type=EventType.FINDING_ADDED,
+            event_id="f_syn2",
+            payload={"finding_id": "f_syn2", "claim": "finding to override"},
+        ),
+        Event(
+            run_id="r_syn",
+            sequence=5,
+            type=EventType.FINDING_INVALIDATED,
+            event_id="f_inv2",
+            payload={
+                "finding_id": "f_syn2",
+                "status": "requires_review",
+                "invalidated_reason": "flagged for review",
+            },
+        ),
+        Event(
+            run_id="r_syn",
+            sequence=6,
+            type=EventType.DECISION_INVALIDATED,
+            event_id="d_inv_unknown",
+            payload={"decision_id": "unknown_decision", "reason": "noop"},
+        ),
+        Event(
+            run_id="r_syn",
+            sequence=7,
+            type=EventType.FINDING_INVALIDATED,
+            event_id="f_inv_no_id",
+            payload={"reason": "missing id"},
+        ),
+    ]
+
+    graph = build_provenance_graph(events)
+    assert graph.nodes["d_syn"].status == StateStatus.INVALID
+    assert graph.nodes["d_syn"].invalidated_reason == "superseded"
+    assert graph.nodes["f_syn"].status == StateStatus.INVALID
+    assert graph.nodes["f_syn"].invalidated_reason == "rejected on entry"
+    assert graph.nodes["f_syn2"].status == StateStatus.REQUIRES_REVIEW
+    assert graph.nodes["f_syn2"].invalidated_reason == "flagged for review"

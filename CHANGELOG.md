@@ -89,6 +89,14 @@ Test counts: ~3680 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **Provenance DAG now updates node status and reason upon invalidation events (#1775).**
+  `build_provenance_graph` previously hardcoded `status=StateStatus.VALID` for every
+  node and ignored `DECISION_INVALIDATED` and `FINDING_INVALIDATED` events. The
+  DAG projector now folds invalidation events matching by payload identifier or
+  event ID, updates node status to `StateStatus.INVALID`, records `invalidated_reason`,
+  and serializes `invalidated_reason` in `ProvenanceGraph.to_dict()` for `--json`
+  output.
+
 - **A developer's own venv and scratch database are no longer committed as the
   project's Continue registration (#1618).** PR #1612 added
   `.continue/config.yaml` to the repository root, fully baked: a `command`
