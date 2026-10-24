@@ -89,6 +89,17 @@ Test counts: ~3680 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **Replay similarity no longer matches non-completed prior actions (#1837).**
+  `classify_call`'s exact-key path already restricted replay to actions whose
+  status is `completed`, but the similarity scan compared against every prior
+  action of the same type regardless of status. A post-restore call with
+  arguments similar to a previously failed, started, unknown, or compensated
+  action exceeded the replay threshold and was classified as a replay hit of
+  that action, blocking re-execution of an operation that never succeeded. The
+  scan now skips any action whose status is not `completed`, so such calls are
+  classified `fresh` (or matched against a completed action when one exists)
+  and the operation executes again.
+
 - **A developer's own venv and scratch database are no longer committed as the
   project's Continue registration (#1618).** PR #1612 added
   `.continue/config.yaml` to the repository root, fully baked: a `command`
