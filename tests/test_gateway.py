@@ -437,6 +437,23 @@ def test_an_empty_body_is_still_an_empty_mapping(db: str, gateway: str) -> None:
     assert "key template" in body["reason"]
 
 
+def test_non_mapping_body_missing_template_field_is_refused(db: str, gateway: str) -> None:
+    """A non-object JSON body cannot satisfy a template with placeholders."""
+    claim(db, "invoice:seed")
+    status, body = _post_raw(gateway, "/v1/invoices", "[1, 2, 3]")
+    assert status == 403
+    assert "key template 'invoice:{id}' needs body field(s) ['id']" in body["reason"]
+
+
+def test_render_key_with_non_mapping_body() -> None:
+    """render_key resolves static templates and refuses missing fields on non-mappings."""
+    assert render_key("bulk-static", [1, 2, 3]) == "bulk-static"
+    assert render_key("bulk-static", None) == "bulk-static"
+    with pytest.raises(GatewayConfigError, match="needs body field"):
+        render_key("invoice:{id}", [1, 2, 3])
+
+
+
 # --- CLI ---------------------------------------------------------------------- #
 
 
@@ -2258,6 +2275,88 @@ def test_a_plain_http_upstream_is_reached_and_settles_the_claim(
     # The recorded path names the scheme the request actually travelled, so
     # the evidence does not claim TLS a plain-HTTP upstream never used.
     assert [e.payload["path"] for e in evidence] == [f"{origin}/v1/invoices"]
+
+
+def test_non_object_json_body_forwarded_to_upstream(
+    db: str, tmp_path: Path, http_upstream: tuple[str, list[bytes]]
+) -> None:
+    """A request whose top level is not a dict forwards its raw bytes (#1774).
+
+    Bulk endpoints taking JSON arrays or routes with static templates need
+    no body fields to render their idempotency keys. The raw wire bytes must
+    reach the upstream rather than being dropped to an empty body.
+    """
+    origin, received = http_upstream
+    registry_path = tmp_path / "gateway_bulk.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "upstreams": [
+                    {
+                        "host": origin,
+                        "methods": ["POST"],
+                        "prefix": "/v1/invoices/batch",
+                        "action_type": "bulk_invoices",
+                        "key_template": "bulk-invoices-static",
+                    }
+                ]
+            }
+        )
+    )
+    routes = load_gateway_config(registry_path)
+
+    with SQLiteStorage(db) as store:
+        outcome = ActionLedger(store, "run_1").claim(
+            "bulk_invoices", {}, key="bulk-invoices-static"
+        )
+        key = outcome.key
+    payload = b'[{"id": "O-1"}, {"id": "O-2"}]'
+    with _gateway_for(db, "run_1", routes, tmp_path) as addr:
+        status, body = _post_raw(addr, "/v1/invoices/batch", payload, host=routes[0].host)
+
+    assert status == 200
+    assert body == {"ok": True}
+    assert received == [payload]
+
+    with SQLiteStorage(db) as store:
+        from continuum.actions.ledger import fold_action_events
+
+        action = fold_action_events(store.read_events("run_1"))[key]
+    assert action.status is ActionStatus.COMPLETED
+
+
+def test_empty_json_object_forwarded_to_upstream(
+    db: str, tmp_path: Path, http_upstream: tuple[str, list[bytes]]
+) -> None:
+    """An empty JSON object '{}' is forwarded to the upstream as '{}' (#1774)."""
+    origin, received = http_upstream
+    registry_path = tmp_path / "gateway_empty_obj.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "upstreams": [
+                    {
+                        "host": origin,
+                        "methods": ["POST"],
+                        "prefix": "/v1/ping",
+                        "action_type": "ping",
+                        "key_template": "ping-static",
+                    }
+                ]
+            }
+        )
+    )
+    routes = load_gateway_config(registry_path)
+
+    with SQLiteStorage(db) as store:
+        ActionLedger(store, "run_1").claim("ping", {}, key="ping-static")
+    with _gateway_for(db, "run_1", routes, tmp_path) as addr:
+        status, body = _post_raw(addr, "/v1/ping", b"{}", host=routes[0].host)
+
+    assert status == 200
+    assert body == {"ok": True}
+    assert received == [b"{}"]
+
 
 
 def test_a_route_without_a_scheme_still_means_https(
