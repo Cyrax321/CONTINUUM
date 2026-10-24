@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
+import types
 from pathlib import Path
 
 import pytest
@@ -18,8 +20,13 @@ from continuum.serve import (
     MethodNotFound,
     NotAuthorized,
     SidecarAuth,
+    SidecarClient,
+    SidecarClientError,
     SidecarServer,
+    SubprocessClient,
+    cmd_serve,
     list_methods,
+    run_serve,
     serve_subprocess,
 )
 from continuum.serve.server import MUTATING, BadParams
@@ -735,3 +742,306 @@ def test_serve_checkpoint_projects_full_history_after_compaction(tmp_path: Path)
     state = project("run_sc", storage.read_all_events("run_sc"))
     assert state.goal is not None
     assert state.goal.constraints == ["fragile", "same-day"]
+
+
+# --- the client side of the wire and the serve entry points (issue #1746) ---
+
+
+def test_client_round_trips_one_request_over_the_wire() -> None:
+    """A request reaches the stream as one complete JSONL line, and the answer
+    on the other stream is what the call returns.
+
+    The client is the reference implementation of the protocol, so the line it
+    writes is what a client in any language must send: id, method, params, a
+    newline. The ``flush`` is half of that contract, so the line must be fully
+    materialised in the stream rather than sitting in a buffer.
+    """
+    responses = io.StringIO(json.dumps({"id": 0, "result": {"completed": 2}}) + "\n")
+    requests = io.StringIO()
+    client = SidecarClient(responses, requests)
+
+    result = client.request("record_progress", run_id="r1", completed=2)
+
+    assert result == {"completed": 2}
+    line = '{"id": 0, "method": "record_progress", "params": {"run_id": "r1", "completed": 2}}\n'
+    assert requests.getvalue() == line
+
+
+def test_client_advances_the_request_id_per_call() -> None:
+    """Two calls on one client carry ids 0 then 1, which is how the server pairs
+    its replies; a reused id would let the second call read the first answer."""
+    responses = io.StringIO(
+        json.dumps({"id": 0, "result": {"n": 1}})
+        + "\n"
+        + json.dumps({"id": 1, "result": {"n": 2}})
+        + "\n"
+    )
+    client = SidecarClient(responses, io.StringIO())
+
+    assert client.request("record_progress") == {"n": 1}
+    assert client.request("record_progress") == {"n": 2}
+
+
+def test_sidecar_client_raises_on_error_response() -> None:
+    """An error answer arrives as a SidecarClientError carrying both fields.
+
+    The wire formats an error as ``{"type", "message"}`` precisely so a client
+    in another language can raise the same structured error; the reference
+    client must not lose either field when it wraps it.
+    """
+    error = json.dumps({"id": 0, "error": {"type": "bad_params", "message": "total is negative"}})
+    client = SidecarClient(io.StringIO(error + "\n"), io.StringIO())
+
+    with pytest.raises(SidecarClientError, match="bad_params: total is negative"):
+        client.request("record_progress", total=-1)
+
+
+def test_sidecar_client_raises_when_the_sidecar_ends_mid_call() -> None:
+    """A closed stream is an error, not an empty result.
+
+    ``readline`` returning an empty line means the other end is gone, and
+    returning anything here would report silence as success, which is how a
+    half-applied side effect goes unnoticed.
+    """
+    client = SidecarClient(io.StringIO(""), io.StringIO())
+
+    with pytest.raises(SidecarClientError, match="sidecar closed the connection"):
+        client.request("record_progress")
+
+
+def test_client_skips_blank_and_unrelated_lines_until_its_own_id_arrives() -> None:
+    """The client hunts for its own id, tolerating what a real session emits.
+
+    Blank lines and replies to other ids arrive on the same stream when a
+    session interleaves calls or a previous reply lands late; the client must
+    read past both rather than mispair a request with the wrong answer.
+    """
+    responses = io.StringIO(
+        "\n"
+        + json.dumps({"id": 99, "result": {"unrelated": True}})
+        + "\n"
+        + "\n"
+        + json.dumps({"id": 0, "result": {"mine": True}})
+        + "\n"
+    )
+    client = SidecarClient(responses, io.StringIO())
+
+    assert client.request("record_progress") == {"mine": True}
+
+
+def test_close_suppresses_close_errors() -> None:
+    """``close`` is cleanup: it must never raise into the caller's ``finally``.
+
+    The stream may already be dead by the time a session is torn down, and a
+    teardown that raises is exactly how a killed sidecar takes the test, or a
+    host, down with it.
+    """
+
+    class ExplodingStream(io.StringIO):
+        def close(self) -> None:
+            raise OSError("stream already gone")
+
+    SidecarClient(io.StringIO(), ExplodingStream()).close()  # must not raise
+
+
+class _FakeProcess:
+    """The subset of ``subprocess.Popen`` the terminate path uses.
+
+    A real process is already driven end to end by ``serve_subprocess``; here
+    the two outcomes of the five-second deadline are what is under test, and a
+    fake lets each be reached deterministically on every platform.
+    """
+
+    def __init__(self, *, ignores_terminate: bool = False) -> None:
+        self.ignores_terminate = ignores_terminate
+        self.terminated = False
+        self.killed = False
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.ignores_terminate:
+            raise subprocess.TimeoutExpired(cmd=["continuum", "serve"], timeout=timeout)
+        return 0
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+def test_subprocess_client_terminates_and_waits_for_the_sidecar() -> None:
+    """The ordinary shutdown: terminate, wait, and never reach kill."""
+    proc = _FakeProcess()
+    client = SubprocessClient(proc, SidecarClient(io.StringIO(), io.StringIO()))
+
+    client.terminate()
+
+    assert proc.terminated
+    assert not proc.killed
+
+
+def test_subprocess_client_kills_a_sidecar_that_ignores_terminate() -> None:
+    """The deadline is real: a sidecar that outlives terminate gets killed.
+
+    Five seconds of waiting on a wedged process is an unbounded test hang in
+    disguise otherwise.
+    """
+    proc = _FakeProcess(ignores_terminate=True)
+    client = SubprocessClient(proc, SidecarClient(io.StringIO(), io.StringIO()))
+
+    client.terminate()
+
+    assert proc.killed
+
+
+def test_subprocess_client_proxies_the_wire_client() -> None:
+    """SubprocessClient is a SidecarClient for everything except the process.
+
+    The delegation through ``__getattr__`` is what lets ``serve_subprocess``
+    hand back a client a caller uses without knowing a process is behind it,
+    so both request and close must reach the inner client.
+    """
+    responses = io.StringIO(json.dumps({"id": 0, "result": {"mode": "resume"}}) + "\n")
+    requests = io.StringIO()
+    client = SubprocessClient(_FakeProcess(), SidecarClient(responses, requests))
+
+    assert client.request("resume") == {"mode": "resume"}
+    assert requests.getvalue().startswith('{"id": 0, "method": "resume')
+
+
+def test_run_serve_stdio_serves_streams_it_is_given() -> None:
+    """The stdio branch runs the loop over the caller's streams and exits 0.
+
+    Defaulting to stdin/stdout is what makes ``continuum serve`` a server;
+    accepting the pair as arguments is what makes the same code testable.
+    """
+    requests = io.StringIO(json.dumps({"id": 0, "method": "resume", "params": {}}) + "\n")
+    out = io.StringIO()
+
+    rc = run_serve(db=":memory:", transport="stdio", instream=requests, outstream=out)
+
+    assert rc == 0
+    answer = json.loads(out.getvalue().strip())
+    assert answer["id"] == 0
+    assert answer["result"]["mode"] == "no_active_run"
+
+
+def test_run_serve_http_serves_and_shuts_down(monkeypatch, capsys, tmp_path: Path) -> None:
+    """The http branch runs ``serve_forever`` and always tears the server down.
+
+    The transport is swapped for a stand-in, since an open port is what makes
+    this test flaky rather than meaningful; what is under test is the branch's
+    shape: start, announce, serve, and in ``finally`` shut down and close the
+    backing storage so a crashed serve does not leave an open file handle.
+    """
+    from continuum.serve import server as server_module
+
+    events: list[str] = []
+
+    class FakeHTTP:
+        def __init__(self, sidecar: SidecarServer, port: int = 8765) -> None:
+            self.port = port
+
+        def serve_forever(self) -> None:
+            events.append("serve_forever")
+
+        def shutdown(self) -> None:
+            events.append("shutdown")
+
+    monkeypatch.setattr(server_module, "SidecarHTTP", FakeHTTP)
+
+    rc = run_serve(db=str(tmp_path / "sidecar.db"), transport="http", port=9188)
+
+    assert rc == 0
+    assert events == ["serve_forever", "shutdown"]
+    assert "http://127.0.0.1:9188" in capsys.readouterr().out
+
+
+def test_run_serve_http_tears_down_when_interrupted(monkeypatch, tmp_path: Path) -> None:
+    """A Ctrl-C still runs the ``finally``: shutdown and close, then exit 0.
+
+    Interrupts are the expected way a foreground ``continuum serve`` stops, so
+    the loop swallowing one must not also swallow the teardown.
+    """
+    from continuum.serve import server as server_module
+
+    events: list[str] = []
+
+    class InterruptedHTTP:
+        def __init__(self, sidecar: SidecarServer, port: int = 8765) -> None:
+            self.port = port
+
+        def serve_forever(self) -> None:
+            events.append("serve_forever")
+            raise KeyboardInterrupt
+
+        def shutdown(self) -> None:
+            events.append("shutdown")
+
+    monkeypatch.setattr(server_module, "SidecarHTTP", InterruptedHTTP)
+
+    rc = run_serve(db=str(tmp_path / "sidecar.db"), transport="http", port=9188)
+
+    assert rc == 0
+    assert events == ["serve_forever", "shutdown"]
+
+
+def test_cmd_serve_hands_run_serve_the_args_and_closes_supplied_storage(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """``cmd_serve`` closes the CLI's own storage before handing over.
+
+    The CLI's connection is superseded by the server's, and leaving both open
+    on one SQLite file is a stale-read, not to mention a file handle, the
+    durability plane cannot afford; only a real ``Storage`` gets this, so the
+    ``isinstance`` gate must not be a suggestion.
+    """
+    from continuum.storage.sqlite import SQLiteStorage
+
+    seen: dict[str, object] = {}
+
+    def fake_run_serve(**kwargs: object) -> int:
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("continuum.serve.run_serve", fake_run_serve)
+
+    class RecordingStorage(SQLiteStorage):
+        def __init__(self) -> None:
+            super().__init__(":memory:")
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+            super().close()
+
+    storage = RecordingStorage()
+    db = str(tmp_path / "serve.db")
+    args = types.SimpleNamespace(db=db, transport="http", port=9188)
+
+    rc = cmd_serve(args, storage, io.StringIO(), io.StringIO())
+
+    assert rc == 0
+    assert seen == {"db": db, "transport": "http", "port": 9188}
+    assert storage.closed
+
+
+def test_cmd_serve_delegates_without_supplied_storage(monkeypatch) -> None:
+    """No storage supplied means nothing to close; the call still reaches run_serve."""
+    seen: dict[str, object] = {}
+
+    def fake_run_serve(**kwargs: object) -> int:
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("continuum.serve.run_serve", fake_run_serve)
+
+    rc = cmd_serve(
+        types.SimpleNamespace(db=None, transport="stdio", port=8765),
+        None,
+        io.StringIO(),
+        io.StringIO(),
+    )
+
+    assert rc == 0
+    assert seen == {"db": None, "transport": "stdio", "port": 8765}
