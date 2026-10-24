@@ -235,7 +235,6 @@ def test_shared_emitter_schema_with_fault_injection() -> None:
     import json
     import os
     import tempfile
-    from datetime import datetime
 
     from benchmarks.horizon.emitter import emit_horizon_report
     from benchmarks.horizon.runner import run_horizon_suite
@@ -245,9 +244,10 @@ def test_shared_emitter_schema_with_fault_injection() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         from benchmarks.fault_injection.emitter import emit_fault_injection_report
         from continuum.benchmark.phase6.metrics import BenchmarkReport
+        from continuum.models import utcnow
 
         dummy_fault = BenchmarkReport(
-            generated_at=datetime.now(),
+            generated_at=utcnow(),
             results=[
                 ScenarioResult(
                     scenario="fault_test",
@@ -270,3 +270,36 @@ def test_shared_emitter_schema_with_fault_injection() -> None:
                 assert "scenario" in r
                 assert "outcome" in r
                 assert "metrics" in r
+
+
+@pytest.mark.slow
+def test_benchmark_report_timestamps_are_utc_aware(monkeypatch: pytest.MonkeyPatch) -> None:
+    """All benchmark entry points stamp reports with timezone-aware UTC."""
+    from datetime import timedelta
+
+    from benchmarks.fault_injection import runner as fault_runner
+    from benchmarks.horizon.runner import run_horizon_suite
+    from continuum.benchmark.phase6.harness import run_benchmark
+
+    assert run_benchmark([]).generated_at.utcoffset() == timedelta(0)
+    assert run_horizon_suite([]).generated_at.utcoffset() == timedelta(0)
+
+    monkeypatch.setattr(
+        fault_runner,
+        "run_fault_injection_suite",
+        lambda faults=None: (
+            [],
+            {
+                "total": 0,
+                "detected": 0,
+                "detection_rate": 0.0,
+                "unsafe_resume": 0,
+                "unsafe_resume_rate": 0.0,
+                "false_positive_rate": 0.0,
+                "false_positive": False,
+                "propagation_distance": 0.0,
+            },
+        ),
+    )
+
+    assert fault_runner.run_benchmark_suite().generated_at.utcoffset() == timedelta(0)

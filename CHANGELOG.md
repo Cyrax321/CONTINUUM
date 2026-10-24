@@ -89,6 +89,10 @@ Test counts: ~3680 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **Benchmark report timestamps are timezone-aware UTC (#1823).** The Phase 6,
+  fault-injection, and horizon benchmark runners now use the shared `utcnow()`
+  helper, keeping report timestamps comparable across benchmark suites.
+
 - **A developer's own venv and scratch database are no longer committed as the
   project's Continue registration (#1618).** PR #1612 added
   `.continue/config.yaml` to the repository root, fully baked: a `command`

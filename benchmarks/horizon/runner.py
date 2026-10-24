@@ -9,12 +9,11 @@ from __future__ import annotations
 
 import contextlib
 import time
-from datetime import datetime
 from typing import Any
 
 from continuum.benchmark.phase6.metrics import BenchmarkReport, RecoveryOutcome, ScenarioResult
 from continuum.events import EventType
-from continuum.models import Origin
+from continuum.models import Origin, utcnow
 from continuum.recovery import RecoveryEngine
 
 from .driver import run_horizon_scenario
@@ -121,7 +120,7 @@ def run_horizon_suite(
     results: list[ScenarioResult] = []
     for name in scenarios:
         results.append(run_single_horizon(name))
-    return BenchmarkReport(generated_at=datetime.now(), results=results)
+    return BenchmarkReport(generated_at=utcnow(), results=results)
 
 
 # For compatibility with benchmarks/run.py
