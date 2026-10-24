@@ -1916,3 +1916,40 @@ def test_trailing_json_works_on_a_command_that_never_declared_it(db: str) -> Non
     assert trailing_code == ExitCode.OK, trailing_out
     assert global_code == ExitCode.OK, global_out
     assert json.loads(trailing_out) == json.loads(global_out)
+
+
+def test_status_honours_json_flag(db: str) -> None:
+    """``status --json`` emits a machine-readable payload (issue #1785).
+
+    The main status view ignored --json and hardcoded plain-text emit. Both
+    preceding and trailing --json must emit a JSON object with run_id, goal,
+    version, progress, and decisions.
+    """
+    code, out, err = run("--db", db, "--json", "status", "run_1")
+    assert code == ExitCode.OK, err
+    data = json.loads(out)
+    assert data["run_id"] == "run_1"
+    assert data["goal"]["description"] == "Analyze 100 documents"
+    assert data["goal"]["version"] == 1
+    assert data["version"] == 0
+    assert data["progress"]["completed"] == 60
+    assert data["progress"]["total"] == 100
+    assert "valid" in data["decisions"]
+    assert "total" in data["decisions"]
+
+    trailing_code, trailing_out, trailing_err = run("--db", db, "status", "run_1", "--json")
+    assert trailing_code == ExitCode.OK, trailing_err
+    assert json.loads(trailing_out) == data
+
+
+def test_status_json_degraded_run_includes_failure_and_exits_corrupted(db: str) -> None:
+    """A poisoned run under status --json names the break and exits CORRUPTED."""
+    _poison(db)
+    code, out, _ = run("--db", db, "--json", "status", "run_1")
+    assert code == ExitCode.CORRUPTED
+    payload = json.loads(out)
+    assert payload["run_id"] == "run_1"
+    assert "projection_failed_at" in payload
+    assert payload["projection_failed_at"]["type"] == "TASK_UPDATED"
+
+
