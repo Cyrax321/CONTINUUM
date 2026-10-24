@@ -161,7 +161,7 @@ jobs:
               if (isFirstContribution) {
                 body.push(
                   "",
-                  "**Welcome aboard!**",
+                  "**Welcome aboard as a new contributor!**",
                   "",
                   "Don't forget to **star the repo ⭐** to follow upcoming releases containing your work and get your contributions noticed."
                 );
