@@ -88,7 +88,14 @@ class MemoryTracker:
             )
             if ret:
                 return int(pmc.WorkingSetSize)
-        return 0
+            return 0
+        try:
+            import resource
+
+            usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            return int(usage if sys.platform == "darwin" else usage * 1024)
+        except Exception:
+            return 0
 
     def sample_peak_rss_bytes(self) -> int:
         if self.is_windows:
@@ -99,7 +106,14 @@ class MemoryTracker:
             )
             if ret:
                 return int(pmc.PeakWorkingSetSize)
-        return 0
+            return 0
+        try:
+            import resource
+
+            usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            return int(usage if sys.platform == "darwin" else usage * 1024)
+        except Exception:
+            return 0
 
 
 def _percentiles(values: list[float]) -> dict[str, float]:
@@ -568,7 +582,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--run-uncompacted-comparison",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
         help="Also run uncompacted workloads to measure compaction effectiveness",
     )

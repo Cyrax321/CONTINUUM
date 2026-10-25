@@ -1701,3 +1701,31 @@ def test_folded_action_cache_invalidates_when_another_writer_appends(
     action2 = writer1.get(outcome2.key)
     assert action2.status is ActionStatus.COMPLETED
     assert action2.external_id == "102"
+
+
+def test_folded_action_cache_invalidates_on_non_contiguous_record(
+    store: SQLiteStorage,
+) -> None:
+    """When another writer advanced the log, an append on writer1 drops cache if non-contiguous."""
+    writer1 = ActionLedger(store, "run_1")
+
+    outcome1 = writer1.claim("github.create_issue", {"title": "Issue A"})
+    writer1.complete(outcome1.key, external_id="101")
+    assert writer1.get(outcome1.key) is not None
+    assert writer1._folded_cache is not None
+
+    # An intervening event is appended to the stream
+    store.append_event("run_1", EventType.DECISION_CREATED, {"name": "intervening"})
+
+    # writer1 records an action without a preceding _replay
+    act = Action(
+        run_id="run_1",
+        action_id="a_intervene",
+        action_type="test",
+        arguments={"x": 2},
+        status=ActionStatus.STARTED,
+    )
+    writer1._record("k_intervene", act)
+    assert writer1._folded_cache is None
+    # Subsequent read re-folds all records cleanly
+    assert writer1.get("k_intervene") is not None
