@@ -100,6 +100,21 @@ Test counts: ~3680 collected on a minimal env.
   classified `fresh` (or matched against a completed action when one exists)
   and the operation executes again.
 
+- **The replay guard's closed-attempt refusal is raised as `ReplayBlocked`
+  instead of a bare `AssertionError` (#1836).** `evaluate()` built its
+  `DENY_RECLAIM` decision without `key=`, unlike every other branch of the
+  decision table, so `decision.key` was `None` and `protected_call()` tripped
+  `assert decision.key is not None` before it could reach the documented
+  `raise ReplayBlocked(decision)`. A retry of an action whose previous attempt
+  reached a closed status (`failed`, `compensated`) therefore surfaced as an
+  internal assertion error callers could not catch, and under `python -O` the
+  stripped assertion silently made `key_to_use` `None`. `DENY_RECLAIM` now
+  carries its key, so the refusal reaches callers as `ReplayBlocked` with the
+  decision and key, and the gate's closed-attempt message reports the real
+  status instead of the `action is None` fallback. Regression tests mirror the
+  `BLOCK_UNCERTAIN` coverage from #735.
+
+
 - **`continuum status` now honours the global `--json` flag in its main view (#1785).**
   Running `continuum --json status <run>` without `--provenance` previously ignored
   `--json` and emitted plain text, while `--provenance` honoured it. The main view
