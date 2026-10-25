@@ -225,8 +225,8 @@ def test_concurrent_claims_on_one_key_are_not_serialised_by_the_ledger(
     an exact count. The unleased default is kept because a single-process caller
     has nothing to serialise against, and it must keep behaving as it always did.
 
-    If a future change makes claiming atomic in storage, the assertion below
-    becomes ``== 1``. That is the signal to tighten it, not to delete it.
+    Atomic claim in storage guarantees that concurrent claimants on the same key
+    produce exactly one winner (outcomes.count("proceed") == 1).
     """
     from continuum.actions.ledger import ActionLedger
 
@@ -247,10 +247,9 @@ def test_concurrent_claims_on_one_key_are_not_serialised_by_the_ledger(
         outcomes = list(pool.map(claim, range(8)))
 
     assert set(outcomes) <= {"proceed", "dedup", "ambiguous"}, outcomes
-    assert outcomes.count("proceed") >= 1, f"someone must be allowed to work: {outcomes}"
-    # More than one go-ahead is possible and is exactly why the lease is needed.
-    # The chain still verifies: these are honestly-recorded duplicate attempts,
-    # not corruption, which is why no integrity check can catch them.
+    assert outcomes.count("proceed") == 1, (
+        f"atomic claim in storage admits exactly one winner: {outcomes}"
+    )
     with SQLiteStorage(db) as store:
         assert store.verify_events("run_1").ok
 

@@ -683,24 +683,40 @@ def cmd_status(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         f"{state.progress.pending} pending, {state.progress.failed} failed",
         f"decisions: {len(state.valid_decisions())}/{len(state.decisions)} valid",
     ]
+    status_payload: dict[str, Any] = {
+        "run_id": state.run_id,
+        "goal": (
+            {
+                "description": state.goal.description,
+                "version": state.goal.version,
+            }
+            if state.goal
+            else None
+        ),
+        "version": state.version,
+        "progress": {
+            "completed": state.progress.completed,
+            "pending": state.progress.pending,
+            "failed": state.progress.failed,
+            "total": state.progress.total,
+        },
+        "decisions": {
+            "valid": len(state.valid_decisions()),
+            "total": len(state.decisions),
+        },
+    }
     if degraded:
         lines.append("")
         lines += _degraded_lines(state)
-    text_payload: dict[str, Any] = (
-        {
-            "projection_failed_at": {
-                "sequence": state.unprojectable_at_sequence,
-                "type": state.unprojectable_event_type,
-                "reason": state.unprojectable_reason,
-            }
+        status_payload["projection_failed_at"] = {
+            "sequence": state.unprojectable_at_sequence,
+            "type": state.unprojectable_event_type,
+            "reason": state.unprojectable_reason,
         }
-        if degraded
-        else {}
-    )
     _emit(
-        text_payload,
+        status_payload,
         "\n".join(lines),
-        as_json=False,
+        as_json=args.json,
         stream=out,
         palette=getattr(args, "_palette", None),
     )
@@ -3013,14 +3029,19 @@ def cmd_gateway(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     return ExitCode.OK
 
 
-def cmd_daemon(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err: Any) -> int:
     """Run CONTINUUM as a background daemon (gateway + watch).
 
     Starts the enforcing HTTP gateway as a long-running process. Use
     ``--detach`` to fork into the background and write a PID file.
     """
+    import contextlib
     import signal
+    import sqlite3
+    import subprocess
     import sys
+    import threading
+    import time
 
     from continuum.gateway import (
         DEFAULT_GATEWAY_CONFIG_PATH,
@@ -3029,6 +3050,8 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         load_gateway_config,
         load_gateway_tenant,
     )
+    from continuum.storage.base import StorageError
+    from continuum.storage.sqlite import _resolve_path
 
     config_path = Path(args.config) if args.config else Path(DEFAULT_GATEWAY_CONFIG_PATH)
     try:
@@ -3045,22 +3068,204 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         return ExitCode.ERROR
 
     bound_tenant = getattr(args, "tenant", None) or load_gateway_tenant(config_path)
-    active = storage.get_active_run()
-    run_id = args.run_id or (active.run_id if active else None)
-    server = GatewayServer(
-        lambda: open_storage(args.db), run_id, routes, port=args.port, bound_tenant=bound_tenant
-    )
+    run_id = getattr(args, "run_id", None)
+    if run_id is None:
+        if storage is not None:
+            active = storage.get_active_run()
+            run_id = active.run_id if active else None
+        else:
+            db_path = getattr(args, "db", None)
+            probe_path = (
+                Path(_resolve_path(db_path))
+                if db_path and str(db_path).startswith("sqlite://")
+                else Path(db_path)
+                if db_path
+                else None
+            )
+            if db_path and db_path != ":memory:" and probe_path and probe_path.exists():
+                try:
+                    probe_storage = open_storage(db_path)
+                    try:
+                        active = probe_storage.get_active_run()
+                        run_id = active.run_id if active else None
+                    finally:
+                        probe_storage.close()
+                except (sqlite3.Error, StorageError, ValueError, OSError) as exc:
+                    print(
+                        f"warning: failed to probe active run from {db_path}: {exc}",
+                        file=err,
+                    )
+                    run_id = None
 
     pid_file = Path(args.pid_file) if args.pid_file else Path(".continuum/daemon.pid")
 
+    if args.detach and not hasattr(os, "fork"):
+        if args.port == 0:
+            print("error: --detach requires an explicit --port on this platform", file=err)
+            return ExitCode.ERROR
+
+        # Check port availability before detaching so occupied ports fail immediately.
+        if args.port > 0:
+            import socket
+
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe_sock:
+                    probe_sock.bind(("127.0.0.1", args.port))
+            except OSError as exc:
+                print(f"error: cannot bind to 127.0.0.1:{args.port}: {exc}", file=err)
+                return ExitCode.ERROR
+
+        try:
+            pid_file.parent.mkdir(parents=True, exist_ok=True)
+            with pid_file.open("a", encoding="utf-8"):
+                pass
+        except OSError as exc:
+            print(f"error: cannot write pid file {pid_file}: {exc}", file=err)
+            return ExitCode.ERROR
+
+        initial_pid_content: str | None = None
+        if pid_file.exists():
+            with contextlib.suppress(OSError, UnicodeDecodeError):
+                initial_pid_content = pid_file.read_text(encoding="utf-8").strip()
+
+        cmd = [sys.executable, "-m", "continuum.cli.main"]
+        if getattr(args, "db", None):
+            cmd.extend(["--db", str(args.db)])
+        cmd.append("daemon")
+        cmd.extend(["--port", str(args.port)])
+        if getattr(args, "config", None):
+            cmd.extend(["--config", str(args.config)])
+        if getattr(args, "tenant", None):
+            cmd.extend(["--tenant", str(args.tenant)])
+        if run_id:
+            cmd.extend(["--run-id", str(run_id)])
+        cmd.extend(["--pid-file", str(pid_file)])
+        cmd.append("--write-pid")
+
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
+            )
+
+        log_path = pid_file.with_suffix(".log")
+        try:
+            with open(log_path, "ab") as log_file:
+                proc = subprocess.Popen(  # nosec B603
+                    cmd,
+                    creationflags=creationflags,
+                    close_fds=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_file,
+                    stderr=log_file,
+                )
+        except OSError:
+            try:
+                proc = subprocess.Popen(  # nosec B603
+                    cmd,
+                    creationflags=creationflags,
+                    close_fds=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError as exc:
+                print(f"error: failed to spawn daemon process: {exc}", file=err)
+                return ExitCode.ERROR
+
+        # Wait for the child to bind the gateway and write its own PID file,
+        # or exit early on error.
+        wait_fn = getattr(proc, "wait", None)
+        poll_fn = getattr(proc, "poll", None)
+        child_pid: int | None = None
+
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            if callable(poll_fn):
+                rc = poll_fn()
+                if isinstance(rc, int):
+                    with contextlib.suppress(OSError, UnicodeDecodeError):
+                        if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() in (
+                            str(proc.pid),
+                            "",
+                        ):
+                            pid_file.unlink(missing_ok=True)
+                    print(f"error: daemon exited during startup (code {rc})", file=err)
+                    return ExitCode.ERROR
+
+            if callable(wait_fn):
+                try:
+                    rc = wait_fn(timeout=0.02)
+                    if isinstance(rc, int):
+                        with contextlib.suppress(OSError, UnicodeDecodeError):
+                            if pid_file.exists() and pid_file.read_text(
+                                encoding="utf-8"
+                            ).strip() in (str(proc.pid), ""):
+                                pid_file.unlink(missing_ok=True)
+                        print(f"error: daemon exited during startup (code {rc})", file=err)
+                        return ExitCode.ERROR
+                except subprocess.TimeoutExpired:
+                    pass
+
+            if pid_file.exists():
+                with contextlib.suppress(OSError, UnicodeDecodeError):
+                    content = pid_file.read_text(encoding="utf-8").strip()
+                    if content.isdigit() and content != initial_pid_content:
+                        child_pid = int(content)
+                        break
+
+            time.sleep(0.02)
+
+        # Fallback for environments where child runs mock or does not write pid file.
+        if child_pid is None:
+            with contextlib.suppress(OSError, UnicodeDecodeError):
+                if not pid_file.exists() or pid_file.read_text(encoding="utf-8").strip() in (
+                    initial_pid_content or "",
+                    "",
+                ):
+                    pid_file.write_text(str(proc.pid), encoding="utf-8")
+
+        reported_pid = child_pid if child_pid is not None else proc.pid
+        print(f"CONTINUUM daemon started (pid {reported_pid})", file=out)
+        print(f"  pid file: {pid_file}", file=out)
+        print(f"  gateway: 127.0.0.1:{args.port}", file=out)
+        return ExitCode.OK
+
+    def _unlink_pid_file() -> None:
+        with contextlib.suppress(OSError, UnicodeDecodeError):
+            if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() == str(
+                os.getpid()
+            ):
+                pid_file.unlink(missing_ok=True)
+
+    try:
+        server = GatewayServer(
+            lambda: open_storage(args.db),
+            run_id,
+            routes,
+            port=args.port,
+            bound_tenant=bound_tenant,
+        )
+    except Exception:
+        _unlink_pid_file()
+        raise
+
+    if getattr(args, "write_pid", False):
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(OSError):
+            pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
     if args.detach:
-        pid = os.fork()
+        fork_fn = getattr(os, "fork", None)
+        assert fork_fn is not None
+        pid = fork_fn()
         if pid > 0:
             print(f"CONTINUUM daemon started (pid {pid})", file=out)
             print(f"  pid file: {pid_file}", file=out)
             print(f"  gateway: 127.0.0.1:{server.port}", file=out)
             return ExitCode.OK
-        os.setsid()
+        if hasattr(os, "setsid"):
+            os.setsid()
         pid_file.parent.mkdir(parents=True, exist_ok=True)
         pid_file.write_text(str(os.getpid()), encoding="utf-8")
 
@@ -3074,12 +3279,15 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
     def _shutdown(signum: int, frame: Any) -> None:
         server.shutdown()
-        if args.detach:
-            pid_file.unlink(missing_ok=True)
+        _unlink_pid_file()
         sys.exit(0)
 
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
+    if threading.current_thread() is threading.main_thread():
+        try:
+            signal.signal(signal.SIGTERM, _shutdown)
+            signal.signal(signal.SIGINT, _shutdown)
+        except (ValueError, OSError):
+            pass
 
     try:
         server.serve_forever()
@@ -3087,8 +3295,7 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         pass
     finally:
         server.shutdown()
-        if args.detach:
-            pid_file.unlink(missing_ok=True)
+        _unlink_pid_file()
     return ExitCode.OK
 
 
@@ -3112,6 +3319,7 @@ def cmd_mcp_install(args: argparse.Namespace, storage: Storage, out: Any, err: A
         display_command,
         install_server,
         resolve_command,
+        scope_available,
         verify_sdk,
     )
 
@@ -3128,6 +3336,51 @@ def cmd_mcp_install(args: argparse.Namespace, storage: Storage, out: Any, err: A
 
     db = Path(args.db or Path.cwd() / "continuum.db").resolve()
     settings_path = _mcp_settings_path(args)
+    # A host with no per-project section cannot honour `local`, and saying
+    # nothing let the default scope of the default command claim a per-project
+    # write while performing a user-wide one (#1761). The registration still
+    # lands where it always did; what changes is that the command now says
+    # which scope it effectively wrote.
+    effective_scope: str | None = None
+    if args.scope == "local" and not scope_available(args.host, "local"):
+        profile = MCP_HOST_PROFILES[args.host]
+        if args.settings:
+            dest_resolved = settings_path.resolve()
+            project_setting = profile["project_settings"]
+            project_dest = (
+                Path(project_setting).expanduser().resolve()
+                if project_setting.startswith("~")
+                else (Path.cwd() / project_setting).resolve()
+            )
+            user_dest = Path(profile["user_settings"]).expanduser().resolve()
+            if dest_resolved == user_dest:
+                effective_scope = "user"
+                print(
+                    f"warning: {args.host} has no per-project location in its settings file, "
+                    "so a 'local' registration applies to every project on this machine. "
+                    "Use --scope user to state that intent.",
+                    file=err,
+                )
+            elif dest_resolved == project_dest:
+                effective_scope = "project"
+            else:
+                effective_scope = "unknown"
+                print(
+                    f"warning: destination '{args.settings}' has an unknown scope for {args.host}, "
+                    "so CONTINUUM cannot determine whether this registration applies per-project or machine-wide.",
+                    file=err,
+                )
+        else:
+            effective_scope = "user"
+            remedy = (
+                "Use --scope user to state that intent, or --scope project for the "
+                f"shared {profile['project_settings']} in the project root."
+            )
+            print(
+                f"warning: {args.host} has no per-project location in its settings file, "
+                "so a 'local' registration applies to every project on this machine. " + remedy,
+                file=err,
+            )
     try:
         status = install_server(
             settings_path,
@@ -3142,22 +3395,25 @@ def cmd_mcp_install(args: argparse.Namespace, storage: Storage, out: Any, err: A
         return ExitCode.ERROR
 
     lines = [
-        f"MCP server registered with {args.host} ({args.scope} scope)",
+        f"MCP server registered with {args.host} ({effective_scope or args.scope} scope)",
         f"  [{status}] {SERVER_NAME} in {settings_path}",
         f"    command: {display_command([*command, '--db', str(db)])}",
         f"    form: {form} (resolved at install time, independent of the host's PATH)",
     ]
+    payload: dict[str, Any] = {
+        "host": args.host,
+        "scope": args.scope,
+        "settings": str(settings_path),
+        "server": SERVER_NAME,
+        "status": status,
+        "command": command,
+        "db": str(db),
+        "form": form,
+    }
+    if effective_scope is not None:
+        payload["effective_scope"] = effective_scope
     _emit(
-        {
-            "host": args.host,
-            "scope": args.scope,
-            "settings": str(settings_path),
-            "server": SERVER_NAME,
-            "status": status,
-            "command": command,
-            "db": str(db),
-            "form": form,
-        },
+        payload,
         "\n".join(lines),
         as_json=args.json,
         stream=out,
@@ -3461,6 +3717,21 @@ def _agents_targets(args: argparse.Namespace) -> list[str]:
     return [args.target]
 
 
+def _agents_selector(args: argparse.Namespace) -> str:
+    """The target selector an invocation actually used.
+
+    ``--all`` acts on every registered target while ``args.target`` still
+    carries its default, so rendering a command from ``args.target`` alone
+    describes an invocation that repeats a fraction of what was done. The
+    JSON payload's ``command`` is copied back by scripts and CI steps, where
+    that fraction is a silent under-rebuild, and on ``remove`` seven of eight
+    generated files left behind (#1762).
+    """
+    if getattr(args, "all_targets", False):
+        return "--all"
+    return f"--target {args.target}"
+
+
 def cmd_agents_install(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Render the instruction targets an IDE reads, from one source.
 
@@ -3487,8 +3758,9 @@ def cmd_agents_install(args: argparse.Namespace, storage: Storage, out: Any, err
         except ValueError as exc:
             refused.append(str(exc))
 
+    source_flag = f" --source {args.source}" if getattr(args, "source", None) else ""
     payload = {
-        "command": f"{REGENERATE_COMMAND} --target {args.target}",
+        "command": f"{REGENERATE_COMMAND} {_agents_selector(args)}{source_flag}",
         "source": str(source_path),
         "installed": [
             {"target": r.target.id, "path": str(r.path), "status": r.status} for r in results
@@ -3529,7 +3801,7 @@ def cmd_agents_remove(args: argparse.Namespace, storage: Storage, out: Any, err:
             kept.append(TARGETS[target_id].path)
 
     payload = {
-        "command": f"continuum agents remove --target {args.target}",
+        "command": f"continuum agents remove {_agents_selector(args)}",
         "removed": removed,
         "left_alone": kept,
     }
@@ -3567,8 +3839,9 @@ def cmd_agents_check(args: argparse.Namespace, storage: Storage, out: Any, err: 
         print(f"error: {exc}", file=err)
         return ExitCode.ERROR
 
+    source_flag = f" --source {args.source}" if getattr(args, "source", None) else ""
     payload = {
-        "command": "continuum agents check",
+        "command": f"continuum agents check {_agents_selector(args)}{source_flag}",
         "clean": all(r.state in ("current", "absent", "unmanaged") for r in results),
         "targets": [
             {"target": r.target.id, "path": str(r.path), "state": r.state, "detail": r.detail}
@@ -5165,7 +5438,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--host",
             choices=tuple(MCP_HOST_PROFILES),
             default="claude-code",
-            help="which host to configure (claude-code, gemini, cursor, vscode).",
+            help=f"which host to configure ({', '.join(MCP_HOST_PROFILES)}).",
         )
         p.add_argument(
             "--scope",
@@ -5326,6 +5599,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--pid-file",
         default=None,
         help="PID file path (default: .continuum/daemon.pid).",
+    )
+    daemon_cmd.add_argument(
+        "--write-pid",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
 
     gateway_cmd = add(
@@ -5621,6 +5899,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="wire transport (default: stdio; http serves POST /<method> JSON).",
     )
     serve.add_argument("--port", type=int, default=8765, help="port for --transport http.")
+    serve.add_argument(
+        "--bind",
+        default=os.environ.get("CONTINUUM_SERVE_BIND", "127.0.0.1"),
+        help="host address to bind for --transport http (default: 127.0.0.1, env: CONTINUUM_SERVE_BIND).",
+    )
+
+    def _cmd_conformance(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+        from continuum.serve.conformance import cmd_conformance
+
+        return cmd_conformance(args, out=out, err=err)
+
+    conformance = add(
+        "conformance",
+        _cmd_conformance,
+        "Run the wire protocol conformance suite against a CONTINUUM server endpoint.",
+    )
+    conformance.add_argument(
+        "--url",
+        default="http://127.0.0.1:8765",
+        help="target server URL to test (default: http://127.0.0.1:8765).",
+    )
+    conformance.add_argument(
+        "--token",
+        default=os.environ.get("CONTINUUM_SERVE_TOKEN"),
+        help="client authorization bearer token.",
+    )
+    conformance.add_argument(
+        "--confirm-token",
+        default=os.environ.get("CONTINUUM_SERVE_CONFIRM_TOKEN"),
+        help="dedicated confirm credential token.",
+    )
 
     def cmd_dashboard(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
         """Serve the read-only dashboard, blocking until interrupted.

@@ -29,6 +29,7 @@ continuum merge <run_id> --reason "..."          # merge child run into parent a
 continuum restore <run_id> --reason "..."        # restore run to anchor checkpoint. mutates
                                                  #   [--to <id|version|seq> | --anchor N | --to-recovery-anchor]
 continuum compact <run_id>                       # archive pre-anchor log prefix. mutates
+continuum conformance --url <endpoint>          # wire protocol conformance runner against HTTP endpoint
 continuum precompact <run_id>                    # checkpoint before context compaction. mutates
 continuum rewind <run_id> --to <checkpoint>      # revert workspace and projection [--force] [--dry-run]
 continuum observe                                # record one tool completion (hook). mutates

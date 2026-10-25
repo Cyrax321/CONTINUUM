@@ -530,3 +530,75 @@ def test_every_mcp_host_shape_is_read_back_as_wired(
         for name in ("project_settings", "local_settings", "user_settings"):
             target = root / profile.get(name, "")
             target.unlink(missing_ok=True)
+
+
+def test_hook_client_wired_in_the_interpreter_fallback_form(env: tuple[Path, Path]) -> None:
+    """The form observe_command() writes when no continuum executable is on PATH (#1759).
+
+    ``hooks install`` on an editable install, a checkout run from source, or
+    most CI setups bakes ``"<python> -m continuum.cli observe"``. The scanner
+    used to recognise only a first token that is a continuum executable, so it
+    reported that hook as nothing configured while it was firing on every
+    tool call, and the doctor said the machine was healthy-but-unconfigured.
+    """
+    import sys
+
+    root, _ = env
+    settings = root / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": f"{sys.executable} -m continuum.cli observe",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    row = ide_for(scan(env), "claude-code", "hooks")
+    assert row.wired is True
+    assert row.state == diagnose.WIRED
+    assert row.stale is False
+
+
+def test_hook_client_in_the_fallback_form_with_a_gone_interpreter_is_stale(
+    env: tuple[Path, Path],
+) -> None:
+    """A dead interpreter in the fallback form is staleness, same as a dead executable."""
+    root, _ = env
+    settings = root / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "/gone/venv/bin/python -m continuum.cli observe",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    row = ide_for(scan(env), "claude-code", "hooks")
+    assert row.stale is True
+    assert "/gone/venv/bin/python" in row.summary
