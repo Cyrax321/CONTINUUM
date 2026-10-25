@@ -1328,6 +1328,14 @@ class ActionLedger:
                 action_type, None, budget_arguments, volatile
             )
 
+        # A correlation ID must pass the contract checks before any attempt,
+        # retry or not: the FAILED and COMPENSATED branches below settle it via
+        # model_copy, which skips field validators, so an unvalidated value
+        # ("  " or 129 chars) would survive into the hash-chained event and
+        # break every later replay of the run (review of #1680).
+        if correlation_id is not None:
+            correlation_id = validate_correlation_id(correlation_id)
+
         if existing is None:
             # Refuse an over-cap attempt before anything is recorded, then
             # count it only once the record is durable: a claim rejected by
@@ -1345,8 +1353,6 @@ class ActionLedger:
                     raise LedgerError(
                         f"origin_digest must be 64 lowercase hex, got {origin_digest!r}"
                     )
-            if correlation_id is not None:
-                correlation_id = validate_correlation_id(correlation_id)
             action = Action(
                 run_id=self.run_id,
                 action_type=action_type,
