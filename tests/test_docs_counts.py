@@ -439,6 +439,129 @@ def test_documented_extras_exist_in_pyproject() -> None:
                     )
 
 
+def _check_pyproject_line_references(path: Path, pyproject_lines: list[str]) -> int:
+    """Assert all ``pyproject.toml:NN`` references in ``path`` resolve correctly (#1701)."""
+    ref_pattern = re.compile(r"`pyproject\.toml:(\d+)(?:-(\d+))?`")
+    extra_pattern = re.compile(r"\[([\w-]+)\]")
+
+    checked = 0
+    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        matches = list(ref_pattern.finditer(line))
+        if not matches:
+            continue
+
+        for match in matches:
+            checked += 1
+            target_line_num = int(match.group(1))
+            end_line_group = match.group(2)
+            assert 1 <= target_line_num <= len(pyproject_lines), (
+                f"{path.name}:{line_no} cites pyproject.toml:{target_line_num}, "
+                f"which is outside the file (1-{len(pyproject_lines)})"
+            )
+            if end_line_group is not None:
+                end_line_num = int(end_line_group)
+                assert target_line_num <= end_line_num <= len(pyproject_lines), (
+                    f"{path.name}:{line_no} cites pyproject.toml range {target_line_num}-{end_line_num}, "
+                    f"which is reversed or outside the file (1-{len(pyproject_lines)})"
+                )
+
+            actual_line = pyproject_lines[target_line_num - 1]
+
+            if "core" in line.lower() and "dependencies" in line.lower():
+                assert "dependencies = [" in actual_line or "pydantic" in actual_line, (
+                    f"{path.name}:{line_no} cites pyproject.toml:{target_line_num} "
+                    f"for core dependencies, but that line holds: {actual_line!r}"
+                )
+            elif "optional extra" in line.lower() or "optional-dependencies" in line.lower():
+                assert (
+                    "[project.optional-dependencies]" in actual_line
+                    or "dependencies = [" in actual_line
+                ), (
+                    f"{path.name}:{line_no} cites pyproject.toml:{target_line_num} "
+                    f"for optional extras, but that line holds: {actual_line!r}"
+                )
+            else:
+                extra_match = extra_pattern.search(line)
+                if extra_match:
+                    extra = extra_match.group(1)
+                    assert actual_line.strip().startswith(f"{extra} ="), (
+                        f"{path.name}:{line_no} cites pyproject.toml:{target_line_num} "
+                        f"for [{extra}], but that line holds: {actual_line!r}"
+                    )
+    return checked
+
+
+def test_documented_pyproject_line_references_resolve() -> None:
+    """Documented pyproject.toml:NN references resolve to the right declaration (#1701).
+
+    Several docs cite a specific line in pyproject.toml (e.g. pyproject.toml:30
+    for core dependencies, or pyproject.toml:58 for the mcp extra). Line
+    numbers drift when dependencies or comments are added to pyproject.toml,
+    leaving documentation pointing at comment lines or wrong extras.
+
+    This guard resolves each cited line number and asserts that it declares
+    the cited dependency (or dependencies = [ for the core one). When an
+    extra moves, the cited line number must be updated to match.
+    """
+    pyproject_lines = (ROOT / "pyproject.toml").read_text(encoding="utf-8").splitlines()
+
+    scanned = [
+        ROOT / "README.md",
+        *sorted(ROOT.joinpath("docs").rglob("*.md")),
+        *sorted(ROOT.joinpath("references").rglob("*.md")),
+    ]
+
+    total_refs = sum(_check_pyproject_line_references(path, pyproject_lines) for path in scanned)
+    assert total_refs > 0, "No pyproject.toml:NN references found to guard"
+
+
+def test_documented_pyproject_line_references_resolve_failures(tmp_path: Path) -> None:
+    """Out-of-bounds or misaligned pyproject.toml references fail with descriptive messages (#1701)."""
+    synthetic_toml = [
+        "# comment 1",
+        'dependencies = ["pydantic>=2.7"]',
+        "[project.optional-dependencies]",
+        "# comment 4",
+        'mcp = ["mcp>=2.0"]',
+        'browser = ["playwright>=1.40"]',
+    ]
+
+    # Out of bounds line number
+    oob = tmp_path / "oob.md"
+    oob.write_text("`pyproject.toml:9999` (`[mcp]`)", encoding="utf-8")
+    with pytest.raises(
+        AssertionError, match="oob.md:1 cites pyproject.toml:9999, which is outside the file"
+    ):
+        _check_pyproject_line_references(oob, synthetic_toml)
+
+    # Reversed or out of bounds range
+    rev = tmp_path / "rev.md"
+    rev.write_text("`pyproject.toml:5-2` (`[mcp]`)", encoding="utf-8")
+    with pytest.raises(
+        AssertionError,
+        match="rev.md:1 cites pyproject.toml range 5-2, which is reversed or outside",
+    ):
+        _check_pyproject_line_references(rev, synthetic_toml)
+
+    # Pointing at a comment line
+    comment = tmp_path / "comment.md"
+    comment.write_text("`pyproject.toml:4` (`[mcp]`)", encoding="utf-8")
+    with pytest.raises(
+        AssertionError,
+        match=r"comment.md:1 cites pyproject.toml:4 for \[mcp\], but that line holds: '# comment 4'",
+    ):
+        _check_pyproject_line_references(comment, synthetic_toml)
+
+    # Pointing at the wrong extra declaration
+    wrong = tmp_path / "wrong.md"
+    wrong.write_text("`pyproject.toml:6` (`[mcp]`)", encoding="utf-8")
+    with pytest.raises(
+        AssertionError,
+        match=r"wrong.md:1 cites pyproject.toml:6 for \[mcp\], but that line holds: 'browser =",
+    ):
+        _check_pyproject_line_references(wrong, synthetic_toml)
+
+
 def _tree_counts() -> tuple[int, int]:
     """Modules and test files, counted the way README.md states them.
 

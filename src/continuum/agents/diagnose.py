@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..clienthooks import CLIENT_PROFILES
+from ..clienthooks import CLIENT_PROFILES, _is_managed_hook, _split_command
 from ..mcp import configfmt
 from ..mcp.authz import (
     POLICY_ENV_VAR,
@@ -467,14 +467,23 @@ def _scan_hook_client(client: str, *, root: Path, home: Path) -> IdeReport:
         for dotted, value in _walk(data):
             if not isinstance(value, str) or "continuum" not in value:
                 continue
-            tokens = value.split()
-            if not tokens or "continuum" not in Path(tokens[0]).name:
-                continue
-            kind = next((k for k in _HOOK_KINDS if k in tokens), None)
+            # The same recogniser the installer itself uses for its
+            # idempotency guarantee (#1759): a hook command is ours either as
+            # a resolved continuum executable or in the interpreter fallback
+            # form ("<python> -m continuum.cli observe") that observe_command()
+            # writes when no executable is on PATH -- an editable install, a
+            # checkout run from source, many CI setups. Matching the first
+            # token alone read that fallback as "nothing configured" while the
+            # hook it installed was firing on every tool call.
+            kind = next(
+                (k for k in _HOOK_KINDS if _is_managed_hook({"command": value}, k)),
+                None,
+            )
             if kind is None:
                 continue
             found = True
             details.append(f"{dotted}: {kind} hook")
+            tokens = _split_command(value)
             if not _resolves(tokens[0], home=home):
                 stale.append(f"{path} bakes {tokens[0]}")
                 stale_command = tokens[0]
