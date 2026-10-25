@@ -1884,7 +1884,15 @@ def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         candidates.extend([Path(".continuum/ledger"), Path(".continuum")])
         if hasattr(storage, "storage_dir"):
             candidates.extend([storage.storage_dir / "ledger", storage.storage_dir])
+        seen: set[Path] = set()
         for cand in candidates:
+            try:
+                resolved = cand.resolve()
+            except Exception:
+                resolved = cand
+            if resolved in seen:
+                continue
+            seen.add(resolved)
             if not cand.is_dir():
                 continue
             backend = FileLedgerBackend(str(cand))
@@ -1892,16 +1900,12 @@ def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
                 entries = backend.load(args.run_id)
                 if entries:
                     ledger_instance = RecoveryLedger(backend)
-                    ledger_entries = entries
+                    ledger_entries = ledger_instance.entries(args.run_id)
                     break
-            except Exception:
-                continue
-        if ledger_instance is None:
-            try:
-                ledger_instance = RecoveryLedger(FileLedgerBackend(".continuum/ledger"))
-                ledger_entries = ledger_instance.entries(args.run_id)
-            except Exception:
+            except Exception as exc:
                 ledger_entries = []
+                print(f"warning: recovery ledger unreadable: {exc}", file=err)
+                break
 
     dep_candidates: set[str] = set()
     dep_section = raw.get(DEPENDENCY_BUDGETS_KEY)
@@ -1960,19 +1964,19 @@ def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             )
             for le in ledger_entries
         )
-        remaining: int | None
+        dep_remaining: int | None
         if ceiling is not None:
-            remaining = 0 if escalated else max(0, ceiling - used)
-            exhausted = remaining == 0
+            dep_remaining = 0 if escalated else max(0, ceiling - used)
+            exhausted = dep_remaining == 0
         else:
-            remaining = None
+            dep_remaining = None
             exhausted = escalated
         dep_rows.append(
             {
                 "dependency": dep,
                 "attempts": used,
                 "max_attempts": ceiling,
-                "remaining": remaining,
+                "remaining": dep_remaining,
                 "exhausted": exhausted,
             }
         )
@@ -1997,11 +2001,17 @@ def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             )
     if dep_rows:
         lines.append("")
-        lines.append(f"{'DEPENDENCY':<36} {'ATTEMPTS':>8} {'MAX':>5} {'REMAINING':>10}")
+        lines.append(
+            f"{'DEPENDENCY':<36} {'ATTEMPTS':>8} {'MAX':>5} {'REMAINING':>10} {'EXHAUSTED':>9}"
+        )
         for r in dep_rows:
             max_str = str(r["max_attempts"]) if r["max_attempts"] is not None else "-"
             rem_str = str(r["remaining"]) if r["remaining"] is not None else "-"
-            lines.append(f"{r['dependency']:<36} {r['attempts']:>8} {max_str:>5} {rem_str:>10}")
+            exhausted_str = "yes" if r["exhausted"] else "no"
+            lines.append(
+                f"{r['dependency']:<36} {r['attempts']:>8} {max_str:>5} "
+                f"{rem_str:>10} {exhausted_str:>9}"
+            )
     _emit(
         payload,
         "\n".join(lines) or "No budgets configured.",

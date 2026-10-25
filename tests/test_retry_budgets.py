@@ -1220,7 +1220,54 @@ def test_cli_budget_reports_dependency_budgets_text_format(db: str, tmp_path: Pa
     assert "ATTEMPTS" in out
     assert "MAX" in out
     assert "REMAINING" in out
+    assert "EXHAUSTED" in out
     assert "ext:weather-api" in out
+
+
+def test_cli_budget_reports_dependency_budgets_text_format_shows_exhausted(
+    db: str, tmp_path: Path
+) -> None:
+    """Text output marks an escalated dependency without ceiling as exhausted (issue #1460)."""
+    ledger_dir = tmp_path / "ledger"
+    ledger = RecoveryLedger(FileLedgerBackend(str(ledger_dir)))
+    ledger.record_gate("run_1", "human_required:ext:escalated")
+
+    cfg = registry(tmp_path, {})
+    code, out, err = run(
+        "--db",
+        db,
+        "budget",
+        "run_1",
+        "--config",
+        cfg,
+        "--ledger-dir",
+        str(ledger_dir),
+    )
+    assert code == ExitCode.OK, err
+    assert "DEPENDENCY" in out
+    assert "EXHAUSTED" in out
+    assert "ext:escalated" in out
+    assert "yes" in out
+
+
+def test_cli_budget_autodiscovery_unreadable_ledger_warns(db: str, tmp_path: Path) -> None:
+    """Autodiscovered unreadable ledger prints warning consistently with explicit path (issue #1460)."""
+    cfg_dir = tmp_path / "cfg_project"
+    cfg_dir.mkdir()
+    auto_ledger = cfg_dir / "ledger"
+    auto_ledger.mkdir()
+    (auto_ledger / "ledger-run_1.jsonl").write_text("corrupted json\n")
+
+    cfg = str(cfg_dir / "budgets.json")
+    Path(cfg).write_text(
+        json.dumps({"default_max_attempts": 3, "dependency_budgets": {"ext:dep": 2}})
+    )
+
+    code, out, err = run("--db", db, "--json", "budget", "run_1", "--config", cfg)
+    assert code == ExitCode.OK, err
+    assert "warning: recovery ledger unreadable" in err
+    payload = json.loads(out)
+    assert "dependency_budgets" in payload
 
 
 def test_cli_budget_ledger_dir_env_var_and_autodiscovery(
