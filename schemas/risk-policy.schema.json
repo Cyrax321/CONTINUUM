@@ -41,7 +41,7 @@
     "token_runaway_threshold": {
       "type": "number",
       "minimum": 0.0,
-      "maximum": 1.0,
+      "maximum": 0.8,
       "default": 0.8,
       "description": "Confidence score threshold for token runaway escalation to abort."
     },

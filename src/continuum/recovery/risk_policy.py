@@ -52,6 +52,10 @@ DEFAULT_RISK_POLICY: dict[str, str] = {
 #: conservative than these safe baseline defaults.
 BASELINE_RISK_POLICY: dict[str, str] = dict(DEFAULT_RISK_POLICY)
 
+#: Baseline confidence score threshold above which token runaway escalates to abort.
+#: Raising it weakens abort escalation, so operators may only lower it.
+_BASELINE_TOKEN_RUNAWAY_THRESHOLD: float = 0.8
+
 #: Canonical set of recognised trigger names under the declarative policy.
 KNOWN_TRIGGERS: frozenset[str] = frozenset(DEFAULT_RISK_POLICY.keys())
 
@@ -149,9 +153,9 @@ class RiskPolicySchema(BaseModel):
         description="Base recovery mode for token runaway anomalies.",
     )
     token_runaway_threshold: float = Field(
-        default=0.8,
+        default=_BASELINE_TOKEN_RUNAWAY_THRESHOLD,
         ge=0.0,
-        le=1.0,
+        le=_BASELINE_TOKEN_RUNAWAY_THRESHOLD,
         description="Confidence score threshold for token runaway escalation to abort.",
     )
     silent_abort: PolicyMode = Field(
@@ -181,11 +185,29 @@ class RiskPolicy(dict):  # type: ignore[type-arg]
 
     token_runaway_threshold: float
 
+    @staticmethod
+    def _validate_threshold(val: Any) -> float:
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            try:
+                f = float(val)
+            except (TypeError, ValueError) as exc:
+                raise RiskPolicyError(
+                    f"token_runaway_threshold must be a float, got {val!r}"
+                ) from exc
+        else:
+            f = float(val)
+        if not 0.0 <= f <= _BASELINE_TOKEN_RUNAWAY_THRESHOLD:
+            raise RiskPolicyError(
+                f"token_runaway_threshold must be within [0.0, {_BASELINE_TOKEN_RUNAWAY_THRESHOLD}]; "
+                f"raising it weakens abort escalation, got {val!r}"
+            )
+        return f
+
     def __init__(
         self,
-        mapping: Mapping[str, str] | None = None,
+        mapping: Mapping[str, Any] | None = None,
         *,
-        token_runaway_threshold: float = 0.8,
+        token_runaway_threshold: Any = _BASELINE_TOKEN_RUNAWAY_THRESHOLD,
         **kwargs: Any,
     ) -> None:
         """Build a policy from overrides, then fill every baseline trigger.
@@ -199,7 +221,7 @@ class RiskPolicy(dict):  # type: ignore[type-arg]
         than rejected; file-level fail-closed handling belongs to the loader.
         """
         super().__init__()
-        self.token_runaway_threshold = float(token_runaway_threshold)
+        self.token_runaway_threshold = self._validate_threshold(token_runaway_threshold)
 
         def set_override(key: str, value: Any) -> None:
             """Normalise, validate, and store one recognised trigger override."""
@@ -224,7 +246,7 @@ class RiskPolicy(dict):  # type: ignore[type-arg]
                 set_override(k, v)
         for k, v in kwargs.items():
             if k == "token_runaway_threshold":
-                self.token_runaway_threshold = float(v)
+                self.token_runaway_threshold = self._validate_threshold(v)
             else:
                 set_override(k, v)
         # Ensure all baseline triggers are present with conservative defaults
@@ -270,7 +292,7 @@ def load_risk_policy(path: Path | str | None = None) -> RiskPolicy:
         raise RiskPolicyError(f"risk policy {location} must be a JSON object")
 
     result: dict[str, str] = {}
-    threshold = 0.8
+    threshold = _BASELINE_TOKEN_RUNAWAY_THRESHOLD
 
     for k, v in data.items():
         if not isinstance(k, str) or not k.strip():
@@ -283,11 +305,12 @@ def load_risk_policy(path: Path | str | None = None) -> RiskPolicy:
         if clean_key == "token_runaway_threshold":
             if isinstance(v, bool) or not isinstance(v, (int, float)):
                 raise RiskPolicyError(
-                    f"token_runaway_threshold must be a number in [0.0, 1.0], got {v!r}"
+                    f"token_runaway_threshold must be a number in [0.0, {_BASELINE_TOKEN_RUNAWAY_THRESHOLD}], got {v!r}"
                 )
-            if not 0.0 <= float(v) <= 1.0:
+            if not 0.0 <= float(v) <= _BASELINE_TOKEN_RUNAWAY_THRESHOLD:
                 raise RiskPolicyError(
-                    f"token_runaway_threshold must be within [0.0, 1.0], got {v!r}"
+                    f"token_runaway_threshold must be within [0.0, {_BASELINE_TOKEN_RUNAWAY_THRESHOLD}]; "
+                    f"raising it weakens abort escalation, got {v!r}"
                 )
             threshold = float(v)
             continue
