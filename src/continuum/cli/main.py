@@ -683,24 +683,40 @@ def cmd_status(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         f"{state.progress.pending} pending, {state.progress.failed} failed",
         f"decisions: {len(state.valid_decisions())}/{len(state.decisions)} valid",
     ]
+    status_payload: dict[str, Any] = {
+        "run_id": state.run_id,
+        "goal": (
+            {
+                "description": state.goal.description,
+                "version": state.goal.version,
+            }
+            if state.goal
+            else None
+        ),
+        "version": state.version,
+        "progress": {
+            "completed": state.progress.completed,
+            "pending": state.progress.pending,
+            "failed": state.progress.failed,
+            "total": state.progress.total,
+        },
+        "decisions": {
+            "valid": len(state.valid_decisions()),
+            "total": len(state.decisions),
+        },
+    }
     if degraded:
         lines.append("")
         lines += _degraded_lines(state)
-    text_payload: dict[str, Any] = (
-        {
-            "projection_failed_at": {
-                "sequence": state.unprojectable_at_sequence,
-                "type": state.unprojectable_event_type,
-                "reason": state.unprojectable_reason,
-            }
+        status_payload["projection_failed_at"] = {
+            "sequence": state.unprojectable_at_sequence,
+            "type": state.unprojectable_event_type,
+            "reason": state.unprojectable_reason,
         }
-        if degraded
-        else {}
-    )
     _emit(
-        text_payload,
+        status_payload,
         "\n".join(lines),
-        as_json=False,
+        as_json=args.json,
         stream=out,
         palette=getattr(args, "_palette", None),
     )
@@ -3461,6 +3477,21 @@ def _agents_targets(args: argparse.Namespace) -> list[str]:
     return [args.target]
 
 
+def _agents_selector(args: argparse.Namespace) -> str:
+    """The target selector an invocation actually used.
+
+    ``--all`` acts on every registered target while ``args.target`` still
+    carries its default, so rendering a command from ``args.target`` alone
+    describes an invocation that repeats a fraction of what was done. The
+    JSON payload's ``command`` is copied back by scripts and CI steps, where
+    that fraction is a silent under-rebuild, and on ``remove`` seven of eight
+    generated files left behind (#1762).
+    """
+    if getattr(args, "all_targets", False):
+        return "--all"
+    return f"--target {args.target}"
+
+
 def cmd_agents_install(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Render the instruction targets an IDE reads, from one source.
 
@@ -3487,8 +3518,9 @@ def cmd_agents_install(args: argparse.Namespace, storage: Storage, out: Any, err
         except ValueError as exc:
             refused.append(str(exc))
 
+    source_flag = f" --source {args.source}" if getattr(args, "source", None) else ""
     payload = {
-        "command": f"{REGENERATE_COMMAND} --target {args.target}",
+        "command": f"{REGENERATE_COMMAND} {_agents_selector(args)}{source_flag}",
         "source": str(source_path),
         "installed": [
             {"target": r.target.id, "path": str(r.path), "status": r.status} for r in results
@@ -3529,7 +3561,7 @@ def cmd_agents_remove(args: argparse.Namespace, storage: Storage, out: Any, err:
             kept.append(TARGETS[target_id].path)
 
     payload = {
-        "command": f"continuum agents remove --target {args.target}",
+        "command": f"continuum agents remove {_agents_selector(args)}",
         "removed": removed,
         "left_alone": kept,
     }
@@ -3567,8 +3599,9 @@ def cmd_agents_check(args: argparse.Namespace, storage: Storage, out: Any, err: 
         print(f"error: {exc}", file=err)
         return ExitCode.ERROR
 
+    source_flag = f" --source {args.source}" if getattr(args, "source", None) else ""
     payload = {
-        "command": "continuum agents check",
+        "command": f"continuum agents check {_agents_selector(args)}{source_flag}",
         "clean": all(r.state in ("current", "absent", "unmanaged") for r in results),
         "targets": [
             {"target": r.target.id, "path": str(r.path), "state": r.state, "detail": r.detail}
@@ -5165,7 +5198,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--host",
             choices=tuple(MCP_HOST_PROFILES),
             default="claude-code",
-            help="which host to configure (claude-code, gemini, cursor, vscode).",
+            help=f"which host to configure ({', '.join(MCP_HOST_PROFILES)}).",
         )
         p.add_argument(
             "--scope",
@@ -5621,6 +5654,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="wire transport (default: stdio; http serves POST /<method> JSON).",
     )
     serve.add_argument("--port", type=int, default=8765, help="port for --transport http.")
+    serve.add_argument(
+        "--bind",
+        default=os.environ.get("CONTINUUM_SERVE_BIND", "127.0.0.1"),
+        help="host address to bind for --transport http (default: 127.0.0.1, env: CONTINUUM_SERVE_BIND).",
+    )
+
+    def _cmd_conformance(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
+        from continuum.serve.conformance import cmd_conformance
+
+        return cmd_conformance(args, out=out, err=err)
+
+    conformance = add(
+        "conformance",
+        _cmd_conformance,
+        "Run the wire protocol conformance suite against a CONTINUUM server endpoint.",
+    )
+    conformance.add_argument(
+        "--url",
+        default="http://127.0.0.1:8765",
+        help="target server URL to test (default: http://127.0.0.1:8765).",
+    )
+    conformance.add_argument(
+        "--token",
+        default=os.environ.get("CONTINUUM_SERVE_TOKEN"),
+        help="client authorization bearer token.",
+    )
+    conformance.add_argument(
+        "--confirm-token",
+        default=os.environ.get("CONTINUUM_SERVE_CONFIRM_TOKEN"),
+        help="dedicated confirm credential token.",
+    )
 
     def cmd_dashboard(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
         """Serve the read-only dashboard, blocking until interrupted.

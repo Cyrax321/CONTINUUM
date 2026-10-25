@@ -417,7 +417,7 @@ CONTINUUM es una librería (`src/continuum`, 124 módulos) más una suite de tes
 | `mcp/` | 12 herramientas stdio más autorización `authz.py` autenticación por token, allowlist, token de confirmación |
 | `serve/` | Sidecar stdio cable JSON + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Dashboard web `app.py` `hitl.py` con botones HITL confirmar/reconciliar/completar, aviso de confianza de prefijo, fijaciones |
-| `cli/` | 54 comandos argparse, códigos de salida como veredicto, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 55 comandos argparse, códigos de salida como veredicto, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | Puente de procesador de spans de OpenTelemetry |
 | `benchmark/` | Harness de CONTINUUM-Bench, 5 escenarios de caída + deriva de argumentos + suite de recuperación de 14 escenarios |
 
@@ -497,6 +497,31 @@ La abstracción central: `estado semántico + validación del entorno + reconcil
 
 CONTINUUM se sitúa en la intersección de ejecución durable, seguimiento idempotente de efectos secundarios y recuperación tras caída para agentes LLM. Los vecinos más cercanos son contratos de reanudación verificados por máquina (Khan 2026), procesamiento transaccional agéntico con admisión protegida por restricciones (Mnemosyne 2026), análisis de ataques de reversión de checkpoint (ACRFence 2026) y defensa de inyección de prompt a nivel de diseño (CaMeL 2025). La lista completa anotada, fundamentos y auditoría de citas están en [references/related-work.md](references/related-work.md).
 
+## Mapa de documentación
+
+Cada página bajo `docs/` y la razón de su existencia:
+
+- **Referencia y API**: [docs/api/README.md](docs/api/README.md) (biblioteca, CLI, MCP, sidecar),
+  [docs/GLOSSARY.md](docs/GLOSSARY.md) (cada término de recuperación, apuntando a su implementación),
+  [references/api.md](references/api.md), [references/cli.md](references/cli.md).
+- **Guías de tareas**: [docs/guides/README.md](docs/guides/README.md),
+  [docs/recipes/README.md](docs/recipes/README.md), [docs/concepts/README.md](docs/concepts/README.md).
+- **Seguridad**: [docs/threat_model.md](docs/threat_model.md) (lo que está protegido, detectado y
+  explícitamente no), [docs/signing_key_rotation.md](docs/signing_key_rotation.md) (rotación de un sello
+  con clave sin romper la verificación de contratos más antiguos solo con hash).
+- **Contratos y escala**: [docs/contract_compatibility.md](docs/contract_compatibility.md)
+  (una promesa sellada verificada por otra build),
+  [docs/multi_agent_isolation.md](docs/multi_agent_isolation.md) (aislamiento de `run_id` compartido),
+  [docs/audit-provenance-compaction-294.md](docs/audit-provenance-compaction-294.md)
+  (procedencia que sobrevive a la compactación).
+- **Autoría y operaciones**: [docs/adapters_guide.md](docs/adapters_guide.md) (escribir un
+  adaptador), [docs/cloud_api.md](docs/cloud_api.md) (capa de despliegue opcional),
+  [docs/TESTING_MCP.md](docs/TESTING_MCP.md) (auditoría adversarial de la superficie MCP),
+  [docs/CONTRIBUTING_ONBOARDING.md](docs/CONTRIBUTING_ONBOARDING.md) (orientación).
+- **Planes**: [docs/ARCHITECTURE_EVOLUTION.md](docs/ARCHITECTURE_EVOLUTION.md) (la estrella polar),
+  [docs/CONTINUUM_MASTER_PLAN.md](docs/CONTINUUM_MASTER_PLAN.md) (estado verificado y próximo trabajo),
+  [docs/research/README.md](docs/research/README.md) (las notas de las que surgieron esos planes).
+
 ## Estado y limitaciones
 
 - **Probado**: 3,636 pasados + 23 saltados en una ejecución completa en la auditoría del 2026-08-24 de este árbol, CI hace cumplir la suite en Python 3.11, 3.12 y 3.13, y los conteos varían por plataforma y servicios opcionales como Postgres (ver [STATUS.md](STATUS.md)). La superficie MCP también ha sido auditada de forma adversarial sobre el protocolo en vivo, ver [test.md](test.md).
@@ -566,3 +591,5 @@ Material de referencia profundo:
 
 - [Issues](https://github.com/Cyrax321/CONTINUUM/issues) para errores y funciones
 - [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) para propuestas de diseño
+- [Notas de la versión](docs/release-notes.md)
+- [Lista de verificación de la versión](docs/release-checklist.md)
