@@ -689,3 +689,68 @@ def test_pg_action_index_drift_skips_malformed_json_payload(
     assert result["archived"] >= 1
     assert any(e.type is EventType.EVENT_LOG_ANCHORED for e in storage.read_events("pg_anchor"))
     assert storage.verify_events("pg_anchor").ok, "chain must still verify after a safe compact"
+
+
+def test_pg_verify_accounts_for_the_archived_prefix(storage: PostgresStorage) -> None:
+    """Issue #1814, Postgres twin of the SQLite regression in
+    tests/test_compaction.py: verify_events counted only live rows in
+    ``checked`` and seeded ``trusted_through`` at 0, so the report
+    understated the audit on a compacted run and one bad live row discarded
+    a fully verified archive prefix."""
+    run_id = f"pg_1814_{next(_iso_counter)}"
+    make_run(storage, run_id)
+    for i in range(10):
+        storage.append_event(run_id, EventType.TASK_UPDATED, {"task": f"t_{i}"})
+    storage.compact_run(run_id, through_sequence=5)
+
+    archived = list(storage.read_archived_events(run_id))
+    live = list(storage.read_events(run_id))
+    assert [e.sequence for e in archived] == [1, 2, 3, 4, 5]
+
+    clean = storage.verify_events(run_id)
+    assert clean.ok, [v.kind for v in clean.violations]
+    assert clean.checked == len(archived) + len(live)
+    assert clean.trusted_through[run_id] == live[-1].sequence
+
+    # Tamper with the first live row: the archive verified in full, so
+    # trusted_through must keep it instead of collapsing to 0.
+    storage._connection.execute(
+        f"UPDATE events SET hash = 'bad_hash' WHERE run_id = '{run_id}' "
+        f"AND sequence = (SELECT MIN(sequence) FROM events WHERE run_id = '{run_id}')"
+    )
+    tampered = storage.verify_events(run_id)
+
+    assert tampered.ok is False
+    assert any(v.kind == "TAMPERED_CONTENT" for v in tampered.violations)
+    assert tampered.checked == len(archived) + len(live)
+    assert tampered.trusted_through[run_id] == archived[-1].sequence
+
+
+def test_postgres_atomic_claim_concurrency(storage: PostgresStorage) -> None:
+    """Concurrent claims on PostgreSQL produce at most one winner via advisory lock."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from continuum.actions.ledger import LedgerError
+    from continuum.models import UnknownSideEffect
+
+    make_run(storage, "pg_atomic", "atomic claim verification")
+
+    def claim(i: int) -> str:
+        ledger = ActionLedger(storage, "pg_atomic")
+        try:
+            outcome = ledger.claim("charge.pg", {"cents": 9900}, key="k_pg")
+            if outcome.fresh:
+                try:
+                    ledger.complete(outcome.key, result={"tx": f"pg-{i}"})
+                    return "proceed"
+                except LedgerError:
+                    return "ambiguous"
+            return "dedup"
+        except (UnknownSideEffect, LedgerError):
+            return "ambiguous"
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        outcomes = list(pool.map(claim, range(16)))
+
+    assert outcomes.count("proceed") <= 1
+    assert set(outcomes) <= {"proceed", "dedup", "ambiguous"}

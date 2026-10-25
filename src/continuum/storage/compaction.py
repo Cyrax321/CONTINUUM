@@ -42,6 +42,7 @@ def resolve_compaction_bound(
     # Local import: checkpoint.manager imports storage, so a module-level
     # import here would cycle.
     from continuum.checkpoint.manager import CheckpointManager
+    from continuum.checkpoint.policy import CheckpointTrigger
 
     lv = storage.latest_version(run_id)
     head = storage.last_sequence(run_id)
@@ -58,6 +59,8 @@ def resolve_compaction_bound(
             manager.checkpoint(
                 run_id,
                 state=state,
+                trigger=CheckpointTrigger.RECOVERY,
+                reason="compaction anchor",
                 force_version=True,
                 environment=storage._anchor_environment(run_id, environment),
             )

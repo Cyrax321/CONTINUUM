@@ -77,16 +77,26 @@ def run_single_horizon(scenario_name: str) -> ScenarioResult:
     result = judge(scen, actual_mode)
     elapsed_ms = round((time.perf_counter() - start) * 1000, 3)
 
-    # Compute the six metrics
-    # Duplicate side effects and work are 0 for horizon (no side effects in driver)
-    # Compression ratio is full log tokens / briefing tokens
-    # Use the judge's scoring for the first three, driver for the last three
+    # Compute the six metrics.
+    # duplicate_side_effects / duplicate_work are measured from the ledger, not
+    # hardcoded. The driver performs one idempotent effect per cycle and
+    # re-attempts it after each reconstruction, exactly as a resumed agent
+    # would. duplicate_side_effects counts executions beyond the first for any
+    # key; duplicate_work counts the re-attempts that the ledger let through to
+    # a second real execution. Both are 0 while the ledger holds, and both go
+    # positive the moment it does not, which is what makes the published zeros
+    # a measurement rather than a constant.
+    performed = horizon.side_effects_performed
+    avoided = horizon.duplicate_work_avoided
+    duplicate_side_effects = horizon.duplicate_side_effects()
     metrics: dict[str, Any] = {
         "accuracy": 1.0 if result.passed else 0.0,
         "unnecessary_human_escalation_rate": 1.0 if result.unnecessary_escalation else 0.0,
         "repair_precision": 1.0 if result.repair_correct else 0.0,
-        "duplicate_side_effects": 0,
-        "duplicate_work": 0.0,
+        "duplicate_side_effects": duplicate_side_effects,
+        "duplicate_work": duplicate_side_effects,
+        "duplicate_work_avoided": avoided,
+        "side_effects_performed": performed,
         "compression_ratio": round(
             len(horizon.storage.read_events(horizon.run_id))
             / max(1, horizon.reconstruction_cycles),

@@ -48,6 +48,13 @@ def emit_horizon_report(
     dup_sides = []
     dup_works = []
     compressions = []
+    # ``duplicate_work_avoided`` and ``side_effects_performed`` are published
+    # alongside the duplicate counts for a reason: a zero on its own is
+    # indistinguishable from a constant. The avoided count is how many
+    # post-reconstruction re-attempts the ledger refused, and it is positive in
+    # every healthy run, so a reader can see the probe actually ran (#1572).
+    avoided = []
+    performed = []
     for r in report.results:
         accuracies.append(r.metrics.get("accuracy", 0))
         unnecessary_rates.append(r.metrics.get("unnecessary_human_escalation_rate", 0))
@@ -55,6 +62,8 @@ def emit_horizon_report(
         dup_sides.append(r.metrics.get("duplicate_side_effects", 0))
         dup_works.append(r.metrics.get("duplicate_work", 0))
         compressions.append(r.metrics.get("compression_ratio", 0))
+        avoided.append(r.metrics.get("duplicate_work_avoided", 0))
+        performed.append(r.metrics.get("side_effects_performed", 0))
 
     horizon_summary: dict[str, Any] = dict(summary)
     if accuracies:
@@ -67,6 +76,8 @@ def emit_horizon_report(
         )
         horizon_summary["duplicate_side_effects"] = sum(dup_sides)
         horizon_summary["duplicate_work"] = round(sum(dup_works) / len(dup_works), 3)
+        horizon_summary["duplicate_work_avoided"] = sum(avoided)
+        horizon_summary["side_effects_performed"] = sum(performed)
         horizon_summary["compression_ratio"] = (
             round(sum(compressions) / len(compressions), 3) if compressions else 0
         )
@@ -91,6 +102,10 @@ def emit_horizon_report(
     )
     lines.append(
         f"Duplicate side effects: {horizon_summary.get('duplicate_side_effects', 0)}  Duplicate work: {horizon_summary.get('duplicate_work', 0)}  Compression: {horizon_summary.get('compression_ratio', 0)}"
+    )
+    lines.append(
+        f"Side effects performed: {horizon_summary.get('side_effects_performed', 0)}  "
+        f"Duplicate re-attempts refused by the ledger: {horizon_summary.get('duplicate_work_avoided', 0)}"
     )
     lines.append("")
     lines.append(
