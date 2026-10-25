@@ -11,6 +11,9 @@ Covers:
 - Hash-chain tamper detection.
 - Proof that correlated tool completion does not auto-complete an uncertain action.
 - CLI observe and evidence-chain subcommands.
+- Review-of-#1680 regressions: retry under a new CID, malformed CIDs on retry,
+  malformed hook CIDs, keyless action records, uncorrelated observations, and
+  TOOL_CALLED status reporting.
 """
 
 from __future__ import annotations
@@ -422,3 +425,224 @@ def test_correlate_evidence_direct() -> None:
 
     missing = next(c for c in chains if c.status == "missing_correlation")
     assert missing.action_key == "k2"
+
+
+def test_retry_under_new_correlation_id_is_matched_not_ambiguous(
+    storage: SQLiteStorage, run_id: str
+) -> None:
+    """A fail-then-retry on the same key may take a new CID (review of #1680).
+
+    The chain must span both attempt CIDs, stay ``matched`` (not ``ambiguous``),
+    and the retry's tool events must not surface as ``unmatched_observation``.
+    """
+    ledger = ActionLedger(storage, run_id)
+    cid_first = "cid-retry-first"
+    cid_retry = "cid-retry-second"
+
+    outcome = ledger.claim("send_email", {"to": "ops"}, correlation_id=cid_first)
+    storage.append_event(
+        run_id,
+        EventType.TOOL_FAILED,
+        {"tool": "smtp", "status": 500, "correlation_id": cid_first},
+        source=Origin.EXTERNAL_AGENT,
+    )
+    ledger.fail(outcome.key, "SMTP 500", certain=True)
+
+    # Same slot retried under a fresh correlation ID (no explicit key: the
+    # exact argument-hash key resolves to the FAILED attempt)
+    ledger.claim("send_email", {"to": "ops"}, correlation_id=cid_retry)
+    storage.append_event(
+        run_id,
+        EventType.TOOL_COMPLETED,
+        {"tool": "smtp", "status": 250, "correlation_id": cid_retry},
+        source=Origin.EXTERNAL_AGENT,
+    )
+
+    chains = correlate_action_events(storage, run_id)
+    assert len(chains) == 1, [c.status for c in chains]
+
+    chain = chains[0]
+    assert chain.action_key == outcome.key
+    assert chain.status == "matched"
+    assert chain.correlation_id == cid_retry  # latest attempt wins for display
+    # Both attempts' tool events are collected under the one chain
+    assert sorted(e["type"] for e in chain.tool_events) == ["TOOL_COMPLETED", "TOOL_FAILED"]
+    assert not [c for c in chains if c.status == "unmatched_observation"]
+    assert not [c for c in chains if c.status == "ambiguous"]
+
+
+@pytest.mark.parametrize("bad_cid", ["", "   ", "a" * 129])
+def test_failed_retry_branch_rejects_malformed_correlation_id(
+    storage: SQLiteStorage, run_id: str, bad_cid: str
+) -> None:
+    """Failed and compensated re-claims validate the CID (review of #1680).
+
+    Those branches settle via ``model_copy``, which skips field validators, so
+    an unvalidated ID would survive into the event log and break every later
+    replay of the run.
+    """
+    ledger = ActionLedger(storage, run_id)
+    outcome = ledger.claim("charge_card", {"amount": 5}, correlation_id="cid-ok")
+    ledger.fail(outcome.key, "declined", certain=True)
+
+    # No explicit key: the retry resolves to the FAILED attempt's slot
+    with pytest.raises(ValueError, match="correlation_id"):
+        ledger.claim("charge_card", {"amount": 5}, correlation_id=bad_cid)
+
+
+def test_compensated_retry_branch_rejects_malformed_correlation_id(
+    storage: SQLiteStorage, run_id: str
+) -> None:
+    """The COMPENSATED retry path validates the CID too (review of #1680)."""
+    ledger = ActionLedger(storage, run_id)
+    outcome = ledger.claim("publish_doc", {"doc": "d1"}, correlation_id="cid-ok")
+    ledger.complete(outcome.key, external_id="pub-1", correlation_id="cid-ok")
+    ledger.compensate(outcome.key, note="retracted")
+
+    with pytest.raises(ValueError, match="correlation_id"):
+        ledger.claim("publish_doc", {"doc": "d1"}, correlation_id="")
+
+
+def test_malformed_hook_correlation_id_does_not_drop_the_observation() -> None:
+    """A malformed agent-supplied CID is dropped, not fatal (review of #1680).
+
+    The observe hook must never fail the host tool call, and the observation is
+    durable evidence regardless of linkage quality.
+    """
+    from continuum.clienthooks import observe_event_payload
+
+    payload = observe_event_payload(
+        {"tool_name": "Write", "tool_input": {"file_path": "x.py", "correlation_id": 42}}
+    )
+    assert "correlation_id" not in payload
+    assert payload["tool"] == "Write"
+
+
+def test_cli_observe_rejects_explicitly_empty_correlation_id(tmp_path) -> None:
+    """An explicitly empty --correlation-id is rejected, not silently ignored (#1680)."""
+    db_path = str(tmp_path / "cli_empty_cid.db")
+    s = SQLiteStorage(db_path)
+    run = s.create_run_started(
+        Run(run_id="cli_run_empty_cid", goal="empty cid rejected"), source=Origin.HUMAN
+    )
+    payload_file = tmp_path / "obs.json"
+    payload_file.write_text(
+        json.dumps({"tool_name": "make", "tool_input": {"file_path": "build.log"}}),
+        encoding="utf-8",
+    )
+
+    out = io.StringIO()
+    err = io.StringIO()
+    rc = main(
+        [
+            "--db",
+            db_path,
+            "observe",
+            "--run-id",
+            run.run_id,
+            "--correlation-id",
+            "",
+            "--payload-file",
+            str(payload_file),
+        ],
+        out=out,
+        err=err,
+    )
+    assert rc != 0
+
+
+def test_keyless_action_record_and_uncorrelated_tool_get_chains() -> None:
+    """Keyless action records and uncorrelated tools are not dropped (#1680).
+
+    A keyless record with a matching CID correlates; tool events without any CID
+    surface as ``missing_correlation`` chains instead of vanishing.
+    """
+    events = [
+        Event(
+            run_id="r1",
+            sequence=1,
+            type=EventType.ACTION_RECORDED,
+            payload={
+                "action": {
+                    "action_id": "act-keyless",
+                    "action_type": "notify",
+                    "status": "started",
+                    "correlation_id": "cid-keyless",
+                },
+            },
+        ),
+        Event(
+            run_id="r1",
+            sequence=2,
+            type=EventType.TOOL_COMPLETED,
+            payload={"tool": "slack", "correlation_id": "cid-keyless"},
+        ),
+        Event(
+            run_id="r1",
+            sequence=3,
+            type=EventType.TOOL_CALLED,
+            payload={"tool": "curl", "path": "https://example.com"},
+        ),
+    ]
+
+    chains = correlate_evidence(events)
+    assert len(chains) == 2
+
+    matched = next(c for c in chains if c.status == "matched")
+    assert matched.action_key is None
+    assert matched.action_id == "act-keyless"
+    assert matched.action_type == "notify"
+    assert matched.action_status == "started"
+    assert matched.correlation_id == "cid-keyless"
+    assert len(matched.tool_events) == 1
+
+    uncorrelated = next(c for c in chains if c.status == "missing_correlation")
+    assert uncorrelated.action_key is None
+    assert uncorrelated.correlation_id is None
+    assert len(uncorrelated.tool_events) == 1
+    assert uncorrelated.tool_events[0]["tool"] == "curl"
+
+
+def test_tool_called_is_reported_as_called_not_failed() -> None:
+    """A TOOL_CALLED event only says the tool started (review of #1680)."""
+    events = [
+        Event(
+            run_id="r1",
+            sequence=1,
+            type=EventType.TOOL_CALLED,
+            payload={"tool": "curl", "correlation_id": "cid-pending"},
+        ),
+    ]
+
+    chains = correlate_evidence(events)
+    assert len(chains) == 1
+    chain = chains[0]
+    assert chain.status == "unmatched_observation"
+    assert chain.observations[0]["status"] == "called"
+
+
+def test_nested_action_fields_are_used_as_fallback() -> None:
+    """Action details come from the nested action when top-level ones are absent (#1680)."""
+    events = [
+        Event(
+            run_id="r1",
+            sequence=1,
+            type=EventType.ACTION_RECORDED,
+            payload={
+                "action": {
+                    "action_id": "act-nested-9",
+                    "action_type": "fetch",
+                    "status": "started",
+                    "correlation_id": "cid-nested",
+                },
+                "key": "k-nested",
+            },
+        ),
+    ]
+
+    chains = correlate_evidence(events)
+    assert len(chains) == 1
+    chain = chains[0]
+    assert chain.action_id == "act-nested-9"
+    assert chain.action_type == "fetch"
+    assert chain.action_status == "started"
