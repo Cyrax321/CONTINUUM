@@ -441,10 +441,7 @@ def reinject_constraint_pins(
     archived_events = storage.read_archived_events(run_id)
     retracted_cids: set[str] = set()
     for e in list(archived_events) + list(live_events):
-        if e.type in (
-            EventType.CONSTRAINT_RETRACTED,
-            EventType.CONSTRAINT_PIN_DROPPED,
-        ) and isinstance(e.payload, dict):
+        if e.type is EventType.CONSTRAINT_RETRACTED and isinstance(e.payload, dict):
             cid = e.payload.get("constraint_id")
             if cid:
                 retracted_cids.add(cid)
@@ -532,7 +529,7 @@ def reinject_constraint_pins(
                 run_id,
                 EventType.CONSTRAINT_PINNED,
                 {"constraint_id": pin.constraint_id, "sha256": pin.sha256},
-                source=asserted_by,
+                source=pin.provenance.origin,
             )
             appended.append(ev)
             live_pinned[pin.constraint_id] = pin.sha256

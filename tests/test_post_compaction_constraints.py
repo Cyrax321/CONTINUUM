@@ -367,3 +367,110 @@ def test_retracted_constraint_is_not_reinstated_across_compaction(tmp_path: Path
 
     state = CheckpointManager(storage).project_current(run_id, full_history=True)
     assert "retracted-rule" not in state.pins
+
+
+def test_unverified_repin_preserves_external_agent_provenance(tmp_path: Path) -> None:
+    """Unverified pins keep their original provenance origin across compaction."""
+    bad_file = tmp_path / "broken_constraints.json"
+    bad_file.write_text("{invalid json", encoding="utf-8")
+
+    db_path = str(tmp_path / "test_provenance.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_external_agent_pin"
+
+    storage.create_run(Run(run_id=run_id, goal="test unverified provenance preservation"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        ConstraintPinned(constraint_id="agent-rule", sha256="b" * 64).model_dump(),
+        source=Origin.EXTERNAL_AGENT,
+    )
+
+    manager = CheckpointManager(storage)
+    manager.checkpoint(run_id)
+
+    report = storage.compact_run(run_id, constraints_path=bad_file)
+    assert report["archived"] >= 1
+
+    live = storage.read_events(run_id)
+    reanchored = [
+        e
+        for e in live
+        if e.type is EventType.CONSTRAINT_PINNED and e.payload.get("constraint_id") == "agent-rule"
+    ]
+    assert len(reanchored) == 1
+    assert reanchored[0].source is Origin.EXTERNAL_AGENT
+
+    state = CheckpointManager(storage).project_current(run_id, full_history=True)
+    assert "agent-rule" in state.pins
+    assert state.pins["agent-rule"].provenance.origin is Origin.EXTERNAL_AGENT
+
+
+def test_dropped_pin_restored_when_added_back_to_registry(tmp_path: Path) -> None:
+    """A rule dropped because it was absent from registry is restored when added back."""
+    different_file = _write_constraints(
+        tmp_path,
+        [
+            {
+                "id": "other-rule",
+                "level": "hard",
+                "predicate": "Another rule in registry.",
+            }
+        ],
+    )
+    pred_hash = hashlib.sha256(b"Restorable rule text.").hexdigest()
+
+    db_path = str(tmp_path / "test_restore_dropped.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_restore_dropped"
+
+    storage.create_run(Run(run_id=run_id, goal="test dropped pin restoration"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        ConstraintPinned(constraint_id="temp-dropped", sha256=pred_hash).model_dump(),
+        source=Origin.HUMAN,
+    )
+
+    manager = CheckpointManager(storage)
+    manager.checkpoint(run_id)
+
+    # First compaction: temp-dropped is not in registry, so it is dropped
+    storage.compact_run(run_id, constraints_path=different_file)
+    live1 = storage.read_events(run_id)
+    assert any(
+        e.type is EventType.CONSTRAINT_PIN_DROPPED
+        and e.payload.get("constraint_id") == "temp-dropped"
+        for e in live1
+    )
+
+    # Operator restores temp-dropped rule to registry
+    restored_file = _write_constraints(
+        tmp_path,
+        [
+            {
+                "id": "other-rule",
+                "level": "hard",
+                "predicate": "Another rule in registry.",
+            },
+            {
+                "id": "temp-dropped",
+                "level": "hard",
+                "predicate": "Restorable rule text.",
+            },
+        ],
+    )
+
+    # Next reinjection should successfully restore the pin
+    appended = reinject_constraint_pins(
+        storage, run_id, constraints_path=restored_file, asserted_by=Origin.HUMAN
+    )
+    assert any(
+        e.type is EventType.CONSTRAINT_PINNED and e.payload.get("constraint_id") == "temp-dropped"
+        for e in appended
+    )
+
+    state = CheckpointManager(storage).project_current(run_id, full_history=True)
+    assert "temp-dropped" in state.pins
