@@ -110,6 +110,7 @@ __all__ = [
     "load_auth",
     "load_confirm",
     "caller_name",
+    "fold_client_name",
     "token_from",
     "CLIENT_TOKENS_ENV_VAR",
 ]
@@ -163,7 +164,7 @@ class NotAuthenticated(PermissionError):
     """The caller did not prove possession of the expected shared secret."""
 
 
-def _fold(name: str) -> str:
+def fold_client_name(name: str) -> str:
     """Normalise a client name so one spelling is one identity (#1598).
 
     Both halves of the handshake key off the same ``clientInfo.name`` string,
@@ -216,7 +217,7 @@ class AuthPolicy:
         # itself ``cursor`` (#1598). Two entries that fold together cannot both
         # survive, so the later one wins rather than silently splitting the
         # identity the fold exists to keep whole.
-        self.tokens = {_fold(k): v for k, v in tokens.items()} if tokens else None
+        self.tokens = {fold_client_name(k): v for k, v in tokens.items()} if tokens else None
         self.source = source
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
@@ -245,7 +246,7 @@ class AuthPolicy:
             # caller sends reaches the entry the operator registered (#1598).
             # A nameless caller folds to nothing the map can hold, and the map
             # never carries an empty key, so it refuses here as before.
-            folded = _fold(caller) if caller else caller
+            folded = fold_client_name(caller) if caller else caller
             if folded not in self.tokens:
                 raise NotAuthenticated(f"caller {caller!r} is not registered for authentication")
             expected = self.tokens[folded]
@@ -516,7 +517,7 @@ class AuthorizationPolicy:
         _reject_inline_alias_syntax(declared)
         self.allow_any = ALLOW_ANY_CLIENT in declared
         names = [n for n in declared if n != ALLOW_ANY_CLIENT]
-        self.allowed = frozenset(_fold(name) for name in names)
+        self.allowed = frozenset(fold_client_name(name) for name in names)
         self.source = source
 
         # An alias is only kept when the canonical it belongs to is itself
@@ -526,9 +527,11 @@ class AuthorizationPolicy:
         live = {
             canonical: extra
             for canonical, extra in _parse_aliases(aliases).items()
-            if _fold(canonical) in self.allowed
+            if fold_client_name(canonical) in self.allowed
         }
-        self.aliases = frozenset(_fold(alias) for extra in live.values() for alias in extra)
+        self.aliases = frozenset(
+            fold_client_name(alias) for extra in live.values() for alias in extra
+        )
         self._identities = self.allowed | self.aliases
         # The spellings as written, so a refusal quotes back something the
         # operator recognises rather than a lowercased shadow of it.
@@ -562,7 +565,7 @@ class AuthorizationPolicy:
         """
         if caller is None:
             return False
-        name = _fold(caller)
+        name = fold_client_name(caller)
         if not name:
             return False
         if self.allow_any:
@@ -735,3 +738,7 @@ def caller_name(context: Any) -> str | None:
         return None
     name = getattr(info, "name", None)
     return str(name) if name else None
+
+
+# Backwards-compatible alias for readers that still reach for the private name.
+_fold = fold_client_name

@@ -11,6 +11,18 @@ from continuum.storage import SQLiteStorage
 adapter = GenericAgentAdapter(SQLiteStorage("continuum.db"))
 ```
 
+## Optional installation extras
+
+The core package does not install environment-specific tooling. Install the
+extra for the adapter you use:
+
+- `browser`: `pip install "continuum-agent[browser]"` installs Playwright for
+  `BrowserAdapter`. Run `playwright install chromium` separately to install a
+  browser binary.
+- `kubernetes`: `pip install "continuum-agent[kubernetes]"` installs the
+  Kubernetes Python client for `KubernetesAdapter`. The `kubectl` CLI and a
+  configured cluster remain external prerequisites.
+
 ## GenericAgentAdapter
 
 `continuum.adapters.GenericAgentAdapter(storage, *, engine=None)`

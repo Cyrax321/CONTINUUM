@@ -750,3 +750,69 @@ def test_no_host_writes_outside_the_file_it_was_pointed_at(
     assert len(created) == 1, (host, created)
     assert "~" not in created[0], (host, created)
     assert not created[0].endswith(".db"), (host, created)
+
+
+#: The tree this suite ships in, so the guard below reads the committed copy.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _tracked_paths() -> set[str] | None:
+    """What git tracks at the repository root, or ``None`` off a checkout.
+
+    ``git ls-files`` rather than a directory walk: a file can sit on disk and
+    be ignored, and it is the committed copy every other clone receives.
+    """
+    proc = subprocess.run(["git", "ls-files"], cwd=_REPO_ROOT, capture_output=True, text=True)
+    if proc.returncode != 0:
+        return None
+    return set(proc.stdout.split())
+
+
+@pytest.mark.parametrize("host", sorted(mcp_install.HOST_PROFILES))
+def test_no_baked_host_registration_is_committed(host: str) -> None:
+    """A project-scope registration is baked for one machine, so it is never committed.
+
+    ``--scope project`` writes the file ``HOST_PROFILES`` names, with an
+    absolute command and an absolute ``--db`` resolved by
+    :func:`continuum.mcp.install.resolve_command` on the machine that ran the
+    install. Committed, that registration points every other clone at a binary
+    that does not exist there, which is the ``CONNECTION_CLOSED`` shape
+    ``docs/api/mcp.md`` documents, and it is why ``continuum doctor`` reported
+    this repository itself as ``stale`` (`.continue/config.yaml` in #1618).
+    ``.mcp.json`` is the one tracked registration and it is a path expression
+    the host expands rather than a resolved path, so it is not subject to this.
+    """
+    tracked = _tracked_paths()
+    if tracked is None:
+        pytest.skip("not a git checkout, so the committed tree cannot be read")
+
+    project_file = mcp_install.HOST_PROFILES[host]["project_settings"]
+    if project_file == ".mcp.json":
+        pytest.skip(f"{host} shares the tracked, host-expanded .mcp.json")
+
+    assert project_file not in tracked, (
+        f"{host}'s project registration {project_file} is committed with a "
+        "baked absolute command; run `continuum mcp remove --host "
+        f"{host} --scope project`, and the file is gitignored"
+    )
+
+
+def test_the_host_help_names_every_host_the_choices_accept() -> None:
+    """The help sentence and the choices line cannot drift apart (#1765).
+
+    A reader who checks ``continuum mcp install --help`` learns which hosts are
+    supported from the prose sentence, so a sentence naming a subset next to a
+    choices line naming the rest teaches the wrong answer next to the right
+    one. The sentence is derived from the same profile table the choices come
+    from, and this test is what keeps the derivation honest.
+    """
+    from continuum.cli.main import build_parser
+
+    top = build_parser()._subparsers._group_actions[0].choices
+    install = top["mcp"]._subparsers._group_actions[0].choices["install"]
+
+    host_help = next(
+        action.help for action in install._actions if action.option_strings == ["--host"]
+    )
+    for host in mcp_install.HOST_PROFILES:
+        assert host in (host_help or ""), f"--host help omits {host}, which the parser accepts"

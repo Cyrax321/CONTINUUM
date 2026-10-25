@@ -4,6 +4,119 @@ Thank you for helping make CONTINUUM better. This document covers everything you
 need to go from a fresh clone to a passing test suite and a clean pull request.
 Maintainers cutting a release follow the manual gate in [docs/release-checklist.md](docs/release-checklist.md), including the pre-tag clean-tree and remote-tag collision checks.
 
+Already know your way around? [docs/CONTRIBUTING_ONBOARDING.md](docs/CONTRIBUTING_ONBOARDING.md)
+is the orientation guide: where the architecture north star lives, what `STATUS.md` and
+`CHANGELOG.md` are for, and the rules review enforces.
+
+---
+
+## Table of Contents
+
+- [A Good First Issue Is the Right Place to Start](#a-good-first-issue-is-the-right-place-to-start)
+- [Labels Worth Knowing](#labels-worth-knowing)
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+- [Running the Tests](#running-the-tests)
+- [Troubleshooting](#troubleshooting)
+- [Linting & Type-Checking](#linting--type-checking)
+- [Project Structure](#project-structure)
+- [Design Principles](#design-principles)
+- [Versioning](#versioning)
+- [Submitting a Pull Request](#submitting-a-pull-request)
+- [Code of Conduct](#code-of-conduct)
+
+---
+
+## A Good First Issue Is the Right Place to Start
+
+If you are new to CONTINUUM, the best place to start is the tracking issue
+[#1661](https://github.com/Cyrax321/CONTINUUM/issues/1661). It gathers verified,
+scoped tasks across documentation, missing test coverage, and packaging. Each
+task names the exact file it touches so you never need to guess where to make
+changes.
+
+Here is what is expected of a first pull request:
+
+- **One issue per PR.** Do not bundle multiple issues or tasks into one PR.
+- **Match the surrounding style.** Follow the existing formatting, naming, and
+  code structure in the files you edit.
+- **Run the test file you touched.** Execute `pytest tests/<your_test_file>.py -q`
+  and confirm `ruff check` passes before opening your PR.
+- **Comment if you get stuck.** If a test fails, instructions are unclear, or
+  you encounter unexpected behavior, leave a comment on the issue describing
+  where you are blocked. Asking a question is a valuable contribution.
+
+To get started today, open [#1661](https://github.com/Cyrax321/CONTINUUM/issues/1661),
+choose an unclaimed task, leave a comment stating you would like to work on it,
+and follow the [Setup](#setup) section below.
+
+---
+
+## Labels Worth Knowing
+
+Issue labels identify where help is needed and how tasks are scoped:
+
+| Label | Description |
+|---|---|
+| `good first issue` | Well-scoped entry-level tasks that name the exact files to modify. |
+| `help wanted` | Open contributor items where community assistance is actively sought. |
+| `hacktoberfest` | Issues participating in Hacktoberfest. Help is wanted on all of them. |
+| `documentation` | Guides, API reference pages, translated READMEs, and doc links. |
+| `tests` | Unit tests, regression tests, and coverage for untested modules. |
+| `bug` | Confirmed behavioral bugs, regressions, or incorrect error handling. |
+
+Issues participating in Hacktoberfest carry both the `hacktoberfest` and
+`help wanted` labels. You can filter the issue tracker by the
+[`good first issue`](https://github.com/Cyrax321/CONTINUUM/labels/good%20first%20issue)
+or [`hacktoberfest`](https://github.com/Cyrax321/CONTINUUM/labels/hacktoberfest)
+labels today to find an unassigned issue and begin contributing.
+
+---
+
+## Where to start: good first issues
+
+If this is your first contribution, start with a
+[good first issue](https://github.com/Cyrax321/CONTINUUM/issues?q=label%3A%22good+first+issue%22+is%3Aopen).
+The [tracking issue](https://github.com/Cyrax321/CONTINUUM/issues/1661) lists the
+current batch. Every entry on it names the exact file it touches and was verified
+against `main`, so you can tell before reading any code whether a task is yours.
+
+A first PR is expected to:
+
+- fix **one issue per PR**. Do not bundle several first issues into a single PR.
+- match the surrounding style. For a test task that means reading the nearest
+  existing test file first, and for a docs task, the section being extended.
+- run the check the issue names: `pytest tests/<your_file>.py -q` for a test
+  task, `ruff check <changed paths>` for any task.
+- comment on the issue if you get stuck. A stuck comment with a real question is
+  a useful contribution, not a failure.
+
+Comment `I would like to work on this` on the issue you pick, so two people do
+not fix the same thing, and open a draft PR early.
+
+---
+
+## Labels worth knowing
+
+| Label | What it means |
+|-------|---------------|
+| `good first issue` | A scoped task verified against `main`. The place to start. |
+| `help wanted` | The maintainers want outside help on this issue. |
+| `hacktoberfest` | Eligible for Hacktoberfest. Filter the tracker by this label in October. |
+| `documentation` | Docs work. Also applied to PRs that touch `docs/` or any `*.md` file. |
+| `tests` | Test suite work. Also applied to PRs that touch `tests/`. |
+| `bug` | Something is broken and needs fixing. |
+
+`good first issue`, `help wanted`, `hacktoberfest`, and `bug` are applied to
+issues by hand. The area labels, including `documentation` and `tests`, are
+applied to PRs by `.github/labeler.yml` from the paths a PR touches, so your PR
+labels itself. Help is wanted on every `hacktoberfest` issue, and each one also
+carries `good first issue`, so that filter alone finds the work.
+
+A concrete thing you can do today: open the
+[issue tracker](https://github.com/Cyrax321/CONTINUUM/issues), filter by
+`good first issue`, and pick one whose "Where" names a file you can open.
+
 ---
 
 ## Prerequisites
@@ -31,6 +144,14 @@ pip install -e ".[dev]"
 # 4. Install the pre-commit hooks (recommended, see below)
 pip install pre-commit
 pre-commit install
+```
+
+To work on an optional environment adapter, install its extra in the same
+virtual environment:
+
+```bash
+pip install -e ".[browser]"     # BrowserAdapter; run playwright install chromium separately
+pip install -e ".[kubernetes]"  # KubernetesAdapter; kubectl and a cluster are external
 ```
 
 On **Windows PowerShell**, use the same steps with these commands instead:
@@ -70,6 +191,19 @@ pytest tests/test_events.py -v
 # Property-based tests (hypothesis) - slow, good before PRs
 pytest tests/test_hashing.py tests/test_models.py -v
 ```
+
+### Documentation guards
+
+`tests/test_docs_counts.py` holds roughly twenty guards that fail CI when a figure
+documented in the READMEs, translated READMEs, or reference docs drifts from
+the code: collected test total, module count, test-file count, CLI subcommand
+count, event-type count, fault-suite size, and more. Several carry a failure
+message that names the exact files to edit.
+
+The module-map figures in `README.md` are pinned with zero tolerance. Adding a
+test file means bumping the test-file count; adding a module means bumping the
+module count. That is intended behaviour, and the guard's own error message is
+the authority on which line to change, so do not duplicate it here.
 
 ---
 

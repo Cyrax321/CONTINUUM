@@ -16,7 +16,7 @@ Deep install and dependency material. The [README Quick Start](../README.md#quic
 
 ## Install levels
 
-The core library has **one** runtime dependency (`pydantic>=2.7`). Everything else is an optional extra (see `pyproject.toml:30` and `pyproject.toml:32-72`).
+The core library has **one** runtime dependency (`pydantic>=2.7`). Everything else is an optional extra (see `pyproject.toml:30` and `pyproject.toml:32-84`).
 
 ```bash
 # Contributors (recommended): everything needed to run tests, lint, type-check
@@ -28,6 +28,8 @@ uv pip install -e .
 # Composable extras
 uv pip install -e ".[mcp]"           # MCP server (13 stdio tools), requires mcp>=2.0
 uv pip install -e ".[otel]"          # OpenTelemetry bridge, opentelemetry-api>=1.20
+uv pip install -e ".[browser]"       # BrowserAdapter, Playwright (run playwright install chromium separately)
+uv pip install -e ".[kubernetes]"    # KubernetesAdapter, Kubernetes client; kubectl and a cluster remain external
 uv pip install -e ".[langgraph]"     # LangGraph adapter
 uv pip install -e ".[openai]"        # OpenAI Agents SDK adapter (also pulls mcp transitively)
 uv pip install -e ".[langchain]"     # LangChain adapter
@@ -46,26 +48,15 @@ Combine freely: `[dev]` already includes `mcp`, `langgraph`, `langchain`, `opena
 |:--|:--|:--|:--|
 | `pydantic>=2.7` | `pyproject.toml:30` (core `dependencies`) | Immutable models, hash-chained events | **Yes, always** |
 | `mcp>=2.0` | `pyproject.toml:58` (`[mcp]`), also in `[dev]` | MCP server (`continuum-mcp`) stdio transport | Only for MCP server (also pulled transitively by `openai-agents`) |
- HEAD
-| `opentelemetry-api>=1.20` | `pyproject.toml:60` (`[otel]`) | Span-processor bridge (`continuum.otel`) | Only for OTel directly; may appear transitively via `mcp`/`openai-agents` |
+ | `opentelemetry-api>=1.20` | `pyproject.toml:60` (`[otel]`) | Span-processor bridge (`continuum.otel`) | Only for OTel directly; may appear transitively via instrumentation |
+| `playwright>=1.40` | `pyproject.toml:69` (`[browser]`) | Browser automation through `BrowserAdapter`; install Chromium separately | Only for `BrowserAdapter` |
+| `kubernetes>=29` | `pyproject.toml:74` (`[kubernetes]`) | Kubernetes availability check for `KubernetesAdapter`; `kubectl` and a configured cluster remain external | Only for `KubernetesAdapter` |
+| `cryptography>=45.0` | `pyproject.toml:81` (`[attest]`), also in `[dev]` | Ed25519 event-chain attestation | Only for `continuum attest` |
+| `psycopg>=3.2` | `pyproject.toml:84` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
 | `langgraph>=0.2` | `pyproject.toml:63` (`[langgraph]`) | LangGraph adapter | Only for LangGraph (also pulled transitively by `langchain`) |
 | `openai-agents>=0.2` | `pyproject.toml:66` (`[openai]`) | OpenAI Agents SDK adapter | Only for OpenAI |
 | `langchain>=0.3` | `pyproject.toml:69` (`[langchain]`) | LangChain adapter | Only for LangChain |
-| `cryptography>=45.0` | `pyproject.toml:74` (`[attest]`), also in `[dev]` | Ed25519 event-chain attestation | Only for `continuum attest` |
-| `psycopg>=3.2` | `pyproject.toml:77` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
-| `cryptography>=45.0` | `pyproject.toml:81` (`[attest]`), also in `[dev]` | Ed25519 event-chain attestation | Only for `continuum attest` |
-| `psycopg>=3.2` | `pyproject.toml:84` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
-| `mcp>=2.0` | `pyproject.toml:58` (`[mcp]`), also in `[dev]` | MCP server (`continuum-mcp`) stdio transport | Only for MCP server (also pulled transitively by `openai-agents`) |
-| `opentelemetry-api>=1.20` | `pyproject.toml:58` (`[otel]`) | Span-processor bridge (`continuum.otel`) | Only for OTel directly; may appear transitively via `mcp`/`openai-agents` |
-| `playwright>=1.40` | `pyproject.toml:69` (`[browser]`) | Browser automation through `BrowserAdapter`; install Chromium separately | Only for BrowserAdapter |
-| `kubernetes>=29` | `pyproject.toml:74` (`[kubernetes]`) | Kubernetes availability check for `KubernetesAdapter`; `kubectl` and a configured cluster remain external | Only for KubernetesAdapter |
-| `langgraph>=0.2` | `pyproject.toml:58` (`[langgraph]`) | LangGraph adapter | Only for LangGraph (also pulled transitively by `langchain`) |
-| `openai-agents>=0.2` | `pyproject.toml:63` (`[openai]`) | OpenAI Agents SDK adapter | Only for OpenAI |
-| `langchain>=0.3` | `pyproject.toml:77` (`[langchain]`) | LangChain adapter | Only for LangChain |
-| `cryptography>=45.0` | `pyproject.toml:81` (`[attest]`), also in `[dev]` | Ed25519 event-chain attestation | Only for `continuum attest` |
-| `psycopg>=3.2` | `pyproject.toml:84` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
 | **Dev / test tooling** (all in `pyproject.toml:33-50` `[dev]`) | | | Only for contributors |
->>>>>>> 779fcc2c (fix(docs): resolve all pyproject line references in install.md)
 | `pytest>=8.0`, `pytest-cov>=5.0`, `pytest-asyncio>=0.23` |  | Test runner + coverage + async MCP tests | Dev |
 | `hypothesis>=6.0` |  | Property-based tests (hashing, models) | Dev |
 | `ruff==0.16.10` |  | Lint + format (CI enforces `ruff check` + `ruff format --check`) | Dev |

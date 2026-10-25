@@ -246,3 +246,58 @@ def test_help_lists_both_new_commands() -> None:
     )
     assert "agents" in out.stdout
     assert "doctor" in out.stdout
+
+
+# --------------------------------------------------------------------------- #
+# the JSON command field reconstructs what was done (#1762)
+# --------------------------------------------------------------------------- #
+
+
+def test_install_all_reports_all_and_not_the_default_target(isolated: Path) -> None:
+    """Eight targets written, so the recorded command must be the eight-target one."""
+    code, out, _ = run("--json", "agents", "install", "--all")
+    assert code == ExitCode.OK
+
+    payload = json.loads(out)
+    assert str(payload["command"]).endswith(" --all"), payload["command"]
+
+
+def test_install_one_reports_that_target(isolated: Path) -> None:
+    code, out, _ = run("--json", "agents", "install", "--target", "cursor")
+    assert code == ExitCode.OK
+
+    assert json.loads(out)["command"].endswith("--target cursor")
+
+
+def test_install_echoes_the_source_it_rendered_from(isolated: Path) -> None:
+    """A --source the caller supplied has to survive into the reconstruction."""
+    source = isolated / "my-instructions.md"
+    source.write_text("# mine\n", encoding="utf-8")
+
+    code, out, _ = run(
+        "--json", "agents", "install", "--target", "cursor", "--source", "my-instructions.md"
+    )
+    assert code == ExitCode.OK
+
+    command = json.loads(out)["command"]
+    assert "--source my-instructions.md" in command, command
+
+
+def test_remove_all_is_reported_as_all(isolated: Path) -> None:
+    """`remove --all` that reports `--target agents` would leave seven files behind."""
+    run("agents", "install", "--all")
+    code, out, _ = run("--json", "agents", "remove", "--all")
+    assert code == ExitCode.OK
+
+    command = json.loads(out)["command"]
+    assert command == "continuum agents remove --all", command
+
+
+def test_check_reports_the_target_it_checked(isolated: Path) -> None:
+    """`check --target cursor` used to report a bare `agents check`, which checks agents."""
+    run("agents", "install", "--target", "cursor")
+    code, out, _ = run("--json", "agents", "check", "--target", "cursor")
+    assert code == ExitCode.OK
+
+    command = json.loads(out)["command"]
+    assert command == "continuum agents check --target cursor", command

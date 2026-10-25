@@ -10,6 +10,42 @@ Test counts: ~3680 collected on a minimal env.
 
 ### Added
 
+- **Wire specification and automated wire conformance suite.**
+  Published OpenAPI 3.1 specification for the CONTINUUM sidecar wire protocol
+  covering action interception and idempotency leases, completion, progress tracking,
+  checkpoints, semantic resume, and human confirmation. The sidecar now serves the
+  OpenAPI 3.1 document dynamically via `GET /openapi.json`, exposes health checks on
+  `GET /healthz`, returns the canonical `Continuum-Version: 1.0` header on all responses,
+  and structures wire errors with standardized error codes. Added the `continuum conformance`
+  CLI tool (`continuum conformance --url <endpoint>`) to validate any server implementation
+  against the full wire specification.
+
+- **Sidecar trust and authentication hardening.**
+  Separated review confirmation from normal agent credentials. An agent holding a
+  normal client token cannot call `confirm` (`NotAuthorized`, HTTP 403), preventing
+  self-certification bypasses of human-in-the-loop review. The sidecar now accepts
+  dedicated confirm credentials via `CONTINUUM_SERVE_CONFIRM_TOKEN` and supports
+  per-client tokens via `CONTINUUM_SERVE_CLIENT_TOKENS`. The HTTP wire transport
+  accepts credentials via standard `Authorization: Bearer <token>` headers without
+  embedding tokens into JSON request bodies, and token verification uses constant-time
+  comparisons (`hmac.compare_digest`) against timing side channels. The HTTP listener
+  bind address is configurable via `--bind` and `CONTINUUM_SERVE_BIND`, with tested
+  reverse proxy configurations for Nginx and Caddy documented in `docs/guides/sidecar_tls_proxy.md`.
+
+- **Atomic claim in storage eliminates concurrent duplicate actions.**
+  `ActionLedger.claim` now resolves and records within a single atomic storage
+  transaction (`atomic_claim`). On SQLite, a single `BEGIN IMMEDIATE` transaction
+  wraps both claim resolution and event append, preventing race conditions where
+  multiple writers observe an unclaimed key and both append. On PostgreSQL, an
+  explicit transaction with `pg_advisory_xact_lock` on the action key enforces
+  mutual exclusion. Concurrency race tests verify zero duplicate claims across 64
+  threads, 16 processes, and crash fault injection (`kill -9`).
+
+- **Good first issues and Hacktoberfest guidance in CONTRIBUTING.md (#1652).**
+  Added an on-ramp section pointing to tracking issue #1661, ground rules for
+  first pull requests, a Table of Contents, and a reference table for issue
+  labels (including hacktoberfest, help wanted, and good first issue).
+
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a
   repeatedly failing integration spends its own allowance instead of the run's:
@@ -52,6 +88,23 @@ Test counts: ~3680 collected on a minimal env.
   scorer is shipped and tested on its own rather than arriving with a heuristic
   that moves while the queue is built.
 ### Fixed
+
+- **A developer's own venv and scratch database are no longer committed as the
+  project's Continue registration (#1618).** PR #1612 added
+  `.continue/config.yaml` to the repository root, fully baked: a `command`
+  inside one contributor's home directory and a `--db` under
+  `/private/tmp/fix-1612/`. That path exists on one machine, so every other
+  clone was wired to a server that cannot start, the `CONNECTION_CLOSED` shape
+  `docs/api/mcp.md` documents, and `continuum doctor` ended at
+  `REQUIRES_REPAIR` on a clean checkout because the baked command does not
+  resolve. The file is gone, and the per-project files `continuum mcp install
+  --scope project` writes, `.continue/config.yaml`, `.cursor/mcp.json`,
+  `.codex/config.toml`, `.zed/settings.json` and `opencode.json`, are now
+  gitignored so the same thing cannot recur. `.mcp.json` is the exception and
+  stays tracked: it carries a path expression the host expands rather than a
+  command resolved on one machine, which is why `install.py` resolves paths on
+  the target machine in the first place. A test pins this per host, so a
+  committed project registration fails CI instead of failing a clone.
 
 - **The documented test count is re-synced, so `main` builds again.** The
   collected total had drifted to 3,680 against a documented 3,636, past the
@@ -141,6 +194,44 @@ Test counts: ~3680 collected on a minimal env.
   ledger can see and remains on the token fallback -- the documented residual,
   since declaring such fields `volatile` at every call site is not a fix: a
   caller that wants around the cap simply forgets to declare them.
+
+- **The doctor stops contradicting the server over client-name case (#1621).**
+  `doctor._observation_finding` compared the baked client name against the
+  names hosts actually sent with a raw `in`, while every comparison in
+  `authz` goes through the fold. The `zed` profile makes the discrepancy
+  visible immediately: `HOST_PROFILES["zed"]["mutating_clients"]` is `"Zed"`,
+  capital Z, transcribed from zed's own source, and `docs/api/mcp.md` tells
+  readers the comparison folds case. The server authorized the caller; the
+  doctor said it had been refused and that install reported success.
+
+  The comparison now folds both sides through the same normalisation, so the
+  doctor agrees with the server. The normaliser is also exported as
+  `authz.fold_client_name`, so there is one place to read the rule instead of
+  re-deriving it. The `_fold` alias is kept so existing readers still resolve.
+
+
+- **The doctor no longer reports a portable registration as stale (#1619).**
+  `.mcp.json` in this repository bakes the form `docs/api/mcp.md` tells people
+  to commit, `${CLAUDE_PROJECT_DIR:-.}/.venv/bin/continuum-mcp`.
+  `os.path.expandvars` does not understand the shell's `${VAR:-default}`
+  syntax, so the text reached `_resolves` unchanged, was not absolute, and fell
+  through to a PATH lookup for a name no PATH will ever contain. The row came
+  back `stale` on every machine, which is the state whose remedy is to re-bake
+  the path, and re-baking replaces a portable committed expression with an
+  absolute one tied to whichever machine ran it. A clean clone therefore
+  exited `REQUIRES_REPAIR` (10) and printed advice that would have made the
+  registration worse.
+
+  A command carrying a shell expression is now reported as `unverified`, a
+  third state carried on `IdeReport.unverified`. It is not stale, so it does
+  not drive the repair exit code; the summary and the detail row say plainly
+  that the host expands it at spawn and the doctor cannot check it. Detection
+  is a literal `$` in the command, which also covers `$VAR` and `$HOME`: those
+  expand to a real path when the variable is set and to a literal `$NAME` when
+  it is not, so the unset case would otherwise have reported a path containing
+  a `$` as broken. A genuinely deleted virtualenv is still `stale`, still
+  exits `REQUIRES_REPAIR`, and still prints the re-bake remedy. The hook
+  surface is untouched: it bakes absolute paths and has no expression form.
 
 ### Changed
 
@@ -908,6 +999,45 @@ Test counts: ~3680 collected on a minimal env.
   callable), and the existing answers for genuinely malformed JSON are
   unchanged.
 
+### Tests
+
+- **`resolve_compaction_bound` is covered (#1653).**
+  `src/continuum/storage/compaction.py` was at 17%: the whole function body
+  was unexercised, including all four `ValueError` branches, in the module
+  both storage engines now share to decide what is safe to archive. That
+  matters because the comparison against `anchor_sequence` is the guard that
+  stops an explicit `through_sequence` from archiving the run's own anchor
+  marker, which is the regression fix for #705 and #1078.
+  `tests/test_storage_compaction_bound.py` drives a real `SQLiteStorage` in
+  `tmp_path` (the resolver calls the private `storage._anchor_environment`, so
+  a mock would skip the anchor logic under test) and covers the happy path,
+  the three re-anchor triggers, and each refusal. Coverage of the module is
+  97%, and removing the comparison fails three tests. Initial tests contributed
+  by @fraware in #1671.
+- **The liveness cadence contract is covered (#1656).**
+  `src/continuum/recovery/health.py` was at 76%. `silence_seconds` had not a
+  single line of coverage, both `load_cadence_contract` refusals were
+  unexercised, and `CadenceContract._scopes_positive` had never been seen to
+  raise, so a change that stopped rejecting a blank scope key or a zero-second
+  scope would not have been caught. `tests/test_recovery_health_cadence.py`
+  covers all three exits of `silence_seconds`, both refusals, every validator
+  branch, `threshold_for` including the fallback for an absent scope,
+  `to_dict`, and `advisory_text`, which had no test at all. The module is now
+  at 90%. No test reads the operator's real `.continuum/liveness.json`; every
+  load points at a file in `tmp_path`, which is what keeps the suite from
+  depending on the machine it runs on. Additional cadence contracts and liveness
+  evaluation tests contributed by @heyyReggiee in #1670.
+- **The splash animation frame math is pinned (#1655).**
+  `src/continuum/tui/animate.py` shipped with no test at all. Its only
+  appearance in a coverage report was
+  `tests/test_module_all_exports.py` importing it, which touches module-level
+  lines and no function body. `tests/test_tui_animate.py` covers all six public
+  functions and the exported constants, and asserts the `SETTLED` contract that
+  makes them safe: a negative frame resolves to the complete, unemphasised
+  result for every one of them. The module is still orphaned, and is left that
+  way on purpose; wiring it up is a design question with its own issue.
+  Coverage of the module is 100%.
+
 ## [0.1.2] - 2026-08-31
 
 ### Fixed
@@ -1100,7 +1230,7 @@ Test counts: ~3680 collected on a minimal env.
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (3,636 collected, ~3,636 passed, ~0 skipped on a minimal env).
+  (3,672 collected, ~3,672 passed, ~0 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses

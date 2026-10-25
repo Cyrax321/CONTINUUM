@@ -56,6 +56,13 @@ dev = [
 # registered, so a host that needs neither pays for neither, and a missing one
 # is reported by name with the command that installs it.
 mcp = ["mcp>=2.0", "tomli-w>=1.0", "PyYAML>=6.0"]
+# The browser adapter is optional: it drives a real page through Playwright.
+# The package is imported lazily so the core library stays dependency-free.
+browser = ["playwright>=1.40"]
+# The Kubernetes adapter is optional: it runs one-shot jobs with the kubectl CLI
+# and requires the Kubernetes client to be importable. The client is imported
+# lazily so the core library stays dependency-free.
+kubernetes = ["kubernetes>=29"]
 # The OpenTelemetry bridge is optional: the core library never imports it.
 otel = ["opentelemetry-api>=1.20"]
 # The LangGraph adapter is optional: it wraps langgraph's StateGraph and tool
