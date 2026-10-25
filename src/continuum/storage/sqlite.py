@@ -201,14 +201,46 @@ class SQLiteStorage(Storage):
         """Exclusive write transaction. Rolls back on any exception."""
         with self._lock:
             connection = self._live_connection()
-            connection.execute("BEGIN IMMEDIATE")
+            nested = connection.in_transaction
+            if not nested:
+                connection.execute("BEGIN IMMEDIATE")
             try:
                 yield connection
             except BaseException:
-                connection.execute("ROLLBACK")
+                if not nested and connection.in_transaction:
+                    connection.execute("ROLLBACK")
                 raise
             else:
-                connection.execute("COMMIT")
+                if not nested and connection.in_transaction:
+                    connection.execute("COMMIT")
+
+    @contextmanager
+    def atomic_claim(self, run_id: str, key: str | None = None) -> Iterator[None]:
+        """Wrap resolve and append in a single BEGIN IMMEDIATE transaction.
+
+        Ensures that reading previous actions and writing the new action claim
+        occur within one exclusive SQLite transaction, preventing race conditions
+        where concurrent writers both observe an unclaimed key and both append.
+        """
+        with self._lock:
+            conn = self._live_connection()
+            nested = conn.in_transaction
+            if not nested:
+                conn.execute("BEGIN IMMEDIATE")
+            commit_on_exit = False
+            try:
+                yield
+                commit_on_exit = True
+            except BaseException as exc:
+                if type(exc).__name__ in ("UnknownSideEffect", "GrantDenied", "LedgerError"):
+                    commit_on_exit = True
+                raise
+            finally:
+                if not nested and conn.in_transaction:
+                    if commit_on_exit:
+                        conn.execute("COMMIT")
+                    else:
+                        conn.execute("ROLLBACK")
 
     @contextmanager
     def _read(self) -> Iterator[sqlite3.Connection]:

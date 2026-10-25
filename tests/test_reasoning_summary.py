@@ -20,6 +20,7 @@ import pytest
 from continuum.cli import ExitCode, main
 from continuum.events import EventType
 from continuum.models import Origin, Run
+from continuum.recovery.summary import INFORMED_RETRY_CAP_BYTES, _fit
 from continuum.storage import SQLiteStorage
 
 
@@ -190,3 +191,25 @@ def test_mcp_resume_flow_carries_summary_through_briefing_command(db: str, tmp_p
     context = json.loads(out)["context"]
     assert "reconciling INV-77" in context
     assert "vendor replied?" in context
+
+
+def test_fit_evicts_in_priority_order() -> None:
+    """Trim oversized blocks deterministically, preserving earlier entries."""
+    block = {
+        "avoid": [f"avoid-{i}" for i in range(6)],
+        "current_failures": [
+            {"id": "failure-1", "detail": "x" * 5000},
+            {"id": "failure-2", "detail": "second detail"},
+            {"id": "failure-3", "detail": "third detail"},
+        ],
+        "settled_effects": ["effect-1", "effect-2", "effect-3"],
+        "last_attempt_steps": ["step-1", "step-2", "step-3"],
+    }
+
+    fitted = _fit(block)
+
+    assert len(json.dumps(fitted, sort_keys=True).encode()) <= (INFORMED_RETRY_CAP_BYTES)
+    assert fitted["avoid"] == block["avoid"][:4]
+    assert fitted["current_failures"] == [{"id": "failure-1", "detail": ""}]
+    assert fitted["settled_effects"] == ["effect-1"]
+    assert fitted["last_attempt_steps"] == ["step-1"]

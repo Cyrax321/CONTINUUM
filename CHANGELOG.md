@@ -6,9 +6,45 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Test counts: ~3680 collected on a minimal env.
+Test counts: ~3950 collected on a minimal env.
 
 ### Added
+
+- **Wire specification and automated wire conformance suite.**
+  Published OpenAPI 3.1 specification for the CONTINUUM sidecar wire protocol
+  covering action interception and idempotency leases, completion, progress tracking,
+  checkpoints, semantic resume, and human confirmation. The sidecar now serves the
+  OpenAPI 3.1 document dynamically via `GET /openapi.json`, exposes health checks on
+  `GET /healthz`, returns the canonical `Continuum-Version: 1.0` header on all responses,
+  and structures wire errors with standardized error codes. Added the `continuum conformance`
+  CLI tool (`continuum conformance --url <endpoint>`) to validate any server implementation
+  against the full wire specification.
+
+- **Sidecar trust and authentication hardening.**
+  Separated review confirmation from normal agent credentials. An agent holding a
+  normal client token cannot call `confirm` (`NotAuthorized`, HTTP 403), preventing
+  self-certification bypasses of human-in-the-loop review. The sidecar now accepts
+  dedicated confirm credentials via `CONTINUUM_SERVE_CONFIRM_TOKEN` and supports
+  per-client tokens via `CONTINUUM_SERVE_CLIENT_TOKENS`. The HTTP wire transport
+  accepts credentials via standard `Authorization: Bearer <token>` headers without
+  embedding tokens into JSON request bodies, and token verification uses constant-time
+  comparisons (`hmac.compare_digest`) against timing side channels. The HTTP listener
+  bind address is configurable via `--bind` and `CONTINUUM_SERVE_BIND`, with tested
+  reverse proxy configurations for Nginx and Caddy documented in `docs/guides/sidecar_tls_proxy.md`.
+
+- **Atomic claim in storage eliminates concurrent duplicate actions.**
+  `ActionLedger.claim` now resolves and records within a single atomic storage
+  transaction (`atomic_claim`). On SQLite, a single `BEGIN IMMEDIATE` transaction
+  wraps both claim resolution and event append, preventing race conditions where
+  multiple writers observe an unclaimed key and both append. On PostgreSQL, an
+  explicit transaction with `pg_advisory_xact_lock` on the action key enforces
+  mutual exclusion. Concurrency race tests verify zero duplicate claims across 64
+  threads, 16 processes, and crash fault injection (`kill -9`).
+
+- **Good first issues and Hacktoberfest guidance in CONTRIBUTING.md (#1652).**
+  Added an on-ramp section pointing to tracking issue #1661, ground rules for
+  first pull requests, a Table of Contents, and a reference table for issue
+  labels (including hacktoberfest, help wanted, and good first issue).
 
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a
@@ -52,6 +88,146 @@ Test counts: ~3680 collected on a minimal env.
   scorer is shipped and tested on its own rather than arriving with a heuristic
   that moves while the queue is built.
 ### Fixed
+
+- **The nightly benchmark publish no longer pushes to `main` (#1641).** The
+  job committed the refreshed tables and ran `git push`, and `main` is
+  branch-protected, so the push was declined by the branch ruleset and the
+  workflow failed every night: the published tables stopped tracking the
+  benchmark on 2026-10-10. The refresh now commits to a branch the job owns
+  and opens a pull request from it, and a night that finds nothing to change
+  exits cleanly instead of pushing an empty commit. The `pull-requests: write`
+  grant the push path never needed is scoped to the publishing job alone, the
+  branch always builds on `main` rather than on whatever ref a manual dispatch
+  happened to select, the `Generated:` timestamp the run rewrites every night
+  no longer counts as a table change, and a night with nothing to publish
+  closes the refresh request an earlier night left open instead of leaving it
+  stale.
+
+- **The daemon CLI no longer crashes when dispatched without storage (#1603).**
+  `continuum daemon` was dispatched through the no-storage tuple, but called
+  `storage.get_active_run()` unconditionally and raised an `AttributeError`
+  before binding the gateway. It now handles `storage=None`, probing an active
+  run from an existing database file when present and warning gracefully on
+  unreadable databases. On non-fork platforms like Windows, `--detach` spawns
+  a background process with detached process flags, verifies port availability
+  and PID file writability beforehand, records the daemon's own PID safely,
+  reports early child startup failures, and unlinks the PID file only when it
+  matches the process's own PID on shutdown.
+
+- **An observed client name is recorded as the one name the host sent (#1805).**
+  `record_observed_client` split the `clientInfo.name` a single connection
+  declared on the separators an allowlist uses (`[\s,]+`), so a host whose name
+  contains spaces or commas was recorded as several names it never declared.
+  One connection from VS Code's MCP client, which declares `"Visual Studio
+  Code"`, wrote three entries: `Visual`, `Studio` and `Code`. The doctor's
+  `client-name` finding then reported `hosts have connected as 'Code',
+  'Studio', 'Visual'` against a registration that authorizes some other name,
+  sending an operator hunting for clients that do not exist, and each fragment
+  consumed its own slot in the 32-entry record and its own counter. Splitting
+  belongs to the allowlist path in `authz`, where one declared value
+  legitimately names several authorized callers; the record path now validates
+  the name exactly the way `declared_client_name` does and stores it verbatim.
+  `split_declared_names` had no other caller and is gone. A database that
+  already saw a multi-word host keeps the fragments the splitting code wrote,
+  so the observation file's schema version is bumped to 2: a reader treats the
+  old file as unknown rather than parsing it, and the next observation
+  replaces it, so an upgrade stops reporting the mismatch instead of carrying
+  the fragments into the doctor's finding.
+
+- **A Kubernetes namespace can run more than one `run_job`, ever (#1807).**
+  `KubernetesAdapter.run_job` called `kubectl run` with the hardcoded pod
+  name `continuum-job` and no `--rm`, so the completed pod stayed in the
+  namespace and the API server refused the next call with
+  `pods "continuum-job" already exists`: the first job succeeded, every job
+  after it in the namespace failed, and two concurrent runs raced for the one
+  name. The name is now derived from the run id plus the action's image and
+  command, so distinct jobs get distinct names while a replay of the same
+  job lands on its own name again, and the pod is created with `--rm`, the
+  cleanup `docker run --rm` already gave the container adapter. Only hex
+  digest characters reach the name, so a run id that kubernetes would reject
+  as a DNS-1123 label cannot be passed through. The argv assertion in
+  `tests/test_kubernetes_adapter.py` moved with the fix and gained tests
+  for the second-call, replay, and invalid-name cases.
+
+- **A digest-less `TOOL_COMPLETED` no longer makes rewind delete a
+  pre-checkpoint file or freeze a post-checkpoint one (#1806).**
+  `rewind_to_checkpoint` keyed its whole "which files survive" decision on
+  whether a `TOOL_COMPLETED` observation carries a `sha256`, so an observation
+  that carries none was treated exactly like "no observation at all". A path
+  whose pre-checkpoint observation has no digest took the "created after the
+  checkpoint" branch and was unlinked even though the checkpoint-era log
+  records a write to it, with zero conflicts and `ok=True`. On the other side,
+  a post-checkpoint observation without a digest left nothing to compare
+  against, so the pre-delete check `file_digest(path) != expected_after` was
+  always true and the file was reported as "digest changed before delete"
+  forever; `--force` did not delete it either, because the `continue` skipped
+  the unlink, so a forced rewind left post-checkpoint files in the workspace
+  while reporting that it ran. Digest-less observations are honest evidence and
+  reachable in an ordinary run: `observe_event_payload` records the path
+  without `bytes`/`sha256` when the file cannot be read at hook time (the
+  PostToolUse hook races the writer, the file can be held exclusively or
+  unreadable, and a multi-step tool can move it between the write and the
+  read), and the gateway's `TOOL_COMPLETED` never carries a digest at all. The
+  pre-checkpoint side now distinguishes "an observation exists but records no
+  digest" from "no observation": the first means the file was already there and
+  cannot be restored, so it is left in place and reported as unrecoverable,
+  never deleted. The post-checkpoint side no longer compares a digest it does
+  not have: there is nothing to verify, so the file is deleted and listed in
+  `deleted_files`. The same guard lifts an unkillable "digest changed before
+  restore" conflict that blocked restoring a file whose post-checkpoint
+  observation had no digest.
+
+- **Replay similarity no longer matches non-completed prior actions (#1837).**
+  `classify_call`'s exact-key path already restricted replay to actions whose
+  status is `completed`, but the similarity scan compared against every prior
+  action of the same type regardless of status. A post-restore call with
+  arguments similar to a previously failed, started, unknown, or compensated
+  action exceeded the replay threshold and was classified as a replay hit of
+  that action, blocking re-execution of an operation that never succeeded. The
+  scan now skips any action whose status is not `completed`, so such calls are
+  classified `fresh` (or matched against a completed action when one exists)
+  and the operation executes again.
+
+- **The replay guard's closed-attempt refusal is raised as `ReplayBlocked`
+  instead of a bare `AssertionError` (#1836).** `evaluate()` built its
+  `DENY_RECLAIM` decision without `key=`, unlike every other branch of the
+  decision table, so `decision.key` was `None` and `protected_call()` tripped
+  `assert decision.key is not None` before it could reach the documented
+  `raise ReplayBlocked(decision)`. A retry of an action whose previous attempt
+  reached a closed status (`failed`, `compensated`) therefore surfaced as an
+  internal assertion error callers could not catch, and under `python -O` the
+  stripped assertion silently made `key_to_use` `None`. `DENY_RECLAIM` now
+  carries its key, so the refusal reaches callers as `ReplayBlocked` with the
+  decision and key, and the gate's closed-attempt message reports the real
+  status instead of the `action is None` fallback. Regression tests mirror the
+  `BLOCK_UNCERTAIN` coverage from #735.
+
+
+- **`continuum status` now honours the global `--json` flag in its main view (#1785).**
+  Running `continuum --json status <run>` without `--provenance` previously ignored
+  `--json` and emitted plain text, while `--provenance` honoured it. The main view
+  now threads `as_json=args.json` into its emitter and outputs a structured JSON
+  payload containing `run_id`, `goal` (`description` and `version`), `version`,
+  `progress` (`completed`, `pending`, `failed`, `total`), and `decisions`
+  (`valid`, `total`). On an unprojectable run, the payload includes the
+  `projection_failed_at` block and exits with code `ExitCode.CORRUPTED`.
+
+- **A developer's own venv and scratch database are no longer committed as the
+  project's Continue registration (#1618).** PR #1612 added
+  `.continue/config.yaml` to the repository root, fully baked: a `command`
+  inside one contributor's home directory and a `--db` under
+  `/private/tmp/fix-1612/`. That path exists on one machine, so every other
+  clone was wired to a server that cannot start, the `CONNECTION_CLOSED` shape
+  `docs/api/mcp.md` documents, and `continuum doctor` ended at
+  `REQUIRES_REPAIR` on a clean checkout because the baked command does not
+  resolve. The file is gone, and the per-project files `continuum mcp install
+  --scope project` writes, `.continue/config.yaml`, `.cursor/mcp.json`,
+  `.codex/config.toml`, `.zed/settings.json` and `opencode.json`, are now
+  gitignored so the same thing cannot recur. `.mcp.json` is the exception and
+  stays tracked: it carries a path expression the host expands rather than a
+  command resolved on one machine, which is why `install.py` resolves paths on
+  the target machine in the first place. A test pins this per host, so a
+  committed project registration fails CI instead of failing a clone.
 
 - **The documented test count is re-synced, so `main` builds again.** The
   collected total had drifted to 3,680 against a documented 3,636, past the
@@ -959,7 +1135,8 @@ Test counts: ~3680 collected on a minimal env.
   `tmp_path` (the resolver calls the private `storage._anchor_environment`, so
   a mock would skip the anchor logic under test) and covers the happy path,
   the three re-anchor triggers, and each refusal. Coverage of the module is
-  97%, and removing the comparison fails three tests.
+  97%, and removing the comparison fails three tests. Initial tests contributed
+  by @fraware in #1671.
 - **The liveness cadence contract is covered (#1656).**
   `src/continuum/recovery/health.py` was at 76%. `silence_seconds` had not a
   single line of coverage, both `load_cadence_contract` refusals were
@@ -971,7 +1148,8 @@ Test counts: ~3680 collected on a minimal env.
   `to_dict`, and `advisory_text`, which had no test at all. The module is now
   at 90%. No test reads the operator's real `.continuum/liveness.json`; every
   load points at a file in `tmp_path`, which is what keeps the suite from
-  depending on the machine it runs on.
+  depending on the machine it runs on. Additional cadence contracts and liveness
+  evaluation tests contributed by @heyyReggiee in #1670.
 - **The splash animation frame math is pinned (#1655).**
   `src/continuum/tui/animate.py` shipped with no test at all. Its only
   appearance in a coverage report was
@@ -1175,7 +1353,7 @@ Test counts: ~3680 collected on a minimal env.
   Framework Integration documents the CrewAI/AutoGen/Pydantic-AI thin hooks
   and the gateway/OTel fallback seams; the Roadmap marks the dashboard and
   the enforced-durability work complete; test counts are current
-  (3,636 collected, ~3,636 passed, ~0 skipped on a minimal env).
+  (3,672 collected, ~3,672 passed, ~0 skipped on a minimal env).
   <!-- generated via: pytest --collect-only -q; pytest -q -->
 
 - **Gateway hardening and docs refresh.** The enforcing proxy now refuses
