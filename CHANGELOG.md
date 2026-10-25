@@ -60,11 +60,16 @@ Test counts: ~3950 collected on a minimal env.
   correlated tool event never automatically settles an uncertain action,
   preserving safe-by-default recovery semantics. Includes CLI commands
   (`continuum evidence-chain <run-id>` and `continuum observe --correlation-id`)
-  and MCP action tool support. Retry and re-claim paths validate the identifier
-  before it is written, so a malformed value cannot poison a later replay, and
-  a malformed identifier arriving from an untrusted hook payload is recorded as
-  flagged evidence instead of halting host tool observation. A dispatched tool
-  call that has not completed yet is reported as started, not failed.
+  and MCP action tool support. A retry of a failed or compensated attempt may
+  take a new correlation identifier (the ID names a single attempt); its
+  evidence chain then spans every attempt's identifier, `ambiguous` is reserved
+  for one identifier resolving to several distinct action keys, and action
+  records without a key and tool observations without an identifier are still
+  reported rather than dropped. The identifier is validated on every claim
+  path (the retry branches settle via `model_copy`, which skips field
+  validators), a malformed identifier supplied by a hook payload is dropped
+  instead of failing the observation, and a `TOOL_CALLED` event is reported as
+  `called` rather than `failed`.
 
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a
