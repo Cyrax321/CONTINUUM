@@ -762,10 +762,26 @@ def _tracked_paths() -> set[str] | None:
     ``git ls-files`` rather than a directory walk: a file can sit on disk and
     be ignored, and it is the committed copy every other clone receives.
     """
-    proc = subprocess.run(["git", "ls-files"], cwd=_REPO_ROOT, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(["git", "ls-files"], cwd=_REPO_ROOT, capture_output=True, text=True)
+    except FileNotFoundError:
+        # No git on PATH: ``subprocess`` raises instead of exiting non-zero,
+        # so this is the skip path, not a crash (#1803).
+        return None
     if proc.returncode != 0:
         return None
     return set(proc.stdout.split())
+
+
+def test_tracked_paths_returns_none_when_git_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_tracked_paths returns None instead of raising when git is missing (#1803)."""
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Simulate missing git executable by raising FileNotFoundError."""
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert _tracked_paths() is None
 
 
 @pytest.mark.parametrize("host", sorted(mcp_install.HOST_PROFILES))

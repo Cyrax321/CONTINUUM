@@ -103,6 +103,15 @@ Test counts: ~3680 collected on a minimal env.
   status instead of the `action is None` fallback. Regression tests mirror the
   `BLOCK_UNCERTAIN` coverage from #735.
 
+- **`continuum status` now honours the global `--json` flag in its main view (#1785).**
+  Running `continuum --json status <run>` without `--provenance` previously ignored
+  `--json` and emitted plain text, while `--provenance` honoured it. The main view
+  now threads `as_json=args.json` into its emitter and outputs a structured JSON
+  payload containing `run_id`, `goal` (`description` and `version`), `version`,
+  `progress` (`completed`, `pending`, `failed`, `total`), and `decisions`
+  (`valid`, `total`). On an unprojectable run, the payload includes the
+  `projection_failed_at` block and exits with code `ExitCode.CORRUPTED`.
+
 - **A developer's own venv and scratch database are no longer committed as the
   project's Continue registration (#1618).** PR #1612 added
   `.continue/config.yaml` to the repository root, fully baked: a `command`
