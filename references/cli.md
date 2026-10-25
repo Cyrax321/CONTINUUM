@@ -55,7 +55,6 @@ continuum provenance <run_id>                    # show provenance DAG
 continuum evidence-chain <run_id>                # correlate actions with tool observations
       [--action-key <k>] [--correlation-id <id>] [--unmatched-only]
 continuum report --trajectory <run_id>           # claims, uncertain side effects, scar rate, stall sites
-continuum policy-review [run_id]                 # advisory recovery history report
 continuum record-plan <run_id> --plan-id <id>    # record structured plan upsert. mutates
 continuum export-evidence <run_id>               # export evidence as JSON lines
 continuum forget --tenant <id> [--dry-run]       # tombstone memory records for a tenant. mutates
