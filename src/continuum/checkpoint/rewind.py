@@ -166,7 +166,7 @@ def rewind_to_checkpoint(
         # at checkpoint time" and deletes a file the checkpoint-era log
         # recorded a write to (#1806).
         before_observed = isinstance(before_payload, dict)
-        before_digest = before_payload.get("sha256") if before_observed else None
+        before_digest = before_payload.get("sha256") if isinstance(before_payload, dict) else None
         current_digest = file_digest(path)
         expected_after = after_digest if isinstance(after_digest, str) else None
         if (
