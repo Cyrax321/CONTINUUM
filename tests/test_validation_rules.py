@@ -15,6 +15,7 @@ finding rather than a silent gap.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import pytest
 
@@ -22,8 +23,11 @@ from continuum.checkpoint import CheckpointManager
 from continuum.environment import StaticProvider, capture
 from continuum.events import EventType
 from continuum.models import (
+    Approval,
+    ApprovalStatus,
     Component,
     ComponentValidationEntry,
+    Decision,
     EnvironmentSnapshot,
     Goal,
     RecoveryMode,
@@ -788,3 +792,117 @@ def test_conformance_accepts_a_callers_own_state() -> None:
 
 def test_the_builtin_rule_satisfies_the_protocol() -> None:
     assert isinstance(RevokedApprovalRule(), ValidationRule)
+
+
+# --- several revoked approvals name one subject: which one wins -------------- #
+
+
+def _revoked(subject: str, approval_id: str, granted_at: datetime | None) -> Approval:
+    return Approval(
+        approval_id=approval_id,
+        subject=subject,
+        status=ApprovalStatus.REVOKED,
+        granted_at=granted_at,
+    )
+
+
+def _state_with(approvals: list[Approval]) -> SemanticState:
+    """State whose one decision is the subject every approval in the list names."""
+    return SemanticState(
+        run_id="run_1",
+        goal=Goal(description="g"),
+        decisions=[Decision(decision_id="decision_1", decision="adopt policy P-42")],
+        approvals=approvals,
+    )
+
+
+def _authorizing_approval(findings: list[ComponentValidationEntry]) -> str:
+    """The id of the approval the single finding blames."""
+    assert len(findings) == 1, findings
+    detail = findings[0].detail
+    assert detail.startswith("authorizing approval ")
+    return detail.removeprefix("authorizing approval ").removesuffix(" was revoked")
+
+
+def test_revoked_approval_names_the_earliest_of_two_dated_revocations() -> None:
+    """Two revoked approvals authorize one decision; the earlier revocation owns the finding.
+
+    The index keeps one entry per subject so an over-determined decision reports
+    a single verdict, and "earliest" is what makes it the binding one: an
+    authorization already lost cannot be lost again by a later grant.
+    """
+    later = _revoked("decision_1", "approval_late", datetime(2026, 3, 1, tzinfo=UTC))
+    earlier = _revoked("decision_1", "approval_early", datetime(2026, 1, 1, tzinfo=UTC))
+
+    findings = RevokedApprovalRule().evaluate(_state_with([later, earlier]))
+
+    assert findings[0].component is Component.DECISION
+    assert findings[0].status is StateStatus.INVALID
+    assert _authorizing_approval(findings) == "approval_early"
+
+
+def test_revoked_approval_keeps_a_dated_revocation_against_a_later_undated_one() -> None:
+    """An undated revocation arriving second cannot displace a dated one.
+
+    Without a granted_at there is no way to tell it is earlier, and silently
+    swapping it in would make the finding unanswerable: the detail names an
+    approval whose revocation time cannot be reconstructed.
+    """
+    dated = _revoked("decision_1", "approval_dated", datetime(2026, 1, 1, tzinfo=UTC))
+    undated = _revoked("decision_1", "approval_undated", None)
+
+    findings = RevokedApprovalRule().evaluate(_state_with([dated, undated]))
+
+    assert _authorizing_approval(findings) == "approval_dated"
+
+
+def test_revoked_approval_lets_a_dated_revocation_displace_an_undated_one() -> None:
+    """Symmetric to the case above: a dated revocation always answers for the subject.
+
+    The undated entry got the slot only because nothing dated had arrived yet;
+    once one does, it is the answerable revocation, whatever the arrival order.
+    """
+    dated = _revoked("decision_1", "approval_dated", datetime(2026, 1, 1, tzinfo=UTC))
+    undated = _revoked("decision_1", "approval_undated", None)
+
+    findings = RevokedApprovalRule().evaluate(_state_with([undated, dated]))
+
+    assert _authorizing_approval(findings) == "approval_dated"
+
+
+# --- conformance rejects a rule that breaks the return contract ------------- #
+
+
+def test_conformance_rejects_an_evaluate_that_returns_no_list() -> None:
+    """The runner catches a malformed return; conformance must not wave it through.
+
+    ``_evaluate_all`` is the one place the return type is enforced, so both
+    surfaces have to fail on it: a rule whose evaluate returns a string shapes
+    a report the seam never promised to merge.
+    """
+    report = check_validation_rule(_MalformedReturnRule())
+
+    assert not report.passed
+    assert any("expected a list" in failure for failure in report.failures)
+
+
+def test_conformance_rejects_a_well_typed_list_with_a_mistyped_item() -> None:
+    """A list of anything but entries is a list that carries nothing the seam can use."""
+    report = check_validation_rule(_MalformedItemRule())
+
+    assert not report.passed
+    assert any("expected ComponentValidationEntry" in failure for failure in report.failures)
+
+
+def test_conformance_rejects_a_rule_whose_evaluate_is_not_callable() -> None:
+    """A name without a callable evaluate is a rule that cannot be run at all."""
+
+    class _NotCallableRule:
+        name = "test:not_callable"
+
+        evaluate = None  # type: ignore[assignment]
+
+    report = check_validation_rule(_NotCallableRule())
+
+    assert not report.passed
+    assert any("no callable 'evaluate' method" in failure for failure in report.failures)

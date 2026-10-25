@@ -529,7 +529,9 @@ class AuthorizationPolicy:
             for canonical, extra in _parse_aliases(aliases).items()
             if fold_client_name(canonical) in self.allowed
         }
-        self.aliases = frozenset(fold_client_name(alias) for extra in live.values() for alias in extra)
+        self.aliases = frozenset(
+            fold_client_name(alias) for extra in live.values() for alias in extra
+        )
         self._identities = self.allowed | self.aliases
         # The spellings as written, so a refusal quotes back something the
         # operator recognises rather than a lowercased shadow of it.

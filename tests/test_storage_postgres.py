@@ -689,3 +689,33 @@ def test_pg_action_index_drift_skips_malformed_json_payload(
     assert result["archived"] >= 1
     assert any(e.type is EventType.EVENT_LOG_ANCHORED for e in storage.read_events("pg_anchor"))
     assert storage.verify_events("pg_anchor").ok, "chain must still verify after a safe compact"
+
+
+def test_postgres_atomic_claim_concurrency(storage: PostgresStorage) -> None:
+    """Concurrent claims on PostgreSQL produce at most one winner via advisory lock."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from continuum.actions.ledger import LedgerError
+    from continuum.models import UnknownSideEffect
+
+    make_run(storage, "pg_atomic", "atomic claim verification")
+
+    def claim(i: int) -> str:
+        ledger = ActionLedger(storage, "pg_atomic")
+        try:
+            outcome = ledger.claim("charge.pg", {"cents": 9900}, key="k_pg")
+            if outcome.fresh:
+                try:
+                    ledger.complete(outcome.key, result={"tx": f"pg-{i}"})
+                    return "proceed"
+                except LedgerError:
+                    return "ambiguous"
+            return "dedup"
+        except (UnknownSideEffect, LedgerError):
+            return "ambiguous"
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        outcomes = list(pool.map(claim, range(16)))
+
+    assert outcomes.count("proceed") <= 1
+    assert set(outcomes) <= {"proceed", "dedup", "ambiguous"}
