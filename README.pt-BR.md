@@ -96,7 +96,7 @@ Verifique:
 ```bash
 continuum --help                 # ponto de entrada CLI
 continuum-mcp --help             # ponto de entrada do servidor MCP (precisa de [mcp] ou [dev])
-pytest -q                        # ~3680 coletados, ~3,636 passando, ~41 pulados em um ambiente mínimo (as contagens exatas variam)
+pytest -q                        # ~3950 coletados, ~3,636 passando, ~41 pulados em um ambiente mínimo (as contagens exatas variam)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # os três portões que o CI exige
 ```
@@ -121,7 +121,9 @@ from continuum import EventType, Run, SQLiteStorage, project
 
 store = SQLiteStorage("agent.db")
 store.create_run(Run(run_id="run_4821", goal="Analisar 10,000 documentos"))
-store.append_event("run_4821", EventType.RUN_STARTED, {"goal": "Analisar 10,000 documentos", "total": 10_000})
+store.append_event(
+    "run_4821", EventType.RUN_STARTED, {"goal": "Analisar 10,000 documentos", "total": 10_000}
+)
 
 for i, doc in enumerate(documents):
     analyze(doc)
@@ -129,7 +131,7 @@ for i, doc in enumerate(documents):
 
 # Após uma queda, um processo novo retoma exatamente de onde parou:
 state = project("run_4821", store.read_events("run_4821"))
-print(state.progress.completed)            # já feito, não se repete
+print(state.progress.completed)  # já feito, não se repete
 print(store.verify_events("run_4821").ok)  # True, cadeia intacta após a queda
 ```
 

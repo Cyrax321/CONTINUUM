@@ -432,6 +432,128 @@ def test_project_scope_writes_the_shared_mcp_json(
     assert entry["args"][-1] == str((tmp_path / "continuum.db").resolve())
 
 
+def test_install_local_warns_and_reports_the_effective_scope_without_nesting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gemini has no per-project location, so 'local' cannot be honoured (#1761).
+
+    ``--scope local`` writes into ``~/.gemini/settings.json``, which Gemini
+    reads for every project on the machine, while the command used to print
+    "(local scope)" and mean it. The write is not refused: an operator may
+    want exactly that registration. What changes is that the command warns,
+    and names the scope it effectively wrote.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+
+    code, out, err = run("mcp", "install", "--host", "gemini")
+    assert code == ExitCode.OK, err
+    assert "per-project location" in err, err
+    assert "(user scope)" in out, out
+
+    # The written settings file carries no project key: the registration is
+    # user-wide, exactly as the warning says.
+    written = (tmp_path / "home" / ".gemini" / "settings.json").read_text(encoding="utf-8")
+    assert "projects" not in json.loads(written)
+
+    code, out, err = run("--json", "mcp", "install", "--host", "gemini")
+    assert code == ExitCode.OK, err
+    payload = json.loads(out)
+    assert payload["scope"] == "local"
+    assert payload["effective_scope"] == "user"
+
+
+def test_install_local_warning_names_the_hosts_own_project_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The remedy must point at the file the host reads, not at .mcp.json (#1761).
+
+    Six of the eight hosts do not use ``.mcp.json`` at project scope -- Cursor
+    reads ``.cursor/mcp.json`` -- so a warning that names ``.mcp.json`` sends
+    the operator after a file their host never opens.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+
+    code, out, err = run("mcp", "install", "--host", "cursor")
+    assert code == ExitCode.OK, err
+    assert ".cursor/mcp.json" in err, err
+
+    # --settings pointing to the host's project settings file is project scope,
+    # with no warning claiming the registration is user-wide (#1761).
+    project_target = tmp_path / ".cursor" / "mcp.json"
+    project_target.parent.mkdir(parents=True, exist_ok=True)
+    code, out, err = run("mcp", "install", "--host", "cursor", "--settings", str(project_target))
+    assert code == ExitCode.OK, err
+    assert "per-project location" not in err, err
+    assert "(project scope)" in out, out
+    code, out, err = run(
+        "--json", "mcp", "install", "--host", "cursor", "--settings", str(project_target)
+    )
+    assert code == ExitCode.OK, err
+    assert json.loads(out)["effective_scope"] == "project"
+
+    # --settings pointing to the user settings file is user scope and warns.
+    user_target = tmp_path / "home" / ".cursor" / "mcp.json"
+    user_target.parent.mkdir(parents=True, exist_ok=True)
+    code, out, err = run("mcp", "install", "--host", "cursor", "--settings", str(user_target))
+    assert code == ExitCode.OK, err
+    assert "per-project location" in err, err
+    assert "(user scope)" in out, out
+    code, out, err = run(
+        "--json", "mcp", "install", "--host", "cursor", "--settings", str(user_target)
+    )
+    assert code == ExitCode.OK, err
+    assert json.loads(out)["effective_scope"] == "user"
+
+    # Running from HOME where project_dest and user_dest coincide is user-wide.
+    monkeypatch.chdir(tmp_path / "home")
+    code, out, err = run("mcp", "install", "--host", "cursor", "--settings", ".cursor/mcp.json")
+    assert code == ExitCode.OK, err
+    assert "per-project location" in err, err
+    assert "(user scope)" in out, out
+    monkeypatch.chdir(tmp_path)
+
+    # An unknown custom destination warns that its scope is unknown.
+    target = tmp_path / "custom" / "settings.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    code, out, err = run("mcp", "install", "--host", "cursor", "--settings", str(target))
+    assert code == ExitCode.OK, err
+    assert "unknown scope" in err, err
+    assert "(unknown scope)" in out, out
+    code, out, err = run("--json", "mcp", "install", "--host", "cursor", "--settings", str(target))
+    assert code == ExitCode.OK, err
+    assert json.loads(out)["effective_scope"] == "unknown"
+
+
+def test_scope_available_for_non_local_scopes() -> None:
+    """Non-local scopes are always available; local depends on project nesting."""
+    assert mcp_install.scope_available("gemini", "user") is True
+    assert mcp_install.scope_available("gemini", "project") is True
+    assert mcp_install.scope_available("gemini", "local") is False
+    assert mcp_install.scope_available("claude-code", "local") is True
+
+
+def test_install_local_is_reported_as_local_where_the_host_supports_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude-code nests by project, so its local scope is real and needs no caveat."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+
+    code, out, err = run("mcp", "install")
+    assert code == ExitCode.OK, err
+    assert "per-project location" not in err, err
+    assert "(local scope)" in out, out
+
+    code, out, err = run("--json", "mcp", "install")
+    assert code == ExitCode.OK, err
+    assert "effective_scope" not in json.loads(out)
+
+
 @pytest.mark.parametrize(
     ("entry", "ours"),
     [
@@ -762,10 +884,26 @@ def _tracked_paths() -> set[str] | None:
     ``git ls-files`` rather than a directory walk: a file can sit on disk and
     be ignored, and it is the committed copy every other clone receives.
     """
-    proc = subprocess.run(["git", "ls-files"], cwd=_REPO_ROOT, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(["git", "ls-files"], cwd=_REPO_ROOT, capture_output=True, text=True)
+    except FileNotFoundError:
+        # No git on PATH: ``subprocess`` raises instead of exiting non-zero,
+        # so this is the skip path, not a crash (#1803).
+        return None
     if proc.returncode != 0:
         return None
     return set(proc.stdout.split())
+
+
+def test_tracked_paths_returns_none_when_git_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_tracked_paths returns None instead of raising when git is missing (#1803)."""
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Simulate missing git executable by raising FileNotFoundError."""
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert _tracked_paths() is None
 
 
 @pytest.mark.parametrize("host", sorted(mcp_install.HOST_PROFILES))
@@ -816,3 +954,151 @@ def test_the_host_help_names_every_host_the_choices_accept() -> None:
     )
     for host in mcp_install.HOST_PROFILES:
         assert host in (host_help or ""), f"--host help omits {host}, which the parser accepts"
+
+
+# --------------------------------------------------------------------------- #
+# VS Code's settings path, per platform (issue #1604)
+# --------------------------------------------------------------------------- #
+
+
+def _rebind_vscode_profile(monkeypatch: pytest.MonkeyPatch, *, home: Path) -> Path:
+    """Point the vscode profile at a sandboxed home, and return it.
+
+    ``HOST_PROFILES`` binds its vscode paths at import, from whatever
+    environment imported it, so patching the variables alone is too late: the
+    profile still holds the real machine's path. Rebinding the two entries in
+    place is what makes the sandboxed values the ones the CLI resolves, and
+    ``setitem`` restores the real ones afterwards. ``HOME`` and ``USERPROFILE``
+    are both set because ``expanduser`` reads the one the running platform
+    honours, and this helper has to work under both.
+    """
+    appdata = home / "AppData" / "Roaming"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("APPDATA", str(appdata))
+    for key in ("local_settings", "user_settings"):
+        monkeypatch.setitem(
+            mcp_install.HOST_PROFILES["vscode"], key, mcp_install._vscode_user_settings()
+        )
+    return home
+
+
+def test_the_vscode_settings_path_follows_the_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The three paths VS Code's documentation names, one per platform.
+
+    One macOS path for every platform was issue #1604: on Windows and Linux the
+    registration was written into a file no VS Code reads. Each expectation
+    here is the documented location for its platform, resolved under a
+    sandboxed home so the real profile never enters the comparison. On a
+    machine running one platform the others are still checked, because the
+    point is that the answer is not this machine's.
+    """
+    home = tmp_path / "home"
+    appdata = tmp_path / "appdata"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("APPDATA", str(appdata))
+
+    assert mcp_install._vscode_user_settings(platform="win32") == str(
+        appdata / "Code" / "User" / "settings.json"
+    )
+    assert (
+        mcp_install._vscode_user_settings(platform="darwin")
+        == "~/Library/Application Support/Code/User/settings.json"
+    )
+    assert (
+        mcp_install._vscode_user_settings(platform="linux") == "~/.config/Code/User/settings.json"
+    )
+
+    # XDG_CONFIG_HOME is ignored on purpose: VS Code hardcodes ~/.config
+    # (upstream microsoft/vscode#38476), so honouring the variable would write
+    # where VS Code does not read, which is the bug this guards against.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "elsewhere"))
+    assert (
+        mcp_install._vscode_user_settings(platform="linux") == "~/.config/Code/User/settings.json"
+    )
+
+    # With APPDATA at its standard roaming directory under the profile home, the
+    # answer stays `~`-relative rather than absolute: `agents/diagnose.py` weaves
+    # a caller's `home` override into `~`-prefixed paths only, so an absolute
+    # binding would send the doctor to the developer's real %APPDATA% instead of
+    # the sandbox a scan passes.
+    monkeypatch.setenv("APPDATA", str(home / "AppData" / "Roaming"))
+    assert (
+        mcp_install._vscode_user_settings(platform="win32")
+        == "~/AppData/Roaming/Code/User/settings.json"
+    )
+
+    # A session without APPDATA (a service account, a hardened shell) still
+    # names the roaming directory, from the profile home rather than a guess,
+    # and keeps the `~`-relative form for the same reason.
+    monkeypatch.delenv("APPDATA")
+    assert Path(mcp_install._vscode_user_settings(platform="win32")).expanduser() == (
+        home / "AppData" / "Roaming" / "Code" / "User" / "settings.json"
+    )
+
+    # An environment that cannot resolve a profile home at all must not crash:
+    # HOST_PROFILES binds this function at import, and 3.13's Path.home()
+    # raises there (a subprocess whose environment carries no USERPROFILE, the
+    # case test_agents_cli.py::test_help_lists_both_new_commands runs). The
+    # answer stays `~`-relative so each consumer's expanduser resolves it.
+    def no_home() -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(mcp_install.Path, "home", no_home)
+    assert (
+        mcp_install._vscode_user_settings(platform="win32")
+        == "~/AppData/Roaming/Code/User/settings.json"
+    )
+    # APPDATA, being absolute already, still wins when it is genuinely set.
+    monkeypatch.setenv("APPDATA", str(tmp_path / "redirected"))
+    assert mcp_install._vscode_user_settings(platform="win32") == str(
+        tmp_path / "redirected" / "Code" / "User" / "settings.json"
+    )
+
+
+def test_vscode_install_lands_where_this_platforms_vs_code_reads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The acceptance case (issue #1604): the file written is the file VS Code opens.
+
+    The install command used to write a macOS-only path on every platform,
+    growing a ``Library/Application Support/Code/User`` tree under the user's
+    profile on Windows and Linux while reporting ``status: installed``. The
+    registration now lands in the settings file the running VS Code actually
+    reads, and that tree is not created on platforms that do not use it.
+    """
+    home = _rebind_vscode_profile(monkeypatch, home=tmp_path / "home")
+
+    code, out, err = run("--json", "mcp", "install", "--host", "vscode", "--scope", "user")
+    assert code == ExitCode.OK, err
+
+    expected = Path(mcp_install.HOST_PROFILES["vscode"]["user_settings"]).expanduser()
+    settings = Path(json.loads(out)["settings"])
+    assert settings == expected, (settings, expected)
+    assert settings.is_file()
+    entry = json.loads(settings.read_text(encoding="utf-8"))["mcpServers"]["continuum-mcp"]
+    assert Path(entry["command"]).is_absolute()
+
+    # The default (local) scope is the same file, for the reason the profile
+    # records: VS Code has no per-project user settings file to point at. The
+    # file is removed first, so the default-scope call has to write the
+    # registration itself: a branch that only reported the path while writing
+    # nothing would pass a mere exit-code and path check.
+    settings.unlink()
+    monkeypatch.chdir(tmp_path)
+    code, out, err = run("--json", "mcp", "install", "--host", "vscode")
+    assert code == ExitCode.OK, err
+    assert Path(json.loads(out)["settings"]) == expected
+    assert settings.is_file(), (
+        "the default scope must write the registration, not just name its file"
+    )
+    entry = json.loads(settings.read_text(encoding="utf-8"))["mcpServers"]["continuum-mcp"]
+    assert Path(entry["command"]).is_absolute()
+
+    if sys.platform != "darwin":
+        assert not (home / "Library").exists(), (
+            "a non-macOS platform must not grow a macOS settings tree"
+        )

@@ -94,6 +94,7 @@ def test_projection_failure_is_reported_as_anchor_failure(
     from continuum.checkpoint.manager import CheckpointManager
 
     def broken_projection(self: object, run_id: str, *, full_history: bool = True) -> SemanticState:
+        """Simulate an unprojectable event failure during anchor resolution."""
         raise RuntimeError("unprojectable event")
 
     monkeypatch.setattr(CheckpointManager, "project_current", broken_projection)
@@ -120,6 +121,7 @@ def test_missing_version_after_checkpoint_is_rejected(
     from continuum.checkpoint.manager import CheckpointManager
 
     def checkpoint_without_persistence(self: object, run_id: str, **kwargs: object) -> None:
+        """Simulate a checkpoint that does not persist a state version."""
         return None
 
     monkeypatch.setattr(CheckpointManager, "checkpoint", checkpoint_without_persistence)

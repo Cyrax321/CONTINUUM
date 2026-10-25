@@ -23,6 +23,7 @@ __all__ = [
     "AdapterAction",
     "AdapterResult",
     "TelemetryHook",
+    "format_action_error",
     "run_action",
 ]
 
