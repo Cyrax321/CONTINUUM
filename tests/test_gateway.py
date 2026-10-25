@@ -454,7 +454,6 @@ def test_render_key_with_non_mapping_body() -> None:
         render_key("invoice:{id}", [1, 2, 3])
 
 
-
 # --- CLI ---------------------------------------------------------------------- #
 
 
@@ -3449,7 +3448,6 @@ def test_empty_json_object_forwarded_to_upstream(
     assert status == 200
     assert body == {"ok": True}
     assert received == [b"{}"]
-
 
 
 def test_a_route_without_a_scheme_still_means_https(
