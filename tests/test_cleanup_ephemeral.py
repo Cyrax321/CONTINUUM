@@ -85,4 +85,3 @@ def test_compaction_anchor_survives_cleanup_ephemeral_artifacts() -> None:
     mgr = CheckpointManager(storage)
     restored = mgr.restore("run_1")
     assert restored.state.goal.description == "test"
-
