@@ -30,6 +30,7 @@ def storage(tmp_path: Path) -> Iterator[SQLiteStorage]:
 def test_resolves_default_bound_below_future_anchor(storage: SQLiteStorage) -> None:
     """The common path refreshes a stale checkpoint and retains room for the marker."""
     from continuum.checkpoint.manager import CheckpointManager
+
     CheckpointManager(storage).checkpoint(RUN_ID)
     earlier_head = storage.last_sequence(RUN_ID)
 
@@ -46,6 +47,7 @@ def test_resolves_default_bound_below_future_anchor(storage: SQLiteStorage) -> N
 def test_resolves_explicit_prefix_below_future_anchor(storage: SQLiteStorage) -> None:
     """An explicit safe prefix remains respected even though a new checkpoint is minted."""
     from continuum.checkpoint.manager import CheckpointManager
+
     CheckpointManager(storage).checkpoint(RUN_ID)
 
     version, through = resolve_compaction_bound(storage, RUN_ID, 1)
@@ -59,6 +61,7 @@ def test_resolves_explicit_prefix_below_future_anchor(storage: SQLiteStorage) ->
 def test_explicit_bound_cannot_consume_anchor_marker(storage: SQLiteStorage, offset: int) -> None:
     """Regression for #705/#1078: deleting the >= guard must fail this test."""
     from continuum.checkpoint.manager import CheckpointManager
+
     CheckpointManager(storage).checkpoint(RUN_ID)
     # resolve_compaction_bound adds one forced checkpoint annotation before the
     # compaction transaction appends EVENT_LOG_ANCHORED.
@@ -90,9 +93,8 @@ def test_projection_failure_is_reported_as_anchor_failure(
     """A failed projection must become the resolver's contextual ValueError."""
     from continuum.checkpoint.manager import CheckpointManager
 
-    def broken_projection(
-        self: object, run_id: str, *, full_history: bool = True
-    ) -> SemanticState:
+    def broken_projection(self: object, run_id: str, *, full_history: bool = True) -> SemanticState:
+        """Simulate an unprojectable event failure during anchor resolution."""
         raise RuntimeError("unprojectable event")
 
     monkeypatch.setattr(CheckpointManager, "project_current", broken_projection)
@@ -118,9 +120,8 @@ def test_missing_version_after_checkpoint_is_rejected(
     """
     from continuum.checkpoint.manager import CheckpointManager
 
-    def checkpoint_without_persistence(
-        self: object, run_id: str, **kwargs: object
-    ) -> None:
+    def checkpoint_without_persistence(self: object, run_id: str, **kwargs: object) -> None:
+        """Simulate a checkpoint that does not persist a state version."""
         return None
 
     monkeypatch.setattr(CheckpointManager, "checkpoint", checkpoint_without_persistence)
