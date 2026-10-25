@@ -102,6 +102,31 @@ def test_identity_tokens_traverses_nested_mappings_and_lists() -> None:
     assert "tenant-north" in tokens
 
 
+@pytest.mark.parametrize("shape", [list, tuple], ids=["list", "tuple"])
+def test_identity_tokens_traverses_every_collection_shape_not_just_lists(
+    shape: type,
+) -> None:
+    """identity_tokens reads a tuple or a set like a list, not as nothing (issue #1815).
+
+    The collector only used to descend into ``list`` and ``Mapping`` values, so a
+    resource named inside a tuple or a set produced an empty token set and the
+    drift fallback had nothing to match on. Whatever the caller packed the
+    arguments in, the same resource must yield the same tokens.
+    """
+    expected = frozenset({"invoice-101.pdf", "invoice-101"})
+    assert identity_tokens({"files": shape(["invoice-101.pdf"])}) == expected
+    assert identity_tokens({"files": {"invoice-101.pdf"}}) == expected
+    assert identity_tokens({"files": frozenset({"invoice-101.pdf"})}) == expected
+    # Nested collections of every shape are descended into too.
+    nested = identity_tokens({"batch": ({"rows": {"invoice-101.pdf"}},)})
+    assert expected <= nested
+
+
+def test_identity_tokens_leaves_bytes_opaque() -> None:
+    """A bytes payload is a scalar blob, not a collection of one-byte tokens."""
+    assert identity_tokens({"payload": b"invoice-101.pdf"}) == frozenset()
+
+
 def test_identity_tokens_extracts_external_id() -> None:
     """identity_tokens extracts tokens and path stems from external_id."""
     tokens = identity_tokens(
