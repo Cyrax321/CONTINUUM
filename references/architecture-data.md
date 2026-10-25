@@ -309,7 +309,7 @@ set, alphabetically:
 `gateway`, `health`, `history`, `hooks`, `impact`, `init`, `inspect`,
 `lineage-issue`, `lineage-verify`, `mcp`, `merge`, `notify-test`, `observe`,
 `policy-review`, `precompact`, `provenance`, `reconcile`, `record-plan`,
-`replay`, `report`, `restore`, `resume`, `rewind`, `runs`, `serve`,
+`replay`, `report`, `review`, `restore`, `resume`, `rewind`, `runs`, `serve`,
 `show-contract`, `start`, `status`, `tree`, `tui`, `validate`,
 `verify`, `watch`.
 
