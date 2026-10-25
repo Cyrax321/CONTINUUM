@@ -104,6 +104,60 @@ Test counts: ~3680 collected on a minimal env.
   `tests/test_kubernetes_adapter.py` moved with the fix and gained tests
   for the second-call, replay, and invalid-name cases.
 
+- **A digest-less `TOOL_COMPLETED` no longer makes rewind delete a
+  pre-checkpoint file or freeze a post-checkpoint one (#1806).**
+  `rewind_to_checkpoint` keyed its whole "which files survive" decision on
+  whether a `TOOL_COMPLETED` observation carries a `sha256`, so an observation
+  that carries none was treated exactly like "no observation at all". A path
+  whose pre-checkpoint observation has no digest took the "created after the
+  checkpoint" branch and was unlinked even though the checkpoint-era log
+  records a write to it, with zero conflicts and `ok=True`. On the other side,
+  a post-checkpoint observation without a digest left nothing to compare
+  against, so the pre-delete check `file_digest(path) != expected_after` was
+  always true and the file was reported as "digest changed before delete"
+  forever; `--force` did not delete it either, because the `continue` skipped
+  the unlink, so a forced rewind left post-checkpoint files in the workspace
+  while reporting that it ran. Digest-less observations are honest evidence and
+  reachable in an ordinary run: `observe_event_payload` records the path
+  without `bytes`/`sha256` when the file cannot be read at hook time (the
+  PostToolUse hook races the writer, the file can be held exclusively or
+  unreadable, and a multi-step tool can move it between the write and the
+  read), and the gateway's `TOOL_COMPLETED` never carries a digest at all. The
+  pre-checkpoint side now distinguishes "an observation exists but records no
+  digest" from "no observation": the first means the file was already there and
+  cannot be restored, so it is left in place and reported as unrecoverable,
+  never deleted. The post-checkpoint side no longer compares a digest it does
+  not have: there is nothing to verify, so the file is deleted and listed in
+  `deleted_files`. The same guard lifts an unkillable "digest changed before
+  restore" conflict that blocked restoring a file whose post-checkpoint
+  observation had no digest.
+
+- **Replay similarity no longer matches non-completed prior actions (#1837).**
+  `classify_call`'s exact-key path already restricted replay to actions whose
+  status is `completed`, but the similarity scan compared against every prior
+  action of the same type regardless of status. A post-restore call with
+  arguments similar to a previously failed, started, unknown, or compensated
+  action exceeded the replay threshold and was classified as a replay hit of
+  that action, blocking re-execution of an operation that never succeeded. The
+  scan now skips any action whose status is not `completed`, so such calls are
+  classified `fresh` (or matched against a completed action when one exists)
+  and the operation executes again.
+
+- **The replay guard's closed-attempt refusal is raised as `ReplayBlocked`
+  instead of a bare `AssertionError` (#1836).** `evaluate()` built its
+  `DENY_RECLAIM` decision without `key=`, unlike every other branch of the
+  decision table, so `decision.key` was `None` and `protected_call()` tripped
+  `assert decision.key is not None` before it could reach the documented
+  `raise ReplayBlocked(decision)`. A retry of an action whose previous attempt
+  reached a closed status (`failed`, `compensated`) therefore surfaced as an
+  internal assertion error callers could not catch, and under `python -O` the
+  stripped assertion silently made `key_to_use` `None`. `DENY_RECLAIM` now
+  carries its key, so the refusal reaches callers as `ReplayBlocked` with the
+  decision and key, and the gate's closed-attempt message reports the real
+  status instead of the `action is None` fallback. Regression tests mirror the
+  `BLOCK_UNCERTAIN` coverage from #735.
+
+
 - **`continuum status` now honours the global `--json` flag in its main view (#1785).**
   Running `continuum --json status <run>` without `--provenance` previously ignored
   `--json` and emitted plain text, while `--provenance` honoured it. The main view
