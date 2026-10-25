@@ -2526,7 +2526,10 @@ def cmd_observe(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
 
     payload = observe_event_payload(raw if isinstance(raw, dict) else {})
     cli_cid = getattr(args, "correlation_id", None)
-    if cli_cid:
+    # `is not None`, not truthiness: an explicitly empty --correlation-id ""
+    # must be rejected (the contract is non-empty) rather than silently saving
+    # the observation without the requested ID (review of #1680).
+    if cli_cid is not None:
         from continuum.models import validate_correlation_id
 
         payload["correlation_id"] = validate_correlation_id(cli_cid)
