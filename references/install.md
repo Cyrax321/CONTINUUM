@@ -53,19 +53,15 @@ Combine freely: `[dev]` already includes `mcp`, `langgraph`, `langchain`, `opena
 | `langchain>=0.3` | `pyproject.toml:69` (`[langchain]`) | LangChain adapter | Only for LangChain |
 | `cryptography>=45.0` | `pyproject.toml:74` (`[attest]`), also in `[dev]` | Ed25519 event-chain attestation | Only for `continuum attest` |
 | `psycopg>=3.2` | `pyproject.toml:77` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
-| `opentelemetry-api>=1.20` | `pyproject.toml:61` (`[otel]`) | Span-processor bridge (`continuum.otel`) | Only for OTel directly; may appear transitively via `mcp`/`openai-agents` |
-| `langgraph>=0.2` | `pyproject.toml:70` (`[langgraph]`) | LangGraph adapter | Only for LangGraph (also pulled transitively by `langchain`) |
-| `openai-agents>=0.2` | `pyproject.toml:73` (`[openai]`) | OpenAI Agents SDK adapter | Only for OpenAI |
-| `langchain>=0.3` | `pyproject.toml:76` (`[langchain]`) | LangChain adapter | Only for LangChain |
 | `cryptography>=45.0` | `pyproject.toml:81` (`[attest]`), also in `[dev]` | Ed25519 event-chain attestation | Only for `continuum attest` |
 | `psycopg>=3.2` | `pyproject.toml:84` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
 | `mcp>=2.0` | `pyproject.toml:58` (`[mcp]`), also in `[dev]` | MCP server (`continuum-mcp`) stdio transport | Only for MCP server (also pulled transitively by `openai-agents`) |
 | `opentelemetry-api>=1.20` | `pyproject.toml:58` (`[otel]`) | Span-processor bridge (`continuum.otel`) | Only for OTel directly; may appear transitively via `mcp`/`openai-agents` |
-| `playwright>=1.40` | `pyproject.toml:67` (`[browser]`) | Browser automation through `BrowserAdapter`; install Chromium separately | Only for BrowserAdapter |
-| `kubernetes>=29` | `pyproject.toml:73` (`[kubernetes]`) | Kubernetes availability check for `KubernetesAdapter`; `kubectl` and a configured cluster remain external | Only for KubernetesAdapter |
+| `playwright>=1.40` | `pyproject.toml:69` (`[browser]`) | Browser automation through `BrowserAdapter`; install Chromium separately | Only for BrowserAdapter |
+| `kubernetes>=29` | `pyproject.toml:74` (`[kubernetes]`) | Kubernetes availability check for `KubernetesAdapter`; `kubectl` and a configured cluster remain external | Only for KubernetesAdapter |
 | `langgraph>=0.2` | `pyproject.toml:58` (`[langgraph]`) | LangGraph adapter | Only for LangGraph (also pulled transitively by `langchain`) |
-| `openai-agents>=0.2` | `pyproject.toml:61` (`[openai]`) | OpenAI Agents SDK adapter | Only for OpenAI |
-| `langchain>=0.3` | `pyproject.toml:76` (`[langchain]`) | LangChain adapter | Only for LangChain |
+| `openai-agents>=0.2` | `pyproject.toml:63` (`[openai]`) | OpenAI Agents SDK adapter | Only for OpenAI |
+| `langchain>=0.3` | `pyproject.toml:77` (`[langchain]`) | LangChain adapter | Only for LangChain |
 | `cryptography>=45.0` | `pyproject.toml:81` (`[attest]`), also in `[dev]` | Ed25519 event-chain attestation | Only for `continuum attest` |
 | `psycopg>=3.2` | `pyproject.toml:84` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
 | **Dev / test tooling** (all in `pyproject.toml:33-50` `[dev]`) | | | Only for contributors |
