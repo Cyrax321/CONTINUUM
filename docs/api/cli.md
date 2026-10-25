@@ -52,6 +52,7 @@ continuum --json <command>                    # machine-readable output
 | `verify <run_id>` | Re-audit the event chain for tampering. |
 | `reconcile <run_id>` | Settle uncertain actions with registered probes. Mutates storage. |
 | `actions <run_id>` | List recorded side effects and flag uncertain outcomes. |
+| `evidence-chain <run_id> [--action-key <k>] [--correlation-id <id>] [--unmatched-only]` | Show action-to-tool evidence chains, correlated by identifier across compaction. Read-only. |
 | `show-contract <run_id>` | Print the recovery contract for the run. |
 | `replay <run_id>` | Replay events and verify the stored state version. |
 | `benchmark [--total <n>]` | Run the CONTINUUM-Bench harness (default: 200 documents per run). |
