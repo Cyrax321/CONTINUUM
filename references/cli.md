@@ -53,7 +53,6 @@ continuum policy-review [run_id]                 # advisory recovery-history rep
 continuum impact <run_id> --evidence <id>        # downstream impact of an evidence item
 continuum provenance <run_id>                    # show provenance DAG
 continuum report --trajectory <run_id>           # claims, uncertain side effects, scar rate, stall sites
-continuum policy-review [run_id]                 # advisory recovery history report
 continuum record-plan <run_id> --plan-id <id>    # record structured plan upsert. mutates
 continuum export-evidence <run_id>               # export evidence as JSON lines
 continuum forget --tenant <id> [--dry-run]       # tombstone memory records for a tenant. mutates
