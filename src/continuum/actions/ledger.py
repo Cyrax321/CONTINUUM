@@ -1949,8 +1949,8 @@ def get_memory_provenance(
     runs_to_scan = [run_id] if run_id is not None else [r.run_id for r in storage.list_runs()]
 
     target_hit: dict[str, Any] | None = None
-    actions_by_id: dict[str, tuple[str, str, Action, str | None]] = {}
-    all_observations: dict[str, Any] = {}
+    actions_by_id: dict[str, tuple[str, str, Action, str | None, str]] = {}
+    observations_by_run: dict[str, dict[str, Any]] = {}
     # Runs we could not read at all. A corrupted or tampered log used to
     # vanish from the answer silently, which is the worst failure mode for a
     # forensic lookup: the caller gets a confident partial result and never
@@ -1965,15 +1965,16 @@ def get_memory_provenance(
             skipped_runs.append(rid)
             return
 
+        obs_map = observations_by_run.setdefault(rid, {})
         for ev in events:
             if ev.type == EventType.PERCEPTION_OBSERVED:
                 with suppress(Exception):
-                    all_observations[_sh(dict(ev.payload))] = ev
+                    obs_map.setdefault(_sh(dict(ev.payload)), ev)
                 ch = ev.payload.get("content_hash")
                 if isinstance(ch, str):
-                    all_observations[ch] = ev
+                    obs_map.setdefault(ch, ev)
                 if getattr(ev, "event_id", None):
-                    all_observations[ev.event_id] = ev
+                    obs_map.setdefault(ev.event_id, ev)
 
             if ev.type in _ACTION_EVENT_TYPES:
                 payload = dict(ev.payload)
@@ -1998,7 +1999,7 @@ def get_memory_provenance(
                 else:
                     rendered = str(raw_key)
 
-                actions_by_id[act.action_id] = (rid, rendered, act, digest)
+                actions_by_id[act.action_id] = (rid, rendered, act, digest, str(raw_key))
 
     for rid in runs_to_scan:
         _scan_run(rid)
@@ -2008,9 +2009,9 @@ def get_memory_provenance(
     # ``mem:t:record_10``, and a first-hit scan would blame record_10's
     # observation and its siblings, which is precisely the misattribution a
     # forensic lookup exists to avoid (#1416).
-    def _match_rank(act: Action, rendered: str) -> int | None:
+    def _match_rank(act: Action, rendered: str, raw_key: str) -> int | None:
         """Rank a candidate from 0 (exact) to 2 (substring); None when it does not match."""
-        if record_key == rendered or record_key == act.action_id:
+        if record_key in (rendered, act.action_id, raw_key):
             return 0
         # A namespace suffix such as ``mem:t:record_1`` is an exact identity in
         # the caller's own vocabulary, so it outranks a bare substring.
@@ -2023,8 +2024,8 @@ def get_memory_provenance(
         return None
 
     ranked: list[tuple[int, str, str, Action, str | None]] = []
-    for rid, rendered, act, digest in actions_by_id.values():
-        rank = _match_rank(act, rendered)
+    for rid, rendered, act, digest, raw_key in actions_by_id.values():
+        rank = _match_rank(act, rendered, raw_key)
         if rank is not None:
             ranked.append((rank, rid, rendered, act, digest))
 
@@ -2060,7 +2061,7 @@ def get_memory_provenance(
         and _IDEMPOTENCY_KEY_PATTERN.fullmatch(record_key)
     ):
         try:
-            foreign = storage.foreign_action(record_key, exclude_run=run_id or "")
+            foreign = storage.foreign_action(record_key, exclude_run="")
             if foreign is not None and (run_id is None or foreign.run_id == run_id):
                 digest = foreign.origin_observation_digest or foreign.origin_digest
                 target_hit = {
@@ -2105,15 +2106,20 @@ def get_memory_provenance(
         if rid not in runs_to_scan:
             _scan_run(rid)
 
-    # Locate originating observation event
-    obs_ev = all_observations.get(target_digest)
+    # Locate originating observation event, prioritizing the target run's own observation
+    obs_ev = observations_by_run.get(target_rid, {}).get(target_digest)
+    if obs_ev is None:
+        for obs_map in observations_by_run.values():
+            if target_digest in obs_map:
+                obs_ev = obs_map[target_digest]
+                break
 
     # Collect sibling actions across all scanned runs
     sibling_records: list[str] = []
     sibling_actions: list[Action] = []
     seen_action_ids: set[str] = {target_action.action_id}
 
-    for _rid, rend, act, d in actions_by_id.values():
+    for _rid, rend, act, d, _raw in actions_by_id.values():
         if d == target_digest and act.action_id not in seen_action_ids:
             seen_action_ids.add(act.action_id)
             if rend:

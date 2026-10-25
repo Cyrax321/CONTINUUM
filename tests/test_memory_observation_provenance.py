@@ -235,7 +235,7 @@ def test_get_memory_provenance_reports_skipped_runs() -> None:
             raise CorruptedRecord("simulated tampering")
         return real_read_all_events(rid)
 
-    storage.read_all_events = _flaky_read  # type: ignore[method-assign]
+    storage.read_all_events = _flaky_read  # type: ignore[method-assign,assignment]
     provenance = ledger.get_memory_provenance("record_1")
     assert provenance is not None
     assert provenance["rendered_key"] == "mem:s:record_1"
@@ -315,3 +315,56 @@ def test_get_memory_provenance_missing_or_no_digest() -> None:
     assert prov["origin_digest"] is None
     assert prov["observation_event"] is None
     assert prov["sibling_records"] == []
+
+
+def test_get_memory_provenance_raw_outcome_key() -> None:
+    """Lookup by raw outcome.key succeeds when claim used explicit rendered key."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="test"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "test"})
+
+    obs_payload = {"prompt": "poisoned context"}
+    digest = stable_hash(obs_payload)
+    storage.append_event("run_1", EventType.PERCEPTION_OBSERVED, obs_payload)
+
+    ledger = ActionLedger(storage, "run_1")
+    outcome = ledger.claim(
+        "mem_write",
+        {"data": "content"},
+        key="mem:tenant:record_abc",
+        origin_observation_digest=digest,
+    )
+
+    # Tracing by outcome.key (which is the stored key hash) finds the write
+    prov = get_memory_provenance(storage, outcome.key, run_id="run_1")
+    assert prov is not None
+    assert prov["rendered_key"] == "mem:tenant:record_abc"
+    assert prov["origin_digest"] == digest
+    assert prov["observation_event"] is not None
+    assert prov["observation_event"].payload == obs_payload
+
+
+def test_get_memory_provenance_cross_run_observation_priority() -> None:
+    """Target run's observation is prioritized over identical digests in later runs."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="run 1"))
+    storage.create_run(Run(run_id="run_2", goal="run 2"))
+
+    obs_content = {"content_hash": "a" * 64, "source": "run_1_source"}
+    storage.append_event("run_1", EventType.PERCEPTION_OBSERVED, obs_content)
+
+    obs_content_2 = {"content_hash": "a" * 64, "source": "run_2_source"}
+    storage.append_event("run_2", EventType.PERCEPTION_OBSERVED, obs_content_2)
+
+    ledger = ActionLedger(storage, "run_1")
+    ledger.claim(
+        "mem_write",
+        {"data": "v"},
+        key="mem:item",
+        origin_observation_digest="a" * 64,
+    )
+
+    prov = get_memory_provenance(storage, "mem:item", run_id="run_1")
+    assert prov is not None
+    assert prov["observation_event"] is not None
+    assert prov["observation_event"].payload.get("source") == "run_1_source"
