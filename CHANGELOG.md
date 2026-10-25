@@ -10,6 +10,37 @@ Test counts: ~3680 collected on a minimal env.
 
 ### Added
 
+- **Wire specification and automated wire conformance suite.**
+  Published OpenAPI 3.1 specification for the CONTINUUM sidecar wire protocol
+  covering action interception and idempotency leases, completion, progress tracking,
+  checkpoints, semantic resume, and human confirmation. The sidecar now serves the
+  OpenAPI 3.1 document dynamically via `GET /openapi.json`, exposes health checks on
+  `GET /healthz`, returns the canonical `Continuum-Version: 1.0` header on all responses,
+  and structures wire errors with standardized error codes. Added the `continuum conformance`
+  CLI tool (`continuum conformance --url <endpoint>`) to validate any server implementation
+  against the full wire specification.
+
+- **Sidecar trust and authentication hardening.**
+  Separated review confirmation from normal agent credentials. An agent holding a
+  normal client token cannot call `confirm` (`NotAuthorized`, HTTP 403), preventing
+  self-certification bypasses of human-in-the-loop review. The sidecar now accepts
+  dedicated confirm credentials via `CONTINUUM_SERVE_CONFIRM_TOKEN` and supports
+  per-client tokens via `CONTINUUM_SERVE_CLIENT_TOKENS`. The HTTP wire transport
+  accepts credentials via standard `Authorization: Bearer <token>` headers without
+  embedding tokens into JSON request bodies, and token verification uses constant-time
+  comparisons (`hmac.compare_digest`) against timing side channels. The HTTP listener
+  bind address is configurable via `--bind` and `CONTINUUM_SERVE_BIND`, with tested
+  reverse proxy configurations for Nginx and Caddy documented in `docs/guides/sidecar_tls_proxy.md`.
+
+- **Atomic claim in storage eliminates concurrent duplicate actions.**
+  `ActionLedger.claim` now resolves and records within a single atomic storage
+  transaction (`atomic_claim`). On SQLite, a single `BEGIN IMMEDIATE` transaction
+  wraps both claim resolution and event append, preventing race conditions where
+  multiple writers observe an unclaimed key and both append. On PostgreSQL, an
+  explicit transaction with `pg_advisory_xact_lock` on the action key enforces
+  mutual exclusion. Concurrency race tests verify zero duplicate claims across 64
+  threads, 16 processes, and crash fault injection (`kill -9`).
+
 - **Good first issues and Hacktoberfest guidance in CONTRIBUTING.md (#1652).**
   Added an on-ramp section pointing to tracking issue #1661, ground rules for
   first pull requests, a Table of Contents, and a reference table for issue
@@ -57,6 +88,15 @@ Test counts: ~3680 collected on a minimal env.
   scorer is shipped and tested on its own rather than arriving with a heuristic
   that moves while the queue is built.
 ### Fixed
+
+- **`continuum status` now honours the global `--json` flag in its main view (#1785).**
+  Running `continuum --json status <run>` without `--provenance` previously ignored
+  `--json` and emitted plain text, while `--provenance` honoured it. The main view
+  now threads `as_json=args.json` into its emitter and outputs a structured JSON
+  payload containing `run_id`, `goal` (`description` and `version`), `version`,
+  `progress` (`completed`, `pending`, `failed`, `total`), and `decisions`
+  (`valid`, `total`). On an unprojectable run, the payload includes the
+  `projection_failed_at` block and exits with code `ExitCode.CORRUPTED`.
 
 - **A developer's own venv and scratch database are no longer committed as the
   project's Continue registration (#1618).** PR #1612 added
@@ -994,7 +1034,8 @@ Test counts: ~3680 collected on a minimal env.
   `to_dict`, and `advisory_text`, which had no test at all. The module is now
   at 90%. No test reads the operator's real `.continuum/liveness.json`; every
   load points at a file in `tmp_path`, which is what keeps the suite from
-  depending on the machine it runs on.
+  depending on the machine it runs on. Additional cadence contracts and liveness
+  evaluation tests contributed by @heyyReggiee in #1670.
 - **The splash animation frame math is pinned (#1655).**
   `src/continuum/tui/animate.py` shipped with no test at all. Its only
   appearance in a coverage report was

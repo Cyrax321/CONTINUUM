@@ -884,10 +884,26 @@ def _tracked_paths() -> set[str] | None:
     ``git ls-files`` rather than a directory walk: a file can sit on disk and
     be ignored, and it is the committed copy every other clone receives.
     """
-    proc = subprocess.run(["git", "ls-files"], cwd=_REPO_ROOT, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(["git", "ls-files"], cwd=_REPO_ROOT, capture_output=True, text=True)
+    except FileNotFoundError:
+        # No git on PATH: ``subprocess`` raises instead of exiting non-zero,
+        # so this is the skip path, not a crash (#1803).
+        return None
     if proc.returncode != 0:
         return None
     return set(proc.stdout.split())
+
+
+def test_tracked_paths_returns_none_when_git_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_tracked_paths returns None instead of raising when git is missing (#1803)."""
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Simulate missing git executable by raising FileNotFoundError."""
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert _tracked_paths() is None
 
 
 @pytest.mark.parametrize("host", sorted(mcp_install.HOST_PROFILES))
@@ -917,3 +933,24 @@ def test_no_baked_host_registration_is_committed(host: str) -> None:
         "baked absolute command; run `continuum mcp remove --host "
         f"{host} --scope project`, and the file is gitignored"
     )
+
+
+def test_the_host_help_names_every_host_the_choices_accept() -> None:
+    """The help sentence and the choices line cannot drift apart (#1765).
+
+    A reader who checks ``continuum mcp install --help`` learns which hosts are
+    supported from the prose sentence, so a sentence naming a subset next to a
+    choices line naming the rest teaches the wrong answer next to the right
+    one. The sentence is derived from the same profile table the choices come
+    from, and this test is what keeps the derivation honest.
+    """
+    from continuum.cli.main import build_parser
+
+    top = build_parser()._subparsers._group_actions[0].choices
+    install = top["mcp"]._subparsers._group_actions[0].choices["install"]
+
+    host_help = next(
+        action.help for action in install._actions if action.option_strings == ["--host"]
+    )
+    for host in mcp_install.HOST_PROFILES:
+        assert host in (host_help or ""), f"--host help omits {host}, which the parser accepts"

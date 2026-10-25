@@ -29,8 +29,8 @@ from __future__ import annotations
 import json
 import os
 import threading
-from collections.abc import Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -313,6 +313,35 @@ class PostgresStorage(Storage):
 
     def _read(self) -> Any:
         return self._lock
+
+    @contextmanager
+    def atomic_claim(self, run_id: str, key: str | None = None) -> Iterator[None]:
+        """Wrap resolve and append in an atomic Postgres transaction with advisory lock.
+
+        Uses pg_advisory_xact_lock on the action key or run_id inside an explicit
+        transaction to ensure strict mutual exclusion during claim resolution and write.
+        """
+        lock_target = key or run_id
+        with self._write():
+            txn = self._connection.transaction()
+            txn.__enter__()
+            commit_on_exit = False
+            try:
+                self._connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    (f"continuum:claim:{lock_target}",),
+                )
+                yield
+                commit_on_exit = True
+            except BaseException as exc:
+                if type(exc).__name__ in ("UnknownSideEffect", "GrantDenied", "LedgerError"):
+                    commit_on_exit = True
+                raise
+            finally:
+                if commit_on_exit:
+                    txn.__exit__(None, None, None)
+                else:
+                    txn.__exit__(Exception, Exception("rollback"), None)
 
     def close(self) -> None:
         """Close the connection. Later use raises from the driver."""

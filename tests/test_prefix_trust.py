@@ -6,10 +6,34 @@ import io
 import json
 from pathlib import Path
 
-from continuum.analysis.prefix_trust import trust_over_prefix
+import pytest
+
+from continuum.analysis.prefix_trust import (
+    TrustReport,
+    _collect_origins,
+    _score_evidence,
+    _score_goal,
+    _score_role,
+    trust_over_prefix,
+)
 from continuum.cli.main import main as cli_main
-from continuum.events import EventType
-from continuum.models import Origin, Run
+from continuum.events import Event, EventType
+from continuum.models import (
+    Approval,
+    ApprovalStatus,
+    ConstraintPin,
+    Decision,
+    Evidence,
+    ExternalDependency,
+    Finding,
+    Origin,
+    PendingWork,
+    PlanStep,
+    Progress,
+    Provenance,
+    Run,
+    SemanticState,
+)
 from continuum.storage import SQLiteStorage
 
 
@@ -383,3 +407,213 @@ def test_dashboard_hook_is_read_only(tmp_path: Path) -> None:
     storage2 = SQLiteStorage(str(db))
     assert storage2.get_run("r1").goal == "ship"
     storage2.close()
+
+
+def test_trust_over_prefix_empty_events_list() -> None:
+    """Empty event list returns the default neutral trust report."""
+    report = trust_over_prefix([])
+    assert report == {
+        "trust_score": 1.0,
+        "breakdown": {"role": 1.0, "goal": 1.0, "evidence": 1.0},
+    }
+
+
+def test_trust_over_prefix_events_iterable() -> None:
+    """Event iterables are projected with either inferred or explicit run_id."""
+    ev = Event(
+        run_id="r1",
+        type=EventType.RUN_STARTED,
+        payload={"goal": "ship"},
+        source=Origin.DETERMINISTIC,
+        sequence=1,
+    )
+    # Inferred run_id from first event
+    rep1 = trust_over_prefix([ev])
+    assert rep1["trust_score"] == 1.0
+    assert rep1["breakdown"]["role"] == 1.0
+
+    # Explicit run_id passed
+    rep2 = trust_over_prefix([ev], run_id="r1")
+    assert rep2["trust_score"] == 1.0
+    assert rep2["breakdown"]["role"] == 1.0
+
+
+def test_score_goal_none_returns_zero() -> None:
+    """Goal dimension returns 0.0 when semantic state has no goal."""
+    state = SemanticState.model_construct(
+        run_id="r1",
+        goal=None,
+        progress=Progress(),
+    )
+    assert _score_goal(state) == 0.0
+
+
+def test_score_role_empty_origins_returns_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Role dimension returns 1.0 when origins list is empty."""
+    state = SemanticState.model_construct(
+        run_id="r1",
+        goal=None,
+        progress=Progress(),
+    )
+    monkeypatch.setattr("continuum.analysis.prefix_trust._collect_origins", lambda _s: [])
+    assert _score_role(state) == 1.0
+
+
+def test_collect_origins_component_provenance_and_approval_statuses() -> None:
+    """_collect_origins collects provenance across findings, decisions, pins, and approvals."""
+    # State with goal=None covers the branch skipping goal origin
+    state = SemanticState.model_construct(
+        run_id="r1",
+        goal=None,
+        progress=Progress(provenance=Provenance(origin=Origin.DETERMINISTIC)),
+        plan=[
+            PlanStep(step_id="p1", description="step", provenance=Provenance(origin=Origin.HUMAN))
+        ],
+        pending_work=[
+            PendingWork(
+                task_id="t1", description="work", provenance=Provenance(origin=Origin.DETERMINISTIC)
+            )
+        ],
+        findings=[Finding(claim="claim", provenance=Provenance(origin=Origin.HUMAN))],
+        decisions=[Decision(decision="dec", provenance=Provenance(origin=Origin.DETERMINISTIC))],
+        pins={
+            "pin1": ConstraintPin(
+                constraint_id="c1",
+                sha256="0" * 64,
+                provenance=Provenance(origin=Origin.EXTERNAL_AGENT),
+            )
+        },
+        approvals=[
+            Approval(subject="deploy", status=ApprovalStatus.GRANTED),
+            Approval(subject="migrate", status=ApprovalStatus.PENDING),
+            Approval(subject="revoke", status=ApprovalStatus.REVOKED),
+        ],
+        external_dependencies=[
+            ExternalDependency(resource="db", provenance=Provenance(origin=Origin.EXTERNAL_AGENT))
+        ],
+        evidence=[Evidence(source="log", provenance=Provenance(origin=Origin.HUMAN))],
+    )
+    origins = _collect_origins(state)
+    # GRANTED approval maps to HUMAN; PENDING and REVOKED map to EXTERNAL_AGENT
+    assert Origin.DETERMINISTIC in origins
+    assert Origin.HUMAN in origins
+    assert Origin.EXTERNAL_AGENT in origins
+    assert origins.count(Origin.HUMAN) >= 3
+    assert origins.count(Origin.EXTERNAL_AGENT) >= 3
+
+
+def test_score_evidence_edge_branches() -> None:
+    """_score_evidence handles empty state, checksum/source variants, and total==0 guard."""
+    # 1. Clean run: no evidence and no dependencies -> 1.0
+    clean_state = SemanticState.model_construct(evidence=[], external_dependencies=[])
+    assert _score_evidence(clean_state) == 1.0
+
+    # 2. Trusted evidence with source only
+    ev_trusted_source = Evidence(
+        source="log",
+        provenance=Provenance(origin=Origin.DETERMINISTIC),
+    )
+    assert (
+        _score_evidence(
+            SemanticState.model_construct(evidence=[ev_trusted_source], external_dependencies=[])
+        )
+        == 1.0
+    )
+
+    # 3. Trusted evidence without checksum or source -> 0.7
+    ev_trusted_bare = Evidence(provenance=Provenance(origin=Origin.HUMAN))
+    assert (
+        round(
+            _score_evidence(
+                SemanticState.model_construct(evidence=[ev_trusted_bare], external_dependencies=[])
+            ),
+            2,
+        )
+        == 0.7
+    )
+
+    # 4. Untrusted evidence with checksum -> 0.4
+    ev_untrusted_checksum = Evidence(
+        checksum="sha256:abc",
+        provenance=Provenance(origin=Origin.EXTERNAL_AGENT),
+    )
+    assert (
+        round(
+            _score_evidence(
+                SemanticState.model_construct(
+                    evidence=[ev_untrusted_checksum], external_dependencies=[]
+                )
+            ),
+            2,
+        )
+        == 0.4
+    )
+
+    # 5. Untrusted evidence without checksum or source -> 0.2
+    ev_untrusted_bare = Evidence(provenance=Provenance(origin=Origin.EXTERNAL_AGENT))
+    assert (
+        round(
+            _score_evidence(
+                SemanticState.model_construct(
+                    evidence=[ev_untrusted_bare], external_dependencies=[]
+                )
+            ),
+            2,
+        )
+        == 0.2
+    )
+
+    # 6. Untrusted dependency with version -> 0.2
+    dep_untrusted_version = ExternalDependency(
+        resource="lib",
+        version="1.0.0",
+        provenance=Provenance(origin=Origin.EXTERNAL_AGENT),
+    )
+    assert (
+        round(
+            _score_evidence(
+                SemanticState.model_construct(
+                    evidence=[], external_dependencies=[dep_untrusted_version]
+                )
+            ),
+            2,
+        )
+        == 0.2
+    )
+
+    # 7. Untrusted dependency without version -> 0.1
+    dep_untrusted_bare = ExternalDependency(
+        resource="lib",
+        version=None,
+        provenance=Provenance(origin=Origin.EXTERNAL_AGENT),
+    )
+    assert (
+        round(
+            _score_evidence(
+                SemanticState.model_construct(
+                    evidence=[], external_dependencies=[dep_untrusted_bare]
+                )
+            ),
+            2,
+        )
+        == 0.1
+    )
+
+    # 8. Defensive total == 0 guard when collections are truthy but yield 0 items
+    class _TruthyEmpty(list):
+        def __bool__(self) -> bool:
+            return True
+
+    empty_guard_state = SemanticState.model_construct(
+        evidence=_TruthyEmpty(), external_dependencies=[]
+    )
+    assert _score_evidence(empty_guard_state) == 1.0
+
+
+def test_trust_report_dict_subclass() -> None:
+    """TrustReport subclasses dict for backwards compatibility."""
+    report = TrustReport(
+        {"trust_score": 0.85, "breakdown": {"role": 1.0, "goal": 1.0, "evidence": 0.55}}
+    )
+    assert isinstance(report, dict)
+    assert report["trust_score"] == 0.85

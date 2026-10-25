@@ -16,7 +16,7 @@ Deep install and dependency material. The [README Quick Start](../README.md#quic
 
 ## Install levels
 
-The core library has **one** runtime dependency (`pydantic>=2.7`). Everything else is an optional extra (see `pyproject.toml:30` and `pyproject.toml:32-72`).
+The core library has **one** runtime dependency (`pydantic>=2.7`). Everything else is an optional extra (see `pyproject.toml:30` and `pyproject.toml:32-84`).
 
 ```bash
 # Contributors (recommended): everything needed to run tests, lint, type-check
