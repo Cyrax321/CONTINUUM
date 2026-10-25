@@ -152,7 +152,9 @@ def test_builtin_probe_rejects_unexpected_keys(tmp_path: Path) -> None:
 def test_artifact_check_probe_requires_path_or_path_key(tmp_path: Path) -> None:
     """artifact_check probe requires either path or path_key."""
     p = tmp_path / "r.json"
-    p.write_text(json.dumps({"probes": {"act": {"type": "artifact_check", "expect_sha256": "abc"}}}))
+    p.write_text(
+        json.dumps({"probes": {"act": {"type": "artifact_check", "expect_sha256": "abc"}}})
+    )
     with pytest.raises(ReconcilerConfigError, match="needs 'path' or 'path_key'"):
         load_reconcilers(p)
 
@@ -175,7 +177,6 @@ def test_builtin_probes_valid_configurations_load_successfully(tmp_path: Path) -
     assert loaded["act_path"] == {"type": "artifact_check", "path": "/tmp/out.txt"}
     assert loaded["act_key"] == {"type": "artifact_check", "path_key": "output_file"}
     assert loaded["act_otel"] == {"type": "otel_span", "tool": "query", "identity": "arg1"}
-
 
 
 # --- verdict parsing -------------------------------------------------------------- #
@@ -240,9 +241,8 @@ def test_authority_verdict_last_line_wins() -> None:
     """Only the last non-empty line of output determines the authority verdict."""
     output = "checking authority...\npreliminary info\nvalid=true"
     assert _parse_authority_verdict(output) is True
-    output_json = "checking authority...\npreliminary info\n{\"valid\": false}"
+    output_json = 'checking authority...\npreliminary info\n{"valid": false}'
     assert _parse_authority_verdict(output_json) is False
-
 
 
 @pytest.mark.parametrize("line", ["occurred:false", "occurred:true", "OCCURRED:FALSE"])

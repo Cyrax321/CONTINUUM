@@ -14,6 +14,7 @@ an oversight.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -21,19 +22,14 @@ WORKFLOW = ROOT / ".github" / "workflows" / "markdownlint.yml"
 
 
 # Top-level markdown files that are deliberately not linted, with the reason.
+#
+# Only tracked files belong here. A working tree also carries untracked local
+# notes (``*.local.md``), and those must not be named: they exist on one
+# contributor's disk and nowhere else, so a clean clone reads the entry as a
+# stale name and fails (#1738).
 EXCLUDED: dict[str, str] = {
     "AGENTS.md": "agent instructions, not documentation",
-    "ARCHITECTURE_RECORD.local.md": "local working note, gitignored content",
-    "CLAUDE.local.md": "local working note",
     "CONTINUUM_PROJECT_DOCUMENT.md": "generated project document, not hand-edited",
-    "NEXT_PHASE_STRATEGY.local.md": "local working note",
-    "PR_REVIEW_QUEUE.local.md": "local working note",
-    "RECORD.local.md": "local working note",
-    "RESEARCH_2026-09-15-gapfill.local.md": "local working note",
-    "RESEARCH_2026-09-15.local.md": "local working note",
-    "RESEARCH_2026-09-18.local.md": "local working note",
-    "SELFTEST_REPORT.local.md": "local working note",
-    "SESSION-2026-10-10.local.md": "local working note",
     "STATUS.md": "long-form status document, linted separately if at all",
     "WORKLOG.md": "working log, not documentation",
     "project.md": "project brief, not user-facing docs",
@@ -49,7 +45,25 @@ def lint_globs() -> set[str]:
 
 
 def top_level_markdown() -> set[str]:
-    return {path.name for path in ROOT.glob("*.md")}
+    """Top-level markdown files the repository tracks.
+
+    ``ROOT.glob`` would also return untracked local notes, which exist on the
+    contributor's own disk only. They are neither the repository's decision to
+    lint nor its decision to exclude, so the guard reads the tracked set from
+    git instead and stays identical on every clone (#1738). It falls back to
+    the glob when git is unavailable, e.g. an exported source archive.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "-z", "--", "*.md"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return {path.name for path in ROOT.glob("*.md")}
+    return {entry for entry in proc.stdout.split("\0") if entry and "/" not in entry}
 
 
 def test_every_top_level_markdown_is_linted_or_explicitly_excluded() -> None:
@@ -74,11 +88,19 @@ def test_linted_files_actually_exist() -> None:
     present = top_level_markdown()
     missing = lint_globs() - present
 
-    assert not missing, "the markdownlint glob names files that do not exist: " + ", ".join(sorted(missing))
+    assert not missing, "the markdownlint glob names files that do not exist: " + ", ".join(
+        sorted(missing)
+    )
 
 
 def test_translated_readmes_are_linted() -> None:
     linted = lint_globs()
 
-    for name in ("README.es.md", "README.ja.md", "README.ko.md", "README.pt-BR.md", "README.zh-CN.md"):
+    for name in (
+        "README.es.md",
+        "README.ja.md",
+        "README.ko.md",
+        "README.pt-BR.md",
+        "README.zh-CN.md",
+    ):
         assert name in linted, f"{name} is not in the markdownlint glob"
