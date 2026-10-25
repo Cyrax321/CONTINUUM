@@ -62,7 +62,7 @@ EXPECTED: dict[tuple[str, int], tuple[str, str]] = {
     ("src/continuum/provenance_map.py", 60): ("CanonicalProvenance", "decl"),
     ("src/continuum/state/validator.py", 259): ("StateValidator", "decl"),
     ("src/continuum/adapters/actions.py", 31): ("AdapterAction", "decl"),
-    ("src/continuum/adapters/actions.py", 60): ("run_action", "decl"),
+    ("src/continuum/adapters/actions.py", 86): ("run_action", "decl"),
     ("src/continuum/models.py", 117): ("StateStatus", "decl"),
     ("src/continuum/models.py", 220): ("Origin", "decl"),
     ("src/continuum/models.py", 255): ("EXTERNAL_MONITOR", "assign"),

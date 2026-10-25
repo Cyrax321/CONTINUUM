@@ -59,5 +59,8 @@ template: |
 
   $CHANGES
 
+  ## New Contributors
+  $CONTRIBUTORS
+
 exclude:
   labels: ["duplicate", "invalid", "wontfix"]
