@@ -331,7 +331,9 @@ def test_check_fixture_malformed_payload_expecting_verified() -> None:
     )
     result = check_fixture(fixture)
     assert not result.passed
-    assert "payload does not load under the current model but is expected to verify" in result.detail
+    assert (
+        "payload does not load under the current model but is expected to verify" in result.detail
+    )
 
 
 def test_check_fixture_supported_version_missing_digest_input() -> None:
@@ -431,5 +433,3 @@ def test_load_corpus_default_directory() -> None:
     """load_corpus with no directory defaults to the checked-in corpus."""
     fixtures = load_corpus()
     assert len(fixtures) > 0
-
-

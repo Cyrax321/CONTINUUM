@@ -67,14 +67,14 @@ def _anchor_for(
         ) from exc
     except CheckpointNotFound:
         pass
+    for cp in storage.list_checkpoints(run_id):
+        if cp.checkpoint_id == text:
+            return cp.state.source_sequence
     try:
         version = int(text)
         anchor = _numeric_anchor(storage, run_id, version)
         if anchor is not None:
             return anchor
-        for cp in storage.list_checkpoints(run_id):
-            if cp.checkpoint_id == text:
-                return cp.state.source_sequence
     except ValueError:
         pass
     raise ValueError(f"no checkpoint {text!r} for run {run_id!r}")

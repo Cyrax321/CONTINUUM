@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from continuum.recovery.ledger import RecoveryLedger
 
 from continuum.actions.ledger import ActionLedger, ActionOutcome
+from continuum.adapters.actions import format_action_error
 from continuum.adapters.base import AgentAdapter
 from continuum.checkpoint.manager import CheckpointManager
 from continuum.events import Event, EventType
@@ -284,7 +285,7 @@ class GenericAgentAdapter(AgentAdapter):
             # certain=False: the effect may or may not have occurred. This keeps
             # the action in ledger.pending() so recovery blocks until a probe
             # settles it, rather than silently permitting a duplicate retry.
-            ledger.fail(outcome.key, f"{type(exc).__name__}: {exc}", certain=False)
+            ledger.fail(outcome.key, format_action_error(exc), certain=False)
             raise
 
         # A non-dict has to be wrapped to be stored. So does a dict that happens

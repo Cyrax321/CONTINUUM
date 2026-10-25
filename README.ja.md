@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI エントリーポイント
 continuum-mcp --help             # MCP サーバーエントリーポイント（[mcp] または [dev] が必要）
-pytest -q                        # 最小環境で約 3680 件収集、約 3,636 件通過、約 41 件スキップ（正確な数は異なる）
+pytest -q                        # 最小環境で約 3950 件収集、約 3,636 件通過、約 41 件スキップ（正確な数は異なる）
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI が強制する三つのゲート
 ```
@@ -120,7 +120,9 @@ from continuum import EventType, Run, SQLiteStorage, project
 
 store = SQLiteStorage("agent.db")
 store.create_run(Run(run_id="run_4821", goal="10,000 ドキュメントを分析"))
-store.append_event("run_4821", EventType.RUN_STARTED, {"goal": "10,000 ドキュメントを分析", "total": 10_000})
+store.append_event(
+    "run_4821", EventType.RUN_STARTED, {"goal": "10,000 ドキュメントを分析", "total": 10_000}
+)
 
 for i, doc in enumerate(documents):
     analyze(doc)
@@ -128,7 +130,7 @@ for i, doc in enumerate(documents):
 
 # クラッシュ後、新しいプロセスは停止した場所から正確に再開する：
 state = project("run_4821", store.read_events("run_4821"))
-print(state.progress.completed)            # すでに完了、繰り返さない
+print(state.progress.completed)  # すでに完了、繰り返さない
 print(store.verify_events("run_4821").ok)  # True、クラッシュ後もチェーンは無傷
 ```
 
@@ -416,7 +418,7 @@ CONTINUUM は一つのライブラリ（`src/continuum`、132 モジュール）
 | `mcp/` | 12 の stdio ツールに加え認可 `authz.py` トークン認証、allowlist、確認トークン |
 | `serve/` | Sidecar stdio JSON ワイヤ + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Web ダッシュボード `app.py` `hitl.py` と HITL ボタン確認、照合、完了、接頭辞信頼助言、ピン留め |
-| `cli/` | 54 の argparse コマンド、終了コードが評決、`runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 55 の argparse コマンド、終了コードが評決、`runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | OpenTelemetry スパンプロセッサーブリッジ |
 | `benchmark/` | CONTINUUM-Bench ハーネス、5 つのクラッシュシナリオ + 引数ドリフト + 14 シナリオのリカバリスイート |
 
@@ -496,6 +498,30 @@ continuum tree <parent_run_id>                   # マルチエージェント�
 
 CONTINUUM は耐久実行、冪等な副作用追跡、LLM エージェントのためのクラッシュリカバリの交差点に位置する。最も近い隣接領域は機械検証された再開契約（Khan 2026）、制約で保護された入場を伴うエージェントトランザクション処理（Mnemosyne 2026）、チェックポイントロールバック攻撃分析（ACRFence 2026）、設計レベルのプロンプトインジェクション防御（CaMeL 2025）である。完全な注釈付きリスト、基礎、引用監査は [references/related-work.md](references/related-work.md) にある。
 
+## ドキュメントマップ
+
+`docs/` 配下のすべてのページと、それぞれが存在する理由：
+
+- **リファレンスと API**: [docs/api/README.md](docs/api/README.md) （ライブラリ、CLI、MCP、サイドカー）、
+  [docs/GLOSSARY.md](docs/GLOSSARY.md) （すべての復旧用語、それぞれが実装を指す）、
+  [references/api.md](references/api.md)、[references/cli.md](references/cli.md)。
+- **タスクガイド**: [docs/guides/README.md](docs/guides/README.md)、
+  [docs/recipes/README.md](docs/recipes/README.md)、[docs/concepts/README.md](docs/concepts/README.md)。
+- **セキュリティ**: [docs/threat_model.md](docs/threat_model.md) （何が保護され、何が検出され、何が明示的に保護されないか）、
+  [docs/signing_key_rotation.md](docs/signing_key_rotation.md) （鍵付き封印をローテーションしながら、古いハッシュのみの契約の検証を壊さない方法）。
+- **契約とスケール**: [docs/contract_compatibility.md](docs/contract_compatibility.md)
+  （別のビルドで検証される封印済みの約束）、
+  [docs/multi_agent_isolation.md](docs/multi_agent_isolation.md) （共有 `run_id` の分離）、
+  [docs/audit-provenance-compaction-294.md](docs/audit-provenance-compaction-294.md)
+  （圧縮を生き延びる来歴）。
+- **作成と運用**: [docs/adapters_guide.md](docs/adapters_guide.md) （アダプターの書き方）、
+  [docs/cloud_api.md](docs/cloud_api.md) （任意のデプロイ層）、
+  [docs/TESTING_MCP.md](docs/TESTING_MCP.md) （MCP 表面の敵対的監査）、
+  [docs/CONTRIBUTING_ONBOARDING.md](docs/CONTRIBUTING_ONBOARDING.md) （オンボーディング）。
+- **計画**: [docs/ARCHITECTURE_EVOLUTION.md](docs/ARCHITECTURE_EVOLUTION.md) （北極星）、
+  [docs/CONTINUUM_MASTER_PLAN.md](docs/CONTINUUM_MASTER_PLAN.md) （検証済みの現状と次の作業）、
+  [docs/research/README.md](docs/research/README.md) （それらの計画の原点となったノート）。
+
 ## ステータスと制限
 
 - **テスト済み**：このツリーの 2026-08-24 監査での完全な実行で 3,636 合格 + 23 スキップ。CI は Python 3.11、3.12、3.13 でスイートを強制し、カウントはプラットフォームや Postgres などのオプションサービスにより異なる（[STATUS.md](STATUS.md) を参照）。MCP 面もライブプロトコル上で敵対的に監査済み。[test.md](test.md) を参照。
@@ -565,3 +591,5 @@ Apache 2.0、[LICENSE](LICENSE) を参照。
 
 - [Issues](https://github.com/Cyrax321/CONTINUUM/issues) バグ報告や新機能の要望
 - [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) 設計や仕様の提案
+- [リリースノート](docs/release-notes.md)
+- [リリースチェックリスト](docs/release-checklist.md)
