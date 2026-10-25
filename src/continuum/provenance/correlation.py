@@ -103,6 +103,14 @@ def _extract_correlation_id(event: Event) -> str | None:
 def _observation_details(event: Event) -> dict[str, Any]:
     """Extract observation details from a tool event."""
     payload = dict(event.payload) if isinstance(event.payload, dict) else {}
+    if event.type is EventType.TOOL_CALLED:
+        # A call event only says the tool started; it establishes neither
+        # success nor failure (review of #1680).
+        fallback_status = "called"
+    elif event.type is EventType.TOOL_COMPLETED:
+        fallback_status = "ok"
+    else:
+        fallback_status = "failed"
     return {
         "sequence": event.sequence,
         "event_id": event.event_id,
@@ -111,9 +119,34 @@ def _observation_details(event: Event) -> dict[str, Any]:
         "path": payload.get("path"),
         "sha256": payload.get("sha256"),
         "bytes": payload.get("bytes"),
-        "status": payload.get("status")
-        or ("ok" if event.type is EventType.TOOL_COMPLETED else "failed"),
+        "status": payload.get("status") or fallback_status,
     }
+
+
+def _action_event_fields(payload: dict[str, Any]) -> tuple[str | None, str | None, str]:
+    """Read action_id, action_type and status from an action event payload.
+
+    Ledger-written records carry all three at the top level; events assembled
+    by hand may only nest them under ``action`` (which is also where
+    ``_extract_correlation_id`` already looks), so the nested action acts as a
+    fallback (review of #1680).
+    """
+    nested = payload.get("action")
+    nested = nested if isinstance(nested, dict) else {}
+    action_id = payload.get("action_id")
+    if action_id is None:
+        action_id = nested.get("action_id")
+    action_type = payload.get("action_type")
+    if action_type is None:
+        action_type = nested.get("action_type")
+    status = payload.get("status")
+    if status is None:
+        status = nested.get("status")
+    return (
+        str(action_id) if action_id is not None else None,
+        str(action_type) if action_type is not None else None,
+        str(status) if status is not None else "",
+    )
 
 
 def correlate_evidence(
@@ -127,18 +160,30 @@ def correlate_evidence(
     Scans the given event stream in sequence order, matches actions and tool
     observations sharing the same correlation identifier, detects unmatched or
     ambiguous observations, and returns ordered evidence chains.
+
+    A retry of the same action key may carry a new correlation identifier (one
+    ID names a single attempt), in which case the chain spans every attempt's
+    identifier and reports the latest one. ``ambiguous`` is reserved for one
+    identifier resolving to several distinct action keys. Action records
+    without a key and tool observations without an identifier are still
+    reported, as ``unmatched_action``/``matched`` and ``missing_correlation``
+    chains respectively.
     """
     sorted_events = sorted(events, key=lambda e: e.sequence)
 
     # 1. Group action attempts by action_key and track correlation_ids
     # Map: action_key -> {
     #   "action_id": ..., "action_type": ..., "status": ..., "correlation_id": ...,
-    #   "events": [...], "first_seq": ...
+    #   "cids": [...], "events": [...], "first_seq": ...
     # }
+    # A key may carry several correlation IDs across retries: a correlation ID
+    # names "a specific attempt", so a retry after FAILED or COMPENSATED may
+    # take a new one (review of #1680). Every CID is registered for matching;
+    # ``correlation_id`` holds the most recent attempt's ID for display.
     actions_by_key: dict[str, dict[str, Any]] = {}
     actions_without_key: list[dict[str, Any]] = []
 
-    # Map: correlation_id -> list of action_keys
+    # Map: correlation_id -> list of distinct action_keys
     actions_by_cid: dict[str, list[str]] = {}
 
     # Tool events grouped by correlation_id: cid -> list of Events
@@ -151,9 +196,7 @@ def correlate_evidence(
         if event.type in _ACTION_EVENT_TYPES:
             payload = dict(event.payload) if isinstance(event.payload, dict) else {}
             key = str(payload.get("key") or "")
-            action_id = str(payload.get("action_id") or "")
-            action_type = str(payload.get("action_type") or "")
-            status = str(payload.get("status") or "")
+            action_id, action_type, status = _action_event_fields(payload)
 
             ev_summary = {
                 "sequence": event.sequence,
@@ -167,8 +210,8 @@ def correlate_evidence(
                 actions_without_key.append(
                     {
                         "action_key": None,
-                        "action_id": action_id or None,
-                        "action_type": action_type or None,
+                        "action_id": action_id,
+                        "action_type": action_type,
                         "correlation_id": cid,
                         "action_status": status or None,
                         "events": [ev_summary],
@@ -180,9 +223,10 @@ def correlate_evidence(
             if key not in actions_by_key:
                 actions_by_key[key] = {
                     "action_key": key,
-                    "action_id": action_id or None,
-                    "action_type": action_type or None,
+                    "action_id": action_id,
+                    "action_type": action_type,
                     "correlation_id": cid,
+                    "cids": [cid] if cid else [],
                     "action_status": status,
                     "events": [ev_summary],
                     "first_seq": event.sequence,
@@ -193,12 +237,16 @@ def correlate_evidence(
                 entry = actions_by_key[key]
                 entry["events"].append(ev_summary)
                 entry["action_status"] = status
-                if cid and not entry["correlation_id"]:
-                    entry["correlation_id"] = cid
-                    actions_by_cid.setdefault(cid, []).append(key)
-                elif cid and entry["correlation_id"] and entry["correlation_id"] != cid:
-                    # Conflicting correlation IDs within the same action key
-                    entry["conflicting_cids"] = True
+                if cid:
+                    if cid not in entry["cids"]:
+                        entry["cids"].append(cid)
+                        entry["correlation_id"] = cid  # latest attempt wins
+                    if key not in actions_by_cid.setdefault(cid, []):
+                        actions_by_cid[cid].append(key)
+                if not entry["action_id"]:
+                    entry["action_id"] = action_id
+                if not entry["action_type"]:
+                    entry["action_type"] = action_type
 
         elif event.type in _TOOL_EVENT_TYPES:
             if cid:
@@ -206,33 +254,8 @@ def correlate_evidence(
             else:
                 tools_without_cid.append(event)
 
-    chains: list[EvidenceChain] = []
-    seen_cids: set[str] = set()
-
-    # Build chains for actions with keys
-    for key, act_info in actions_by_key.items():
-        cid = act_info.get("correlation_id")
-        act_events = act_info.get("events", [])
-        tool_evs: list[Event] = []
-        observations: list[dict[str, Any]] = []
-
-        if cid:
-            seen_cids.add(cid)
-            tool_evs = tools_by_cid.get(cid, [])
-            observations = [_observation_details(te) for te in tool_evs]
-
-            # Check ambiguity: multiple distinct action keys sharing the same correlation_id
-            keys_for_cid = actions_by_cid.get(cid, [])
-            if len(keys_for_cid) > 1 or act_info.get("conflicting_cids"):
-                chain_status = "ambiguous"
-            elif tool_evs:
-                chain_status = "matched"
-            else:
-                chain_status = "unmatched_action"
-        else:
-            chain_status = "missing_correlation"
-
-        tool_ev_summaries = [
+    def _tool_summaries(tool_evs: list[Event]) -> list[dict[str, Any]]:
+        return [
             {
                 "sequence": te.sequence,
                 "event_id": te.event_id,
@@ -244,48 +267,122 @@ def correlate_evidence(
             for te in tool_evs
         ]
 
+    def _append_chain(
+        *,
+        action_key: str | None,
+        action_id: str | None,
+        action_type: str | None,
+        correlation_id: str | None,
+        action_status: str | None,
+        status: str,
+        action_events: list[dict[str, Any]],
+        tool_evs: list[Event],
+    ) -> None:
         chains.append(
             EvidenceChain(
-                action_key=key,
-                action_id=act_info.get("action_id"),
-                action_type=act_info.get("action_type"),
-                correlation_id=cid,
-                action_status=act_info.get("action_status"),
-                status=chain_status,
-                action_events=act_events,
-                tool_events=tool_ev_summaries,
-                observations=observations,
+                action_key=action_key,
+                action_id=action_id,
+                action_type=action_type,
+                correlation_id=correlation_id,
+                action_status=action_status,
+                status=status,
+                action_events=action_events,
+                tool_events=_tool_summaries(tool_evs),
+                observations=[_observation_details(te) for te in tool_evs],
             )
+        )
+
+    chains: list[EvidenceChain] = []
+    seen_cids: set[str] = set()
+
+    def _collect_tool_events(cids: list[str]) -> list[Event]:
+        """Claim every CID of an attempt as seen and gather its tool events."""
+        tool_evs: list[Event] = []
+        for cid in cids:
+            seen_cids.add(cid)
+            tool_evs.extend(tools_by_cid.get(cid, []))
+        tool_evs.sort(key=lambda e: e.sequence)
+        return tool_evs
+
+    # Build chains for actions with keys
+    for key, act_info in actions_by_key.items():
+        cids = act_info.get("cids") or []
+        act_events = act_info.get("events", [])
+
+        tool_evs = _collect_tool_events(cids) if cids else []
+
+        if cids:
+            # Ambiguity is one correlation ID resolving to several distinct
+            # action keys, not the same key changing CID between attempts.
+            if any(len(actions_by_cid.get(cid, [])) > 1 for cid in cids):
+                chain_status = "ambiguous"
+            elif tool_evs:
+                chain_status = "matched"
+            else:
+                chain_status = "unmatched_action"
+        else:
+            chain_status = "missing_correlation"
+
+        _append_chain(
+            action_key=key,
+            action_id=act_info.get("action_id"),
+            action_type=act_info.get("action_type"),
+            correlation_id=act_info.get("correlation_id"),
+            action_status=act_info.get("action_status"),
+            status=chain_status,
+            action_events=act_events,
+            tool_evs=tool_evs,
+        )
+
+    # Keyless action records still carry their attempt's events and may still
+    # correlate by ID; they were previously dropped entirely (review of #1680).
+    for act_info in actions_without_key:
+        cid = act_info.get("correlation_id")
+        tool_evs = _collect_tool_events([cid]) if cid else []
+
+        if cid:
+            chain_status = "matched" if tool_evs else "unmatched_action"
+        else:
+            chain_status = "missing_correlation"
+
+        _append_chain(
+            action_key=None,
+            action_id=act_info.get("action_id"),
+            action_type=act_info.get("action_type"),
+            correlation_id=cid,
+            action_status=act_info.get("action_status"),
+            status=chain_status,
+            action_events=act_info.get("events", []),
+            tool_evs=tool_evs,
         )
 
     # Process tool observations whose correlation_id did not match any action
     for cid, t_events in tools_by_cid.items():
         if cid in seen_cids:
             continue
-        tool_ev_summaries = [
-            {
-                "sequence": te.sequence,
-                "event_id": te.event_id,
-                "type": te.type.value if hasattr(te.type, "value") else str(te.type),
-                "tool": (dict(te.payload).get("tool") or dict(te.payload).get("tool_name"))
-                if isinstance(te.payload, dict)
-                else "unknown",
-            }
-            for te in t_events
-        ]
-        obs_list = [_observation_details(te) for te in t_events]
-        chains.append(
-            EvidenceChain(
-                action_key=None,
-                action_id=None,
-                action_type=None,
-                correlation_id=cid,
-                action_status=None,
-                status="unmatched_observation",
-                action_events=[],
-                tool_events=tool_ev_summaries,
-                observations=obs_list,
-            )
+        _append_chain(
+            action_key=None,
+            action_id=None,
+            action_type=None,
+            correlation_id=cid,
+            action_status=None,
+            status="unmatched_observation",
+            action_events=[],
+            tool_evs=t_events,
+        )
+
+    # Tool observations without any correlation ID are reported as their own
+    # missing_correlation chains instead of vanishing (review of #1680).
+    if tools_without_cid:
+        _append_chain(
+            action_key=None,
+            action_id=None,
+            action_type=None,
+            correlation_id=None,
+            action_status=None,
+            status="missing_correlation",
+            action_events=[],
+            tool_evs=tools_without_cid,
         )
 
     # Filter by action_key or correlation_id if requested
