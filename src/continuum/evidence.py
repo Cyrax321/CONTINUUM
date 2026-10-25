@@ -154,7 +154,7 @@ class OtelSpanReconciler(Reconciler):
             if not self._matches(action, event.payload):
                 continue
             if event.type is EventType.TOOL_FAILED:
-                return None
+                continue
             citation = self._citation(event)
             return Resolution(
                 occurred=True,

@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI エントリーポイント
 continuum-mcp --help             # MCP サーバーエントリーポイント（[mcp] または [dev] が必要）
-pytest -q                        # 最小環境で約 3680 件収集、約 3,636 件通過、約 41 件スキップ（正確な数は異なる）
+pytest -q                        # 最小環境で約 3950 件収集、約 3,636 件通過、約 41 件スキップ（正確な数は異なる）
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI が強制する三つのゲート
 ```
@@ -120,7 +120,9 @@ from continuum import EventType, Run, SQLiteStorage, project
 
 store = SQLiteStorage("agent.db")
 store.create_run(Run(run_id="run_4821", goal="10,000 ドキュメントを分析"))
-store.append_event("run_4821", EventType.RUN_STARTED, {"goal": "10,000 ドキュメントを分析", "total": 10_000})
+store.append_event(
+    "run_4821", EventType.RUN_STARTED, {"goal": "10,000 ドキュメントを分析", "total": 10_000}
+)
 
 for i, doc in enumerate(documents):
     analyze(doc)
@@ -128,7 +130,7 @@ for i, doc in enumerate(documents):
 
 # クラッシュ後、新しいプロセスは停止した場所から正確に再開する：
 state = project("run_4821", store.read_events("run_4821"))
-print(state.progress.completed)            # すでに完了、繰り返さない
+print(state.progress.completed)  # すでに完了、繰り返さない
 print(store.verify_events("run_4821").ok)  # True、クラッシュ後もチェーンは無傷
 ```
 
@@ -416,7 +418,7 @@ CONTINUUM は一つのライブラリ（`src/continuum`、132 モジュール）
 | `mcp/` | 12 の stdio ツールに加え認可 `authz.py` トークン認証、allowlist、確認トークン |
 | `serve/` | Sidecar stdio JSON ワイヤ + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Web ダッシュボード `app.py` `hitl.py` と HITL ボタン確認、照合、完了、接頭辞信頼助言、ピン留め |
-| `cli/` | 54 の argparse コマンド、終了コードが評決、`runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 55 の argparse コマンド、終了コードが評決、`runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | OpenTelemetry スパンプロセッサーブリッジ |
 | `benchmark/` | CONTINUUM-Bench ハーネス、5 つのクラッシュシナリオ + 引数ドリフト + 14 シナリオのリカバリスイート |
 

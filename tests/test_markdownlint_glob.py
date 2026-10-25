@@ -14,6 +14,7 @@ an oversight.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -21,6 +22,11 @@ WORKFLOW = ROOT / ".github" / "workflows" / "markdownlint.yml"
 
 
 # Top-level markdown files that are deliberately not linted, with the reason.
+#
+# Only tracked files belong here. A working tree also carries untracked local
+# notes (``*.local.md``), and those must not be named: they exist on one
+# contributor's disk and nowhere else, so a clean clone reads the entry as a
+# stale name and fails (#1738).
 EXCLUDED: dict[str, str] = {
     "AGENTS.md": "agent instructions, not documentation",
     "CONTINUUM_PROJECT_DOCUMENT.md": "generated project document, not hand-edited",
@@ -39,7 +45,25 @@ def lint_globs() -> set[str]:
 
 
 def top_level_markdown() -> set[str]:
-    return {path.name for path in ROOT.glob("*.md") if not path.name.endswith(".local.md")}
+    """Top-level markdown files the repository tracks.
+
+    ``ROOT.glob`` would also return untracked local notes, which exist on the
+    contributor's own disk only. They are neither the repository's decision to
+    lint nor its decision to exclude, so the guard reads the tracked set from
+    git instead and stays identical on every clone (#1738). It falls back to
+    the glob when git is unavailable, e.g. an exported source archive.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "-z", "--", "*.md"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return {path.name for path in ROOT.glob("*.md")}
+    return {entry for entry in proc.stdout.split("\0") if entry and "/" not in entry}
 
 
 def test_every_top_level_markdown_is_linted_or_explicitly_excluded() -> None:

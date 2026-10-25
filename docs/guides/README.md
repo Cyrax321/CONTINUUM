@@ -49,3 +49,9 @@ these in [docs/concepts/README.md](../concepts/README.md).
   PreToolUse hooks for crash recovery, instant resume, and constraint-aware gating.
 - [Embed CONTINUUM in Codex](embed-codex.md) - the same resume contract under Codex's
   feature-flagged hook engine.
+- [Sidecar TLS proxy](sidecar_tls_proxy.md) - terminate TLS in front of the
+  HTTP sidecar with Nginx or Caddy, forward client tokens, and enforce credential separation.
+- [Wire specification and conformance](wire_specification.md) - OpenAPI 3.1
+  specification for the sidecar and the automated wire conformance suite.
+
+

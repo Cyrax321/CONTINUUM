@@ -724,3 +724,33 @@ def test_pg_verify_accounts_for_the_archived_prefix(storage: PostgresStorage) ->
     assert any(v.kind == "TAMPERED_CONTENT" for v in tampered.violations)
     assert tampered.checked == len(archived) + len(live)
     assert tampered.trusted_through[run_id] == archived[-1].sequence
+
+
+def test_postgres_atomic_claim_concurrency(storage: PostgresStorage) -> None:
+    """Concurrent claims on PostgreSQL produce at most one winner via advisory lock."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from continuum.actions.ledger import LedgerError
+    from continuum.models import UnknownSideEffect
+
+    make_run(storage, "pg_atomic", "atomic claim verification")
+
+    def claim(i: int) -> str:
+        ledger = ActionLedger(storage, "pg_atomic")
+        try:
+            outcome = ledger.claim("charge.pg", {"cents": 9900}, key="k_pg")
+            if outcome.fresh:
+                try:
+                    ledger.complete(outcome.key, result={"tx": f"pg-{i}"})
+                    return "proceed"
+                except LedgerError:
+                    return "ambiguous"
+            return "dedup"
+        except (UnknownSideEffect, LedgerError):
+            return "ambiguous"
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        outcomes = list(pool.map(claim, range(16)))
+
+    assert outcomes.count("proceed") <= 1
+    assert set(outcomes) <= {"proceed", "dedup", "ambiguous"}
