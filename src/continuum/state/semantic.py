@@ -478,6 +478,7 @@ class _Accumulator:
             approval_id=_payload_str(event, "approval_id"),
             subject=_payload_str(event, "subject"),
             status=ApprovalStatus.PENDING,
+            parked=bool(event.payload.get("parked", False)),
         )
         if not _replace(self.approvals, "approval_id", approval.approval_id, approval):
             self.approvals.append(approval)

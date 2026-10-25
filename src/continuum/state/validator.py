@@ -1047,8 +1047,12 @@ class StateValidator:
                     StateStatus.EXPIRED,
                     f"expired at {expires_at.isoformat()}",
                 )
-            elif approval.status is ApprovalStatus.PENDING:
+            elif approval.status is ApprovalStatus.PENDING and not getattr(
+                approval, "parked", False
+            ):
                 status, detail = StateStatus.REQUIRES_REVIEW, "approval never granted"
+            elif approval.status is ApprovalStatus.PENDING:
+                status, detail = StateStatus.VALID, "parked for deferred review"
             else:
                 status, detail = StateStatus.VALID, "granted"
 

@@ -444,7 +444,7 @@ Schema v6. SQLite is primary, Postgres is CI verified. One log, many projections
 
 ### Module map: one library, many surfaces
 
-CONTINUUM is one library (`src/continuum`, 148 modules) plus a large test suite (223 test files, ~3950 tests). All modules append to and replay one hash chained event log:
+CONTINUUM is one library (`src/continuum`, 151 modules) plus a large test suite (227 test files, ~3950 tests). All modules append to and replay one hash chained event log:
 
 | Module | Role |
 |:--|:--|
@@ -466,7 +466,7 @@ CONTINUUM is one library (`src/continuum`, 148 modules) plus a large test suite 
 | `mcp/` | 13 stdio tools plus authz `authz.py` token auth, allowlist, confirmation token |
 | `serve/` | Sidecar stdio JSON wire + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Web dashboard `app.py` `hitl.py` with HITL buttons confirm/reconcile/complete, prefix trust advisory, pins |
-| `cli/` | 55 argparse commands, exit codes as verdict: `runs, start, inspect, resume, verify, health, tree, benchmark, attest, lineage-issue, lineage-verify, dashboard` |
+| `cli/` | 56 argparse commands, exit codes as verdict: `runs, start, inspect, resume, verify, health, tree, benchmark, attest, lineage-issue, lineage-verify, review, dashboard` |
 | `otel.py` | OpenTelemetry span processor bridge |
 | `benchmark/` | CONTINUUM-Bench harness: 5 crash scenarios + argument drift + 14 scenario recovery suite + 7 fault risk injection |
 

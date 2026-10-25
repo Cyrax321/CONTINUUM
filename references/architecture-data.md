@@ -295,7 +295,7 @@ gap.
 
 ---
 
-## 15. CLI commands (55) `src/continuum/cli/main.py`
+## 15. CLI commands (56) `src/continuum/cli/main.py`
 
 Every subcommand is registered in `build_parser()` (`cli/main.py:4028`), which
 is the single registry, a verb that is not there is not a command. The full
@@ -307,7 +307,7 @@ set, alphabetically:
 `gateway`, `health`, `history`, `hooks`, `impact`, `init`, `inspect`,
 `lineage-issue`, `lineage-verify`, `mcp`, `merge`, `notify-test`, `observe`,
 `policy-review`, `precompact`, `provenance`, `reconcile`, `record-plan`,
-`replay`, `report`, `restore`, `resume`, `rewind`, `runs`, `serve`,
+`replay`, `report`, `review`, `restore`, `resume`, `rewind`, `runs`, `serve`,
 `show-contract`, `start`, `status`, `tree`, `tui`, `validate`,
 `verify`, `watch`.
 
