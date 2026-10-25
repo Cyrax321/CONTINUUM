@@ -183,7 +183,7 @@ def test_load_risk_policy_token_runaway_threshold(tmp_path: Path) -> None:
     policy = load_risk_policy(p)
     assert policy.token_runaway_threshold == 0.65
 
-    # Invalid threshold type or range
+    # Invalid threshold type or range (raising above baseline 0.8 weakens abort escalation)
     p.write_text(
         json.dumps({"token_runaway_threshold": "not_a_number"}),
         encoding="utf-8",
@@ -192,11 +192,49 @@ def test_load_risk_policy_token_runaway_threshold(tmp_path: Path) -> None:
         load_risk_policy(p)
 
     p.write_text(
+        json.dumps({"token_runaway_threshold": 1.0}),
+        encoding="utf-8",
+    )
+    with pytest.raises(RiskPolicyError, match="raising it weakens abort escalation"):
+        load_risk_policy(p)
+
+    p.write_text(
         json.dumps({"token_runaway_threshold": 1.5}),
         encoding="utf-8",
     )
     with pytest.raises(RiskPolicyError, match="must be within"):
         load_risk_policy(p)
+
+    p.write_text(
+        json.dumps({"token_runaway_threshold": -0.1}),
+        encoding="utf-8",
+    )
+    with pytest.raises(RiskPolicyError, match="must be within"):
+        load_risk_policy(p)
+
+
+def test_risk_policy_constructor_rejects_threshold_above_baseline() -> None:
+    """Constructor rejects thresholds above baseline 0.8 or outside [0.0, 0.8]."""
+    assert RiskPolicy(token_runaway_threshold=0.65).token_runaway_threshold == 0.65
+    assert RiskPolicy(token_runaway_threshold=0.8).token_runaway_threshold == 0.8
+
+    with pytest.raises(RiskPolicyError, match="raising it weakens abort escalation"):
+        RiskPolicy(token_runaway_threshold=0.85)
+
+    with pytest.raises(RiskPolicyError, match="raising it weakens abort escalation"):
+        RiskPolicy(token_runaway_threshold=1.0)
+
+    with pytest.raises(RiskPolicyError, match="raising it weakens abort escalation"):
+        RiskPolicy(token_runaway_threshold=5.0)
+
+    with pytest.raises(RiskPolicyError, match="must be within"):
+        RiskPolicy(token_runaway_threshold=-0.1)
+
+    with pytest.raises(RiskPolicyError, match="raising it weakens abort escalation"):
+        RiskPolicy(**{"token_runaway_threshold": 0.9})  # type: ignore[arg-type]
+
+    with pytest.raises(RiskPolicyError, match="must be a float"):
+        RiskPolicy(token_runaway_threshold="not_a_float")
 
 
 def test_evaluate_risk_action_default_mappings() -> None:
@@ -308,7 +346,7 @@ def test_risk_policy_init_normalizes_trigger_keys() -> None:
     assert RiskPolicy({"Meltdown": "abort"})["meltdown"] == "abort"
     assert RiskPolicy({" Meltdown ": "abort"})["meltdown"] == "abort"
     assert RiskPolicy(meltdown="abort")["meltdown"] == "abort"
-    assert RiskPolicy(**{"LOOP": "wait"})["loop"] == "wait"
+    assert RiskPolicy(**{"LOOP": "wait"})["loop"] == "wait"  # type: ignore[arg-type]
 
 
 def test_risk_policy_init_rejects_invalid_mode_and_downgrades() -> None:
