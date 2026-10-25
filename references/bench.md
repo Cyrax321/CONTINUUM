@@ -101,9 +101,11 @@ in every scenario.
 <!-- BENCH:START -->
 ### Latest nightly results (real runs, no invented numbers)
 
-Generated: 2026-09-30T11:03:24.403017  Horizon scenarios: 5  Passed: 4  Failed: 1
+Generated: 2026-10-08T18:27:24.485759  Horizon scenarios: 5  Passed: 4  Failed: 1
 
-Accuracy: 0.8  Unnecessary escalation: 0.2  Repair precision: 0.8  Duplicate side effects: 0  Duplicate work: 0.0  Compression: 0.138
+Accuracy: 0.8  Unnecessary escalation: 0.2  Repair precision: 0.8  Duplicate side effects: 0  Duplicate work: 0.0  Compression: 0.26
+
+Side effects performed: 630  Duplicate re-attempts refused by the ledger: 79
 
 | Scenario | Cycles | Years | Correct | Actual | Accuracy |
 | --- | --- | --- | --- | --- | --- |

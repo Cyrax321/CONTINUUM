@@ -99,3 +99,41 @@ def test_raising_observer_cannot_break_the_action() -> None:
     )
     assert result.status == "completed"
     assert result.output == 42
+
+
+# --- failure messages carry the captured stderr (issue #1760) ---------------- #
+
+
+def test_a_subprocess_failure_carries_its_stderr_tail() -> None:
+    """A CalledProcessError's string form never includes stderr; the formatter does.
+
+    Without this the half of the captured output that says how to fix the
+    failure (which import failed, which file was missing, what the compiler
+    said) is captured by the transport and then discarded.
+    """
+    import subprocess
+
+    from continuum.adapters.actions import format_action_error
+
+    exc = subprocess.CalledProcessError(
+        42, ["python", "-m", "compile"], stderr="NameError: name 'x' is not defined\n"
+    )
+
+    message = format_action_error(exc)
+
+    assert "CalledProcessError" in message
+    assert "NameError: name 'x' is not defined" in message
+
+
+def test_a_chatty_stderr_is_bounded_so_it_cannot_flood_the_ledger() -> None:
+    """The ledger is durable and the result is rendered, so the tail is bounded."""
+    import subprocess
+
+    from continuum.adapters.actions import _STDERR_TAIL, format_action_error
+
+    exc = subprocess.CalledProcessError(1, ["python", "-c", "noisy"], stderr="line\n" * 5000)
+
+    message = format_action_error(exc)
+
+    assert len(message) < 4 * _STDERR_TAIL
+    assert message.endswith("line")

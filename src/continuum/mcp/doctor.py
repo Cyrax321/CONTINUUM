@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from continuum.mcp import configfmt
-from continuum.mcp.authz import POLICY_ENV_VAR, POLICY_ENV_VAR_ALIAS
+from continuum.mcp.authz import POLICY_ENV_VAR, POLICY_ENV_VAR_ALIAS, fold_client_name
 from continuum.mcp.install import HOST_PROFILES, SERVER_NAME, host_format, host_shape
 from continuum.mcp.observation import read_observed_clients
 
@@ -667,18 +667,21 @@ def _entry_at(path: Path, host: str, scope: str, project_root: Path) -> dict[str
 def _registration_sites(
     cwd: Path,
 ) -> Iterator[tuple[str, Path, str, dict[str, Any] | None]]:
-    """Every place a registration for this project could live, most specific first.
+    """Every place a registration for this project could live, in the host's own precedence.
 
-    Project scope leads because it is cwd-relative: its answer depends on the
-    checkout rather than on whose account the process runs as. Local and user
-    scope follow, in that order, because ``mcp install`` defaults to local and
-    local beats project in the host's own precedence. The scope travels with
-    each site because a host whose per-user file nests by project can only be
-    read back once the checkout it belongs to is named again.
+    Local leads: it is the per-user file for this project, and the CLI's own
+    ``--scope`` help states local wins over the committed ``.mcp.json``, so
+    when both scopes hold a registration the one the host actually runs is
+    local. Reading project first made the permission probe declare the client
+    name of a registration the host ignores while the effective one bakes a
+    different one (#1764). Project follows, then user, the broadest scope
+    last. The scope travels with each site because a host whose per-user file
+    nests by project can only be read back once the checkout it belongs to is
+    named again.
     """
     for scope, key in (
-        ("project", "project_settings"),
         ("local", "local_settings"),
+        ("project", "project_settings"),
         ("user", "user_settings"),
     ):
         for host, profile in HOST_PROFILES.items():
@@ -849,7 +852,7 @@ def _observation_finding(
             f"re-run {INSTALL_SERVER_COMMAND} after the host has connected once, or call "
             f"a tool from the host and re-run this check",
         )
-    if baked in observed:
+    if any(fold_client_name(name) == fold_client_name(baked) for name in observed):
         return (
             "pass",
             f"a host has connected as {baked!r}, the name the registration authorizes",

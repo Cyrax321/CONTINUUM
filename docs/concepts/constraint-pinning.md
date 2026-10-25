@@ -23,7 +23,11 @@ from continuum.events import EventType
 from continuum.models import ConstraintPinned
 
 sha = hashlib.sha256("never send without confirmation".encode("utf-8")).hexdigest()
-storage.append_event(run_id, EventType.CONSTRAINT_PINNED, ConstraintPinned(constraint_id="no-send", sha256=sha).model_dump())
+storage.append_event(
+    run_id,
+    EventType.CONSTRAINT_PINNED,
+    ConstraintPinned(constraint_id="no-send", sha256=sha).model_dump(),
+)
 ```
 
 ### 2. Project
@@ -45,7 +49,12 @@ Records the id alone (`Field(strict=True)`, same label charset). See `src/contin
 
 ```python
 from continuum.models import ConstraintRetracted
-storage.append_event(run_id, EventType.CONSTRAINT_RETRACTED, ConstraintRetracted(constraint_id="no-send").model_dump())
+
+storage.append_event(
+    run_id,
+    EventType.CONSTRAINT_RETRACTED,
+    ConstraintRetracted(constraint_id="no-send").model_dump(),
+)
 ```
 
 If `constraint_id` is active, it is deleted from `pins`. Otherwise it is appended to `unmatched_pin_retractions`.
@@ -200,16 +209,22 @@ The JSON payload mirrors this:
 from continuum.state.semantic import check_pin_accounting
 
 # Advisory
-accounting, flags, should_escalate = check_pin_accounting(state, context_without, grace_seconds=60, now=now_past, strict=False)
+accounting, flags, should_escalate = check_pin_accounting(
+    state, context_without, grace_seconds=60, now=now_past, strict=False
+)
 # flags == ["pin no-send:abc12345 absent past grace (100s > 60s)"]
 # should_escalate == False
 
 # Strict fail-closed
-accounting, flags, should_escalate = check_pin_accounting(state, context_without, grace_seconds=60, now=now_past, strict=True)
+accounting, flags, should_escalate = check_pin_accounting(
+    state, context_without, grace_seconds=60, now=now_past, strict=True
+)
 # should_escalate == True
 
 # Within grace, even strict does not escalate
-accounting, flags, should_escalate = check_pin_accounting(state, context_without, grace_seconds=60, now=now_within, strict=True)
+accounting, flags, should_escalate = check_pin_accounting(
+    state, context_without, grace_seconds=60, now=now_within, strict=True
+)
 # flags == [], should_escalate == False
 ```
 

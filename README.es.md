@@ -96,7 +96,7 @@ Verifica:
 ```bash
 continuum --help                 # punto de entrada CLI
 continuum-mcp --help             # punto de entrada servidor MCP (necesita [mcp] o [dev])
-pytest -q                        # ~3680 recogidos, ~3,636 pasando, ~41 saltados en un entorno mínimo (los recuentos exactos varían)
+pytest -q                        # ~3950 recogidos, ~3,636 pasando, ~41 saltados en un entorno mínimo (los recuentos exactos varían)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # las tres puertas que CI exige
 ```
@@ -121,7 +121,9 @@ from continuum import EventType, Run, SQLiteStorage, project
 
 store = SQLiteStorage("agent.db")
 store.create_run(Run(run_id="run_4821", goal="Analizar 10,000 documentos"))
-store.append_event("run_4821", EventType.RUN_STARTED, {"goal": "Analizar 10,000 documentos", "total": 10_000})
+store.append_event(
+    "run_4821", EventType.RUN_STARTED, {"goal": "Analizar 10,000 documentos", "total": 10_000}
+)
 
 for i, doc in enumerate(documents):
     analyze(doc)
@@ -129,7 +131,7 @@ for i, doc in enumerate(documents):
 
 # Tras una caída, un proceso nuevo retoma exactamente donde se detuvo:
 state = project("run_4821", store.read_events("run_4821"))
-print(state.progress.completed)            # ya hecho, no se repite
+print(state.progress.completed)  # ya hecho, no se repite
 print(store.verify_events("run_4821").ok)  # True, cadena intacta tras la caída
 ```
 
@@ -229,7 +231,7 @@ CONTINUUM se verifica contra agentes LLM reales, límites de protocolo en vivo y
 - **Clientes de terceros**: Gemini CLI y Kilo Code conectados vía stdio JSON-RPC contra el almacén SQLite en vivo, validando coexistencia multiagente y aislamiento de autorización.
 - **Cumplimiento de protocolo**: conducido de extremo a extremo con `@modelcontextprotocol/inspector --cli` a través de muertes de proceso, las herramientas mutantes deniegan por defecto tras `CONTINUUM_MCP_MUTATING_CLIENTS`, los reclamos externos degradan a `REQUIRES_REVIEW` (`safe: false`).
 - **Auto reparación**: servidores matados de forma brusca se recuperan de sidecars huérfanos `-wal`/`-shm` de SQLite mediante limpieza de un solo reintento al arrancar.
-- **Escala**: cerca de 3680 tests recogidos (~3,680 pasando, el resto se salta sin servicios opcionales) en Python 3.11, 3.12 y 3.13 (unitarios, basados en propiedades con `hypothesis`, concurrencia, adversariales). CONTINUUM-Bench ejecuta cinco escenarios de caída más un escenario dedicado de deriva de argumentos, midiendo 0 trabajo duplicado y 0 efectos secundarios duplicados para CONTINUUM frente a duplicación total para la reproducción ingenua, más una suite separada de 14 escenarios de corrección de recuperación (`continuum.benchmark.phase6`) que codifica los puntos de caída del estudio de ejecución durable como aserciones ejecutables.
+- **Escala**: cerca de 3950 tests recogidos (~3,950 pasando, el resto se salta sin servicios opcionales) en Python 3.11, 3.12 y 3.13 (unitarios, basados en propiedades con `hypothesis`, concurrencia, adversariales). CONTINUUM-Bench ejecuta cinco escenarios de caída más un escenario dedicado de deriva de argumentos, midiendo 0 trabajo duplicado y 0 efectos secundarios duplicados para CONTINUUM frente a duplicación total para la reproducción ingenua, más una suite separada de 14 escenarios de corrección de recuperación (`continuum.benchmark.phase6`) que codifica los puntos de caída del estudio de ejecución durable como aserciones ejecutables.
 - **Auditoría adversarial**: la superficie MCP completa fue auditada sobre el protocolo en vivo, se encontraron y corrigieron tres defectos. Método y pasos de reproducción en [test.md](test.md).
 
 ## Integración MCP
@@ -395,7 +397,7 @@ Esquema v6. SQLite es primario, Postgres verificado por CI. Un registro, muchas 
 
 ### Mapa de módulos, una librería, muchas superficies
 
-CONTINUUM es una librería (`src/continuum`, 124 módulos) más una suite de tests grande (161 archivos de test, ~3680 tests). Todos los módulos añaden y reproducen un registro de eventos encadenado:
+CONTINUUM es una librería (`src/continuum`, 124 módulos) más una suite de tests grande (161 archivos de test, ~3950 tests). Todos los módulos añaden y reproducen un registro de eventos encadenado:
 
 | Módulo | Rol |
 |:--|:--|
@@ -417,7 +419,7 @@ CONTINUUM es una librería (`src/continuum`, 124 módulos) más una suite de tes
 | `mcp/` | 12 herramientas stdio más autorización `authz.py` autenticación por token, allowlist, token de confirmación |
 | `serve/` | Sidecar stdio cable JSON + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Dashboard web `app.py` `hitl.py` con botones HITL confirmar/reconciliar/completar, aviso de confianza de prefijo, fijaciones |
-| `cli/` | 54 comandos argparse, códigos de salida como veredicto, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 55 comandos argparse, códigos de salida como veredicto, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | Puente de procesador de spans de OpenTelemetry |
 | `benchmark/` | Harness de CONTINUUM-Bench, 5 escenarios de caída + deriva de argumentos + suite de recuperación de 14 escenarios |
 
@@ -497,6 +499,31 @@ La abstracción central: `estado semántico + validación del entorno + reconcil
 
 CONTINUUM se sitúa en la intersección de ejecución durable, seguimiento idempotente de efectos secundarios y recuperación tras caída para agentes LLM. Los vecinos más cercanos son contratos de reanudación verificados por máquina (Khan 2026), procesamiento transaccional agéntico con admisión protegida por restricciones (Mnemosyne 2026), análisis de ataques de reversión de checkpoint (ACRFence 2026) y defensa de inyección de prompt a nivel de diseño (CaMeL 2025). La lista completa anotada, fundamentos y auditoría de citas están en [references/related-work.md](references/related-work.md).
 
+## Mapa de documentación
+
+Cada página bajo `docs/` y la razón de su existencia:
+
+- **Referencia y API**: [docs/api/README.md](docs/api/README.md) (biblioteca, CLI, MCP, sidecar),
+  [docs/GLOSSARY.md](docs/GLOSSARY.md) (cada término de recuperación, apuntando a su implementación),
+  [references/api.md](references/api.md), [references/cli.md](references/cli.md).
+- **Guías de tareas**: [docs/guides/README.md](docs/guides/README.md),
+  [docs/recipes/README.md](docs/recipes/README.md), [docs/concepts/README.md](docs/concepts/README.md).
+- **Seguridad**: [docs/threat_model.md](docs/threat_model.md) (lo que está protegido, detectado y
+  explícitamente no), [docs/signing_key_rotation.md](docs/signing_key_rotation.md) (rotación de un sello
+  con clave sin romper la verificación de contratos más antiguos solo con hash).
+- **Contratos y escala**: [docs/contract_compatibility.md](docs/contract_compatibility.md)
+  (una promesa sellada verificada por otra build),
+  [docs/multi_agent_isolation.md](docs/multi_agent_isolation.md) (aislamiento de `run_id` compartido),
+  [docs/audit-provenance-compaction-294.md](docs/audit-provenance-compaction-294.md)
+  (procedencia que sobrevive a la compactación).
+- **Autoría y operaciones**: [docs/adapters_guide.md](docs/adapters_guide.md) (escribir un
+  adaptador), [docs/cloud_api.md](docs/cloud_api.md) (capa de despliegue opcional),
+  [docs/TESTING_MCP.md](docs/TESTING_MCP.md) (auditoría adversarial de la superficie MCP),
+  [docs/CONTRIBUTING_ONBOARDING.md](docs/CONTRIBUTING_ONBOARDING.md) (orientación).
+- **Planes**: [docs/ARCHITECTURE_EVOLUTION.md](docs/ARCHITECTURE_EVOLUTION.md) (la estrella polar),
+  [docs/CONTINUUM_MASTER_PLAN.md](docs/CONTINUUM_MASTER_PLAN.md) (estado verificado y próximo trabajo),
+  [docs/research/README.md](docs/research/README.md) (las notas de las que surgieron esos planes).
+
 ## Estado y limitaciones
 
 - **Probado**: 3,636 pasados + 23 saltados en una ejecución completa en la auditoría del 2026-08-24 de este árbol, CI hace cumplir la suite en Python 3.11, 3.12 y 3.13, y los conteos varían por plataforma y servicios opcionales como Postgres (ver [STATUS.md](STATUS.md)). La superficie MCP también ha sido auditada de forma adversarial sobre el protocolo en vivo, ver [test.md](test.md).
@@ -513,7 +540,7 @@ CONTINUUM se sitúa en la intersección de ejecución durable, seguimiento idemp
 
 A principios de 2026 vi agentes de larga duración fallar en la recuperación, no en el razonamiento. Los checkpoints se trataban como prueba para continuar, no como evidencia a verificar. Estudiando Temporal, LangGraph, ACRFence 2603.20625 y self conditioning 2509.09677, encontré que el hueco era un sustrato de verificación portable que pregunta, dado el estado en el tiempo T y el mundo tal como está ahora, sigue siendo seguro continuar.
 
-En tres semanas construí CONTINUUM desde un invariante, cada hecho lleva su origen. El resultado es un registro encadenado con `verify()`, un libro mayor con deduplicación por clave estable, una puerta y un gateway que bloquean efectos no reclamados, y un motor de recuperación que sella un contrato. Cinco costuras exponen el mismo registro a Claude Code, LangGraph, LangChain, OpenAI, HTTP y OpenTelemetry. Validado con muertes reales y ~3680 tests, imprime `0 duplicados` donde la reproducción ingenua imprime `50`.
+En tres semanas construí CONTINUUM desde un invariante, cada hecho lleva su origen. El resultado es un registro encadenado con `verify()`, un libro mayor con deduplicación por clave estable, una puerta y un gateway que bloquean efectos no reclamados, y un motor de recuperación que sella un contrato. Cinco costuras exponen el mismo registro a Claude Code, LangGraph, LangChain, OpenAI, HTTP y OpenTelemetry. Validado con muertes reales y ~3950 tests, imprime `0 duplicados` donde la reproducción ingenua imprime `50`.
 
 CONTINUUM fue creado por **Anandhu P Shaji** ([@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/)) y es mantenido por el creador original. Es de código abierto bajo [Apache-2.0](LICENSE). Las contribuciones de la comunidad son bienvenidas vía [CONTRIBUTING.md](CONTRIBUTING.md) y se acreditan en [AUTHORS.md](AUTHORS.md) y [graphs/contributors](https://github.com/Cyrax321/CONTINUUM/graphs/contributors).
 
@@ -521,7 +548,7 @@ CONTINUUM fue creado por **Anandhu P Shaji** ([@Cyrax321](https://github.com/Cyr
 
 Este proyecto es de código abierto bajo Apache 2.0 y está deliberadamente construido para ser extendido: por investigadores que validan la semántica de recuperación, por ingenieros que portan el libro mayor o el servidor MCP a otros frameworks o lenguajes, y por cualquiera que convierta la hoja de ruta planificada en realidad. Un buen lugar para empezar es la etiqueta `good first issue` en el [rastreador de issues](https://github.com/Cyrax321/CONTINUUM/issues), o los defectos abiertos de corrección listados en STATUS.md.
 
-Abre un issue antes de enviar PRs grandes. Consulta [CONTRIBUTING.md](CONTRIBUTING.md) para la guía completa de contribución, incluido el [Code of Conduct](CODE_OF_CONDUCT.md).
+Abre un issue antes de enviar PRs grandes. Consulta [CONTRIBUTING.md](CONTRIBUTING.md) para la guía completa de contribución, incluido el [Code of Conduct](CODE_OF_CONDUCT.md) y la [política de seguridad](SECURITY.md).
 
 ### Colaboradores
 
@@ -561,3 +588,10 @@ Material de referencia profundo:
 - [references/e2e.md](references/e2e.md) - recorrido de test de autonomía extremo a extremo
 - [references/testing.md](references/testing.md) - disposición y convenciones de la suite de tests
 - [references/related-work.md](references/related-work.md) - trabajo relacionado anotado y auditoría de citas
+
+## Enlaces rápidos
+
+- [Issues](https://github.com/Cyrax321/CONTINUUM/issues) para errores y funciones
+- [Discussions](https://github.com/Cyrax321/CONTINUUM/discussions) para propuestas de diseño
+- [Notas de la versión](docs/release-notes.md)
+- [Lista de verificación de la versión](docs/release-checklist.md)

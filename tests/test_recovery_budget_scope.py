@@ -135,6 +135,30 @@ def test_scoped_escalation_marker_does_not_gate_another_scope(
     assert ledger.record_attempt("run_1", scope="b") == 1
 
 
+def test_scoped_escalation_with_a_tight_threshold_writes_no_run_wide_gate(
+    ledger: RecoveryLedger,
+) -> None:
+    """A scoped escalation never writes a second, run-wide gate (issue #1737).
+
+    The threshold being small enough that the leftover run-wide pseudo-count
+    would also clear it is what distinguishes this from
+    ``test_scoped_escalation_marker_does_not_gate_another_scope``: the
+    pre-scope escalation block must not run after the scoped one.
+    """
+    assert ledger.record_attempt("run_1", scope="a", max_attempts=1) == 1
+
+    markers = [
+        e
+        for e in ledger.entries("run_1")
+        if e.kind == LedgerEntryKind.GATE.value and e.gate == HUMAN_REQUIRED
+    ]
+    assert len(markers) == 1
+    assert markers[0].scope == "a"
+
+    assert ledger.requires_human("run_1", scope="a", max_attempts=3) is True
+    assert ledger.requires_human("run_1", scope="b", max_attempts=3) is False
+
+
 def test_scoped_escalation_still_answers_the_run_wide_query(
     ledger: RecoveryLedger,
 ) -> None:
@@ -149,6 +173,23 @@ def test_run_wide_escalation_blocks_every_scope(ledger: RecoveryLedger) -> None:
     """A global escalation (or a legacy unscoped one) gates all of them."""
     for _ in range(3):
         ledger.record_attempt("run_1", max_attempts=3)
+
+    assert ledger.requires_human("run_1", scope="a", max_attempts=3) is True
+    assert ledger.requires_human("run_1", scope="b", max_attempts=3) is True
+
+
+def test_run_wide_escalation_writes_one_gate(ledger: RecoveryLedger) -> None:
+    """The run-wide escalation writes a single marker, not a duplicate."""
+    for _ in range(3):
+        ledger.record_attempt("run_1", max_attempts=3)
+
+    markers = [
+        e
+        for e in ledger.entries("run_1")
+        if e.kind == LedgerEntryKind.GATE.value and e.gate == HUMAN_REQUIRED
+    ]
+    assert len(markers) == 1
+    assert markers[0].scope is None
 
     assert ledger.requires_human("run_1", scope="a", max_attempts=3) is True
     assert ledger.requires_human("run_1", scope="b", max_attempts=3) is True

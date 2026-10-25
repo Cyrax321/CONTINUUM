@@ -16,7 +16,7 @@ Deep install and dependency material. The [README Quick Start](../README.md#quic
 
 ## Install levels
 
-The core library has **one** runtime dependency (`pydantic>=2.7`). Everything else is an optional extra (see `pyproject.toml:30` and `pyproject.toml:32-72`).
+The core library has **one** runtime dependency (`pydantic>=2.7`). Everything else is an optional extra (see `pyproject.toml:30` and `pyproject.toml:32-87`).
 
 ```bash
 # Contributors (recommended): everything needed to run tests, lint, type-check
@@ -34,6 +34,7 @@ uv pip install -e ".[langgraph]"     # LangGraph adapter
 uv pip install -e ".[openai]"        # OpenAI Agents SDK adapter (also pulls mcp transitively)
 uv pip install -e ".[langchain]"     # LangChain adapter
 uv pip install -e ".[attest]"        # Ed25519 attestation (continuum attest)
+uv pip install -e ".[spiffe]"        # SPIFFE workload identity binding for attestations (issue #745)
 uv pip install -e ".[postgres]"      # PostgreSQL backend, psycopg>=3.2
 uv pip install -e ".[dev,postgres]"  # full dev + live Postgres contract tests
 ```
@@ -47,15 +48,16 @@ Combine freely: `[dev]` already includes `mcp`, `langgraph`, `langchain`, `opena
 | Package | Where declared | Purpose | Required? |
 |:--|:--|:--|:--|
 | `pydantic>=2.7` | `pyproject.toml:30` (core `dependencies`) | Immutable models, hash-chained events | **Yes, always** |
-| `mcp>=2.0` | `pyproject.toml:53` (`[mcp]`), also in `[dev]` | MCP server (`continuum-mcp`) stdio transport | Only for MCP server (also pulled transitively by `openai-agents`) |
-| `opentelemetry-api>=1.20` | `pyproject.toml:55` (`[otel]`) | Span-processor bridge (`continuum.otel`) | Only for OTel directly; may appear transitively via `mcp`/`openai-agents` |
-| `playwright>=1.40` | `pyproject.toml:62` (`[browser]`) | Browser automation through `BrowserAdapter`; install Chromium separately | Only for BrowserAdapter |
-| `kubernetes>=29` | `pyproject.toml:66` (`[kubernetes]`) | Kubernetes availability check for `KubernetesAdapter`; `kubectl` and a configured cluster remain external | Only for KubernetesAdapter |
-| `langgraph>=0.2` | `pyproject.toml:58` (`[langgraph]`) | LangGraph adapter | Only for LangGraph (also pulled transitively by `langchain`) |
-| `openai-agents>=0.2` | `pyproject.toml:61` (`[openai]`) | OpenAI Agents SDK adapter | Only for OpenAI |
-| `langchain>=0.3` | `pyproject.toml:64` (`[langchain]`) | LangChain adapter | Only for LangChain |
-| `cryptography>=45.0` | `pyproject.toml:69` (`[attest]`), also in `[dev]` | Ed25519 event-chain attestation | Only for `continuum attest` |
-| `psycopg>=3.2` | `pyproject.toml:72` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
+| `mcp>=2.0` | `pyproject.toml:58` (`[mcp]`), also in `[dev]` | MCP server (`continuum-mcp`) stdio transport | Only for MCP server (also pulled transitively by `openai-agents`) |
+ | `opentelemetry-api>=1.20` | `pyproject.toml:67` (`[otel]`) | Span-processor bridge (`continuum.otel`) | Only for OTel directly; may appear transitively via instrumentation |
+| `playwright>=1.40` | `pyproject.toml:61` (`[browser]`) | Browser automation through `BrowserAdapter`; install Chromium separately | Only for `BrowserAdapter` |
+| `kubernetes>=29` | `pyproject.toml:65` (`[kubernetes]`) | Kubernetes availability check for `KubernetesAdapter`; `kubectl` and a configured cluster remain external | Only for `KubernetesAdapter` |
+| `cryptography>=45.0` | `pyproject.toml:81` (`[attest]`), also in `[dev]` | Ed25519 event-chain attestation | Only for `continuum attest` |
+| `pyspiffe>=0.2.0` | `pyproject.toml:84` (`[spiffe]`) | SPIFFE Workload API client for binding workload identities to attestations (issue #745) | Only for `continuum attest --spiffe` |
+| `psycopg>=3.2` | `pyproject.toml:87` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
+| `langgraph>=0.2` | `pyproject.toml:70` (`[langgraph]`) | LangGraph adapter | Only for LangGraph (also pulled transitively by `langchain`) |
+| `openai-agents>=0.2` | `pyproject.toml:73` (`[openai]`) | OpenAI Agents SDK adapter | Only for OpenAI |
+| `langchain>=0.3` | `pyproject.toml:76` (`[langchain]`) | LangChain adapter | Only for LangChain |
 | **Dev / test tooling** (all in `pyproject.toml:33-50` `[dev]`) | | | Only for contributors |
 | `pytest>=8.0`, `pytest-cov>=5.0`, `pytest-asyncio>=0.23` |  | Test runner + coverage + async MCP tests | Dev |
 | `hypothesis>=6.0` |  | Property-based tests (hashing, models) | Dev |
@@ -101,7 +103,7 @@ continuum-mcp --help             # needs [mcp] or [dev]
 # powershell -ExecutionPolicy Bypass -File .\try-it.ps1
 # powershell -ExecutionPolicy Bypass -File .\try-it.ps1 cli --help
 
-# Full test suite (~3680 tests; exact skips vary by environment)
+# Full test suite (~3950 tests; exact skips vary by environment)
 pytest -q                        # or: ./try-it.sh test
 pytest --no-cov --tb=short -q    # faster, no coverage
 pytest tests/test_events.py -v   # single file

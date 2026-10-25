@@ -300,7 +300,7 @@ def load_gateway_tenant(path: Path) -> str | None:
     return None
 
 
-def render_key(template: str, body: dict[str, Any]) -> str:
+def render_key(template: str, body: Any) -> str:
     """Substitute ``{field}`` placeholders from the request body.
 
     Values are normalised exactly as ``gate`` normalises tool arguments
@@ -322,10 +322,11 @@ def render_key(template: str, body: dict[str, Any]) -> str:
     import string
 
     fields = [f for _, f, _, _ in string.Formatter().parse(template) if f]
-    missing = [f for f in fields if f not in body]
+    mapping = body if isinstance(body, Mapping) else {}
+    missing = [f for f in fields if f not in mapping]
     if missing:
         raise GatewayConfigError(f"key template {template!r} needs body field(s) {missing}")
-    values = {f: normalize_key_value(body[f]) for f in fields}
+    values = {f: normalize_key_value(mapping[f]) for f in fields}
     if is_memory_template(template):
         # Only the placeholders before the terminal segment can shift the
         # positions, and the check reads the formatted value rather than only
@@ -448,7 +449,7 @@ def match_route(
     host: str,
     method: str,
     path: str,
-    body: dict[str, Any],
+    body: Any,
     actions_by_key: dict[str, Any],
     run_id: str,
     bound_tenant: str | None = None,
@@ -536,8 +537,9 @@ def match_route(
         import string as _fields_string
 
         _fields = [f for _, f, _, _ in _fields_string.Formatter().parse(route.key_template) if f]
+        mapping = body if isinstance(body, Mapping) else {}
         for _field in _fields[:-1]:
-            _value = body.get(_field, "")
+            _value = mapping.get(_field, "")
             if ":" in str(normalize_key_value(_value)):
                 return Decision(
                     False,
@@ -571,7 +573,8 @@ def match_route(
 
         fields = [f for _, f, _, _ in _string.Formatter().parse(route.key_template) if f]
         tenant_field = "tenant_id" if "tenant_id" in fields else "tenant"
-        tenant_in_key = str(normalize_key_value(body.get(tenant_field, "")))
+        mapping = body if isinstance(body, Mapping) else {}
+        tenant_in_key = str(normalize_key_value(mapping.get(tenant_field, "")))
         if tenant_in_key != bound_tenant:
             return Decision(
                 False,
@@ -702,13 +705,14 @@ class GatewayServer:
                 """Drop the stdlib access log: evidence belongs in the event log."""
                 pass
 
-            def _body(self, max_bytes: int = MAX_BODY_BYTES) -> dict[str, Any]:
-                """Read the request body as a mapping, or answer and raise.
+            def _body(self, max_bytes: int = MAX_BODY_BYTES) -> tuple[Any, bytes]:
+                """Read the request body as JSON and raw bytes, or answer and raise.
 
-                Returns an empty mapping for a body that is absent, and for one
-                that parses to valid JSON of some other shape: neither can bind
-                a key template field, and the missing-field refusal downstream
-                names that correctly.
+                Returns an empty mapping and empty bytes for a body that is absent.
+                A non-mapping JSON body (an array, a number, a string) cannot bind
+                key template placeholders, which downstream template evaluation
+                names correctly, but routes that require no body fields legitimately
+                carry such payloads to the upstream.
 
                 A body that cannot be read at all does not come back. This
                 writes the refusal itself and raises, 413 with
@@ -771,7 +775,7 @@ class GatewayServer:
                     # A genuinely empty body stays an empty mapping: a route
                     # whose template needs no fields is legitimately callable
                     # with no body at all.
-                    return {}
+                    return {}, b""
                 try:
                     parsed = json.loads(raw)
                 except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -788,7 +792,7 @@ class GatewayServer:
                     # is the same misreport as the missing field, only quieter.
                     self._respond(400, {"error": f"invalid JSON in request body: {exc}"})
                     raise _MalformedBody from exc
-                return parsed if isinstance(parsed, dict) else {}
+                return parsed, raw
 
             def _respond(self, code: int, payload: dict[str, Any]) -> None:
                 """Answer with one JSON body, keeping the framing self-consistent.
@@ -815,7 +819,7 @@ class GatewayServer:
                 """
                 host = self.headers.get("Host", "")
                 try:
-                    body = self._body()
+                    body, raw = self._body()
                 except (_BodyTooLarge, _MalformedBody):
                     return
 
@@ -925,9 +929,10 @@ class GatewayServer:
                         for k, v in self.headers.items()
                         if k.lower() not in ("host", "content-length")
                     }
-                    payload = json.dumps(body).encode() if body else None
+                    payload = raw if raw else None
                     if payload is not None:
-                        headers["Content-Type"] = "application/json"
+                        if "content-type" not in {k.lower() for k in headers}:
+                            headers["Content-Type"] = "application/json"
                         headers["Content-Length"] = str(len(payload))
                     try:
                         conn.request(method, self.path, body=payload, headers=headers)
