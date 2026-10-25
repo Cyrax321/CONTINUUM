@@ -330,6 +330,32 @@ def test_landing_page_meta_cli_count_matches_the_parser() -> None:
     )
 
 
+def test_architecture_docs_cli_command_counts_match_the_parser() -> None:
+    """The architecture diagrams and HTML page pin their CLI counts to the parser (#1386)."""
+    expected = _cli_subcommand_count()
+
+    arch_md = ROOT / "docs" / "diagrams" / "architecture.md"
+    if arch_md.exists():
+        text = arch_md.read_text(encoding="utf-8")
+        matches = re.findall(r"CLI,\s*(\d+)\s*commands", text)
+        matches += re.findall(r"\|\s*CLI commands\s*\|\s*(\d+)\s*\|", text)
+        for count_str in matches:
+            assert int(count_str) == expected, (
+                f"{arch_md.name} states {count_str} CLI commands, but build_parser() "
+                f"registers {expected}"
+            )
+
+    arch_html = ROOT / "docs" / "architecture.html"
+    if arch_html.exists():
+        text = arch_html.read_text(encoding="utf-8")
+        matches = re.findall(r"CLI\s*-\s*(\d+)\s*commands", text)
+        for count_str in matches:
+            assert int(count_str) == expected, (
+                f"{arch_html.name} states {count_str} CLI commands, but build_parser() "
+                f"registers {expected}"
+            )
+
+
 def test_documented_counts_agree() -> None:
     stated: dict[str, int] = {}
     for f in COUNTED_FILES:
@@ -599,8 +625,22 @@ def test_readme_module_and_test_file_counts_match_tree() -> None:
         f"README says {documented_tests} test files but tests/ carries {live_tests}"
     )
 
+    arch_html = ROOT / "docs" / "architecture.html"
+    if arch_html.exists():
+        arch_text = arch_html.read_text(encoding="utf-8")
+        m_match = re.search(r"<b>(\d+)</b>\s+modules", arch_text)
+        t_match = re.search(r"<b>(\d+)</b>\s+test files", arch_text)
+        if m_match and t_match:
+            arch_modules, arch_tests = int(m_match.group(1)), int(t_match.group(1))
+            assert abs(live_modules - arch_modules) <= TREE_COUNT_TOLERANCE, (
+                f"docs/architecture.html says {arch_modules} modules but src/continuum carries {live_modules}"
+            )
+            assert abs(live_tests - arch_tests) <= TREE_COUNT_TOLERANCE, (
+                f"docs/architecture.html says {arch_tests} test files but tests/ carries {live_tests}"
+            )
 
-def test_pyproject_line_references_in_docs():
+
+def test_pyproject_line_references_in_docs() -> None:
     """Verify pyproject.toml:NN references in docs point to valid dependency lines.
 
     Design note: These are line numbers, and any added extra shifts them.

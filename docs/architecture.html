@@ -5,22 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>CONTINUUM - System Architecture</title>
   <meta name="description" content="CONTINUUM system architecture: one hash-chained event log, five integration seams, trust-earned recovery engine."/>
-  <link rel="preconnect" href="https://fonts.googleapis.com"/>
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"/>
   <style>
     :root{--bg:#F3F7FA;--panel:#E8EFF5;--core:#DDE8F1;--card:#FFFFFF;--ink:#0E1F2D;--slate:#46607A;--slate2:#7D96AB;--rule:#CDDAE6;--accent:#C73F0A;--accentTint:#FBE9E1;--spine:#111F2B;--onSpine:#E3EFF8;--spineAlt:#9FB5C6;--edgeP:#2F4F68;--edgeS:#8FACBE;--shadow2:0 2px 8px rgba(14,31,45,.10);}
     @media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#09131D;--panel:#0D1A26;--core:#102233;--card:#152334;--ink:#D8E8F3;--slate:#8FADC2;--slate2:#627F94;--rule:#1E3848;--accent:#FF7040;--accentTint:#3B1A0E;--spine:#070F18;--onSpine:#D8E8F3;--spineAlt:#5A7B93;--edgeP:#7AA5BE;--edgeS:#3E606F;--shadow2:0 2px 8px rgba(0,0,0,.45);color-scheme:dark;}}
     :root[data-theme="dark"]{--bg:#09131D;--panel:#0D1A26;--core:#102233;--card:#152334;--ink:#D8E8F3;--slate:#8FADC2;--slate2:#627F94;--rule:#1E3848;--accent:#FF7040;--accentTint:#3B1A0E;--spine:#070F18;--onSpine:#D8E8F3;--spineAlt:#5A7B93;--edgeP:#7AA5BE;--edgeS:#3E606F;--shadow2:0 2px 8px rgba(0,0,0,.45);color-scheme:dark;}
     *,*::before,*::after{box-sizing:border-box;}
     html{background:var(--bg);}
-    body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,"Segoe UI",system-ui,sans-serif;padding:32px clamp(16px,4vw,56px) 72px;-webkit-font-smoothing:antialiased;}
+    body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:32px clamp(16px,4vw,56px) 72px;-webkit-font-smoothing:antialiased;}
     .pagehead{max-width:1280px;margin:0 auto 24px;display:flex;flex-wrap:wrap;align-items:flex-end;gap:16px;}
     .pagehead-text{flex:1;min-width:260px;}
     .eyebrow{font-size:10.5px;font-weight:800;letter-spacing:2.4px;text-transform:uppercase;color:var(--accent);margin:0 0 8px;}
     h1{font-size:clamp(22px,3.2vw,34px);font-weight:800;letter-spacing:-0.025em;margin:0 0 10px;color:var(--ink);line-height:1.18;}
     .lede{max-width:72ch;color:var(--slate);font-size:14px;line-height:1.6;margin:0;}
-    .theme-btn{flex-shrink:0;align-self:flex-start;margin-top:4px;background:var(--card);border:1px solid var(--rule);color:var(--slate);font:600 12px/1 Inter,sans-serif;padding:8px 14px;border-radius:8px;cursor:pointer;}
+    .theme-btn{flex-shrink:0;align-self:flex-start;margin-top:4px;background:var(--card);border:1px solid var(--rule);color:var(--slate);font:600 12px/1 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:8px 14px;border-radius:8px;cursor:pointer;}
     .stats{max-width:1280px;margin:0 auto 20px;display:flex;flex-wrap:wrap;gap:10px;}
     .pill{background:var(--card);border:1px solid var(--rule);border-radius:999px;padding:5px 14px;font-size:12px;color:var(--slate);display:flex;gap:6px;align-items:center;}
     .pill b{color:var(--ink);font-weight:700;}
@@ -45,7 +42,7 @@
     .ttl2{font-size:11.5px;font-weight:700;fill:var(--ink);}
     .sub{font-size:10px;fill:var(--slate);}
     .subb{font-size:9px;fill:var(--slate2);}
-    .mono{font-family:"JetBrains Mono",ui-monospace,Menlo,monospace;font-size:9px;fill:var(--slate);}
+    .mono{font-family:"JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;font-size:9px;fill:var(--slate);}
     .elbl{font-size:9px;fill:var(--slate);}
     .elblX{font-size:9px;fill:var(--accent);font-weight:600;}
     .hub{font-size:13px;font-weight:800;letter-spacing:0.5px;fill:var(--onSpine);}
@@ -60,7 +57,7 @@
     .sw-bx{display:inline-block;width:13px;height:10px;background:var(--accentTint);border-left:3px solid var(--accent);}
     figcaption{max-width:80ch;margin:16px auto 0;font-size:13px;line-height:1.65;color:var(--slate);}
     figcaption b{color:var(--ink);font-weight:700;}
-    code{font-family:"JetBrains Mono",ui-monospace,Menlo,monospace;font-size:11.5px;}
+    code{font-family:"JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;font-size:11.5px;}
     .provenance{max-width:1280px;margin:28px auto 0;border-top:1px solid var(--rule);padding-top:16px;font-size:12px;color:var(--slate);line-height:1.65;}
     .provenance b{color:var(--ink);}
   </style>
@@ -75,11 +72,11 @@
   <button class="theme-btn" type="button" aria-label="Toggle color theme">Dark</button>
 </div>
 <div class="stats">
-  <div class="pill"><b>141</b> modules</div>
+  <div class="pill"><b>148</b> modules</div>
   <div class="pill"><b>55</b> EventType members</div>
   <div class="pill"><b>schema v6</b></div>
   <div class="pill"><b>13</b> MCP tools</div>
-  <div class="pill"><b>203</b> test files</div>
+  <div class="pill"><b>223</b> test files</div>
   <div class="pill"><b>7</b> recovery modes</div>
   <div class="pill"><b>5</b> integration seams</div>
 </div>
@@ -94,9 +91,9 @@
 
   <!-- TITLE -->
   <text x="48" y="42" style="font-size:11.5px;font-weight:800;letter-spacing:1.8px;fill:var(--accent);">CONTINUUM - SYSTEM ARCHITECTURE</text>
-  <text x="48" y="62" class="sub">One library (src/continuum, 141 modules) - all modules append to and replay one hash-chained log.</text>
+  <text x="48" y="62" class="sub">One library (src/continuum, 148 modules) - all modules append to and replay one hash-chained log.</text>
   <text x="1232" y="42" text-anchor="end" class="mono">schema v6 - 55 event types - 13 MCP tools</text>
-  <text x="1232" y="58" text-anchor="end" class="mono">141 modules - 203 test files</text>
+  <text x="1232" y="58" text-anchor="end" class="mono">148 modules - 223 test files</text>
 
   <!-- ROW 1: AGENTS -->
   <rect class="band" x="40" y="78" width="1200" height="108" rx="14"/>
@@ -134,7 +131,7 @@
   <rect class="card" x="60"  y="250" width="218" height="70" rx="9"/>
   <text x="76"  y="273" class="ttl2">1 - In-process</text>
   <text x="76"  y="289" class="mono">intercept_action</text>
-  <text x="76"  y="303" class="sub">wrap_tool on 3 SDKs</text>
+  <text x="76"  y="303" class="sub">wrap_tool on 2 SDKs</text>
   <text x="76"  y="315" class="subb">zero network hop</text>
   <rect class="card" x="292" y="250" width="218" height="70" rx="9"/>
   <text x="308" y="273" class="ttl2">2 - MCP server</text>
@@ -170,7 +167,7 @@
   <rect class="cardX" x="68"  y="400" width="256" height="100" rx="9"/>
   <rect class="tab"   x="68"  y="408" width="3"   height="84"  rx="1.5"/>
   <text x="86"  y="428" class="ttl">Gate</text>
-  <text x="86"  y="445" class="mono">security/gate.py</text>
+  <text x="86"  y="445" class="mono">gate.py</text>
   <text x="86"  y="461" class="sub">no claim - DENY (exit 2)</text>
   <text x="86"  y="477" class="subb">unknown host fails closed</text>
   <text x="86"  y="491" class="subb">replay guard blocks re-fire</text>
@@ -257,7 +254,7 @@
   <text x="88" y="842" class="subb">blob store: content-addressed payloads at storage_dir/blobs/sha256.blob - audit_blob_descriptor - deep integrity verify - ActionReconciler plugins</text>
 
   <!-- resume channel -->
-  <path class="dashX" d="M1212,706 L1228,706 L1228,1090 L1212,1090" marker-end="url(#arrX)"/>
+  <path class="dashX" d="M1212,706 L1228,706 L1228,1090 L1240,1090" marker-end="url(#arrX)"/>
   <text x="1222" y="870"  text-anchor="end" class="elblX">resume</text>
   <text x="1222" y="884"  text-anchor="end" class="elblX">sealed</text>
   <text x="1222" y="898"  text-anchor="end" class="elblX">contract</text>
@@ -297,7 +294,7 @@
   <text x="60" y="1064" class="lbl">READ SURFACES</text>
 
   <rect class="card" x="68"  y="1076" width="264" height="58" rx="9"/>
-  <text x="86"  y="1099" class="ttl2">CLI - 47 commands</text>
+  <text x="86"  y="1099" class="ttl2">CLI - 55 commands</text>
   <text x="86"  y="1115" class="sub">exit code is the verdict</text>
   <text x="86"  y="1128" class="subb">verify - health - tree - briefing - resume</text>
 
@@ -314,7 +311,7 @@
   <rect class="card" x="920" y="1076" width="292" height="58" rx="9"/>
   <text x="938" y="1099" class="ttl2">Benchmark suite</text>
   <text x="938" y="1115" class="sub">CONTINUUM-Bench crash scenarios</text>
-  <text x="938" y="1128" class="subb">18 recovery scenarios - 8 risk-fault scenarios</text>
+  <text x="938" y="1128" class="subb">19 recovery scenarios - 7 risk-fault scenarios</text>
 
   <path class="edgeP" d="M400,1020 L400,1042" marker-end="url(#arrP)"/>
   <text x="416" y="1035" class="elbl">verify - health - tree - briefing</text>
@@ -324,7 +321,7 @@
 </svg>
 </div>
 <figcaption>
-  <b>How to read it.</b> Follow the arrows downward: any harness reaches the core through one of <b>five seams</b>. An action is intercepted at the <b>Gate</b> (no claim -- DENY, exit 2), which then consults the <b>Action Ledger</b>; the ledger fires the effect exactly once and settles it from the external system's real HTTP status, so a replay returns the cached result instead of firing again. Everything appends to one <b>hash-chained event log</b>, which the <b>State Engine</b> replays into a typed projection and the <b>Checkpoint Manager</b> seals behind a RECOVERY anchor. On resume, the <b>Recovery Engine</b> re-derives a sealed contract from that state, checking file digests, dependency pins, model identity, risk observations and human-gate budgets before it says <b>safe</b>. Vermilion markers show every boundary where trust is earned rather than assumed.
+  <b>How to read it.</b> Follow the arrows downward: any harness reaches the core through one of <b>five seams</b>. An action is intercepted at the <b>Gate</b> (no claim -- DENY, exit 2), which then consults the <b>Action Ledger</b>; completed results are reused, while uncertain effects require reconciliation (the HTTP gateway settles from real HTTP status). Everything appends to one <b>hash-chained event log</b>, which the <b>State Engine</b> replays into a typed projection and the <b>Checkpoint Manager</b> seals behind a RECOVERY anchor. On resume, the <b>Recovery Engine</b> re-derives a sealed contract from that state, checking file digests, dependency pins, model identity, risk observations and human-gate budgets before it says <b>safe</b>. Vermilion markers show every boundary where trust is earned rather than assumed.
 </figcaption>
 <div class="legend">
   <span><i class="sw-p"></i> primary write path</span>
@@ -336,7 +333,7 @@
 <p class="provenance">
   <b>Figures are read from the code, not the README.</b>
   55 <code>EventType</code> members, schema v6, and 13 MCP tools were counted from <code>src/continuum/</code>;
-  141 modules confirmed; 203 test files confirmed in <code>tests/</code>.
+  148 modules confirmed; 223 test files confirmed in <code>tests/</code>.
   New since the last diagram: blob offload store (<code>storage/blob.py</code>), transparent rehydration, deep integrity verify,
   <code>RiskObservedPayload</code> schema and projection, per-dependency recovery budgets, <code>ActionReconciler</code> plugins,
   and environment-aware compaction anchors.

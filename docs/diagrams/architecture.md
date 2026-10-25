@@ -6,7 +6,8 @@ run dies mid-effect, and which surfaces read state back. Every node names the
 module that implements it. Every figure on this page was re-verified against
 the source the day it was written (commands in the last section).
 
-This is the integration view. For the SDK's internal data flow see
+This is the integration view. For the interactive standalone view with theme
+switching, see [docs/architecture.html](../architecture.html); for the SDK's internal data flow see
 `references/architecture-flow.md`; for the component model, the projection
 semantics and the recovery context, see `references/architecture.md`; for the
 rendered drawing plus the enumerated surface inventory, see
@@ -65,7 +66,7 @@ flowchart TB
     %% ---------- surfaces ----------
     subgraph surfaces["Surfaces that read state back"]
         direction LR
-        cli["CLI, 52 commands<br/>only a verified-safe run exits 0"]
+        cli["CLI, 55 commands<br/>only a verified-safe run exits 0"]
         dash["Web dashboard and human gate<br/>dashboard/ and serve/"]
         tui["Terminal UI<br/>tui/"]
         bench["Benchmark and fault injection<br/>benchmark/"]
@@ -110,15 +111,22 @@ flowchart TB
 ## The claim, fire, settle lifecycle
 
 The ledger is a two-phase protocol. A side effect is claimed before it fires
-because a Python callable cannot cross the MCP boundary: `intercept_action`
-answers *may I*, the caller performs the effect, `complete_action` records the
-outcome. A crash between the two leaves the outcome genuinely unknown, and
-that is by design, never silently completed, never retried, never dropped.
+because a Python callable cannot cross the MCP boundary: `continuum_intercept_action`
+answers *may I*, the caller performs the effect, and `continuum_complete_action` records the
+outcome. In-process adapters (`wrap_tool`, `intercept_action`) execute `action_fn`
+directly between claim and completion.
+
+A crash between claim and completion leaves the outcome genuinely unknown.
+On resume, `RecoveryEngine.assess()` refuses to proceed while an action outcome
+remains uncertain (`REQUEST_HUMAN` or `BLOCKED`). The caller or operator then
+runs reconciliation (e.g. via `continuum reconcile` or registered probe),
+appending `ACTION_RECONCILED` once settled. A second assessment derives the
+sealed `RESUME` contract:
 
 ```mermaid
 sequenceDiagram
-    participant A as Agent
-    participant S as Seam (MCP tool, adapter, gateway)
+    participant A as Agent / Caller
+    participant S as Seam (MCP stdio server)
     participant L as Action ledger
     participant E as External system
     participant Log as Event log
@@ -129,13 +137,16 @@ sequenceDiagram
     L->>Log: append ACTION_RECORDED (started)
     S-->>A: proceed true
     A->>E: fire the side effect
-    Note over A,E: hard crash here, no completion is ever reported
+    Note over A,E: hard crash here; no completion reported
     A--x S: complete_action(key, outcome)
-    R->>L: reconcile the unknown outcome
-    L->>E: probe (ProbeReconciler)
-    E-->>L: occurred, external_id
+    Note over A,R: restart and assess
+    A->>R: assess()
+    R-->>A: REQUEST_HUMAN (blocked: action outcome unknown)
+    Note over A,L: caller reconciles (probe or manual verification)
+    A->>L: reconcile_action(key, occurred=true)
     L->>Log: append ACTION_RECONCILED
-    R-->>A: REQUEST_HUMAN, then RESUME, the effect never fires twice
+    A->>R: assess()
+    R-->>A: RESUME (sealed contract, effect never fires twice)
 ```
 
 Every state component carries its origin. Facts the agent asserted about
@@ -151,7 +162,7 @@ environment resumes cleanly, and its exit code is 0.
 | Schema version | 6 | `SCHEMA_VERSION` in `src/continuum/storage/migrations.py` |
 | Event types | 55 | `EventType` in `src/continuum/events.py` |
 | MCP tools | 13 total, 3 read-only (`validate`, `resume`, `list_actions`) and 10 mutating | `@server.tool(...)` decorators in `src/continuum/mcp/server.py` |
-| CLI commands | 52 | `add(...)` registrations in `src/continuum/cli/main.py` |
+| CLI commands | 55 | `add(...)` registrations in `src/continuum/cli/main.py` |
 | Recovery modes | 7, max severity wins, `RESUME` safest through `ABORT` most severe | `RecoveryMode` in `src/continuum/recovery/engine.py` |
 | Checkpoint policies | 6 (`Manual`, `Interval`, `Event`, `Semantic`, `ContextPressure`, `Hybrid`) | `src/continuum/checkpoint/policy.py` |
 | Storage backends | SQLite (primary) and Postgres, plus an optional blob store | `src/continuum/storage/` |
@@ -173,6 +184,6 @@ grep -n "SCHEMA_VERSION =" src/continuum/storage/migrations.py
 ```
 
 The counts in the docs are guarded by `tests/test_docs_event_counts.py` (the
-event figure must follow the live enum) and `tests/test_docs_counts.py` (the
-test-suite totals must agree across docs), so this page fails CI if the
-figures drift from the code.
+event figure must follow the live enum) and `tests/test_docs_counts.py` (which
+pins the CLI subcommand total to the parser and asserts collected-test agreement across docs),
+so this page fails CI if the figures drift from the code.
