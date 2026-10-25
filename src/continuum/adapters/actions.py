@@ -54,6 +54,31 @@ class AdapterResult:
     error: str | None = None
 
 
+#: How much of a captured stderr stream a failed action's message may carry
+#: (#1760). The transports already pay for a full pipe to drain it, but the
+#: ledger is durable and a result is rendered to an operator, so the tail is
+#: bounded to keep one chatty failure from flooding either.
+_STDERR_TAIL = 2000
+
+
+def format_action_error(exc: BaseException) -> str:
+    """The message an adapter failure carries into the result and the ledger.
+
+    A ``CalledProcessError``'s string form names only the command and the exit
+    status, so a failure's only diagnostic used to be that the exit status,
+    and the half of the captured output that says how to fix it (which import
+    failed, which file was missing, what the compiler said) was captured by
+    the transport and then discarded (#1760). When the exception carries a
+    stderr, its bounded tail is appended.
+    """
+    message = f"{type(exc).__name__}: {exc}"
+    stderr = getattr(exc, "stderr", None)
+    if isinstance(stderr, str) and stderr.strip():
+        tail = stderr.strip()[-_STDERR_TAIL:]
+        message = f"{message}\nstderr (last {_STDERR_TAIL} characters):\n{tail}"
+    return message
+
+
 TelemetryHook = Callable[[AdapterAction, AdapterResult], None]
 
 
@@ -88,7 +113,7 @@ def run_action(
             dep_scope=action.dep_scope,
         )
     except Exception as exc:  # adapter already recorded the attempt uncertain
-        result = AdapterResult(status="failed", error=f"{type(exc).__name__}: {exc}")
+        result = AdapterResult(status="failed", error=format_action_error(exc))
         _emit(on_event, action, result)
         return result
     result = AdapterResult(status="completed", output=output)

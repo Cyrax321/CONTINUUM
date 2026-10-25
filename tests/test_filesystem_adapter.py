@@ -164,3 +164,28 @@ def test_run_shell_captures_mocked_subprocess_failure(
     assert "CalledProcessError" in result.error
     assert "127" in result.error
     assert len(ActionLedger(storage, "run_fs").pending()) == 1
+
+
+def test_run_shell_surfaces_the_failed_command_stderr(tmp_path: pathlib.Path) -> None:
+    """The message the process printed is the message the operator needs (#1760).
+
+    The transport already pays for a full pipe to drain stderr; the error used
+    to carry only the exit status, so a failed action's only diagnostic was
+    "exited 42" and the agent loop re-planned blind against the same error.
+    """
+    storage = _storage()
+    adapter = FilesystemSandboxAdapter(storage, str(tmp_path / "sandbox"))
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; sys.stderr.write('which import failed, says the compiler'); sys.exit(42)",
+    ]
+
+    result = adapter.run_shell("run_fs", command)
+
+    assert result.status == "failed"
+    assert "which import failed, says the compiler" in (result.error or "")
+
+    # The durable record carries the same tail, not just the in-memory result.
+    [entry] = ActionLedger(storage, "run_fs").pending()
+    assert "which import failed, says the compiler" in (entry.last_error or "")
