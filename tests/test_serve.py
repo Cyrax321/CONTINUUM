@@ -952,9 +952,10 @@ def test_run_serve_over_http_shuts_the_server_down(monkeypatch) -> None:
     events: list[str] = []
 
     class FakeHTTP:
-        def __init__(self, server, port: int = 8765) -> None:
+        def __init__(self, server, port: int = 8765, bind: str = "127.0.0.1") -> None:
             events.append(f"init:{port}")
             self.port = port
+            self.bind = bind
 
         def serve_forever(self) -> None:
             events.append("serve")
@@ -987,9 +988,10 @@ def test_run_serve_http_survives_ctrl_c_and_still_shuts_down(monkeypatch, capsys
     events: list[str] = []
 
     class FakeHTTP:
-        def __init__(self, server, port: int = 8765) -> None:
+        def __init__(self, server, port: int = 8765, bind: str = "127.0.0.1") -> None:
             events.append(f"init:{port}")
             self.port = port
+            self.bind = bind
 
         def serve_forever(self) -> None:
             raise KeyboardInterrupt
@@ -1074,14 +1076,16 @@ def test_cmd_serve_leaves_a_non_storage_object_alone(tmp_path) -> None:
 
 
 def test_cmd_serve_forwards_the_db_transport_and_port() -> None:
-    """The three knobs the CLI parses reach ``run_serve`` unchanged."""
+    """The knobs the CLI parses reach ``run_serve`` unchanged."""
     import continuum.serve
     from continuum.serve import cmd_serve
 
     seen: dict = {}
 
-    def fake_run_serve(db=None, transport="stdio", instream=None, outstream=None, port=8765):
-        seen.update(db=db, transport=transport, port=port)
+    def fake_run_serve(
+        db=None, transport="stdio", instream=None, outstream=None, port=8765, bind=None
+    ):
+        seen.update(db=db, transport=transport, port=port, bind=bind)
         return 7
 
     monkeypatch_target = continuum.serve
@@ -1093,6 +1097,7 @@ def test_cmd_serve_forwards_the_db_transport_and_port() -> None:
             db = "runs.db"
             transport = "http"
             port = 9999
+            bind = "127.0.0.1"
 
         class StorageLike:
             pass
@@ -1101,4 +1106,4 @@ def test_cmd_serve_forwards_the_db_transport_and_port() -> None:
     finally:
         monkeypatch_target.run_serve = original
 
-    assert seen == {"db": "runs.db", "transport": "http", "port": 9999}
+    assert seen == {"db": "runs.db", "transport": "http", "port": 9999, "bind": "127.0.0.1"}
