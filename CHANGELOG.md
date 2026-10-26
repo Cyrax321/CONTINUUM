@@ -69,7 +69,10 @@ Test counts: ~3950 collected on a minimal env.
   path (the retry branches settle via `model_copy`, which skips field
   validators), a malformed identifier supplied by a hook payload is dropped
   instead of failing the observation, and a `TOOL_CALLED` event is reported as
-  `called` rather than `failed`.
+  `called` rather than `failed`. Evidence chains also carry every attempt's
+  identifier (`correlation_ids`), so `--correlation-id` filtering and
+  `correlate_action_events(..., correlation_id=...)` find the chain by any
+  attempt's identifier, not just the latest one.
 
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a

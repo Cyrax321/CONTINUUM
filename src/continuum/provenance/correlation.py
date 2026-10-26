@@ -62,6 +62,7 @@ class EvidenceChain:
     action_id: str | None = None
     action_type: str | None = None
     correlation_id: str | None = None
+    correlation_ids: list[str] = field(default_factory=list)
     action_status: str | None = None
     status: str = "matched"
     action_events: list[dict[str, Any]] = field(default_factory=list)
@@ -75,6 +76,7 @@ class EvidenceChain:
             "action_id": self.action_id,
             "action_type": self.action_type,
             "correlation_id": self.correlation_id,
+            "correlation_ids": list(self.correlation_ids),
             "action_status": self.action_status,
             "status": self.status,
             "action_events": list(self.action_events),
@@ -273,6 +275,7 @@ def correlate_evidence(
         action_id: str | None,
         action_type: str | None,
         correlation_id: str | None,
+        correlation_ids: list[str] | None = None,
         action_status: str | None,
         status: str,
         action_events: list[dict[str, Any]],
@@ -284,6 +287,7 @@ def correlate_evidence(
                 action_id=action_id,
                 action_type=action_type,
                 correlation_id=correlation_id,
+                correlation_ids=list(correlation_ids) if correlation_ids else [],
                 action_status=action_status,
                 status=status,
                 action_events=action_events,
@@ -328,6 +332,7 @@ def correlate_evidence(
             action_id=act_info.get("action_id"),
             action_type=act_info.get("action_type"),
             correlation_id=act_info.get("correlation_id"),
+            correlation_ids=act_info.get("cids") or [],
             action_status=act_info.get("action_status"),
             status=chain_status,
             action_events=act_events,
@@ -350,6 +355,7 @@ def correlate_evidence(
             action_id=act_info.get("action_id"),
             action_type=act_info.get("action_type"),
             correlation_id=cid,
+            correlation_ids=[cid] if cid else [],
             action_status=act_info.get("action_status"),
             status=chain_status,
             action_events=act_info.get("events", []),
@@ -365,6 +371,7 @@ def correlate_evidence(
             action_id=None,
             action_type=None,
             correlation_id=cid,
+            correlation_ids=[cid],
             action_status=None,
             status="unmatched_observation",
             action_events=[],
@@ -389,7 +396,11 @@ def correlate_evidence(
     if action_key is not None:
         chains = [c for c in chains if c.action_key == action_key]
     if correlation_id is not None:
-        chains = [c for c in chains if c.correlation_id == correlation_id]
+        # A retried action collects one CID per attempt and the chain spans
+        # them all, so match on membership, not the display ID (which is the
+        # latest attempt's). Otherwise an operator looking up an earlier
+        # attempt by its own ID is told there is no evidence (review of #1875).
+        chains = [c for c in chains if correlation_id in c.correlation_ids]
 
     return chains
 
