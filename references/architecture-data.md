@@ -297,7 +297,7 @@ gap.
 
 ## 15. CLI commands (56) `src/continuum/cli/main.py`
 
-Every subcommand is registered in `build_parser()` (`cli/main.py:5137`), which
+Every subcommand is registered in `build_parser()` (`cli/main.py:5140`), which
 is the single registry, a verb that is not there is not a command. The full
 set, alphabetically:
 
@@ -312,7 +312,7 @@ set, alphabetically:
 `show-contract`, `start`, `status`, `tree`, `tui`, `validate`,
 `verify`, `watch`.
 
-All accept `--json`, which is a flag on the top-level parser (`cli/main.py:5158`)
+All accept `--json`, which is a flag on the top-level parser (`cli/main.py:5161`)
 rather than one per subcommand.
 
 ---
