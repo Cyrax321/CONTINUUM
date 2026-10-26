@@ -36,7 +36,7 @@ from continuum.checkpoint.policy import (
     PolicyContext,
     default_policy,
 )
-from continuum.events import EventType
+from continuum.events import Event, EventType
 from continuum.models import (
     EnvironmentSnapshot,
     SemanticState,
@@ -405,6 +405,14 @@ class CheckpointManager:
             self.storage.delete_checkpoint(c.checkpoint_id)
             deleted.append(c.checkpoint_id)
         return deleted
+
+    def reinject_constraints(
+        self, run_id: str, *, constraints_path: Path | None = None
+    ) -> list[Event]:
+        """Post-compaction constraint re-injection and verification hook (issue #1413)."""
+        from continuum.security.constraints import reinject_constraint_pins
+
+        return reinject_constraint_pins(self.storage, run_id, constraints_path=constraints_path)
 
 
 def _write_resume_json(run_id: str, checkpoint: StateCheckpoint) -> None:

@@ -1,0 +1,572 @@
+"""Tests for post-compaction constraint re-injection and verification hook (issue #1413)."""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+from pathlib import Path
+
+import pytest
+
+from continuum.checkpoint import CheckpointManager
+from continuum.cli import main
+from continuum.events import EventType
+from continuum.models import ConstraintPinned, Origin, Run
+from continuum.security.constraints import (
+    load_constraints,
+    reinject_constraint_pins,
+)
+from continuum.storage import SQLiteStorage
+
+
+def _write_constraints(path: Path, constraints: list[dict[str, object]]) -> Path:
+    target = path / ".continuum" / "constraints.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps({"constraints": constraints}), encoding="utf-8")
+    return target
+
+
+def test_post_compaction_constraint_reinjection_with_registry(tmp_path: Path) -> None:
+    """Active constraints are verified and re-injected into live tail across compaction."""
+    constraints_file = _write_constraints(
+        tmp_path,
+        [
+            {
+                "id": "no-direct-db-writes",
+                "level": "hard",
+                "predicate": "The agent must not write to the primary database directly.",
+                "scope": ["db.write"],
+            },
+            {
+                "id": "prefer-cache",
+                "level": "soft",
+                "predicate": "Prefer cache over recomputing.",
+            },
+        ],
+    )
+    reg = load_constraints(constraints_file, asserted_by=Origin.HUMAN)
+    expected_digest = reg.digest
+    pred_hash = hashlib.sha256(
+        b"The agent must not write to the primary database directly."
+    ).hexdigest()
+
+    db_path = str(tmp_path / "test.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_compaction_pins"
+
+    storage.create_run(Run(run_id=run_id, goal="test compaction pin re-injection"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        ConstraintPinned(constraint_id="no-direct-db-writes", sha256=pred_hash).model_dump(),
+        source=Origin.HUMAN,
+    )
+
+    manager = CheckpointManager(storage)
+    manager.checkpoint(run_id)
+
+    # Perform compaction with constraints_path
+    report = storage.compact_run(run_id, constraints_path=constraints_file)
+    assert report["archived"] >= 1
+
+    live_events = storage.read_events(run_id)
+    types = [e.type for e in live_events]
+
+    assert EventType.EVENT_LOG_ANCHORED in types
+    assert EventType.CONSTRAINT_PINNED in types
+    assert EventType.CONSTRAINT_PINS_VERIFIED in types
+
+    verified_ev = next(e for e in live_events if e.type is EventType.CONSTRAINT_PINS_VERIFIED)
+    assert verified_ev.payload["verified"] is True
+    assert verified_ev.payload["digest"] == expected_digest
+    assert verified_ev.payload["count"] == 2
+
+    # Projecting with full history preserves both active pins and live tail has them
+    live_pinned = {
+        e.payload["constraint_id"]: e.payload["sha256"]
+        for e in live_events
+        if e.type is EventType.CONSTRAINT_PINNED
+    }
+    assert "no-direct-db-writes" in live_pinned
+    assert "prefer-cache" in live_pinned
+
+    state = CheckpointManager(storage).project_current(run_id, full_history=True)
+    assert "no-direct-db-writes" in state.pins
+    assert "prefer-cache" in state.pins
+    assert state.pins["no-direct-db-writes"].sha256 == pred_hash
+
+
+def test_post_compaction_constraint_dropped_on_hash_mismatch(tmp_path: Path) -> None:
+    """A tampered or mismatched constraint pin is dropped and re-pinned with valid digest."""
+    constraints_file = _write_constraints(
+        tmp_path,
+        [
+            {
+                "id": "strict-security",
+                "level": "hard",
+                "predicate": "Legitimate operator security policy.",
+            }
+        ],
+    )
+    db_path = str(tmp_path / "mismatch.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_mismatch"
+
+    storage.create_run(Run(run_id=run_id, goal="test mismatch"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    # Tampered sha256
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        {"constraint_id": "strict-security", "sha256": "0" * 64},
+        source=Origin.HUMAN,
+    )
+
+    storage.compact_run(run_id, constraints_path=constraints_file)
+
+    live_events = storage.read_events(run_id)
+    types = [e.type for e in live_events]
+
+    assert EventType.CONSTRAINT_PIN_DROPPED in types
+    dropped_ev = next(e for e in live_events if e.type is EventType.CONSTRAINT_PIN_DROPPED)
+    assert dropped_ev.payload["constraint_id"] == "strict-security"
+    assert dropped_ev.payload["reason"] == "digest_mismatch"
+
+    # The legitimate constraint from operator registry was re-pinned
+    legit_hash = hashlib.sha256(b"Legitimate operator security policy.").hexdigest()
+    state = CheckpointManager(storage).project_current(run_id, full_history=True)
+    assert state.pins["strict-security"].sha256 == legit_hash
+
+
+def test_post_compaction_constraint_dropped_when_removed_from_registry(
+    tmp_path: Path,
+) -> None:
+    """A constraint removed from the operator registry is dropped during compaction."""
+    constraints_file = _write_constraints(
+        tmp_path,
+        [
+            {
+                "id": "retained-pin",
+                "level": "hard",
+                "predicate": "This pin remains active.",
+            }
+        ],
+    )
+    db_path = str(tmp_path / "removed.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_removed"
+
+    storage.create_run(Run(run_id=run_id, goal="test removed"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        {"constraint_id": "obsolete-pin", "sha256": "a" * 64},
+        source=Origin.HUMAN,
+    )
+
+    storage.compact_run(run_id, constraints_path=constraints_file)
+
+    live_events = storage.read_events(run_id)
+    types = [e.type for e in live_events]
+
+    assert EventType.CONSTRAINT_PIN_DROPPED in types
+    dropped_ev = next(e for e in live_events if e.type is EventType.CONSTRAINT_PIN_DROPPED)
+    assert dropped_ev.payload["constraint_id"] == "obsolete-pin"
+    assert dropped_ev.payload["reason"] == "not_in_registry"
+
+    state = CheckpointManager(storage).project_current(run_id, full_history=True)
+    assert "obsolete-pin" not in state.pins
+    assert "retained-pin" in state.pins
+
+
+def test_post_compaction_no_registry_preserves_active_pins(tmp_path: Path) -> None:
+    """When no registry file exists, active pins are re-anchored with verified=False."""
+    db_path = str(tmp_path / "no_reg.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_no_reg"
+
+    storage.create_run(Run(run_id=run_id, goal="test no reg"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        {"constraint_id": "stand-alone-pin", "sha256": "f" * 64},
+        source=Origin.HUMAN,
+    )
+
+    # Missing registry file
+    missing_file = tmp_path / "absent_constraints.json"
+    storage.compact_run(run_id, constraints_path=missing_file)
+
+    live_events = storage.read_events(run_id)
+    types = [e.type for e in live_events]
+
+    assert EventType.CONSTRAINT_PINNED in types
+    assert EventType.CONSTRAINT_PINS_VERIFIED in types
+
+    verified_ev = next(e for e in live_events if e.type is EventType.CONSTRAINT_PINS_VERIFIED)
+    assert verified_ev.payload["verified"] is False
+    assert verified_ev.payload["count"] == 1
+
+    state = CheckpointManager(storage).project_current(run_id, full_history=True)
+    assert "stand-alone-pin" in state.pins
+
+
+def test_post_compaction_clean_when_no_constraints_and_no_registry(tmp_path: Path) -> None:
+    """A run with no constraints and no registry file undergoes compaction without extra events."""
+    db_path = str(tmp_path / "clean.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_clean"
+
+    storage.create_run(Run(run_id=run_id, goal="test clean"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    storage.append_event(run_id, EventType.WORK_COMPLETED, {"count": 1})
+
+    missing_file = tmp_path / "absent_constraints.json"
+    storage.compact_run(run_id, constraints_path=missing_file)
+
+    live_events = storage.read_events(run_id)
+    types = {e.type for e in live_events}
+    assert types == {EventType.STATE_CHECKPOINTED, EventType.EVENT_LOG_ANCHORED}
+
+
+def test_reinject_constraint_pins_direct_helper(tmp_path: Path) -> None:
+    """The reinject_constraint_pins helper works on arbitrary storage and run."""
+    constraints_file = _write_constraints(
+        tmp_path,
+        [
+            {
+                "id": "direct-pin",
+                "level": "hard",
+                "predicate": "Direct hook test predicate.",
+            }
+        ],
+    )
+    db_path = str(tmp_path / "direct.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_direct"
+
+    storage.create_run(Run(run_id=run_id, goal="direct test"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "direct"})
+
+    appended = reinject_constraint_pins(storage, run_id, constraints_path=constraints_file)
+    assert len(appended) == 2  # CONSTRAINT_PINNED and CONSTRAINT_PINS_VERIFIED
+    assert appended[0].type is EventType.CONSTRAINT_PINNED
+    assert appended[1].type is EventType.CONSTRAINT_PINS_VERIFIED
+
+
+def test_cmd_precompact_reinjects_constraints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Precompact command re-injects constraint verification marker."""
+    monkeypatch.chdir(tmp_path)
+    _write_constraints(
+        tmp_path,
+        [
+            {
+                "id": "precompact-pin",
+                "level": "hard",
+                "predicate": "Must survive precompact hook.",
+            }
+        ],
+    )
+    db = str(tmp_path / "continuum.db")
+    storage = SQLiteStorage(db)
+    storage.create_run(Run(run_id="run_pre", goal="precompact test"))
+    storage.append_event("run_pre", EventType.RUN_STARTED, {"goal": "precompact"})
+
+    out, err = io.StringIO(), io.StringIO()
+    code = main(["--db", db, "precompact", "--run-id", "run_pre"], out=out, err=err)
+    assert code == 0, err.getvalue()
+
+    live_events = storage.read_events("run_pre")
+    types = [e.type for e in live_events]
+    assert EventType.CONSTRAINT_PINNED in types
+    assert EventType.CONSTRAINT_PINS_VERIFIED in types
+
+
+def test_malformed_constraints_file_does_not_abort_compaction(tmp_path: Path) -> None:
+    """A corrupted constraints.json does not abort compaction after archive commits."""
+    bad_file = tmp_path / ".continuum" / "constraints.json"
+    bad_file.parent.mkdir(parents=True, exist_ok=True)
+    bad_file.write_text("{not valid json", encoding="utf-8")
+
+    db_path = str(tmp_path / "test_malformed.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_malformed"
+
+    storage.create_run(Run(run_id=run_id, goal="test malformed registry"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        ConstraintPinned(constraint_id="p1", sha256="a" * 64).model_dump(),
+        source=Origin.HUMAN,
+    )
+
+    manager = CheckpointManager(storage)
+    manager.checkpoint(run_id)
+
+    # Compaction must succeed rather than crash
+    report = storage.compact_run(run_id, constraints_path=bad_file)
+    assert report["archived"] >= 1
+
+    live = storage.read_events(run_id)
+    types = [e.type for e in live]
+    assert EventType.CONSTRAINT_PINS_VERIFIED in types
+    verified_ev = next(e for e in live if e.type is EventType.CONSTRAINT_PINS_VERIFIED)
+    assert verified_ev.payload["verified"] is False
+
+
+def test_retracted_constraint_is_not_reinstated_across_compaction(tmp_path: Path) -> None:
+    """An explicitly retracted constraint is not resurrected by post-compaction hook."""
+    constraints_file = _write_constraints(
+        tmp_path,
+        [
+            {
+                "id": "retracted-rule",
+                "level": "hard",
+                "predicate": "A rule that was later retracted.",
+            }
+        ],
+    )
+    pred_hash = hashlib.sha256(b"A rule that was later retracted.").hexdigest()
+
+    db_path = str(tmp_path / "test_retract.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_retract"
+
+    storage.create_run(Run(run_id=run_id, goal="test retraction persistence"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        ConstraintPinned(constraint_id="retracted-rule", sha256=pred_hash).model_dump(),
+        source=Origin.HUMAN,
+    )
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_RETRACTED,
+        {"constraint_id": "retracted-rule"},
+        source=Origin.HUMAN,
+    )
+
+    manager = CheckpointManager(storage)
+    manager.checkpoint(run_id)
+
+    report = storage.compact_run(run_id, constraints_path=constraints_file)
+    assert report["archived"] >= 1
+
+    live = storage.read_events(run_id)
+    pinned_events = [e for e in live if e.type is EventType.CONSTRAINT_PINNED]
+    # Retracted pin must not be re-pinned in the live tail
+    assert not any(e.payload.get("constraint_id") == "retracted-rule" for e in pinned_events)
+
+    state = CheckpointManager(storage).project_current(run_id, full_history=True)
+    assert "retracted-rule" not in state.pins
+
+
+def test_unverified_repin_preserves_external_agent_provenance(tmp_path: Path) -> None:
+    """Unverified pins keep their original provenance origin across compaction."""
+    bad_file = tmp_path / "broken_constraints.json"
+    bad_file.write_text("{invalid json", encoding="utf-8")
+
+    db_path = str(tmp_path / "test_provenance.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_external_agent_pin"
+
+    storage.create_run(Run(run_id=run_id, goal="test unverified provenance preservation"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        ConstraintPinned(constraint_id="agent-rule", sha256="b" * 64).model_dump(),
+        source=Origin.EXTERNAL_AGENT,
+    )
+
+    manager = CheckpointManager(storage)
+    manager.checkpoint(run_id)
+
+    report = storage.compact_run(run_id, constraints_path=bad_file)
+    assert report["archived"] >= 1
+
+    live = storage.read_events(run_id)
+    reanchored = [
+        e
+        for e in live
+        if e.type is EventType.CONSTRAINT_PINNED and e.payload.get("constraint_id") == "agent-rule"
+    ]
+    assert len(reanchored) == 1
+    assert reanchored[0].source is Origin.EXTERNAL_AGENT
+
+    state = CheckpointManager(storage).project_current(run_id, full_history=True)
+    assert "agent-rule" in state.pins
+    assert state.pins["agent-rule"].provenance.origin is Origin.EXTERNAL_AGENT
+
+
+def test_dropped_pin_restored_when_added_back_to_registry(tmp_path: Path) -> None:
+    """A rule dropped because it was absent from registry is restored when added back."""
+    different_file = _write_constraints(
+        tmp_path,
+        [
+            {
+                "id": "other-rule",
+                "level": "hard",
+                "predicate": "Another rule in registry.",
+            }
+        ],
+    )
+    pred_hash = hashlib.sha256(b"Restorable rule text.").hexdigest()
+
+    db_path = str(tmp_path / "test_restore_dropped.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_restore_dropped"
+
+    storage.create_run(Run(run_id=run_id, goal="test dropped pin restoration"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        ConstraintPinned(constraint_id="temp-dropped", sha256=pred_hash).model_dump(),
+        source=Origin.HUMAN,
+    )
+
+    manager = CheckpointManager(storage)
+    manager.checkpoint(run_id)
+
+    # First compaction: temp-dropped is not in registry, so it is dropped
+    storage.compact_run(run_id, constraints_path=different_file)
+    live1 = storage.read_events(run_id)
+    assert any(
+        e.type is EventType.CONSTRAINT_PIN_DROPPED
+        and e.payload.get("constraint_id") == "temp-dropped"
+        for e in live1
+    )
+
+    # Operator restores temp-dropped rule to registry
+    restored_file = _write_constraints(
+        tmp_path,
+        [
+            {
+                "id": "other-rule",
+                "level": "hard",
+                "predicate": "Another rule in registry.",
+            },
+            {
+                "id": "temp-dropped",
+                "level": "hard",
+                "predicate": "Restorable rule text.",
+            },
+        ],
+    )
+
+    # Next reinjection should successfully restore the pin
+    appended = reinject_constraint_pins(
+        storage, run_id, constraints_path=restored_file, asserted_by=Origin.HUMAN
+    )
+    assert any(
+        e.type is EventType.CONSTRAINT_PINNED and e.payload.get("constraint_id") == "temp-dropped"
+        for e in appended
+    )
+
+    state = CheckpointManager(storage).project_current(run_id, full_history=True)
+    assert "temp-dropped" in state.pins
+
+
+def test_reinject_skips_redundant_audit_event_when_no_change(tmp_path: Path) -> None:
+    """Re-running reinject_constraint_pins without changes does not append duplicate audit events."""
+    constraints_file = _write_constraints(
+        tmp_path,
+        [
+            {
+                "id": "pin-stable",
+                "level": "hard",
+                "predicate": "Stable invariant rule.",
+            }
+        ],
+    )
+    db_path = str(tmp_path / "test_dedup.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_dedup_audit"
+
+    storage.create_run(Run(run_id=run_id, goal="test audit dedup"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+
+    first_appended = reinject_constraint_pins(
+        storage, run_id, constraints_path=constraints_file, asserted_by=Origin.HUMAN
+    )
+    assert any(e.type is EventType.CONSTRAINT_PINS_VERIFIED for e in first_appended)
+
+    # Re-running immediately with unchanged registry and pins must not append redundant records
+    second_appended = reinject_constraint_pins(
+        storage, run_id, constraints_path=constraints_file, asserted_by=Origin.HUMAN
+    )
+    assert second_appended == []
+
+
+def test_compaction_surfaces_constraint_reinjection_warnings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compaction returns warning entries when constraint re-injection encounters an error."""
+    db_path = str(tmp_path / "test_warn.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_warn"
+
+    storage.create_run(Run(run_id=run_id, goal="test warn"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test warn"})
+    for i in range(10):
+        storage.append_event(run_id, EventType.WORK_COMPLETED, {"item": i})
+
+    def _fail_reinject(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("simulated storage failure during re-pin")
+
+    monkeypatch.setattr(
+        CheckpointManager,
+        "reinject_constraints",
+        _fail_reinject,
+    )
+
+    res = storage.compact_run(run_id, through_sequence=5)
+    assert res.get("archived") == 5
+    assert "warnings" in res
+    assert any("simulated storage failure" in w for w in res["warnings"])
+
+
+def test_precompact_surfaces_broken_registry_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed constraints.json records registry_error and prints failure in precompact."""
+    broken_file = tmp_path / "constraints.json"
+    broken_file.write_text("{invalid json", encoding="utf-8")
+
+    import continuum.security.constraints as sc_module
+
+    monkeypatch.setattr(sc_module, "DEFAULT_CONSTRAINTS_PATH", broken_file)
+
+    db_path = str(tmp_path / "test_broken.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_broken_reg"
+
+    storage.create_run(Run(run_id=run_id, goal="test broken registry"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    pred_hash = hashlib.sha256(b"rule").hexdigest()
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        {"constraint_id": "rule-1", "sha256": pred_hash},
+        source=Origin.HUMAN,
+    )
+
+    out = io.StringIO()
+    err = io.StringIO()
+    code = main(["--db", db_path, "precompact", "--run-id", run_id], out=out, err=err)
+    assert code == 0
+    events = storage.read_events(run_id)
+    verified_events = [e for e in events if e.type is EventType.CONSTRAINT_PINS_VERIFIED]
+    assert verified_events
+    last_verified = verified_events[-1]
+    assert "registry_error" in last_verified.payload
+    assert "constraint registry:" in out.getvalue()

@@ -87,6 +87,18 @@ Test counts: ~3950 collected on a minimal env.
   and the reviewer fatigue telemetry (#1411) are its wired consumers, so the
   scorer is shipped and tested on its own rather than arriving with a heuristic
   that moves while the queue is built.
+
+- **Post-compaction constraint re-injection and verification hook (#1413).**
+  When log compaction or harness pre-compaction executes (`continuum compact-run`
+  or `continuum precompact`), early event history is archived and context pressure
+  is reduced. Active constraint pins are now verified against the operator registry
+  at `.continuum/constraints.json` and re-injected into the live anchor so that
+  resuming agent sessions continue operating under governing invariants without
+  governance decay. Two new event types record the audit fact in the hash-chained log:
+  `CONSTRAINT_PINS_VERIFIED` (recording active constraint digest, count, and verification
+  status) and `CONSTRAINT_PIN_DROPPED` (emitted when an active pin fails verification
+  or cannot be re-anchored). A public `reinject_constraint_pins` helper in
+  `continuum.security.constraints` is exposed for hooks and curation workflows.
 ### Fixed
 
 - **Benchmark report timestamps are timezone-aware UTC (#1823).** The Phase 6,
