@@ -139,7 +139,7 @@ class Storage(ABC):
         through_sequence: int | None = None,
         environment: EnvironmentSnapshot | None = None,
         constraints_path: Path | None = None,
-    ) -> dict[str, int]:
+    ) -> dict[str, Any]:
         """Archive the pre-anchor prefix of a run's log (issue #239).
 
         Only meaningful on engines with ``events_archive``; callers check

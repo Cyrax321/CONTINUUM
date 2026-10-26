@@ -413,12 +413,14 @@ def reinject_constraint_pins(
     state = CheckpointManager(storage).project_current(run_id, full_history=True)
     active_pins = dict(state.pins)
 
+    registry_error: str | None = None
     try:
         registry = load_constraints_or_none(constraints_path, asserted_by=asserted_by)
-    except Exception:
+    except Exception as exc:
         registry = None
+        registry_error = str(exc)
 
-    if registry is None and not active_pins:
+    if registry is None and not active_pins and registry_error is None:
         return []
 
     appended: list[Event] = []
@@ -503,8 +505,25 @@ def reinject_constraint_pins(
                 appended.append(ev)
                 live_pinned[pin_id] = pin_sha
 
-        # Append audit verification record
+        # Append audit verification record if changed or not already present in live tail
         sorted_verified = sorted(verified_pins, key=lambda x: x[0])
+        last = next(
+            (
+                e
+                for e in reversed(live_events)
+                if e.type is EventType.CONSTRAINT_PINS_VERIFIED and isinstance(e.payload, dict)
+            ),
+            None,
+        )
+        if (
+            not appended
+            and last is not None
+            and last.payload.get("digest") == registry.digest
+            and last.payload.get("count") == len(sorted_verified)
+            and last.payload.get("verified") is True
+        ):
+            return appended
+
         ev_verified = storage.append_event(
             run_id,
             EventType.CONSTRAINT_PINS_VERIFIED,
@@ -522,7 +541,7 @@ def reinject_constraint_pins(
         appended.append(ev_verified)
         return appended
 
-    # registry is None, but active_pins exists
+    # registry is None, but active_pins exists or registry loading failed
     for pin in active_pins.values():
         if live_pinned.get(pin.constraint_id) != pin.sha256:
             ev = storage.append_event(
@@ -535,17 +554,40 @@ def reinject_constraint_pins(
             live_pinned[pin.constraint_id] = pin.sha256
 
     sorted_pins = sorted(active_pins.values(), key=lambda p: p.constraint_id)
+    expected_digest = stable_hash(
+        [{"constraint_id": p.constraint_id, "sha256": p.sha256} for p in sorted_pins]
+    )
+    last = next(
+        (
+            e
+            for e in reversed(live_events)
+            if e.type is EventType.CONSTRAINT_PINS_VERIFIED and isinstance(e.payload, dict)
+        ),
+        None,
+    )
+    if (
+        not appended
+        and registry_error is None
+        and last is not None
+        and last.payload.get("digest") == expected_digest
+        and last.payload.get("count") == len(sorted_pins)
+        and last.payload.get("verified") is False
+    ):
+        return appended
+
+    payload: dict[str, Any] = {
+        "digest": expected_digest,
+        "count": len(sorted_pins),
+        "verified": False,
+        "pins": [{"constraint_id": p.constraint_id, "sha256": p.sha256} for p in sorted_pins],
+    }
+    if registry_error is not None:
+        payload["registry_error"] = registry_error
+
     ev_verified = storage.append_event(
         run_id,
         EventType.CONSTRAINT_PINS_VERIFIED,
-        {
-            "digest": stable_hash(
-                [{"constraint_id": p.constraint_id, "sha256": p.sha256} for p in sorted_pins]
-            ),
-            "count": len(sorted_pins),
-            "verified": False,
-            "pins": [{"constraint_id": p.constraint_id, "sha256": p.sha256} for p in sorted_pins],
-        },
+        payload,
         source=asserted_by,
     )
     appended.append(ev_verified)

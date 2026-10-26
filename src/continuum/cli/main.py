@@ -2963,6 +2963,12 @@ def cmd_precompact(args: argparse.Namespace, storage: Storage, out: Any, err: An
     written, failures = _write_precompact_snapshots(storage, run_id)
     if reinject_failure:
         failures.append(reinject_failure)
+    for e in reversed(storage.read_events(run_id)):
+        if e.type is EventType.CONSTRAINT_PINS_VERIFIED and isinstance(e.payload, dict):
+            reg_err = e.payload.get("registry_error")
+            if reg_err:
+                failures.append(f"constraint registry: {reg_err}")
+            break
 
     lines = [
         f"Checkpoint {checkpoint.checkpoint_id} sealed at v{checkpoint.version} "
