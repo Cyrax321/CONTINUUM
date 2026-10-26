@@ -474,3 +474,99 @@ def test_dropped_pin_restored_when_added_back_to_registry(tmp_path: Path) -> Non
 
     state = CheckpointManager(storage).project_current(run_id, full_history=True)
     assert "temp-dropped" in state.pins
+
+
+def test_reinject_skips_redundant_audit_event_when_no_change(tmp_path: Path) -> None:
+    """Re-running reinject_constraint_pins without changes does not append duplicate audit events."""
+    constraints_file = _write_constraints(
+        tmp_path,
+        [
+            {
+                "id": "pin-stable",
+                "level": "hard",
+                "predicate": "Stable invariant rule.",
+            }
+        ],
+    )
+    db_path = str(tmp_path / "test_dedup.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_dedup_audit"
+
+    storage.create_run(Run(run_id=run_id, goal="test audit dedup"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+
+    first_appended = reinject_constraint_pins(
+        storage, run_id, constraints_path=constraints_file, asserted_by=Origin.HUMAN
+    )
+    assert any(e.type is EventType.CONSTRAINT_PINS_VERIFIED for e in first_appended)
+
+    # Re-running immediately with unchanged registry and pins must not append redundant records
+    second_appended = reinject_constraint_pins(
+        storage, run_id, constraints_path=constraints_file, asserted_by=Origin.HUMAN
+    )
+    assert second_appended == []
+
+
+def test_compaction_surfaces_constraint_reinjection_warnings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compaction returns warning entries when constraint re-injection encounters an error."""
+    db_path = str(tmp_path / "test_warn.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_warn"
+
+    storage.create_run(Run(run_id=run_id, goal="test warn"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test warn"})
+    for i in range(10):
+        storage.append_event(run_id, EventType.WORK_COMPLETED, {"item": i})
+
+    def _fail_reinject(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("simulated storage failure during re-pin")
+
+    monkeypatch.setattr(
+        CheckpointManager,
+        "reinject_constraints",
+        _fail_reinject,
+    )
+
+    res = storage.compact_run(run_id, through_sequence=5)
+    assert res.get("archived") == 5
+    assert "warnings" in res
+    assert any("simulated storage failure" in w for w in res["warnings"])
+
+
+def test_precompact_surfaces_broken_registry_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed constraints.json records registry_error and prints failure in precompact."""
+    broken_file = tmp_path / "constraints.json"
+    broken_file.write_text("{invalid json", encoding="utf-8")
+
+    import continuum.security.constraints as sc_module
+
+    monkeypatch.setattr(sc_module, "DEFAULT_CONSTRAINTS_PATH", broken_file)
+
+    db_path = str(tmp_path / "test_broken.db")
+    storage = SQLiteStorage(db_path)
+    run_id = "run_broken_reg"
+
+    storage.create_run(Run(run_id=run_id, goal="test broken registry"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    pred_hash = hashlib.sha256(b"rule").hexdigest()
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        {"constraint_id": "rule-1", "sha256": pred_hash},
+        source=Origin.HUMAN,
+    )
+
+    out = io.StringIO()
+    err = io.StringIO()
+    code = main(["--db", db_path, "precompact", "--run-id", run_id], out=out, err=err)
+    assert code == 0
+    events = storage.read_events(run_id)
+    verified_events = [e for e in events if e.type is EventType.CONSTRAINT_PINS_VERIFIED]
+    assert verified_events
+    last_verified = verified_events[-1]
+    assert "registry_error" in last_verified.payload
+    assert "constraint registry:" in out.getvalue()
