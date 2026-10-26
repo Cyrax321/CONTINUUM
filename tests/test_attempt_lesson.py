@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from continuum.events import EventType
 from continuum.interchange import export_semantic_state, import_semantic_state
 from continuum.models import AttemptLesson, Origin, Run
-from continuum.recovery.summary import build_attempt_lesson
+from continuum.recovery.summary import build_attempt_lesson, render_attempt_lesson
 from continuum.state.semantic import project
 from continuum.storage import SQLiteStorage
 
@@ -501,3 +501,156 @@ def test_property_ordering_deterministic_by_created_at() -> None:
         assert a1.falsified == "first"
     finally:
         storage.close()
+
+
+def test_build_attempt_lesson_adaptive_truncation_under_size_budget() -> None:
+    """Adaptive truncation progressively trims fields and evidence under 2048 bytes."""
+    from continuum.checkpoint.manager import RestoredRun
+    from continuum.environment.diff import EnvironmentDiff
+    from continuum.models import (
+        Component,
+        ComponentValidationEntry,
+        RecoveryContract,
+        RecoverySafety,
+        StateStatus,
+        StateValidationResult,
+    )
+    from continuum.recovery.engine import RecoveryDecision
+    from continuum.recovery.planner import RepairPlan
+    from continuum.state.validator import ValidationOutcome
+
+    storage = _make_storage()
+    try:
+        state = project("run_1", storage.read_events("run_1"))
+
+        # Case 1: Field-level halving brings total bytes under 2048 bytes
+        single_status = [
+            ComponentValidationEntry(
+                component=Component.EXTERNAL_DEPENDENCY,
+                component_id=f"dep_{i}",
+                status=StateStatus.STALE,
+                detail="x" * 512,
+            )
+            for i in range(2)
+        ]
+        single_report = StateValidationResult(
+            run_id="run_1",
+            statuses=single_status,
+            safe_to_resume=False,
+            reason="y" * 512,
+        )
+        single_validation = ValidationOutcome(
+            state=state, report=single_report, environment_diff=EnvironmentDiff()
+        )
+        contract = RecoveryContract(
+            run_id="run_1",
+            checkpoint_version=0,
+            recovery_status=RecoverySafety.REQUIRES_REPAIR,
+            verified=[],
+            invalidated=[],
+            required_actions=[],
+        )
+        restored = RestoredRun(
+            run_id="run_1", state=state, checkpoint=None, pending_events=0, replayed=False
+        )
+        decision_single = RecoveryDecision(
+            run_id="run_1",
+            mode="repair_and_resume",  # type: ignore[arg-type]
+            contract=contract,
+            plan=RepairPlan(steps=[]),
+            validation=single_validation,
+            restored=restored,
+            uncertain_actions=(),
+            rationale=("z" * 512,),
+        )
+        lesson_single = build_attempt_lesson(decision_single)
+        total_single = len(
+            json.dumps(lesson_single.model_dump(mode="json"), sort_keys=True).encode()
+        )
+        assert total_single <= 2048
+        assert len(lesson_single.falsified) < 512
+
+        # Case 2: 8 entries with 512-byte details creates >4KB of raw evidence and fields
+        statuses = [
+            ComponentValidationEntry(
+                component=Component.EXTERNAL_DEPENDENCY,
+                component_id=f"dep_{i}",
+                status=StateStatus.STALE,
+                detail="x" * 512,
+            )
+            for i in range(8)
+        ]
+        report = StateValidationResult(
+            run_id="run_1",
+            statuses=statuses,
+            safe_to_resume=False,
+            reason="stale dependency failure",
+        )
+        validation = ValidationOutcome(
+            state=state, report=report, environment_diff=EnvironmentDiff()
+        )
+        decision_multi = RecoveryDecision(
+            run_id="run_1",
+            mode="repair_and_resume",  # type: ignore[arg-type]
+            contract=contract,
+            plan=RepairPlan(steps=[]),
+            validation=validation,
+            restored=restored,
+            uncertain_actions=(),
+            rationale=("y" * 512,),
+        )
+        lesson_multi = build_attempt_lesson(decision_multi)
+        total_multi = len(json.dumps(lesson_multi.model_dump(mode="json"), sort_keys=True).encode())
+        assert total_multi <= 2048
+        # Adaptive loop reduced evidence list from 8 items down to fit within the cap
+        assert len(lesson_multi.source_evidence) < 8
+    finally:
+        storage.close()
+
+
+def test_render_attempt_lesson_dict_input() -> None:
+    """render_attempt_lesson handles dictionary inputs with all summary fields."""
+    raw_lesson = {
+        "attempt_id": "attempt_1",
+        "falsified": "cache invalidated by external service",
+        "env_delta": "redis port changed from 6379 to 6380",
+        "scar_action_ids": ["act_flush", "act_sync"],
+        "next_avoid": "avoid blind cache eviction without ping",
+        "source_evidence": ["log line 1", "log line 2", "log line 3", "log line 4"],
+    }
+    lines = render_attempt_lesson(raw_lesson)
+    assert lines[0] == "attempt attempt_1: cache invalidated by external service"
+    assert lines[1] == "env delta: redis port changed from 6379 to 6380"
+    assert lines[2] == "scar actions: act_flush, act_sync"
+    assert lines[3] == "next avoid: avoid blind cache eviction without ping"
+    assert lines[4] == "evidence: log line 1"
+    assert lines[5] == "evidence: log line 2"
+    assert lines[6] == "evidence: log line 3"
+    assert len(lines) == 7
+
+
+def test_render_attempt_lesson_empty_attempt_id_with_falsified() -> None:
+    """render_attempt_lesson formats falsified message when attempt_id is empty."""
+    dict_lesson = {
+        "attempt_id": "",
+        "falsified": "hypothesis refuted",
+    }
+    lines = render_attempt_lesson(dict_lesson)
+    assert lines == ["falsified: hypothesis refuted"]
+
+    # When both attempt_id and falsified are empty, skips both lines
+    delta_only = {
+        "attempt_id": "",
+        "falsified": "",
+        "env_delta": "network timeout",
+    }
+    delta_lines = render_attempt_lesson(delta_only)
+    assert delta_lines == ["env delta: network timeout"]
+
+    # When attempt_id is set but falsified is empty
+    id_only = {
+        "attempt_id": "attempt_42",
+        "falsified": "",
+    }
+    id_lines = render_attempt_lesson(id_only)
+    assert id_lines == ["attempt attempt_42"]
