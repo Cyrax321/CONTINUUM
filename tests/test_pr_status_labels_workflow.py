@@ -165,7 +165,10 @@ def _run_apply_script(tmp_path: Path, intent: dict | None) -> list[str]:
 
     ``intent`` is written to ``intent.json`` in the working directory the
     script reads it from; ``None`` leaves the file absent so the missing
-    artifact path is exercised.
+    artifact path is exercised. Stale files from earlier runs in the same
+    directory are cleared first, otherwise a ``None`` run would read the
+    previous run's intent and take the skip path instead of the missing
+    artifact branch.
     """
     node = shutil.which("node")
     if node is None:
@@ -174,8 +177,12 @@ def _run_apply_script(tmp_path: Path, intent: dict | None) -> list[str]:
     program = "\n".join([_HARNESS_PRELUDE, _apply_script(), _HARNESS_POSTLUDE])
     program_file = tmp_path / "apply_harness.js"
     program_file.write_text(program, encoding="utf-8")
+    intent_file = tmp_path / "intent.json"
+    calls_file = tmp_path / "calls.json"
+    intent_file.unlink(missing_ok=True)
+    calls_file.unlink(missing_ok=True)
     if intent is not None:
-        (tmp_path / "intent.json").write_text(json.dumps(intent), encoding="utf-8")
+        intent_file.write_text(json.dumps(intent), encoding="utf-8")
 
     proc = subprocess.run(
         [node, program_file.name],
@@ -185,7 +192,6 @@ def _run_apply_script(tmp_path: Path, intent: dict | None) -> list[str]:
         cwd=tmp_path,
     )
     assert proc.returncode == 0, f"apply script crashed:\n{proc.stderr[-2000:]}"
-    calls_file = tmp_path / "calls.json"
     assert calls_file.is_file(), "harness wrote no call log"
     return json.loads(calls_file.read_text(encoding="utf-8"))
 
