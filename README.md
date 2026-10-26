@@ -508,7 +508,7 @@ All wiring is host-side; the model's cooperation is optional:
 continuum hooks install claude-code --with-gate   # coding CLIs: evidence, briefing, gate
 continuum gateway --port 8765                     # enforcing HTTP proxy for everything else
 provider.add_span_processor(continuum.otel.make_span_processor(storage))  # OTel to evidence
-continuum-mcp                                     # anything MCP-capable: the twelve-tool server
+continuum-mcp                                     # anything MCP-capable: the thirteen-tool server
 continuum briefing                                # session-start context injection
 continuum budget <run_id>                         # retry-budget usage report
 continuum tree <parent_run_id>                    # multi-agent hierarchy view
