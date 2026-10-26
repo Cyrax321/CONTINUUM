@@ -368,3 +368,156 @@ def test_get_memory_provenance_cross_run_observation_priority() -> None:
     assert prov is not None
     assert prov["observation_event"] is not None
     assert prov["observation_event"].payload.get("source") == "run_1_source"
+
+
+def test_get_memory_provenance_cross_run_key_collision_disambiguation() -> None:
+    """Exact key claimed in multiple runs prompts caller to disambiguate with run_id."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="run 1"))
+    storage.create_run(Run(run_id="run_2", goal="run 2"))
+
+    ledger1 = ActionLedger(storage, "run_1")
+    ledger1.claim("mem_write", key="mem:colliding_key", origin_observation_digest="a" * 64)
+
+    ledger2 = ActionLedger(storage, "run_2")
+    ledger2.claim("mem_write", key="mem:colliding_key", origin_observation_digest="b" * 64)
+
+    with pytest.raises(LedgerError) as exc_info:
+        get_memory_provenance(storage, "mem:colliding_key")
+
+    err_msg = str(exc_info.value)
+    assert "the key exists in runs ['run_1', 'run_2']; pass run_id" in err_msg
+    assert "run_1:mem:colliding_key" in err_msg
+    assert "run_2:mem:colliding_key" in err_msg
+
+    # Supplying run_id disambiguates the lookup cleanly
+    prov1 = get_memory_provenance(storage, "mem:colliding_key", run_id="run_1")
+    assert prov1 is not None
+    assert prov1["run_id"] == "run_1"
+    assert prov1["origin_digest"] == "a" * 64
+
+    prov2 = get_memory_provenance(storage, "mem:colliding_key", run_id="run_2")
+    assert prov2 is not None
+    assert prov2["run_id"] == "run_2"
+    assert prov2["origin_digest"] == "b" * 64
+
+
+def test_get_memory_provenance_unreadable_run_on_miss_raises_error() -> None:
+    """When a record misses and an inspected run is corrupted, raise LedgerError."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_corrupt", goal="corrupted"))
+
+    real_read_all_events = storage.read_all_events
+
+    def _flaky_read(rid: str) -> Any:
+        if rid == "run_corrupt":
+            raise CorruptedRecord("corrupted log record")
+        return real_read_all_events(rid)
+
+    storage.read_all_events = _flaky_read  # type: ignore[method-assign,assignment]
+
+    with pytest.raises(LedgerError, match="could not read runs.*run_corrupt"):
+        get_memory_provenance(storage, "nonexistent_key")
+
+
+def test_get_memory_provenance_arguments_record_key_match() -> None:
+    """Matches candidate via action.arguments['record_key']."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="test"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "test"})
+
+    ledger = ActionLedger(storage, "run_1")
+    ledger.claim(
+        "custom_op",
+        {"record_key": "special_key_in_args"},
+        key="mem:other_name",
+        origin_observation_digest="f" * 64,
+    )
+
+    prov = get_memory_provenance(storage, "special_key_in_args")
+    assert prov is not None
+    assert prov["origin_digest"] == "f" * 64
+
+
+def test_get_memory_provenance_foreign_action_index_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Action index fallback locates external action by idempotency key."""
+    storage = SQLiteStorage(":memory:")
+    monkeypatch.setattr(storage, "supports_action_index", True)
+
+    idem_key = "e" * 64
+    act = Action(
+        action_id="act_ext_1",
+        run_id="run_external",
+        action_type="mem_write",
+        origin_observation_digest="d" * 64,
+    )
+
+    def _mock_foreign(k: str, exclude_run: str = "") -> Action | None:
+        return act if k == idem_key else None
+
+    monkeypatch.setattr(storage, "foreign_action", _mock_foreign)
+
+    prov = get_memory_provenance(storage, idem_key)
+    assert prov is not None
+    assert prov["run_id"] == "run_external"
+    assert prov["action"].action_id == "act_ext_1"
+    assert prov["origin_digest"] == "d" * 64
+
+
+def test_get_memory_provenance_foreign_action_index_corrupted_raises_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A corrupted record encountered during action index fallback raises LedgerError."""
+    storage = SQLiteStorage(":memory:")
+    monkeypatch.setattr(storage, "supports_action_index", True)
+
+    def _bad_foreign(k: str, exclude_run: str = "") -> Any:
+        raise CorruptedRecord("corrupted index row")
+
+    monkeypatch.setattr(storage, "foreign_action", _bad_foreign)
+
+    with pytest.raises(LedgerError, match="could not read runs"):
+        get_memory_provenance(storage, "a" * 64)
+
+
+def test_get_memory_provenance_cross_run_observation_fallback_resolution() -> None:
+    """Observation located in another run resolves when target run does not have it."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_act", goal="action run"))
+    storage.create_run(Run(run_id="run_obs", goal="observation run"))
+
+    digest = "7" * 64
+    storage.append_event(
+        "run_obs",
+        EventType.PERCEPTION_OBSERVED,
+        {"content_hash": digest, "source": "remote_obs"},
+    )
+
+    ledger = ActionLedger(storage, "run_act")
+    ledger.claim("mem_write", key="mem:cross_obs", origin_observation_digest=digest)
+
+    prov = get_memory_provenance(storage, "mem:cross_obs", run_id="run_act")
+    assert prov is not None
+    assert prov["observation_event"] is not None
+    assert prov["observation_event"].payload.get("source") == "remote_obs"
+
+
+def test_get_memory_provenance_handles_corrupt_action_payload() -> None:
+    """Events with malformed action payloads are skipped without breaking lookup."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="test"))
+
+    ledger = ActionLedger(storage, "run_1")
+    ledger.claim("mem_write", key="mem:valid_key", origin_observation_digest="3" * 64)
+
+    storage.append_event(
+        "run_1",
+        EventType.ACTION_RECORDED,
+        {"action": "not-a-valid-action-dict", "key": "invalid_key"},
+    )
+
+    prov = get_memory_provenance(storage, "mem:valid_key")
+    assert prov is not None
+    assert prov["rendered_key"] == "mem:valid_key"
