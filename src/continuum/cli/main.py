@@ -1490,6 +1490,26 @@ def _anchor_on_recovery(
     )
 
 
+def _workload_provider_name(args: argparse.Namespace) -> str | None:
+    """The workload identity provider an attest command should use.
+
+    ``--spiffe`` is an operator request for the SPIFFE Workload API, so it must
+    not fall back to ``CONTINUUM_WORKLOAD_PROVIDER``: a leftover 'fake' in the
+    environment (from tests, a container, or CI) would silently swap the
+    live-SVID check for the fake provider, which accepts its own hardcoded
+    claim that anyone holding a signing key can self-assert.
+    """
+    provider_name = getattr(args, "workload_provider", None)
+    if getattr(args, "spiffe", False):
+        if provider_name and provider_name.lower() != "spiffe":
+            raise ValueError(
+                "--spiffe requires the SPIFFE provider, "
+                f"but --workload-provider is {provider_name!r}"
+            )
+        return "spiffe"
+    return provider_name
+
+
 def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
     """Report how a run may resume.
 
@@ -1578,9 +1598,9 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         live_hash = events[-1].hash if events else None
 
         req_wid = getattr(args, "require_workload_identity", None)
-        provider_name = getattr(args, "workload_provider", None)
+        provider_name = _workload_provider_name(args)
         id_provider = None
-        if provider_name or getattr(args, "spiffe", False):
+        if provider_name:
             from continuum.security.workload_identity import resolve_workload_provider
 
             try:
@@ -4899,7 +4919,7 @@ def cmd_attest(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             resolve_workload_provider,
         )
 
-        provider_name = getattr(args, "workload_provider", None)
+        provider_name = _workload_provider_name(args)
         try:
             provider = resolve_workload_provider(provider_name)
             wid = provider.get_identity()
@@ -4952,7 +4972,7 @@ def cmd_attest_verify(args: argparse.Namespace, storage: Storage, out: Any, err:
 
     expected_wid = getattr(args, "expected_workload_identity", None)
     require_wid = getattr(args, "require_workload_identity", False)
-    provider_name = getattr(args, "workload_provider", None)
+    provider_name = _workload_provider_name(args)
 
     identity_provider = None
     if getattr(args, "spiffe", False) or provider_name:

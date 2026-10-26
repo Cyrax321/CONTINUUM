@@ -575,3 +575,66 @@ def test_cli_resume_identity_flags_require_attest(tmp_path: Path) -> None:
         code, _, err = run("--db", db_path, "resume", "run_flags", *flag_args)
         assert code == ExitCode.ERROR, err
         assert "require --attest" in err
+
+
+def test_cli_spiffe_flag_cannot_be_overridden_by_fake_env_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--spiffe must reach the SPIFFE Workload API even with CONTINUUM_WORKLOAD_PROVIDER=fake.
+
+    resolve_workload_provider falls back to that variable, so the flag has to
+    pin the provider to 'spiffe': a leftover value would otherwise swap the
+    live-SVID check for the fake provider, which accepts its own hardcoded
+    claim that any signing-key holder can self-assert.
+    """
+    from continuum.cli import ExitCode
+    from tests.test_cli import run
+
+    # The fake provider's default identity is exactly the claim the fake check
+    # would accept, and so what --spiffe must not be fooled by.
+    db_path = str(tmp_path / "env.db")
+    attest_file = _seal_attestation(
+        db_path, tmp_path, "spiffe://example.org/ns/default/sa/test-agent"
+    )
+
+    monkeypatch.setenv("CONTINUUM_WORKLOAD_PROVIDER", "fake")
+    monkeypatch.delenv("SPIFFE_ENDPOINT_SOCKET", raising=False)
+
+    code, out, _ = run(
+        "--db",
+        db_path,
+        "attest-verify",
+        "run_seal",
+        "--attest",
+        str(attest_file),
+        "--spiffe",
+    )
+    # No Workload API socket is configured, so the SPIFFE provider fails closed
+    # instead of vouching for the claim (and the fake provider is never asked).
+    assert code == ExitCode.CORRUPTED
+    assert "IDENTITY_MISMATCH" in out
+
+
+def test_cli_spiffe_rejects_conflicting_workload_provider(tmp_path: Path) -> None:
+    """--spiffe with a different --workload-provider is a hard error, not a guess."""
+    from continuum.cli import ExitCode
+    from tests.test_cli import run
+
+    db_path = str(tmp_path / "conflict.db")
+    attest_file = _seal_attestation(
+        db_path, tmp_path, "spiffe://example.org/ns/default/sa/test-agent"
+    )
+
+    code, _, err = run(
+        "--db",
+        db_path,
+        "attest-verify",
+        "run_seal",
+        "--attest",
+        str(attest_file),
+        "--spiffe",
+        "--workload-provider",
+        "fake",
+    )
+    assert code == ExitCode.ERROR
+    assert "--spiffe requires the SPIFFE provider" in err

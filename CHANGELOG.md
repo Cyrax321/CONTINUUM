@@ -49,10 +49,13 @@ Test counts: ~3950 collected on a minimal env.
 - **Event-chain attestations can bind verifiable SPIFFE workload identities (#745).**
   `WorkloadIdentity` protocol and provider adapters allow attestation signatures
   to cryptographically bind workload identity claims (SPIFFE IDs) to an event chain.
-  `continuum attest` accepts `--workload-identity` and `--spiffe` to bind an identity,
+  `continuum attest` accepts `--workload-identity` (a claim signed by the same
+  key) and `--spiffe` (bind the SVID the Workload API issues to this workload),
   `continuum attest-verify` enforces identity constraints without silent downgrade, and
-  `continuum resume --attest` verifies both chain integrity and workload identity before
-  resuming, exiting non-zero on mismatch or unavailable provider.
+  `continuum resume --attest` verifies both chain integrity and any requested identity
+  constraint before resuming, exiting non-zero on mismatch or unavailable provider.
+  `--spiffe` pins the SPIFFE provider, so `CONTINUUM_WORKLOAD_PROVIDER` cannot
+  silently downgrade it to the fake provider.
 
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a

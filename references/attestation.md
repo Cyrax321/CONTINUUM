@@ -102,8 +102,14 @@ Identity claims are validated as canonical SPIFFE IDs (trust domain, path
 segments, no whitespace, query or fragment), and `--spiffe` checks a sealed
 identity against the SVID the Workload API currently issues to this workload:
 a well-formed claim belonging to a different workload of the same trust domain
-is rejected. A forged document whose signature does not verify is always
-reported `UNTRUSTED`, whatever identity it claims.
+is rejected. `--spiffe` pins the SPIFFE provider, so a `CONTINUUM_WORKLOAD_PROVIDER`
+leftover from tests or CI cannot swap the live-SVID check for the fake
+provider, and an explicit `--workload-provider` other than `spiffe` is an
+error. A forged document whose signature does not verify is always reported
+`UNTRUSTED`, whatever identity it claims. A claim added with
+`--workload-identity` is signed by the same key; it binds provenance to key
+custody, and only a provider check (`--spiffe`, or
+`--workload-provider spiffe`) ties it to a live workload.
 
 ### Resume verification hook
 
