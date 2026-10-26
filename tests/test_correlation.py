@@ -14,6 +14,8 @@ Covers:
 - Review-of-#1680 regressions: retry under a new CID, malformed CIDs on retry,
   malformed hook CIDs, keyless action records, uncorrelated observations, and
   TOOL_CALLED status reporting.
+- Review-of-#1875 regression: filtering evidence chains by an earlier retry
+  attempt's correlation ID.
 """
 
 from __future__ import annotations
@@ -469,6 +471,54 @@ def test_retry_under_new_correlation_id_is_matched_not_ambiguous(
     assert sorted(e["type"] for e in chain.tool_events) == ["TOOL_COMPLETED", "TOOL_FAILED"]
     assert not [c for c in chains if c.status == "unmatched_observation"]
     assert not [c for c in chains if c.status == "ambiguous"]
+
+
+def test_filter_by_earlier_retry_correlation_id_still_finds_chain(
+    storage: SQLiteStorage, run_id: str
+) -> None:
+    """Filtering by an earlier attempt's CID must not lose the chain (#1875).
+
+    A retry collects one CID per attempt and the chain spans them all, so an
+    operator looking up the first (failed) attempt by its own ID must still
+    see the chain with that attempt's tool events. The chain used to expose
+    only the latest CID, so the equality filter returned nothing.
+    """
+    ledger = ActionLedger(storage, run_id)
+    cid_first = "cid-retry-first"
+    cid_retry = "cid-retry-second"
+
+    outcome = ledger.claim("send_email", {"to": "ops"}, correlation_id=cid_first)
+    storage.append_event(
+        run_id,
+        EventType.TOOL_FAILED,
+        {"tool": "smtp", "status": 500, "correlation_id": cid_first},
+        source=Origin.EXTERNAL_AGENT,
+    )
+    ledger.fail(outcome.key, "SMTP 500", certain=True)
+    ledger.claim("send_email", {"to": "ops"}, correlation_id=cid_retry)
+    storage.append_event(
+        run_id,
+        EventType.TOOL_COMPLETED,
+        {"tool": "smtp", "status": 250, "correlation_id": cid_retry},
+        source=Origin.EXTERNAL_AGENT,
+    )
+
+    filtered = correlate_action_events(storage, run_id, correlation_id=cid_first)
+    assert len(filtered) == 1, [c.status for c in filtered]
+
+    chain = filtered[0]
+    assert chain.action_key == outcome.key
+    assert chain.status == "matched"
+    assert chain.correlation_id == cid_retry  # display stays latest-wins
+    assert chain.correlation_ids == [cid_first, cid_retry]
+    # The earlier attempt's tool event is included in the filtered chain
+    assert sorted(e["type"] for e in chain.tool_events) == ["TOOL_COMPLETED", "TOOL_FAILED"]
+    assert "correlation_ids" in chain.to_dict()
+    assert chain.to_dict()["correlation_ids"] == [cid_first, cid_retry]
+
+    # The retry's own ID still filters to the same chain, and no other ID does
+    assert len(correlate_action_events(storage, run_id, correlation_id=cid_retry)) == 1
+    assert not correlate_action_events(storage, run_id, correlation_id="cid-unknown")
 
 
 @pytest.mark.parametrize("bad_cid", ["", "   ", "a" * 129])
