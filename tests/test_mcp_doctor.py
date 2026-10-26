@@ -1408,3 +1408,77 @@ def test_find_registration_still_reads_the_committed_entry_without_a_local_one(
     assert found is not None
     assert found["scope"] == "project"
     assert found["baked_client"] == "committed-name"
+
+
+def test_find_registration_prefers_the_project_file_over_a_global_user_one(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Cursor has no nested local scope, so its ``local_settings`` is the global file (#1853).
+
+    ``~/.cursor/mcp.json`` is one file applied to every project on the
+    machine; it is not a local-scope registration for this checkout the way
+    claude-code's ``~/.claude.json`` section is. The sites used to iterate
+    ``local`` first across every host, which yielded that global file under
+    the ``"local"`` scope ahead of the project's own ``.cursor/mcp.json``, so
+    the doctor diagnosed a registration the operator wrote globally as though
+    it were the one this checkout runs.
+    """
+    home = _isolated_home(monkeypatch, tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    cursor_dir = project / ".cursor"
+    cursor_dir.mkdir()
+
+    entry = {
+        "type": "stdio",
+        "command": str(SCRIPTS_DIR / "continuum-mcp"),
+        "args": ["--db", str(project / "continuum.db")],
+        "env": {"CONTINUUM_MCP_MUTATING_CLIENTS": "project-name"},
+    }
+    (cursor_dir / "mcp.json").write_text(
+        json.dumps({"mcpServers": {SERVER_NAME: entry}}, indent=2), encoding="utf-8"
+    )
+    global_entry = dict(entry)
+    global_entry["env"] = {"CONTINUUM_MCP_MUTATING_CLIENTS": "global-name"}
+    (home / ".cursor").mkdir()
+    (home / ".cursor" / "mcp.json").write_text(
+        json.dumps({"mcpServers": {SERVER_NAME: global_entry}}, indent=2), encoding="utf-8"
+    )
+
+    found = find_registration(project)
+
+    assert found is not None
+    assert found["scope"] == "project", "the project's own file must lead for cursor"
+    assert found["baked_client"] == "project-name"
+    assert found["settings_path"] == cursor_dir / "mcp.json"
+
+
+def test_find_registration_reads_a_global_registration_as_user_scope(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """A cursor registration that lives only globally is cited as user-wide (#1853).
+
+    ``local`` is not a real scope for cursor: its local and user settings are
+    one file, read from the same top-level container. Reporting such a
+    registration as ``"local"`` would describe a project-scoped registration
+    that does not exist, so the doctor cites the user scope it actually has.
+    """
+    home = _isolated_home(monkeypatch, tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    (home / ".cursor").mkdir()
+    global_entry = {
+        "type": "stdio",
+        "command": str(SCRIPTS_DIR / "continuum-mcp"),
+        "args": ["--db", str(project / "continuum.db")],
+        "env": {"CONTINUUM_MCP_MUTATING_CLIENTS": "global-name"},
+    }
+    (home / ".cursor" / "mcp.json").write_text(
+        json.dumps({"mcpServers": {SERVER_NAME: global_entry}}, indent=2), encoding="utf-8"
+    )
+
+    found = find_registration(project)
+
+    assert found is not None
+    assert found["scope"] == "user", "a cursor global registration is user-wide, not local"
+    assert found["baked_client"] == "global-name"

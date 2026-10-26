@@ -667,24 +667,44 @@ def _entry_at(path: Path, host: str, scope: str, project_root: Path) -> dict[str
 def _registration_sites(
     cwd: Path,
 ) -> Iterator[tuple[str, Path, str, dict[str, Any] | None]]:
-    """Every place a registration for this project could live, in the host's own precedence.
+    """Every place a registration for this project could live, per host.
 
-    Local leads: it is the per-user file for this project, and the CLI's own
-    ``--scope`` help states local wins over the committed ``.mcp.json``, so
-    when both scopes hold a registration the one the host actually runs is
-    local. Reading project first made the permission probe declare the client
-    name of a registration the host ignores while the effective one bakes a
-    different one (#1764). Project follows, then user, the broadest scope
-    last. The scope travels with each site because a host whose per-user file
-    nests by project can only be read back once the checkout it belongs to is
-    named again.
+    The order is per host, not global, because what ``local`` means is a host
+    property. Only a host whose per-user file nests by project (claude-code
+    today) has a local scope at all: there the entry lands under
+    ``projects/<path>`` and genuinely is the per-user file for this one
+    checkout, so local leads, as the CLI's ``--scope`` help promises (#1764).
+
+    Every other host's ``local_settings`` *is* its ``user_settings``: one
+    global file with no nesting section, applied to every project on the
+    machine. Yielding that under ``"local"`` and ahead of the project's own
+    file made the doctor diagnose a global registration as though it were the
+    project's, so a checkout carrying its own ``.cursor/mcp.json`` reported
+    the client name of whatever the operator installed globally (#1853).
+    Those hosts yield the project file first and their one global file last,
+    under the scope it actually has.
+
+    The scope travels with each site because the nesting host can only read
+    its per-project section once the checkout it belongs to is named again,
+    and because re-reading the found entry (:func:`_registration_env`) needs
+    the same scope to land on the same spot in the document.
     """
-    for scope, key in (
-        ("local", "local_settings"),
-        ("project", "project_settings"),
-        ("user", "user_settings"),
-    ):
-        for host, profile in HOST_PROFILES.items():
+    for host, profile in HOST_PROFILES.items():
+        if profile["nested_by_project"]:
+            order = (
+                ("local", "local_settings"),
+                ("project", "project_settings"),
+                ("user", "user_settings"),
+            )
+        else:
+            # No nesting section means ``local`` and ``user`` collapse to one
+            # global file read from the same top-level container, so it is
+            # yielded once, under the user-wide scope it actually has.
+            order = (
+                ("project", "project_settings"),
+                ("user", "user_settings"),
+            )
+        for scope, key in order:
             path = Path(profile[key]).expanduser()
             if not path.is_absolute():
                 path = cwd / path
