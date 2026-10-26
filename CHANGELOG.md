@@ -10,6 +10,23 @@ Test counts: ~3950 collected on a minimal env.
 
 ### Added
 
+- **Risk-informed recovery assessment emits located repair guidance (#1423).**
+  `RecoveryEngine.assess()` already mapped `RISK_OBSERVED` triggers to recovery
+  modes (#303); the winning risk events now also shape the repair plan through
+  a typed `RiskSignal` projection (`continuum/recovery/risk.py`), so the
+  planner stays a pure projection over typed inputs instead of duck-typing
+  over free-form events. A `loop` signal yields `replan_excluding:<step or
+  signature>` steps naming the repeating trajectory to avoid, plus a fallback
+  step naming the trigger and episode when the monitor names nothing, where
+  the previous plan was empty under a replan verdict. A `meltdown` signal
+  yields a `human_review` step targeting the last verified fact-gathering
+  step before the cascade, located by whole-token matching over plan steps
+  and ranked by evidence, verification and proximity to the cascade; an
+  explicit `last_verified_step`, `fact_gathering_step` or `rollback_target`
+  in the risk detail always wins. When no honest anchor exists the step says
+  so, rather than back-filling the step that was melting down and presenting
+  it as the verified fact-gathering rollback point.
+
 - **Wire specification and automated wire conformance suite.**
   Published OpenAPI 3.1 specification for the CONTINUUM sidecar wire protocol
   covering action interception and idempotency leases, completion, progress tracking,

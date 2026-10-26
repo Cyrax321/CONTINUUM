@@ -532,7 +532,7 @@ class RecoveryEngine:
         risk_rationale = None
         winning_risk_events: list[Any] = []
         try:
-            from continuum.recovery.risk import evaluate_risk, load_risk_policy
+            from continuum.recovery.risk import evaluate_risk, load_risk_policy, signals_from_events
 
             policy = load_risk_policy()
             # Archive-aware: the shared fetch walks the archived prefix too, so
@@ -604,7 +604,10 @@ class RecoveryEngine:
             unprojectable=unprojectable,
             exhausted_dependencies=exhausted_dependencies,
             run_budget_exhausted=run_budget_exhausted,
-            risk_events=winning_risk_events,
+            # Typed projections, never raw events: the planner stays a pure
+            # projection over RiskSignal rather than duck-typing payloads
+            # (issue #1423 review).
+            risk_events=signals_from_events(winning_risk_events),
             state=validation.state,
         )
         liveness_advisory = None

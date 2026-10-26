@@ -8,7 +8,9 @@ never blocking the run.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import re
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -16,7 +18,15 @@ from typing import Any
 from pydantic import ValidationError
 
 from continuum.events import EventType
-from continuum.models import Origin, RecoveryMode, RiskObservedPayload
+from continuum.models import (
+    Origin,
+    PlanStep,
+    PlanStepStatus,
+    RecoveryMode,
+    RiskObservedPayload,
+    SemanticState,
+    StateStatus,
+)
 from continuum.storage.base import Storage
 
 __all__ = [
@@ -26,10 +36,14 @@ __all__ = [
     "DEFAULT_RISK_POLICY",
     "DEFAULT_RISK_POLICY_PATH",
     "RiskPolicy",
+    "RiskSignal",
     "load_risk_policy",
     "evaluate_risk",
     "is_more_conservative",
     "ingest_risk_json_line",
+    "signal_from_event",
+    "signals_from_events",
+    "locate_last_fact_gathering_step",
 ]
 
 DEFAULT_RISK_POLICY_PATH = Path(".continuum/risk-policy.json")
@@ -127,6 +141,222 @@ class RiskPayload(RiskObservedPayload):
     """
 
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class RiskSignal:
+    """A risk observation reduced to the fields repair planning reads.
+
+    ``RiskObservedPayload`` is the wire schema a monitor writes; this is the
+    internal projection the planner consumes. Normalising event payloads,
+    plain mappings and attribute objects to one typed shape before any step
+    is planned from them is what keeps an untyped event from reaching the
+    contract and producing a wrong repair target (issue #1423 review).
+    """
+
+    trigger: str
+    step_id: str | None = None
+    episode_id: str | None = None
+    detail: dict[str, Any] = field(default_factory=dict)
+
+
+def _clean(value: Any) -> str | None:
+    """A non-blank string, stripped, or None for anything else."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def signal_from_event(event: Any) -> RiskSignal | None:
+    """Reduce one risk event to a :class:`RiskSignal`, or None if malformed.
+
+    Accepts the three shapes the recovery stack hands around: an event whose
+    ``payload`` is a mapping, a plain mapping, and an object exposing the
+    fields as attributes (older probes, tests). An entry without a usable
+    trigger is dropped, mirroring ``ingest_risk``'s fail-open stance: a
+    malformed signal contributes no repair step rather than a fabricated one.
+    """
+    payload: Mapping[str, Any] | None = None
+    if isinstance(event, Mapping):
+        payload = event
+    else:
+        raw = getattr(event, "payload", None)
+        if isinstance(raw, Mapping):
+            payload = raw
+    if payload is not None:
+        trigger = _clean(payload.get("trigger"))
+        step_id = _clean(payload.get("step_id"))
+        episode_id = _clean(payload.get("episode_id"))
+        detail = payload.get("detail")
+    else:
+        trigger = _clean(getattr(event, "trigger", None))
+        step_id = _clean(getattr(event, "step_id", None))
+        episode_id = _clean(getattr(event, "episode_id", None))
+        detail = getattr(event, "detail", None)
+    if trigger is None:
+        return None
+    detail_map: dict[str, Any] = dict(detail) if isinstance(detail, Mapping) else {}
+    if episode_id is None:
+        # A monitor that nests everything in detail still carries the episode
+        # there; the repair reason names it, so losing it to a nesting
+        # difference would drop the provenance an operator needs.
+        episode_id = _clean(detail_map.get("episode_id"))
+    return RiskSignal(
+        trigger=trigger,
+        step_id=step_id,
+        episode_id=episode_id,
+        detail=detail_map,
+    )
+
+
+def signals_from_events(events: Iterable[Any]) -> list[RiskSignal]:
+    """Reduce an event sequence to signals, dropping malformed entries."""
+    signals: list[RiskSignal] = []
+    for event in events:
+        signal = signal_from_event(event)
+        if signal is not None:
+            signals.append(signal)
+    return signals
+
+
+#: Fact-gathering vocabulary for locating a rollback anchor (issue #1423).
+#: Matched on whole tokens, never substrings: "already" contains "read" and
+#: "thread" contains "read" exactly the way a real fact step does under a
+#: substring test, which is how an unrelated verified step ("already
+#: refactored the retry budget") beat one carrying real evidence. The
+#: optional ``(?:s|ing)?`` keeps "searching", "findings" and "gathering"
+#: legible without re-opening the substring hazard.
+_FACT_GATHERING_RE = re.compile(
+    r"\b(gather|fact|facts|evidence|collect|query|fetch|search|read|check"
+    r"|inspect|observe|probe|find|finding|findings|investigate|lookup)"
+    r"(?:s|ing)?\b",
+    re.IGNORECASE,
+)
+
+_EXPLICIT_ANCHOR_KEYS = ("last_verified_step", "fact_gathering_step", "rollback_target")
+
+
+def _verified_kinds() -> frozenset[PlanStepStatus]:
+    return frozenset((PlanStepStatus.VERIFIED, PlanStepStatus.COMPLETED))
+
+
+def _ancestors(plan_by_id: Mapping[str, PlanStep], trigger_step_id: str) -> set[str]:
+    """Ids the trigger step depends on, directly or transitively.
+
+    ``plan_upsert`` stores ``SemanticState.plan`` sorted by ``step_id``, so a
+    position in that list is not execution order: a completed ``z_fetch``
+    before a failing ``a_cascade`` is stored with ``a_cascade`` first, and a
+    positional slice drops the only real anchor (issue #1423 review). The
+    dependency graph is the ordering the plan itself records.
+    """
+    seen: set[str] = set()
+    frontier = [trigger_step_id]
+    while frontier:
+        step = plan_by_id.get(frontier.pop())
+        if step is None:
+            continue
+        for dep in step.depends_on:
+            if dep not in seen:
+                seen.add(dep)
+                frontier.append(dep)
+    return seen
+
+
+def _candidates_before_cascade(plan: list[PlanStep], trigger_step_id: str | None) -> list[PlanStep]:
+    """Plan steps that may have run before the cascade, in stored order.
+
+    Without a trigger there is no cascade boundary to respect, so every step
+    is a candidate. With one, a step qualifies by being recorded before the
+    trigger step's last update (``provenance.source_sequence``), by depending
+    into it through the ``depends_on`` graph, or by sitting before it in the
+    stored list. The list alone is the weakest of the three: it is a
+    ``step_id`` sort, not execution order, and survives only for plans whose
+    events carry no sequence and no dependencies.
+    """
+    if trigger_step_id is None:
+        return list(plan)
+    trigger_index: int | None = None
+    for index, step in enumerate(plan):
+        if step.step_id == trigger_step_id:
+            trigger_index = index
+            break
+    if trigger_index is None:
+        return list(plan)
+    boundary = plan[trigger_index].provenance.source_sequence
+    ancestors = _ancestors({s.step_id: s for s in plan}, trigger_step_id)
+    candidates: list[PlanStep] = []
+    for index, step in enumerate(plan):
+        if index == trigger_index:
+            continue
+        sequence = step.provenance.source_sequence
+        recorded_earlier = sequence is not None and boundary is not None and sequence < boundary
+        if index < trigger_index or step.step_id in ancestors or recorded_earlier:
+            candidates.append(step)
+    return candidates
+
+
+def _last_valid_entry_id(entries: Any, attr: str) -> str | None:
+    """The id of the last VALID entry in a state collection, or None."""
+    valid = [e for e in (entries or ()) if e.status is StateStatus.VALID]
+    if not valid:
+        return None
+    value = getattr(valid[-1], attr, None)
+    return value if isinstance(value, str) and value else None
+
+
+def locate_last_fact_gathering_step(
+    state: SemanticState | None,
+    *,
+    trigger_step_id: str | None = None,
+    detail: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Locate the step a meltdown rollback should target (issue #1423).
+
+    Explicit anchors the monitor names in ``detail`` win first; the plan is
+    then scanned. A plan step qualifies only when it is verified or completed
+    and matches the fact-gathering vocabulary on whole tokens, ranked by
+    (carries evidence, recorded later, stored later) so the *last* verified
+    fact-gathering step wins. Anything weaker is not a safe rollback point and
+    is deliberately not named: unverified or non-factual steps, arbitrary
+    stored positions, and evidence or findings the projection marked other
+    than VALID are all skipped. The caller must then say no anchor could be
+    located instead of back-filling one of them: the trigger step is the one
+    that was melting down, and an arbitrary position is not a fact.
+    """
+    if isinstance(detail, Mapping):
+        for key in _EXPLICIT_ANCHOR_KEYS:
+            explicit = _clean(detail.get(key))
+            # An anchor that names the trigger step points at the failure
+            # itself, not at work before it: ignore it and keep looking.
+            if explicit is not None and explicit != trigger_step_id:
+                return explicit
+    if state is None:
+        return None
+
+    candidates = _candidates_before_cascade(list(state.plan or ()), trigger_step_id)
+    verified_kinds = _verified_kinds()
+    factual = [
+        s
+        for s in candidates
+        if s.status in verified_kinds
+        and _FACT_GATHERING_RE.search(f"{s.step_id} {s.description}".lower())
+    ]
+    if factual:
+        best = max(
+            factual,
+            key=lambda s: (
+                bool(s.evidence),
+                s.provenance.source_sequence or -1,
+                candidates.index(s),
+            ),
+        )
+        return best.step_id
+
+    # No usable plan step: the evidence and finding stores are the run's
+    # verified facts, and only entries the projection marked VALID name one.
+    return _last_valid_entry_id(state.evidence, "evidence_id") or _last_valid_entry_id(
+        state.findings, "finding_id"
+    )
 
 
 def ingest_risk(
