@@ -267,6 +267,14 @@ Test counts: ~3950 collected on a minimal env.
   the target machine in the first place. A test pins this per host, so a
   committed project registration fails CI instead of failing a clone.
 
+- **PR Status Labels Apply no longer fails on comment reviews.** The workflow
+  recorded no intent artifact on non-approval reviews (e.g. comment reviews),
+  causing `actions/download-artifact` to exit with an error on every review
+  comment across the repository. `pr-status-labels.yml` now records an explicit
+  skip intent on non-approval reviews, and `pr-status-labels-apply.yml`'s download
+  step is marked fault-tolerant with `continue-on-error: true` while the apply
+  script cleanly skips non-actionable intents.
+
 - **The documented test count is re-synced, so `main` builds again.** The
   collected total had drifted to 3,680 against a documented 3,636, past the
   30-test tolerance `test_documented_count_matches_suite` allows, so the

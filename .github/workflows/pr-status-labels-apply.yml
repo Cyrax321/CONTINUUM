@@ -10,6 +10,7 @@ on:
 # when the triggering run was started by a review on a fork-originated
 # PR. This is the only place writes happen; see pr-status-labels.yml.
 permissions:
+  actions: read
   issues: write
   pull-requests: write
 
@@ -20,6 +21,7 @@ jobs:
     steps:
       - name: Download intent artifact
         uses: actions/download-artifact@v8
+        continue-on-error: true
         with:
           name: pr-status-intent
           run-id: ${{ github.event.workflow_run.id }}
@@ -67,8 +69,13 @@ jobs:
             try {
               intent = JSON.parse(fs.readFileSync("intent.json", "utf8"));
             } catch (err) {
-              // Commented reviews record no intent artifact.
+              // Commented reviews or missing artifacts record no intent.
               core.info("No intent recorded for this run; nothing to do.");
+              return;
+            }
+
+            if (!intent || intent.skip || !intent.pr_number) {
+              core.info("No label changes requested for this run; nothing to do.");
               return;
             }
 
