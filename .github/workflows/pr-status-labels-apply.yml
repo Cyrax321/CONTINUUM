@@ -10,6 +10,7 @@ on:
 # when the triggering run was started by a review on a fork-originated
 # PR. This is the only place writes happen; see pr-status-labels.yml.
 permissions:
+  actions: read
   issues: write
   pull-requests: write
 

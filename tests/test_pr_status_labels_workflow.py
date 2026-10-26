@@ -30,6 +30,7 @@ PHASE2 = ROOT / ".github" / "workflows" / "pr-status-labels-apply.yml"
 
 
 def test_workflow_files_exist_and_parse_yaml() -> None:
+    """Ensure both PR status label workflow definitions exist and parse cleanly."""
     yaml = pytest.importorskip("yaml")
     assert PHASE1.is_file(), "pr-status-labels.yml missing"
     assert PHASE2.is_file(), "pr-status-labels-apply.yml missing"
@@ -42,6 +43,7 @@ def test_workflow_files_exist_and_parse_yaml() -> None:
 
 
 def test_download_artifact_is_fault_tolerant() -> None:
+    """Verify the intent artifact download step has continue-on-error enabled."""
     yaml = pytest.importorskip("yaml")
     data = yaml.safe_load(PHASE2.read_text(encoding="utf-8"))
     steps = data["jobs"]["apply"]["steps"]
@@ -53,6 +55,7 @@ def test_download_artifact_is_fault_tolerant() -> None:
 
 
 def test_phase1_records_skip_intent_on_comment_reviews() -> None:
+    """Ensure phase 1 writes an explicit skip intent for non-approval reviews."""
     content = PHASE1.read_text(encoding="utf-8")
     assert "skip: true" in content, (
         "pr-status-labels.yml must set skip: true on non-approval reviews "
@@ -66,6 +69,7 @@ def test_phase1_records_skip_intent_on_comment_reviews() -> None:
 
 
 def test_phase2_handles_skip_and_missing_intents() -> None:
+    """Verify phase 2 returns early on missing or skipped intents before API calls."""
     content = PHASE2.read_text(encoding="utf-8")
     # Verify early return on missing intent file
     catch_match = re.search(r"catch\s*\([^)]*\)\s*\{([^}]+)\}", content)
@@ -84,6 +88,17 @@ def test_phase2_handles_skip_and_missing_intents() -> None:
     github_pos = content.find("github.paginate")
     assert skip_pos != -1 and github_pos != -1 and skip_pos < github_pos, (
         "intent.skip check must precede github API invocations"
+    )
+
+
+def test_phase2_declares_actions_read_permission() -> None:
+    """Verify phase 2 declares actions: read permission for cross-run artifact downloads."""
+    yaml = pytest.importorskip("yaml")
+    data = yaml.safe_load(PHASE2.read_text(encoding="utf-8"))
+    permissions = data.get("permissions", {})
+    assert permissions.get("actions") == "read", (
+        "pr-status-labels-apply.yml must declare actions: read so that cross-run "
+        "actions/download-artifact@v8 steps have token permissions to fetch artifacts"
     )
 
 
