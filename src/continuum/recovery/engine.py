@@ -524,40 +524,15 @@ class RecoveryEngine:
                 run_budget_exhausted = False
                 exhausted_dependencies.clear()
 
-        plan = plan_repairs(
-            validation.report.statuses,
-            uncertain_actions=uncertain,
-            strict_unknown=self.validator.strict_unknown,
-            unprojectable=unprojectable,
-            exhausted_dependencies=exhausted_dependencies,
-            run_budget_exhausted=run_budget_exhausted,
-        )
-        liveness_advisory = None
-        liveness_breaches = 0
-        try:
-            from continuum.recovery.health import advisory_for_storage
-
-            liveness_advisory = advisory_for_storage(self.storage, run_id)
-            # Count prior breaches as DETECTED events. The archived prefix
-            # folds in via the shared fetch, so a silence detected before a
-            # compaction still counts: the live tail alone would reset the
-            # breach count to zero (same archive-blindness family as #553).
-            try:
-                liveness_breaches = sum(
-                    1 for e in archive_aware_events if e.type == EventType.LIVENESS_SILENCE_DETECTED
-                )
-            except Exception:
-                liveness_breaches = 0
-        except Exception:
-            liveness_advisory = None
         # Risk evaluation (issue #303): map triggers to modes, collect ids.
         # Runs before the decision so the worst trigger proposes alongside the
         # other signals; the most cautious proposal wins regardless of order.
         triggering_risks: list[str] = []
         risk_mode = None
         risk_rationale = None
+        winning_risk_events: list[Any] = []
         try:
-            from continuum.recovery.risk import evaluate_risk, load_risk_policy
+            from continuum.recovery.risk import evaluate_risk, load_risk_policy, signals_from_events
 
             policy = load_risk_policy()
             # Archive-aware: the shared fetch walks the archived prefix too, so
@@ -591,10 +566,12 @@ class RecoveryEngine:
                     triggering = [risk_ev.event_id]
                     triggers = [trig]
                     repeating_steps = []
+                    winning_risk_events = [risk_ev]
                 elif SEVERITY[candidate] == SEVERITY[best_mode]:
                     triggering.append(risk_ev.event_id)
                     if trig not in triggers:
                         triggers.append(trig)
+                    winning_risk_events.append(risk_ev)
                 else:
                     continue
                 _collect_repeating_step(repeating_steps, risk_ev)
@@ -618,6 +595,39 @@ class RecoveryEngine:
             triggering_risks = []
             risk_mode = None
             risk_rationale = None
+            winning_risk_events = []
+
+        plan = plan_repairs(
+            validation.report.statuses,
+            uncertain_actions=uncertain,
+            strict_unknown=self.validator.strict_unknown,
+            unprojectable=unprojectable,
+            exhausted_dependencies=exhausted_dependencies,
+            run_budget_exhausted=run_budget_exhausted,
+            # Typed projections, never raw events: the planner stays a pure
+            # projection over RiskSignal rather than duck-typing payloads
+            # (issue #1423 review).
+            risk_events=signals_from_events(winning_risk_events),
+            state=validation.state,
+        )
+        liveness_advisory = None
+        liveness_breaches = 0
+        try:
+            from continuum.recovery.health import advisory_for_storage
+
+            liveness_advisory = advisory_for_storage(self.storage, run_id)
+            # Count prior breaches as DETECTED events. The archived prefix
+            # folds in via the shared fetch, so a silence detected before a
+            # compaction still counts: the live tail alone would reset the
+            # breach count to zero (same archive-blindness family as #553).
+            try:
+                liveness_breaches = sum(
+                    1 for e in archive_aware_events if e.type == EventType.LIVENESS_SILENCE_DETECTED
+                )
+            except Exception:
+                liveness_breaches = 0
+        except Exception:
+            liveness_advisory = None
         mode, rationale = self._decide(
             validation,
             uncertain,

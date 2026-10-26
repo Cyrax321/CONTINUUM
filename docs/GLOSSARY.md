@@ -27,7 +27,7 @@ Every term here is used in issues and in code. Definitions point to the implemen
   The append only, tamper evident `RecoveryLedger` (`src/continuum/recovery/ledger.py:494`) over a `LedgerBackend` (memory or JSONL file). Entries are hash chained from `GENESIS`. `verify` reports the last trusted index. `record_attempt` tracks retry counts and writes an anchored `human_required` gate when a threshold is reached. `compact` drops a prefix while re sealing the chain. Reconciliation (`reconcile`) detects drift between the ledger chain and the live state version.
 
 - **Repair plan**  
-  `RepairPlan` in `src/continuum/recovery/planner.py:121` listing ordered `RepairStep`s derived from validation statuses and uncertain actions (`plan_repairs`). Steps are ordered so inputs are re-derived before consumers.
+  `RepairPlan` in `src/continuum/recovery/planner.py:140` listing ordered `RepairStep`s derived from validation statuses and uncertain actions (`plan_repairs`). Steps are ordered so inputs are re-derived before consumers.
 
 - **Adapter action**  
   `AdapterAction` (`src/continuum/adapters/actions.py:31`) is the uniform `name + params + dep_scope` operation that every adapter emits. `AdapterResult` carries the outcome. `run_action` is the facade over `AgentAdapter.intercept_action` where the ledger provides idempotency and the telemetry hook (`on_event`, issue 162) can observe each execution.
