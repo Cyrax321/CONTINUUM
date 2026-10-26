@@ -155,3 +155,67 @@ def test_cli_impact_json(tmp_path: Path):
     assert payload["evidence"] == ev.event_id
     assert any(n["event_id"] == dec.event_id for n in payload["downstream"])
     s2.close()
+
+
+def test_decision_invalidation_marks_the_decision_node_invalid():
+    """An invalidation names the decision's domain id, not its event id (#1850).
+
+    ``graph.nodes`` is keyed by ``event_id``; the invalidation branch used to
+    look the ``decision_id`` up in it, which never matched, so the node stayed
+    ``VALID`` and the reason was lost. The fold must resolve the domain id to
+    the node carrying it.
+    """
+    storage = SQLiteStorage(":memory:")
+    run_id = "run_invalidate"
+    storage.create_run(Run(run_id=run_id, goal="test"))
+    dec = storage.append_event(
+        run_id, EventType.DECISION_CREATED, {"decision": "deploy", "decision_id": "dec_42"}
+    )
+    storage.append_event(
+        run_id,
+        EventType.DECISION_INVALIDATED,
+        {"decision_id": "dec_42", "reason": "config change"},
+    )
+
+    graph = build_provenance_graph(storage.read_events(run_id))
+
+    node = graph.nodes[dec.event_id]
+    assert node.status.value == "invalid"
+    assert node.invalidated_reason == "config change"
+
+
+def test_finding_invalidation_marks_the_finding_node_invalid():
+    """Same lookup bug on the finding side: ``finding_id``, not ``event_id``."""
+    storage = SQLiteStorage(":memory:")
+    run_id = "run_invalidate_finding"
+    storage.create_run(Run(run_id=run_id, goal="test"))
+    finding = storage.append_event(
+        run_id, EventType.FINDING_ADDED, {"finding_id": "f_7", "claim": "over budget"}
+    )
+    storage.append_event(
+        run_id,
+        EventType.FINDING_INVALIDATED,
+        {"finding_id": "f_7", "reason": "re-costed"},
+    )
+
+    graph = build_provenance_graph(storage.read_events(run_id))
+
+    node = graph.nodes[finding.event_id]
+    assert node.status.value == "invalid"
+    assert node.invalidated_reason == "re-costed"
+
+
+def test_invalidation_of_an_unknown_decision_leaves_the_graph_alone():
+    """An invalidation with no node to void is still a no-op, not an error."""
+    storage = SQLiteStorage(":memory:")
+    run_id = "run_invalidate_unknown"
+    storage.create_run(Run(run_id=run_id, goal="test"))
+    storage.append_event(
+        run_id, EventType.DECISION_CREATED, {"decision": "deploy", "decision_id": "dec_42"}
+    )
+    storage.append_event(run_id, EventType.DECISION_INVALIDATED, {"decision_id": "dec_missing"})
+
+    graph = build_provenance_graph(storage.read_events(run_id))
+
+    assert len(graph.nodes) == 1
+    assert next(iter(graph.nodes.values())).status.value == "valid"
