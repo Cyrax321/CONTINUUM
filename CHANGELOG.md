@@ -87,6 +87,17 @@ Test counts: ~3950 collected on a minimal env.
   and the reviewer fatigue telemetry (#1411) are its wired consumers, so the
   scorer is shipped and tested on its own rather than arriving with a heuristic
   that moves while the queue is built.
+
+- **`continuum budget` reports per-dependency retry budget usage (#1460).**
+  The command reported retry-budget usage per action type (#240) and per
+  authorization (#413), but per-dependency budgets (#1428) were invisible in
+  both JSON and text output. `cmd_budget` now reports a `dependency_budgets`
+  section with attempts used, configured ceilings (resolved via
+  `max_attempts_for_dependency`), remaining allowance, and exhaustion status.
+  The recovery ledger directory is discovered across `--ledger-dir`,
+  `CONTINUUM_LEDGER_DIR`, `.continuum/ledger`, `.continuum`, and
+  `storage.storage_dir`, and degrades gracefully when no dependency budgets
+  are configured.
 ### Fixed
 
 - **Benchmark report timestamps are timezone-aware UTC (#1823).** The Phase 6,

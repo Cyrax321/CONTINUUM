@@ -1783,14 +1783,23 @@ def cmd_confirm(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
 
 
 def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -> int:
-    """Report retry-budget usage per action type (issue #240) and per
-    authorization (issue #413). Read-only."""
+    """Report retry-budget usage per action type (issue #240), per
+    authorization (issue #413), and per dependency (issue #1460). Read-only."""
     from continuum.budgets import (
         DEFAULT_BUDGETS_PATH,
+        DEPENDENCY_BUDGETS_KEY,
         attempts_for_type,
         evaluate_budget,
         get_remaining,
         load_budgets,
+        max_attempts_for_dependency,
+    )
+    from continuum.recovery.ledger import (
+        HUMAN_REQUIRED,
+        FileLedgerBackend,
+        LedgerEntryKind,
+        RecoveryLedger,
+        resolve_scope,
     )
 
     storage.get_run(args.run_id)
@@ -1852,9 +1861,128 @@ def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
                         "exhausted": remaining == 0,
                     }
                 )
+
+    # Per-dependency recovery budgets (issue #1428, #1460): read from recovery ledger
+    # and dependency_budgets section in budgets.json.
+    ledger_instance: RecoveryLedger | None = None
+    ledger_entries: list[Any] = []
+    ledger_dir = getattr(args, "ledger_dir", None)
+    if not ledger_dir:
+        ledger_dir = os.environ.get("CONTINUUM_LEDGER_DIR")
+    if ledger_dir:
+        try:
+            ledger_instance = RecoveryLedger(FileLedgerBackend(str(ledger_dir)))
+            ledger_entries = ledger_instance.entries(args.run_id)
+        except Exception as exc:
+            ledger_entries = []
+            print(f"warning: recovery ledger unreadable: {exc}", file=err)
+    else:
+        candidates: list[Path] = []
+        if getattr(args, "config", None):
+            cfg_parent = Path(args.config).resolve().parent
+            candidates.extend([cfg_parent / "ledger", cfg_parent])
+        candidates.extend([Path(".continuum/ledger"), Path(".continuum")])
+        if hasattr(storage, "storage_dir"):
+            candidates.extend([storage.storage_dir / "ledger", storage.storage_dir])
+        seen: set[Path] = set()
+        for cand in candidates:
+            try:
+                resolved = cand.resolve()
+            except Exception:
+                resolved = cand
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if not cand.is_dir():
+                continue
+            backend = FileLedgerBackend(str(cand))
+            try:
+                entries = backend.load(args.run_id)
+                if entries:
+                    ledger_instance = RecoveryLedger(backend)
+                    ledger_entries = ledger_instance.entries(args.run_id)
+                    break
+            except Exception as exc:
+                ledger_entries = []
+                print(f"warning: recovery ledger unreadable: {exc}", file=err)
+                break
+
+    dep_candidates: set[str] = set()
+    dep_section = raw.get(DEPENDENCY_BUDGETS_KEY)
+    if isinstance(dep_section, dict):
+        for k in dep_section:
+            norm = resolve_scope(k)
+            if norm is not None:
+                dep_candidates.add(norm)
+
+    for e in events:
+        if e.type is EventType.DEPENDENCY_DECLARED and isinstance(e.payload, dict):
+            res = e.payload.get("resource") or e.payload.get("dependency")
+            norm = resolve_scope(res)
+            if norm is not None:
+                dep_candidates.add(norm)
+        elif e.type is EventType.ACTION_RECORDED and isinstance(e.payload, dict):
+            act = e.payload.get("action")
+            if isinstance(act, dict):
+                norm = resolve_scope(act.get("dep_scope"))
+                if norm is not None:
+                    dep_candidates.add(norm)
+
+    for le in ledger_entries:
+        norm = resolve_scope(le.scope) or resolve_scope(getattr(le, "dependency", None))
+        if norm is not None:
+            dep_candidates.add(norm)
+        if (
+            le.kind == LedgerEntryKind.GATE.value
+            and le.gate
+            and le.gate.startswith("human_required:")
+        ):
+            norm_gate = resolve_scope(le.gate.split(":", 1)[1])
+            if norm_gate is not None:
+                dep_candidates.add(norm_gate)
+
+    dep_rows: list[dict[str, Any]] = []
+    for dep in sorted(dep_candidates):
+        used = sum(
+            1
+            for le in ledger_entries
+            if le.kind == LedgerEntryKind.ATTEMPT.value
+            and (
+                resolve_scope(le.scope) == dep
+                or resolve_scope(getattr(le, "dependency", None)) == dep
+            )
+        )
+        ceiling = max_attempts_for_dependency(raw, dep)
+        escalated = any(
+            le.kind == LedgerEntryKind.GATE.value
+            and (
+                (le.gate == HUMAN_REQUIRED and (le.scope is None or resolve_scope(le.scope) == dep))
+                or le.gate == f"human_required:{dep}"
+            )
+            for le in ledger_entries
+        )
+        dep_remaining: int | None
+        if ceiling is not None:
+            dep_remaining = 0 if escalated else max(0, ceiling - used)
+            exhausted = dep_remaining == 0
+        else:
+            dep_remaining = None
+            exhausted = escalated
+        dep_rows.append(
+            {
+                "dependency": dep,
+                "attempts": used,
+                "max_attempts": ceiling,
+                "remaining": dep_remaining,
+                "exhausted": exhausted,
+            }
+        )
+
     payload: dict[str, Any] = {"run_id": args.run_id, "budgets": rows}
     if auth_rows:
         payload["authorization_budgets"] = auth_rows
+    if dep_rows:
+        payload["dependency_budgets"] = dep_rows
     lines = [f"{'ACTION TYPE':<28} {'ATTEMPTS':>8} {'MAX':>4} {'REMAINING':>10}"]
     for r in rows:
         lines.append(
@@ -1867,6 +1995,19 @@ def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             label = f"{r['action_type']}/{r['authorization_id'][:12]}..."
             lines.append(
                 f"{label:<48} {r['counter']:>5} {r['max_attempts']:>4} {r['remaining']:>10}"
+            )
+    if dep_rows:
+        lines.append("")
+        lines.append(
+            f"{'DEPENDENCY':<36} {'ATTEMPTS':>8} {'MAX':>5} {'REMAINING':>10} {'EXHAUSTED':>9}"
+        )
+        for r in dep_rows:
+            max_str = str(r["max_attempts"]) if r["max_attempts"] is not None else "-"
+            rem_str = str(r["remaining"]) if r["remaining"] is not None else "-"
+            exhausted_str = "yes" if r["exhausted"] else "no"
+            lines.append(
+                f"{r['dependency']:<36} {r['attempts']:>8} {max_str:>5} "
+                f"{rem_str:>10} {exhausted_str:>9}"
             )
     _emit(
         payload,
@@ -5315,6 +5456,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         default=None,
         help="budget registry path (default: .continuum/budgets.json).",
+    )
+    budget_cmd.add_argument(
+        "--ledger-dir",
+        default=None,
+        help="directory holding recovery ledgers.",
     )
 
     tree_parser = with_run(add("tree", cmd_tree, "Show a parent run and its children."))

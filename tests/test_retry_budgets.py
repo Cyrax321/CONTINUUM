@@ -38,6 +38,7 @@ from continuum.budgets import (
 from continuum.cli import ExitCode, main
 from continuum.events import EventType
 from continuum.models import Run
+from continuum.recovery import FileLedgerBackend, RecoveryLedger
 from continuum.storage import SQLiteStorage
 
 
@@ -1067,6 +1068,318 @@ def test_cli_budget_counts_archived_attempts_after_compaction(db: str, tmp_path:
     assert by_type["send_invoice"]["remaining"] == 2
 
 
+def test_cli_budget_reports_per_dependency_usage(db: str, tmp_path: Path) -> None:
+    """Report shows per-dependency attempt counts, ceilings, remaining, and exhaustion (issue #1460)."""
+    ledger_dir = tmp_path / "ledger"
+    ledger = RecoveryLedger(FileLedgerBackend(str(ledger_dir)))
+    ledger.record_attempt("run_1", scope="ext:weather-api")
+    ledger.record_attempt("run_1", scope="ext:weather-api")
+    ledger.record_attempt("run_1", scope="ext:sandbox")
+
+    cfg = registry(
+        tmp_path,
+        {
+            "default_max_attempts": 3,
+            "dependency_budgets": {"ext:weather-api": 2, "ext:sandbox": 4},
+        },
+    )
+    code, out, err = run(
+        "--db",
+        db,
+        "--json",
+        "budget",
+        "run_1",
+        "--config",
+        cfg,
+        "--ledger-dir",
+        str(ledger_dir),
+    )
+    assert code == ExitCode.OK, err
+    payload = json.loads(out)
+    assert "dependency_budgets" in payload
+    by_dep = {r["dependency"]: r for r in payload["dependency_budgets"]}
+    assert by_dep["ext:weather-api"]["attempts"] == 2
+    assert by_dep["ext:weather-api"]["max_attempts"] == 2
+    assert by_dep["ext:weather-api"]["remaining"] == 0
+    assert by_dep["ext:weather-api"]["exhausted"] is True
+
+    assert by_dep["ext:sandbox"]["attempts"] == 1
+    assert by_dep["ext:sandbox"]["max_attempts"] == 4
+    assert by_dep["ext:sandbox"]["remaining"] == 3
+    assert by_dep["ext:sandbox"]["exhausted"] is False
+
+
+def test_cli_budget_dependency_fallback_to_default_max_attempts(db: str, tmp_path: Path) -> None:
+    """An unlisted dependency falls back to default_max_attempts in the registry (issue #1460)."""
+    ledger_dir = tmp_path / "ledger"
+    ledger = RecoveryLedger(FileLedgerBackend(str(ledger_dir)))
+    ledger.record_attempt("run_1", scope="ext:unlisted")
+
+    cfg = registry(
+        tmp_path,
+        {
+            "default_max_attempts": 5,
+            "dependency_budgets": {"ext:weather-api": 2},
+        },
+    )
+    code, out, err = run(
+        "--db",
+        db,
+        "--json",
+        "budget",
+        "run_1",
+        "--config",
+        cfg,
+        "--ledger-dir",
+        str(ledger_dir),
+    )
+    assert code == ExitCode.OK, err
+    payload = json.loads(out)
+    by_dep = {r["dependency"]: r for r in payload["dependency_budgets"]}
+    assert by_dep["ext:unlisted"]["attempts"] == 1
+    assert by_dep["ext:unlisted"]["max_attempts"] == 5
+    assert by_dep["ext:unlisted"]["remaining"] == 4
+    assert by_dep["ext:unlisted"]["exhausted"] is False
+
+
+def test_cli_budget_dependency_exhausted_by_gate_marker(db: str, tmp_path: Path) -> None:
+    """An anchored gate marker or escalation marks the dependency exhausted (issue #1460)."""
+    ledger_dir = tmp_path / "ledger"
+    ledger = RecoveryLedger(FileLedgerBackend(str(ledger_dir)))
+    ledger.record_attempt("run_1", scope="ext:weather-api", max_attempts=1)
+    ledger.record_gate("run_1", "human_required:ext:legacy")
+
+    cfg = registry(
+        tmp_path,
+        {
+            "default_max_attempts": 3,
+            "dependency_budgets": {"ext:weather-api": 2, "ext:legacy": 5},
+        },
+    )
+    code, out, err = run(
+        "--db",
+        db,
+        "--json",
+        "budget",
+        "run_1",
+        "--config",
+        cfg,
+        "--ledger-dir",
+        str(ledger_dir),
+    )
+    assert code == ExitCode.OK, err
+    payload = json.loads(out)
+    by_dep = {r["dependency"]: r for r in payload["dependency_budgets"]}
+    assert by_dep["ext:weather-api"]["exhausted"] is True
+    assert by_dep["ext:weather-api"]["remaining"] == 0
+    assert by_dep["ext:legacy"]["exhausted"] is True
+    assert by_dep["ext:legacy"]["remaining"] == 0
+
+
+def test_cli_budget_degrades_gracefully_without_dependency_budgets(db: str, tmp_path: Path) -> None:
+    """With no dependency budgets or attempts configured, command succeeds without dependency section (issue #1460)."""
+    code, out, err = run(
+        "--db",
+        db,
+        "--json",
+        "budget",
+        "run_1",
+        "--config",
+        registry(tmp_path, {"default_max_attempts": 3}),
+    )
+    assert code == ExitCode.OK, err
+    payload = json.loads(out)
+    assert "dependency_budgets" not in payload
+
+
+def test_cli_budget_reports_dependency_budgets_text_format(db: str, tmp_path: Path) -> None:
+    """Text output includes DEPENDENCY table with attempt counts and ceilings (issue #1460)."""
+    ledger_dir = tmp_path / "ledger"
+    ledger = RecoveryLedger(FileLedgerBackend(str(ledger_dir)))
+    ledger.record_attempt("run_1", scope="ext:weather-api")
+
+    cfg = registry(
+        tmp_path,
+        {
+            "default_max_attempts": 3,
+            "dependency_budgets": {"ext:weather-api": 2},
+        },
+    )
+    code, out, err = run(
+        "--db",
+        db,
+        "budget",
+        "run_1",
+        "--config",
+        cfg,
+        "--ledger-dir",
+        str(ledger_dir),
+    )
+    assert code == ExitCode.OK, err
+    assert "DEPENDENCY" in out
+    assert "ATTEMPTS" in out
+    assert "MAX" in out
+    assert "REMAINING" in out
+    assert "EXHAUSTED" in out
+    assert "ext:weather-api" in out
+
+
+def test_cli_budget_reports_dependency_budgets_text_format_shows_exhausted(
+    db: str, tmp_path: Path
+) -> None:
+    """Text output marks an escalated dependency without ceiling as exhausted (issue #1460)."""
+    ledger_dir = tmp_path / "ledger"
+    ledger = RecoveryLedger(FileLedgerBackend(str(ledger_dir)))
+    ledger.record_gate("run_1", "human_required:ext:escalated")
+
+    cfg = registry(tmp_path, {})
+    code, out, err = run(
+        "--db",
+        db,
+        "budget",
+        "run_1",
+        "--config",
+        cfg,
+        "--ledger-dir",
+        str(ledger_dir),
+    )
+    assert code == ExitCode.OK, err
+    assert "DEPENDENCY" in out
+    assert "EXHAUSTED" in out
+    assert "ext:escalated" in out
+    assert "yes" in out
+
+
+def test_cli_budget_autodiscovery_unreadable_ledger_warns(db: str, tmp_path: Path) -> None:
+    """Autodiscovered unreadable ledger prints warning consistently with explicit path (issue #1460)."""
+    cfg_dir = tmp_path / "cfg_project"
+    cfg_dir.mkdir()
+    auto_ledger = cfg_dir / "ledger"
+    auto_ledger.mkdir()
+    (auto_ledger / "ledger-run_1.jsonl").write_text("corrupted json\n")
+
+    cfg = str(cfg_dir / "budgets.json")
+    Path(cfg).write_text(
+        json.dumps({"default_max_attempts": 3, "dependency_budgets": {"ext:dep": 2}})
+    )
+
+    code, out, err = run("--db", db, "--json", "budget", "run_1", "--config", cfg)
+    assert code == ExitCode.OK, err
+    assert "warning: recovery ledger unreadable" in err
+    payload = json.loads(out)
+    assert "dependency_budgets" in payload
+
+
+def test_cli_budget_ledger_dir_env_var_and_autodiscovery(
+    db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ledger directory resolves from CONTINUUM_LEDGER_DIR env var or auto-discovery (issue #1460)."""
+    env_ledger = tmp_path / "env_ledger"
+    ledger1 = RecoveryLedger(FileLedgerBackend(str(env_ledger)))
+    ledger1.record_attempt("run_1", scope="ext:from-env")
+
+    monkeypatch.setenv("CONTINUUM_LEDGER_DIR", str(env_ledger))
+    cfg = registry(tmp_path, {"default_max_attempts": 3})
+
+    code, out, err = run("--db", db, "--json", "budget", "run_1", "--config", cfg)
+    assert code == ExitCode.OK, err
+    payload = json.loads(out)
+    assert "dependency_budgets" in payload
+    deps = {r["dependency"] for r in payload["dependency_budgets"]}
+    assert "ext:from-env" in deps
+
+    monkeypatch.delenv("CONTINUUM_LEDGER_DIR", raising=False)
+    cfg_dir = tmp_path / "cfg_project"
+    cfg_dir.mkdir()
+    auto_ledger = cfg_dir / "ledger"
+    ledger2 = RecoveryLedger(FileLedgerBackend(str(auto_ledger)))
+    ledger2.record_attempt("run_1", scope="ext:from-autodiscovery")
+
+    cfg2 = str(cfg_dir / "budgets.json")
+    Path(cfg2).write_text(json.dumps({"default_max_attempts": 3}))
+
+    code, out, err = run("--db", db, "--json", "budget", "run_1", "--config", cfg2)
+    assert code == ExitCode.OK, err
+    payload2 = json.loads(out)
+    assert "dependency_budgets" in payload2
+    deps2 = {r["dependency"] for r in payload2["dependency_budgets"]}
+    assert "ext:from-autodiscovery" in deps2
+
+
+def test_cli_budget_dependency_case_normalization(db: str, tmp_path: Path) -> None:
+    """Dependency names normalize case so mixed-case registry and attempts merge cleanly (issue #1460)."""
+    cfg_data = {
+        "default_max_attempts": 5,
+        "dependency_budgets": {"ext:Weather-API": 2},
+    }
+    cfg = registry(tmp_path, cfg_data)
+    # Runtime lookup must normalize mixed-case keys
+    assert max_attempts_for_dependency(cfg_data, "ext:weather-api") == 2
+    assert max_attempts_for_dependency(cfg_data, "ext:Weather-API") == 2
+
+    ledger_dir = tmp_path / "ledger"
+    ledger = RecoveryLedger(FileLedgerBackend(str(ledger_dir)))
+    # Enforcement and CLI reporting must agree on the ceiling
+    ledger.record_attempt("run_1", dependency="ext:weather-api", dependency_budgets=cfg_data)
+    assert not ledger.requires_human(
+        "run_1", dependency="ext:weather-api", dependency_budgets=cfg_data
+    )
+    ledger.record_attempt("run_1", dependency="ext:weather-api", dependency_budgets=cfg_data)
+    assert ledger.requires_human("run_1", dependency="ext:weather-api", dependency_budgets=cfg_data)
+
+    code, out, err = run(
+        "--db",
+        db,
+        "--json",
+        "budget",
+        "run_1",
+        "--config",
+        cfg,
+        "--ledger-dir",
+        str(ledger_dir),
+    )
+    assert code == ExitCode.OK, err
+    payload = json.loads(out)
+    assert "dependency_budgets" in payload
+    # Must only have a single merged entry for the normalized dependency
+    assert len(payload["dependency_budgets"]) == 1
+    dep_entry = payload["dependency_budgets"][0]
+    assert dep_entry["dependency"] == "ext:weather-api"
+    assert dep_entry["attempts"] == 2
+    assert dep_entry["max_attempts"] == 2
+    assert dep_entry["remaining"] == 0
+    assert dep_entry["exhausted"] is True
+
+
+def test_cli_budget_unreadable_ledger_handled_gracefully(db: str, tmp_path: Path) -> None:
+    """An unreadable or invalid ledger file degrades gracefully without crashing (issue #1460)."""
+    ledger_dir = tmp_path / "ledger"
+    ledger_dir.mkdir()
+    # Write corrupt JSON to the ledger file
+    (ledger_dir / "ledger-run_1.jsonl").write_text("invalid json content\n")
+
+    cfg = registry(tmp_path, {"default_max_attempts": 3, "dependency_budgets": {"ext:dep": 2}})
+    code, out, err = run(
+        "--db",
+        db,
+        "--json",
+        "budget",
+        "run_1",
+        "--config",
+        cfg,
+        "--ledger-dir",
+        str(ledger_dir),
+    )
+    assert code == ExitCode.OK, err
+    assert "warning: recovery ledger unreadable" in err
+    payload = json.loads(out)
+    assert "dependency_budgets" in payload
+    dep_entry = payload["dependency_budgets"][0]
+    assert dep_entry["dependency"] == "ext:dep"
+    assert dep_entry["attempts"] == 0
+    assert dep_entry["max_attempts"] == 2
+
+
 def test_hand_built_authorization_counter_bool_is_rejected() -> None:
     raw = bound_registry()
     raw["authorization_bound"]["send_invoice"]["authz:stripe-cust-1"]["counter"] = True
@@ -1293,3 +1606,111 @@ def test_hand_built_dependency_limit_bool_is_not_silently_a_cap_of_one() -> None
     hand-built mapping."""
     raw: dict[str, Any] = {"dependency_budgets": {"ext:weather-api": True}}
     assert max_attempts_for_dependency(raw, "ext:weather-api", fallback=9) == 9
+
+
+def test_max_attempts_for_dependency_case_insensitive_lookup() -> None:
+    """Keys match case-insensitively with whitespace stripped across section and bare mappings."""
+    raw_section: dict[str, Any] = {"dependency_budgets": {"  Ext:Weather-API  ": 3}}
+    assert max_attempts_for_dependency(raw_section, "ext:weather-api") == 3
+    assert max_attempts_for_dependency(raw_section, "EXT:WEATHER-API") == 3
+
+    raw_bare: dict[str, Any] = {"  Ext:Payment-Gateway  ": 4}
+    assert max_attempts_for_dependency(raw_bare, "ext:payment-gateway") == 4
+    assert max_attempts_for_dependency(raw_bare, "EXT:PAYMENT-GATEWAY") == 4
+
+
+def test_cli_budget_dependency_discovered_from_events(db: str, tmp_path: Path) -> None:
+    """Dependencies declared or action-scoped in the event log are discovered by continuum budget."""
+    with SQLiteStorage(db) as store:
+        store.append_event(
+            "run_1",
+            EventType.DEPENDENCY_DECLARED,
+            {"resource": "ext:payment-gateway"},
+        )
+        store.append_event(
+            "run_1",
+            EventType.DEPENDENCY_DECLARED,
+            {"dependency": "ext:inventory-service"},
+        )
+        store.append_event(
+            "run_1",
+            EventType.ACTION_RECORDED,
+            {"action": {"action_type": "fetch", "dep_scope": "ext:crm-sync"}},
+        )
+
+    cfg = registry(tmp_path, {"default_max_attempts": 4})
+    code, out, err = run("--db", db, "--json", "budget", "run_1", "--config", cfg)
+    assert code == ExitCode.OK, err
+    payload = json.loads(out)
+    assert "dependency_budgets" in payload
+    discovered = {r["dependency"] for r in payload["dependency_budgets"]}
+    assert "ext:payment-gateway" in discovered
+    assert "ext:inventory-service" in discovered
+    assert "ext:crm-sync" in discovered
+
+
+def test_cli_budget_dependency_discovered_from_gate_entry(db: str, tmp_path: Path) -> None:
+    """Scoped human_required gate entries in the ledger contribute to candidate discovery."""
+    ledger_dir = tmp_path / "ledger"
+    ledger = RecoveryLedger(FileLedgerBackend(str(ledger_dir)))
+    ledger.record_gate("run_1", "human_required:ext:auth-provider")
+
+    cfg = registry(tmp_path, {"default_max_attempts": 3})
+    code, out, err = run(
+        "--db",
+        db,
+        "--json",
+        "budget",
+        "run_1",
+        "--config",
+        cfg,
+        "--ledger-dir",
+        str(ledger_dir),
+    )
+    assert code == ExitCode.OK, err
+    payload = json.loads(out)
+    assert "dependency_budgets" in payload
+    deps = {r["dependency"] for r in payload["dependency_budgets"]}
+    assert "ext:auth-provider" in deps
+
+
+def test_cli_budget_table_text_formatting_with_auth_and_dep_budgets(
+    db: str, tmp_path: Path
+) -> None:
+    """Plain-text table formatting outputs ACTION TYPE, AUTHORIZATION, and DEPENDENCY sections."""
+    ledger_dir = tmp_path / "ledger"
+    ledger = RecoveryLedger(FileLedgerBackend(str(ledger_dir)))
+    ledger.record_attempt("run_1", scope="ext:service-a")
+
+    cfg = registry(
+        tmp_path,
+        {
+            "default_max_attempts": 3,
+            "actions": {"send_email": {"max_attempts": 2}},
+            "authorization_bound": {
+                "send_email": {
+                    "auth_1234567890abcdef": {
+                        "counter": 1,
+                        "max_attempts": 3,
+                    }
+                }
+            },
+            "dependency_budgets": {"ext:service-a": 3},
+        },
+    )
+
+    code, out, err = run(
+        "--db",
+        db,
+        "budget",
+        "run_1",
+        "--config",
+        cfg,
+        "--ledger-dir",
+        str(ledger_dir),
+    )
+    assert code == ExitCode.OK, err
+    assert "ACTION TYPE" in out
+    assert "AUTHORIZATION" in out
+    assert "DEPENDENCY" in out
+    assert "ext:service-a" in out
