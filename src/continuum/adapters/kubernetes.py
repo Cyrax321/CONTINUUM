@@ -73,16 +73,22 @@ class KubernetesAdapter(GenericAgentAdapter):
     ) -> AdapterResult:
         """Run ``sh -c command`` as a one-shot pod from ``image``.
 
-        Executes ``kubectl run <pod-name> -n <namespace> --rm --image <image>``
-        in the adapter's namespace and returns the pod's stdout as
-        ``AdapterResult.output``. The pod name is derived from the run id and
-        the action's idempotency basis (its image and command), so two
-        different jobs in one namespace get distinct names and stop
+        Executes ``kubectl run <pod-name> -n <namespace> --attach --rm
+        --image <image>`` in the adapter's namespace and returns the pod's
+        stdout as ``AdapterResult.output``. The pod name is derived from the
+        run id and the action's idempotency basis (its image and command), so
+        two different jobs in one namespace get distinct names and stop
         colliding, while a replay of the same job reuses its own name.
         ``--rm`` deletes the pod when it completes, the same cleanup the
         container adapter gets from ``docker run --rm``; without it every
         completed pod stays behind and blocks its own name from ever being
-        used again (issue #1807). A non-zero exit or a kubectl failure is
+        used again (issue #1807). ``--attach`` is what makes ``--rm`` legal
+        at all: ``kubectl run`` rejects ``--rm`` for a pod it never attaches
+        to, so every job on a live cluster used to fail before it started
+        with ``--rm should only be used for attached containers`` (issue
+        #1849). Attaching also waits for the pod to finish, so a non-zero
+        container exit surfaces here instead of being missed by a fire-and-
+        forget run. A non-zero exit or a kubectl failure is
         captured into the result (status ``failed`` with ``error`` set)
         rather than raised, because the attempt is already recorded in the
         ledger. Raises ``RuntimeError`` up front when kubectl or the
@@ -100,6 +106,7 @@ class KubernetesAdapter(GenericAgentAdapter):
                     _pod_name(run_id, image, command),
                     "-n",
                     self.namespace,
+                    "--attach",
                     "--rm",
                     "--image",
                     image,

@@ -138,6 +138,7 @@ def test_run_job_builds_the_expected_action_and_returns_stdout(
         "continuum-job-0786df27ca76",
         "-n",
         "jobs",
+        "--attach",
         "--rm",
         "--image",
         "example/app:latest",
@@ -241,3 +242,20 @@ def test_pod_name_stays_a_valid_label_when_the_run_id_is_not(
 
 def _pod_name_matches_dns1123(name: str) -> bool:
     return re.fullmatch(r"continuum-job-[0-9a-f]{12}", name) is not None
+
+
+def test_run_job_attaches_so_rm_is_legal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--rm`` only parses on an attached run, so ``--attach`` goes with it (#1849).
+
+    ``kubectl run`` rejects ``--rm`` outright when it is not attaching (``--rm
+    should only be used for attached containers``), failing before it creates
+    any pod. A job argv that names ``--rm`` without ``--attach`` therefore
+    cannot have ever run on a live cluster.
+    """
+    adapter, argvs = _adapter(monkeypatch)
+
+    adapter.run_job("run_k8s", "busybox", "echo hello")
+
+    argv = argvs[0]
+    assert "--rm" in argv
+    assert argv.index("--attach") < argv.index("--rm")
