@@ -6,6 +6,7 @@ from continuum.actions.ledger import (
     ActionOutcome,
     ClaimLockError,
     LedgerError,
+    get_memory_provenance,
 )
 from continuum.actions.reconciliation import (
     AssumeNotOccurredReconciler,
@@ -31,6 +32,7 @@ __all__ = [
     "ReconciliationReport",
     "Resolution",
     "arguments_hash",
+    "get_memory_provenance",
     "idempotency_key",
     "reconcile_pending",
     "unresolved_actions",

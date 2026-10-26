@@ -46,6 +46,18 @@ Test counts: ~3950 collected on a minimal env.
   first pull requests, a Table of Contents, and a reference table for issue
   labels (including hacktoberfest, help wanted, and good first issue).
 
+- **Observation provenance linkage and memory forensic lookup (#1416, #1407, #304).**
+  Link motivating observation digests to external memory mutation claims in `ActionLedger`.
+  The `Action` model and `ActionLedger.claim()` accept `origin_observation_digest` as an alias
+  for `origin_digest`, persisting the linkage on ledger events and `action_index` projections
+  so attribution survives event-log compaction. Added `get_memory_provenance()` to walk backward
+  from a memory record key to its initiating observation event in the hash-chained log and
+  enumerate sibling records originating from the same contaminated observation. The lookup
+  resolves a short key by rank (exact key or action id, then a namespace suffix, then a
+  substring) and raises `LedgerError` when two candidates tie, rather than blaming one of them
+  by insertion order. Runs it cannot read are listed in the result's `skipped_runs` so a
+  forensic answer never passes as complete when a log was unreadable.
+
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a
   repeatedly failing integration spends its own allowance instead of the run's:
