@@ -82,12 +82,104 @@ def test_spiffe_provider_unavailable_without_socket(monkeypatch: pytest.MonkeyPa
         provider.get_identity()
 
 
-def test_spiffe_provider_verification() -> None:
+def test_spiffe_provider_verification(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = SpiffeIdentityProvider(trust_domain="example.org")
+    # The Workload API is unreachable in tests, so stand in for the SVID this
+    # workload actually holds: verify_identity must compare against it.
+    monkeypatch.setattr(
+        provider,
+        "get_identity",
+        lambda: WorkloadIdentity("spiffe://example.org/sa/agent"),
+    )
+
     good = WorkloadIdentity("spiffe://example.org/sa/agent")
+    other_workload_same_domain = WorkloadIdentity("spiffe://example.org/sa/other")
     bad_domain = WorkloadIdentity("spiffe://evil.com/sa/agent")
     assert provider.verify_identity(good) is True
+    assert provider.verify_identity(other_workload_same_domain) is False
     assert provider.verify_identity(bad_domain) is False
+
+
+def test_spiffe_provider_verify_identity_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a current SVID the claim is rejected, not trusted by domain alone."""
+    monkeypatch.delenv("SPIFFE_ENDPOINT_SOCKET", raising=False)
+    provider = SpiffeIdentityProvider(trust_domain="example.org")
+    claim = WorkloadIdentity("spiffe://example.org/sa/agent")
+    assert provider.verify_identity(claim) is False
+
+
+def test_spiffe_provider_get_identity_fetches_svid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """get_identity owns the client lifecycle and maps the SVID into a WorkloadIdentity."""
+
+    class _SpiffeId:
+        trust_domain = "example.org"
+
+        def __str__(self) -> str:
+            return "spiffe://example.org/ns/prod/sa/worker"
+
+    class _Svid:
+        spiffe_id = _SpiffeId()
+
+    class _Client:
+        instances: list[_Client] = []
+
+        def __init__(self, socket_path: str | None = None) -> None:
+            self.socket_path = socket_path
+            self.closed = False
+            _Client.instances.append(self)
+
+        def __enter__(self) -> _Client:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            self.closed = True
+
+        def fetch_x509_svid(self) -> _Svid:
+            return _Svid()
+
+    provider = SpiffeIdentityProvider(socket_path="/tmp/spire-agent.sock")
+    monkeypatch.setattr(provider, "_spiffe_client_cls", lambda: _Client)
+
+    ident = provider.get_identity()
+
+    assert ident.spiffe_id == "spiffe://example.org/ns/prod/sa/worker"
+    assert ident.trust_domain == "example.org"
+    assert ident.provider == "spiffe"
+    assert _Client.instances[0].socket_path == "/tmp/spire-agent.sock"
+    assert _Client.instances[0].closed
+
+
+def test_spiffe_provider_reports_missing_spiffe_package(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The actionable diagnostic names the real PyPI package ('spiffe')."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "spiffe", None)
+    provider = SpiffeIdentityProvider(socket_path="/tmp/spire-agent.sock")
+    with pytest.raises(WorkloadIdentityUnavailableError, match=r"'spiffe' package"):
+        provider.get_identity()
+
+
+def test_workload_identity_rejects_malformed_spiffe_ids() -> None:
+    """Validation mirrors what real SPIFFE implementations accept."""
+    for bad in (
+        "spiffe://example.org/sa/a b",  # whitespace
+        "spiffe://example.org/sa/a?x=1",  # query
+        "spiffe://example.org/sa/a#frag",  # fragment
+        "spiffe://EXAMPLE.org/sa/a",  # trust domain must be lowercase host form
+        "spiffe://exa mple.org/sa/a",
+        "spiffe://example.org//a",  # empty path segment
+        "spiffe://example.org/./a",  # '.' segment
+        "spiffe://example.org/../a",  # '..' segment
+        "spiffe://example.org/sa/a;b",  # invalid path character
+    ):
+        with pytest.raises(ValueError, match="malformed SPIFFE ID"):
+            WorkloadIdentity(bad)
+
+    # A supplied trust domain that disagrees with the ID names two domains.
+    with pytest.raises(ValueError, match="disagrees"):
+        WorkloadIdentity("spiffe://example.org/sa/agent", trust_domain="other.org")
 
 
 def test_resolve_workload_provider() -> None:
@@ -198,6 +290,23 @@ def test_identity_bound_attestation_rejects_tampered_identity() -> None:
         "trust_domain": "example.org",
     }
     assert verify_attestation(doc) is False
+
+
+def test_require_workload_identity_rejects_arbitrary_binding() -> None:
+    """sign_chain accepts arbitrary mappings, so the requirement must validate them."""
+    priv_pem, _ = generate_keypair()
+    for bogus in ({"unrelated": True}, {"spiffe_id": "not-a-spiffe-id"}):
+        attest = sign_chain(
+            priv_pem,
+            run_id="run_bogus",
+            trusted_through_seq=3,
+            chain_hash="hash_bogus",
+            workload_identity=bogus,
+        )
+        # The signature is valid and covers the claim ...
+        assert verify_attestation(attest) is True
+        # ... but it does not name a workload identity, so requiring one fails.
+        assert verify_attestation(attest, require_workload_identity=True) is False
 
 
 def test_no_silent_downgrade_when_identity_required() -> None:
@@ -325,3 +434,144 @@ def test_cli_attest_and_verify_with_workload_identity(tmp_path: Path) -> None:
     )
     assert code == ExitCode.UNSAFE
     assert "Attestation verification failed" in out
+
+
+def _seal_attestation(db_path: str, tmp_path: Path, spiffe_id: str) -> Path:
+    """Create a one-event run and seal a valid attestation over its head."""
+    from continuum.cli import ExitCode
+    from continuum.events import EventType
+    from continuum.models import Run
+    from continuum.storage import SQLiteStorage
+    from tests.test_cli import run
+
+    with SQLiteStorage(db_path) as store:
+        store.create_run(Run(run_id="run_seal", goal="seal an attestation"))
+        store.append_event("run_seal", EventType.RUN_STARTED, {"goal": "seal", "total": 1})
+
+    priv_pem, _ = generate_keypair()
+    (tmp_path / "seal.pem").write_text(priv_pem, encoding="utf-8")
+    attest_file = tmp_path / "run_seal.attest.json"
+    code, _, err = run(
+        "--db",
+        db_path,
+        "attest",
+        "run_seal",
+        "--key",
+        str(tmp_path / "seal.pem"),
+        "--signer",
+        "ci-bot",
+        "--workload-identity",
+        spiffe_id,
+        "--out",
+        str(attest_file),
+    )
+    assert code == ExitCode.OK, err
+    return attest_file
+
+
+def test_cli_attest_verify_forged_document_is_untrusted(tmp_path: Path) -> None:
+    """A failed signature is UNTRUSTED even when the identity also mismatches.
+
+    Both checks collapse into one call, an attest-verify that folds the
+    identity constraint into the signature verdict reports IDENTITY_MISMATCH
+    for a forged document, implying a signature that never verified.
+    """
+    from continuum.cli import ExitCode
+    from tests.test_cli import run
+
+    db_path = str(tmp_path / "forged.db")
+    attest_file = _seal_attestation(db_path, tmp_path, "spiffe://example.org/ns/prod/sa/agent-1")
+
+    doc = json.loads(attest_file.read_text(encoding="utf-8"))
+    # Rewrite the sealed identity without re-signing: the signature stops
+    # verifying, and the forged claim does not match what we will expect.
+    doc["workload_identity"]["spiffe_id"] = "spiffe://example.org/ns/prod/sa/attacker"
+    attest_file.write_text(json.dumps(doc), encoding="utf-8")
+
+    code, out, _ = run(
+        "--db",
+        db_path,
+        "attest-verify",
+        "run_seal",
+        "--attest",
+        str(attest_file),
+        "--expected-workload-identity",
+        "spiffe://example.org/ns/prod/sa/agent-1",
+    )
+    assert code == ExitCode.CORRUPTED
+    assert "UNTRUSTED" in out
+    assert "IDENTITY_MISMATCH" not in out
+
+
+def test_cli_resume_refuses_attestation_when_a_row_was_tampered_in_place(
+    tmp_path: Path,
+) -> None:
+    """resume --attest must recompute the chain, not trust the stored head hash.
+
+    Editing an earlier event payload straight through the database leaves the
+    hash column (and so the sealed head) untouched: without a verify_events
+    walk before the comparison, the attestation still 'matches' and the run
+    resumes on a tampered chain.
+    """
+    from continuum.cli import ExitCode
+    from continuum.events import EventType
+    from continuum.models import Run
+    from continuum.storage import SQLiteStorage
+    from tests.test_cli import run
+
+    db_path = str(tmp_path / "tampered.db")
+    with SQLiteStorage(db_path) as store:
+        store.create_run(Run(run_id="run_tamper", goal="tamper resistance"))
+        store.append_event("run_tamper", EventType.RUN_STARTED, {"goal": "tamper", "total": 1})
+        store.append_event("run_tamper", EventType.TOOL_CALLED, {"tool": "web.search", "q": "a"})
+
+    priv_pem, _ = generate_keypair()
+    key_file = tmp_path / "tamper.pem"
+    key_file.write_text(priv_pem, encoding="utf-8")
+    attest_file = tmp_path / "run_tamper.attest.json"
+    code, _, err = run(
+        "--db",
+        db_path,
+        "attest",
+        "run_tamper",
+        "--key",
+        str(key_file),
+        "--signer",
+        "ci-bot",
+        "--out",
+        str(attest_file),
+    )
+    assert code == ExitCode.OK, err
+
+    # In-place edit of a non-head row: the stored hash column survives, so only
+    # the recomputing walk can detect it.
+    import sqlite3
+
+    raw = sqlite3.connect(db_path)
+    raw.execute("UPDATE events SET payload = '{\"forged\": true}' WHERE sequence = 1")
+    raw.commit()
+    raw.close()
+
+    code, out, _ = run("--db", db_path, "resume", "run_tamper", "--attest", str(attest_file))
+    assert code == ExitCode.UNSAFE
+    assert "no longer verifies" in out
+
+
+def test_cli_resume_identity_flags_require_attest(tmp_path: Path) -> None:
+    """--require-workload-identity / --spiffe without --attest cannot be evaluated."""
+    from continuum.cli import ExitCode
+    from continuum.models import Run
+    from continuum.storage import SQLiteStorage
+    from tests.test_cli import run
+
+    db_path = str(tmp_path / "flags.db")
+    with SQLiteStorage(db_path) as store:
+        store.create_run(Run(run_id="run_flags", goal="flag gating"))
+
+    for flag_args in (
+        ("--require-workload-identity", "spiffe://example.org/sa/agent"),
+        ("--spiffe",),
+    ):
+        code, _, err = run("--db", db_path, "resume", "run_flags", *flag_args)
+        assert code == ExitCode.ERROR, err
+        assert "require --attest" in err

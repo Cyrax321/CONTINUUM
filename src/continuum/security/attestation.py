@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from continuum.security.hashing import to_json
+from continuum.security.workload_identity import WorkloadIdentity
 
 __all__ = [
     "ATTESTATION_ALGORITHM",
@@ -214,30 +215,34 @@ def verify_attestation(
         return False
 
     wid = data.get("workload_identity")
-    if require_workload_identity and not wid:
+    # ``sign_chain`` accepts arbitrary mappings, so parse the binding into a
+    # validated ``WorkloadIdentity`` once: every constraint below then acts on
+    # a real identity claim rather than any non-empty dictionary.
+    bound: WorkloadIdentity | None = None
+    if isinstance(wid, Mapping):
+        try:
+            bound = WorkloadIdentity.from_dict(wid)
+        except ValueError:
+            bound = None
+
+    if require_workload_identity and bound is None:
+        # A binding that is missing, or present but not a valid identity
+        # ({"unrelated": true}), must not satisfy the requirement.
         return False
 
     if expected_workload_identity is not None:
-        if not wid or not isinstance(wid, Mapping):
-            return False
         expected_spiffe_id = (
             expected_workload_identity.spiffe_id
             if hasattr(expected_workload_identity, "spiffe_id")
             else str(expected_workload_identity)
         )
-        if wid.get("spiffe_id") != expected_spiffe_id:
+        if bound is None or bound.spiffe_id != expected_spiffe_id:
             return False
 
     if identity_provider is not None:
-        if not wid or not isinstance(wid, Mapping):
+        if bound is None:
             return False
-        from continuum.security.workload_identity import WorkloadIdentity
-
-        try:
-            wid_obj = WorkloadIdentity.from_dict(wid)
-            if not identity_provider.verify_identity(wid_obj):
-                return False
-        except Exception:
+        if not identity_provider.verify_identity(bound):
             return False
 
     return True

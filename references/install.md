@@ -53,7 +53,7 @@ Combine freely: `[dev]` already includes `mcp`, `langgraph`, `langchain`, `opena
 | `playwright>=1.40` | `pyproject.toml:61` (`[browser]`) | Browser automation through `BrowserAdapter`; install Chromium separately | Only for `BrowserAdapter` |
 | `kubernetes>=29` | `pyproject.toml:65` (`[kubernetes]`) | Kubernetes availability check for `KubernetesAdapter`; `kubectl` and a configured cluster remain external | Only for `KubernetesAdapter` |
 | `cryptography>=45.0` | `pyproject.toml:81` (`[attest]`), also in `[dev]` | Ed25519 event-chain attestation | Only for `continuum attest` |
-| `pyspiffe>=0.2.0` | `pyproject.toml:84` (`[spiffe]`) | SPIFFE Workload API client for binding workload identities to attestations (issue #745) | Only for `continuum attest --spiffe` |
+| `spiffe>=0.3.0` | `pyproject.toml:84` (`[spiffe]`) | SPIFFE Workload API client (py-spiffe) for binding workload identities to attestations (issue #745) | Only for `continuum attest --spiffe` |
 | `psycopg>=3.2` | `pyproject.toml:87` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
 | `langgraph>=0.2` | `pyproject.toml:70` (`[langgraph]`) | LangGraph adapter | Only for LangGraph (also pulled transitively by `langchain`) |
 | `openai-agents>=0.2` | `pyproject.toml:73` (`[openai]`) | OpenAI Agents SDK adapter | Only for OpenAI |

@@ -1535,6 +1535,16 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
         # UNSAFE (31): run exists but resuming is not safe (distinct from NOT_FOUND / 2).
         return ExitCode.UNSAFE
 
+    if (
+        getattr(args, "require_workload_identity", None)
+        or getattr(args, "workload_provider", None)
+        or getattr(args, "spiffe", False)
+    ) and not getattr(args, "attest", None):
+        raise ValueError(
+            "--require-workload-identity, --workload-provider and --spiffe require --attest: "
+            "an identity can only be evaluated against a signed attestation document"
+        )
+
     if getattr(args, "attest", None):
         attest_file = Path(args.attest)
         if not attest_file.exists():
@@ -1551,6 +1561,20 @@ def cmd_resume(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             return ExitCode.UNSAFE
 
         events = storage.read_events(run_id)
+        # The attestation signs the head hash as stored, so a row tampered in
+        # place (payload edited, hash column left alone) would still 'match'
+        # the sealed value. Recompute the chain first and fail closed rather
+        # than trusting the stored hash column (review of #745).
+        integrity = storage.verify_events(run_id)
+        if not integrity.ok:
+            msg = (
+                f"Event chain for run {run_id!r} no longer verifies "
+                f"({len(integrity.violations)} violation(s)); the attestation cannot be "
+                f"trusted. Run `continuum verify {run_id}` for the specific events."
+            )
+            payload = {"run_id": run_id, "mode": "request_human", "safe": False, "reason": msg}
+            _emit(payload, msg, as_json=args.json, stream=out)
+            return ExitCode.UNSAFE
         live_hash = events[-1].hash if events else None
 
         req_wid = getattr(args, "require_workload_identity", None)
@@ -4870,11 +4894,21 @@ def cmd_attest(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
         wid = WorkloadIdentity(spiffe_id=args.workload_identity)
     elif getattr(args, "spiffe", False) or getattr(args, "workload_provider", None):
-        from continuum.security.workload_identity import resolve_workload_provider
+        from continuum.security.workload_identity import (
+            WorkloadIdentityError,
+            resolve_workload_provider,
+        )
 
         provider_name = getattr(args, "workload_provider", None)
-        provider = resolve_workload_provider(provider_name)
-        wid = provider.get_identity()
+        try:
+            provider = resolve_workload_provider(provider_name)
+            wid = provider.get_identity()
+        except WorkloadIdentityError as exc:
+            # A missing socket or a missing [spiffe] extra is the common case,
+            # not an internal failure: report the actionable diagnostic the
+            # provider already carries instead of an unhandled traceback.
+            print(f"error: cannot acquire workload identity: {exc}", file=err)
+            return ExitCode.ERROR
 
     attest = sign_chain(
         private_pem,
@@ -4941,39 +4975,34 @@ def cmd_attest_verify(args: argparse.Namespace, storage: Storage, out: Any, err:
             )
             return ExitCode.CORRUPTED
 
-    signature_valid = verify_attestation(
+    # The signature seals the document as a whole, bound identity included, so
+    # it is validated on its own first: a document whose signature does not
+    # verify is UNTRUSTED whatever identity it claims, and only a *validly
+    # signed* document that then fails an identity constraint is
+    # IDENTITY_MISMATCH. Folding the constraints into this call instead would
+    # report a mismatched (but correctly signed) identity as a forged document.
+    signature_valid = verify_attestation(doc)
+    # The identity constraints are the library's to evaluate, not a second
+    # hand-rolled copy here, so the verdict cannot drift from what
+    # verify_attestation enforces (including a missing binding failing closed
+    # when a provider or a requirement was requested).
+    identity_valid = verify_attestation(
         doc,
         expected_workload_identity=expected_wid,
         identity_provider=identity_provider,
-        require_workload_identity=require_wid,
+        require_workload_identity=bool(require_wid),
     )
     chain_match = doc.get("chain_hash") == live_hash
     seq_match = doc.get("trusted_through_seq") == live_seq
 
     wid_bound = doc.get("workload_identity")
-    wid_match = True
-    if require_wid and not wid_bound:
-        wid_match = False
-    elif expected_wid:
-        if (
-            not wid_bound
-            or not isinstance(wid_bound, dict)
-            or wid_bound.get("spiffe_id") != expected_wid
-        ):
-            wid_match = False
-    elif identity_provider and wid_bound:
-        from continuum.security.workload_identity import WorkloadIdentity
 
-        try:
-            wid_obj = WorkloadIdentity.from_dict(wid_bound)
-            if not identity_provider.verify_identity(wid_obj):
-                wid_match = False
-        except Exception:
-            wid_match = False
-
-    if not signature_valid and wid_match:
+    if not signature_valid:
+        # An invalid signature is UNTRUSTED whatever the identity claim says:
+        # reporting IDENTITY_MISMATCH for a forged document would imply the
+        # signature held and only the identity differed.
         verdict = "UNTRUSTED"
-    elif not wid_match:
+    elif not identity_valid:
         verdict = "IDENTITY_MISMATCH"
     elif not chain_intact or not chain_match or not seq_match:
         verdict = "ALTERED"
@@ -4984,6 +5013,7 @@ def cmd_attest_verify(args: argparse.Namespace, storage: Storage, out: Any, err:
         "run_id": args.run_id,
         "verdict": verdict,
         "signature_valid": signature_valid,
+        "identity_valid": identity_valid,
         "chain_match": chain_match,
         "chain_intact": chain_intact,
         "signer": doc.get("signer"),
@@ -5000,11 +5030,22 @@ def cmd_attest_verify(args: argparse.Namespace, storage: Storage, out: Any, err:
             f"chain matches."
         )
     elif verdict == "IDENTITY_MISMATCH":
-        bound_id = wid_bound.get("spiffe_id") if isinstance(wid_bound, dict) else "none"
-        text = (
-            f"Attestation IDENTITY_MISMATCH: sealed identity {bound_id!r} does not match "
-            f"expected identity {expected_wid!r}."
-        )
+        bound_id = wid_bound.get("spiffe_id") if isinstance(wid_bound, dict) else None
+        if expected_wid:
+            text = (
+                f"Attestation IDENTITY_MISMATCH: sealed identity {bound_id!r} does not match "
+                f"expected identity {expected_wid!r}."
+            )
+        elif not wid_bound:
+            text = (
+                "Attestation IDENTITY_MISMATCH: the attestation carries no workload "
+                "identity, but an identity constraint was requested."
+            )
+        else:
+            text = (
+                f"Attestation IDENTITY_MISMATCH: workload identity provider "
+                f"rejected the sealed identity {bound_id!r}."
+            )
     elif verdict == "ALTERED":
         if not chain_intact:
             text = (

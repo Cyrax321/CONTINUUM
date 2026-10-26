@@ -81,7 +81,7 @@ langchain = ["langchain>=0.3"]
 attest = ["cryptography>=45.0"]
 # SPIFFE workload identity integration for binding attestations (issue #745).
 # Imported lazily so core installs remain zero-dependency.
-spiffe = ["pyspiffe>=0.2.0"]
+spiffe = ["spiffe>=0.3.0"]
 # The PostgreSQL storage backend (B2.3) for multi-process / multi-host durability.
 # The core stays SQLite-only so a plain install needs no database driver.
 postgres = ["psycopg>=3.2"]
@@ -127,10 +127,11 @@ files = ["src/continuum"]
 # errors from `mypy src/continuum` that say nothing about the code (#315). An
 # optional import added without a family here brings the errors back.
 
-# pyspiffe is an optional runtime dependency (the [spiffe] extra). It is
-# imported lazily, so the module must type-check without it installed.
+# py-spiffe is an optional runtime dependency (the [spiffe] extra; published
+# on PyPI as the 'spiffe' package). It is imported lazily, so the module must
+# type-check without it installed.
 [[tool.mypy.overrides]]
-module = ["pyspiffe", "pyspiffe.*"]
+module = ["spiffe", "spiffe.*"]
 ignore_missing_imports = true
 
 # psycopg is an optional runtime dependency (the [postgres] extra). It is

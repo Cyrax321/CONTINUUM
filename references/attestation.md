@@ -98,6 +98,13 @@ continuum attest-verify <run_id> --attest attest.json --require-workload-identit
     # fails if the attestation carries no workload identity (no silent downgrade).
 ```
 
+Identity claims are validated as canonical SPIFFE IDs (trust domain, path
+segments, no whitespace, query or fragment), and `--spiffe` checks a sealed
+identity against the SVID the Workload API currently issues to this workload:
+a well-formed claim belonging to a different workload of the same trust domain
+is rejected. A forged document whose signature does not verify is always
+reported `UNTRUSTED`, whatever identity it claims.
+
 ### Resume verification hook
 
 Resuming an agent run can be gated on attestation and identity verification:
@@ -106,9 +113,12 @@ Resuming an agent run can be gated on attestation and identity verification:
 continuum resume <run_id> --attest attest.json [--require-workload-identity "spiffe://example.org/ns/prod/sa/agent-worker"]
 ```
 
-If the attestation signature fails, the chain has been altered since signing, or
-the required workload identity mismatches, `continuum resume` refuses to resume,
-exits with `ExitCode.UNSAFE` (31), and prints the failure reason.
+Before comparing the sealed hash, `resume` recomputes the event chain with
+`continuum verify`: a row tampered in place (payload edited, hash column left
+alone) would otherwise still match the sealed value. If the signature fails,
+the chain has been altered since signing, or the required workload identity
+mismatches, `continuum resume` refuses to resume, exits with `ExitCode.UNSAFE`
+(31), and prints the failure reason.
 
 ## Propagation tokens: delegating work across a boundary
 
