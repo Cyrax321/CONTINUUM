@@ -2034,11 +2034,16 @@ def get_memory_provenance(
         best = min(rank for rank, *_ in ranked)
         best_hits = [hit for hit in ranked if hit[0] == best]
         if len(best_hits) > 1:
-            keys = ", ".join(sorted(h[2] for h in best_hits))
+            keys = ", ".join(sorted(f"{h[1]}:{h[2]}" for h in best_hits))
+            runs = sorted({h[1] for h in best_hits})
+            hint = (
+                f"the key exists in runs {runs}; pass run_id"
+                if len(runs) > 1
+                else "pass the full rendered key or an action id"
+            )
             raise LedgerError(
                 f"record key {record_key!r} is ambiguous: it matches {len(best_hits)} "
-                f"actions ({keys}); pass the full rendered key or an action id "
-                "to disambiguate the forensic lookup"
+                f"actions ({keys}); {hint} to disambiguate the forensic lookup"
             )
         _, rid, rendered, act, digest = best_hits[0]
         target_hit = {
@@ -2079,6 +2084,11 @@ def get_memory_provenance(
             pass
 
     if target_hit is None:
+        if skipped_runs:
+            runs_str = ", ".join(sorted(set(skipped_runs)))
+            raise LedgerError(
+                f"lookup for record key {record_key!r} could not read runs ({runs_str})"
+            )
         return None
 
     target_digest = target_hit["origin_digest"]
