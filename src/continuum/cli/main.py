@@ -1909,13 +1909,11 @@ def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
 
     dep_candidates: set[str] = set()
     dep_section = raw.get(DEPENDENCY_BUDGETS_KEY)
-    dep_limits: dict[str, Any] = {}
     if isinstance(dep_section, dict):
-        for k, v in dep_section.items():
+        for k in dep_section:
             norm = resolve_scope(k)
             if norm is not None:
                 dep_candidates.add(norm)
-                dep_limits[norm] = v
 
     for e in events:
         if e.type is EventType.DEPENDENCY_DECLARED and isinstance(e.payload, dict):
@@ -1943,7 +1941,6 @@ def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             if norm_gate is not None:
                 dep_candidates.add(norm_gate)
 
-    effective_raw = {**raw, DEPENDENCY_BUDGETS_KEY: dep_limits} if dep_limits else raw
     dep_rows: list[dict[str, Any]] = []
     for dep in sorted(dep_candidates):
         used = sum(
@@ -1955,7 +1952,7 @@ def cmd_budget(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
                 or resolve_scope(getattr(le, "dependency", None)) == dep
             )
         )
-        ceiling = max_attempts_for_dependency(effective_raw, dep)
+        ceiling = max_attempts_for_dependency(raw, dep)
         escalated = any(
             le.kind == LedgerEntryKind.GATE.value
             and (
