@@ -928,3 +928,85 @@ def test_a_legacy_child_blocks_the_recovery_verdict_like_a_recorded_one(
     # and the verdict accounts for it, rather than calling the family safe
     assert "FAMILY BLOCKED" in verdict
     assert "kid" in verdict
+
+
+# --- error and edge branches of the view models (issue #1841) ---------------- #
+
+
+def test_overview_lines_render_a_projection_failure(db: str, store: SQLiteStorage) -> None:
+    """A run whose tail does not fold still answers, naming the break."""
+    run("--db", db, "start", "r1", "--goal", "g")
+    # The CLI records no total, so the over-total write below needs one to
+    # exceed: a second RUN_STARTED carries it and bumps the goal version.
+    store.append_event("r1", EventType.RUN_STARTED, {"goal": "g", "total": 10})
+    store.append_event("r1", EventType.WORK_COMPLETED, {})
+    store.append_event("r1", EventType.TASK_UPDATED, {"completed": 999, "failed": 0})
+
+    lines = "\n".join(tui_model.overview_lines(store, "r1"))
+
+    assert "PROJECTION FAILURE: the log stops folding at sequence" in lines
+    assert "TASK_UPDATED" in lines
+    assert "exceeds total" in lines
+    # the figures up to the break are still there, not blanked out
+    assert "run:         r1" in lines
+
+
+def test_budget_rows_survive_a_broken_budget_registry(
+    db: str, store: SQLiteStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registry that cannot be read must not take the dashboard down."""
+    run("--db", db, "start", "r1", "--goal", "g")
+    ActionLedger(SQLiteStorage(db), "r1").claim("send_invoice", {}, key="invoice:I-1")
+
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise json.JSONDecodeError("expecting value", "", 0)
+
+    monkeypatch.setattr(tui_model, "load_budgets", boom)
+
+    rows = {r.action_type: r for r in tui_model.budget_rows(store, "r1")}
+    # the recorded action still renders, with the default allowance in force
+    assert rows["send_invoice"].attempts == 1
+    assert rows["send_invoice"].max_attempts > 0
+
+
+def test_recovery_lines_name_a_broken_reconciler_config(
+    db: str, store: SQLiteStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ReconcilerConfigError is surfaced as a step, not dropped."""
+    run("--db", db, "start", "r1", "--goal", "g")
+    from continuum import reconcilers
+
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise reconcilers.ReconcilerConfigError("no reconcilers section")
+
+    monkeypatch.setattr(reconcilers, "load_reconcilers", boom)
+
+    lines = "\n".join(tui_model.recovery_lines(store, "r1"))
+
+    assert "error: no reconcilers section" in lines
+
+
+def test_recovery_lines_absorb_any_other_load_failure(
+    db: str, store: SQLiteStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Anything else load_reconcilers raises still yields steps, no traceback."""
+    run("--db", db, "start", "r1", "--goal", "g")
+    from continuum import reconcilers
+
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("registry on a gone drive")
+
+    monkeypatch.setattr(reconcilers, "load_reconcilers", boom)
+
+    lines = "\n".join(tui_model.recovery_lines(store, "r1"))
+
+    assert "traceback" not in lines.lower()
+
+
+def test_complete_run_refuses_to_run_twice(db: str, store: SQLiteStorage) -> None:
+    run("--db", db, "start", "r1", "--goal", "g")
+
+    assert tui_model.complete_run(store, "r1") == "run r1 completed"
+    # the second call is a no-op that says so, not a second RUN_COMPLETED
+    assert tui_model.complete_run(store, "r1") == "run r1 is already completed"
+    assert store.get_run("r1").status is RunStatus.COMPLETED
