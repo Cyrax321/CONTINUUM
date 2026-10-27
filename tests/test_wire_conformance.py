@@ -11,7 +11,13 @@ Verifies:
 from __future__ import annotations
 
 import io
+import urllib.error
+import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
 
 from continuum.serve import (
     SidecarAuth,
@@ -19,6 +25,9 @@ from continuum.serve import (
     get_openapi_spec,
 )
 from continuum.serve.conformance import (
+    WireConformanceReport,
+    WireTestResult,
+    _http_call,
     cmd_conformance,
     run_wire_conformance,
 )
@@ -174,3 +183,98 @@ def test_cli_conformance_command(tmp_path: Path) -> None:
         assert "conformance tests passed" in output
     finally:
         http.shutdown()
+
+
+# --- report rendering and HTTP error handling, without a live server ---------- #
+
+
+def test_report_render_names_every_failure() -> None:
+    report = WireConformanceReport(target_url="http://127.0.0.1:9")
+    report.results.append(WireTestResult("healthz", True))
+    report.results.append(WireTestResult("openapi", False, "missing Continuum-Version header"))
+
+    rendered = report.render()
+
+    assert report.passed is False
+    assert report.passed_count == 1
+    assert report.failed_count == 1
+    assert "FAILED: 1 of 2 conformance tests failed." in rendered
+    assert "[FAIL] openapi: missing Continuum-Version header" in rendered
+    assert "[PASS] healthz" in rendered
+
+
+def test_report_render_announces_a_clean_pass() -> None:
+    report = WireConformanceReport(target_url="http://127.0.0.1:9")
+    report.results.append(WireTestResult("healthz", True))
+    report.results.append(WireTestResult("openapi", True, "3.1.0"))
+
+    rendered = report.render()
+
+    assert report.passed is True
+    assert report.failed_count == 0
+    assert "All 2 conformance tests passed." in rendered
+    assert "FAIL" not in rendered
+
+
+def test_http_call_returns_the_raw_body_when_an_error_is_not_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proxy's HTML error page is not a parse error; it is evidence."""
+
+    def boom(req: Any, timeout: float = 5.0) -> Any:
+        raise urllib.error.HTTPError(
+            req.full_url,
+            500,
+            "Internal Server Error",
+            {"Content-Type": "text/html"},
+            io.BytesIO(b"<html>gateway error</html>"),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+
+    status, parsed, headers = _http_call("http://127.0.0.1:9/broken")
+
+    assert status == 500
+    assert parsed == {"raw": "<html>gateway error</html>"}
+    assert headers["Content-Type"] == "text/html"
+
+
+def test_http_call_parses_a_json_error_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A well-formed JSON error body still comes back structured."""
+
+    def boom(req: Any, timeout: float = 5.0) -> Any:
+        raise urllib.error.HTTPError(
+            req.full_url,
+            409,
+            "Conflict",
+            {"Content-Type": "application/json"},
+            io.BytesIO(b'{"error": "duplicate claim", "code": 409}'),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+
+    status, parsed, _headers = _http_call("http://127.0.0.1:9/claim")
+
+    assert status == 409
+    assert parsed == {"error": "duplicate claim", "code": 409}
+
+
+def test_cli_conformance_command_returns_one_when_the_suite_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing suite is a CLI failure, not a zero-exit report."""
+    from continuum.serve import conformance
+
+    failed = WireConformanceReport(target_url="http://127.0.0.1:9")
+    failed.results.append(WireTestResult("healthz", False, "missing Continuum-Version header"))
+    monkeypatch.setattr(conformance, "run_wire_conformance", lambda *a, **k: failed)
+
+    args = SimpleNamespace(url="http://127.0.0.1:9", token=None, confirm_token=None)
+    out = io.StringIO()
+
+    code = cmd_conformance(args, out=out, err=io.StringIO())
+
+    assert code == 1
+    rendered = out.getvalue()
+    assert "FAILED: 1 of 1 conformance tests failed." in rendered
+    assert "missing Continuum-Version header" in rendered
