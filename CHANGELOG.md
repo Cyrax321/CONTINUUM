@@ -89,6 +89,20 @@ Test counts: ~3950 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **The daemon's active-run probe and detached startup deadline work on
+  server-backed storage (#1855).** The probe gated on `Path(db).exists()`,
+  which is never true for a `postgresql://` URL, so the daemon silently bound
+  with `run_id=None` instead of the live run. Only SQLite is now gated on
+  filesystem existence, since a missing SQLite file means nothing to probe and
+  opening it would create it; server-backed URLs are probed through
+  `open_storage` directly, and a probe that fails (no `psycopg` extra, an
+  unreachable host) prints a warning rather than aborting the launch. The
+  detached-process readiness deadline was hardcoded to 500ms, which Python
+  startup alone routinely exceeds on Windows, so a healthy child was reported
+  as started before it had bound. It is now five seconds and overridable via
+  `CONTINUUM_DAEMON_STARTUP_TIMEOUT_S`, and a child that exits during the
+  window is still reported as an error.
+
 - **Benchmark report timestamps are timezone-aware UTC (#1823).** The Phase 6,
   fault-injection, and horizon benchmark runners now use the shared `utcnow()`
   helper, keeping report timestamps comparable across benchmark suites.

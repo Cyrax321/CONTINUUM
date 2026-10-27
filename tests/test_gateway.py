@@ -1610,6 +1610,130 @@ def test_cmd_daemon_resolves_active_run_when_storage_none(tmp_path: Path) -> Non
         assert mock_server.call_args.args[1] == "active_daemon_run"
 
 
+def _daemon_args(cfg: Path, db: str, tmp_path: Path) -> Any:
+    import argparse
+
+    return argparse.Namespace(
+        config=str(cfg),
+        tenant=None,
+        run_id=None,
+        db=db,
+        port=8765,
+        detach=False,
+        pid_file=None,
+    )
+
+
+def _daemon_gateway_cfg(tmp_path: Path) -> Path:
+    cfg = tmp_path / "gateway.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "upstreams": [
+                    {
+                        "host": "api.example.com",
+                        "action_type": "send",
+                        "key_template": "key:{id}",
+                    }
+                ]
+            }
+        )
+    )
+    return cfg
+
+
+def test_cmd_daemon_probes_active_run_for_server_backed_urls(tmp_path: Path) -> None:
+    """The active-run probe reaches server-backed URLs, not just files (#1855).
+
+    A Postgres DSN has no file to stat, so gating the probe on
+    `Path(dsn).exists()` silently skipped it and the daemon bound with
+    `run_id=None` even when the run was alive.
+    """
+    import io
+    from unittest.mock import MagicMock, patch
+
+    from continuum.cli.main import cmd_daemon
+
+    cfg = _daemon_gateway_cfg(tmp_path)
+    db = "postgresql://continuum:continuum@localhost:5432/continuum"
+    args = _daemon_args(cfg, db, tmp_path)
+    out = io.StringIO()
+    err = io.StringIO()
+    with (
+        patch("continuum.gateway.GatewayServer") as mock_server,
+        patch("continuum.cli.main.open_storage") as mock_open,
+        patch("signal.signal"),
+    ):
+        mock_store = MagicMock()
+        mock_store.get_active_run.return_value = Run(run_id="pg_active_run", goal="g")
+        mock_open.return_value = mock_store
+        mock_server.return_value.serve_forever.return_value = None
+        mock_server.return_value.port = 8765
+        code = cmd_daemon(args, None, out, err)
+        assert code == 0
+        mock_open.assert_called_once_with(db)
+        mock_store.close.assert_called_once()
+        assert mock_server.call_args.args[1] == "pg_active_run"
+        assert "failed to probe active run" not in err.getvalue()
+
+
+def test_cmd_daemon_probe_failure_warns_instead_of_dying(tmp_path: Path) -> None:
+    """A server-backed probe that fails warns and keeps starting (#1855).
+
+    The missing-psycopg and unreachable-host failures both surface as
+    RuntimeError; the probe is diagnostic, so either one must print a warning
+    and leave run_id unset rather than abort the daemon launch.
+    """
+    import io
+    from unittest.mock import patch
+
+    from continuum.cli.main import cmd_daemon
+
+    cfg = _daemon_gateway_cfg(tmp_path)
+    db = "postgresql://continuum:continuum@db.invalid:5432/continuum"
+    args = _daemon_args(cfg, db, tmp_path)
+    out = io.StringIO()
+    err = io.StringIO()
+    with (
+        patch("continuum.gateway.GatewayServer") as mock_server,
+        patch("continuum.cli.main.open_storage") as mock_open,
+        patch("signal.signal"),
+    ):
+        mock_open.side_effect = RuntimeError(
+            "could not connect to PostgreSQL at 'postgresql://...': connection refused"
+        )
+        mock_server.return_value.serve_forever.return_value = None
+        mock_server.return_value.port = 8765
+        code = cmd_daemon(args, None, out, err)
+        assert code == 0
+        assert "failed to probe active run" in err.getvalue()
+        assert mock_server.call_args.args[1] is None
+
+
+def test_detached_startup_timeout_is_realistic_and_overridable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The detached readiness deadline defaults to 5s, not 500ms (#1855).
+
+    Half a second is routinely exceeded by Python startup alone on Windows, so
+    a healthy child was reported as started before it had bound. The default
+    is now five seconds, overridable through the environment for tests.
+    """
+    from continuum.cli.main import _detached_startup_timeout
+
+    monkeypatch.delenv("CONTINUUM_DAEMON_STARTUP_TIMEOUT_S", raising=False)
+    assert _detached_startup_timeout() == 5.0
+
+    monkeypatch.setenv("CONTINUUM_DAEMON_STARTUP_TIMEOUT_S", "9.5")
+    assert _detached_startup_timeout() == 9.5
+
+    monkeypatch.setenv("CONTINUUM_DAEMON_STARTUP_TIMEOUT_S", "not-a-number")
+    assert _detached_startup_timeout() == 5.0
+
+    monkeypatch.setenv("CONTINUUM_DAEMON_STARTUP_TIMEOUT_S", "0")
+    assert _detached_startup_timeout() == pytest.approx(0.05)
+
+
 def test_cmd_daemon_detach_without_os_fork(tmp_path: Path) -> None:
     """cmd_daemon detach spawns background process when os.fork is unavailable (#1603)."""
     import argparse
