@@ -89,6 +89,19 @@ Test counts: ~3950 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **Checkpoint rewind classifies digest-less paths before touching the
+  filesystem (#1854).** The rewind pass is now split into a classification
+  pass and a mutation pass. A post-checkpoint observation that carries no
+  digest gives no evidence that the file was created after the checkpoint,
+  so deleting it could remove a file that pre-existed the checkpoint; the
+  rewind now refuses with a conflict and only `--force` authorizes the
+  unlink. A path whose checkpoint-time observation has no digest and whose
+  file is missing from disk is reported as `unrecoverable` rather than
+  `deleted`, so a clean verdict no longer claims a deletion that never
+  happened. Because every path is classified before any file is unlinked or
+  restored, a rewind that turns out to be blocked no longer leaves the
+  earlier files already deleted when it raises `RewindError`.
+
 - **Benchmark report timestamps are timezone-aware UTC (#1823).** The Phase 6,
   fault-injection, and horizon benchmark runners now use the shared `utcnow()`
   helper, keeping report timestamps comparable across benchmark suites.

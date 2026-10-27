@@ -157,6 +157,14 @@ def rewind_to_checkpoint(
     deleted: list[str] = []
     conflicts: list[str] = []
     unrecoverable: list[str] = []
+    # Preflight pass (#1854): classify every post-checkpoint path from the
+    # observations alone, before anything is unlinked or restored. A rewind
+    # that discovered an unrecoverable path midway through the loop had
+    # already deleted the paths it processed earlier by the time it raised
+    # RewindError, leaving the workspace half-rewound under a failure exit.
+    # The classification below reads digests but never mutates; the mutation
+    # pass runs only once every blocker is resolved or overridden with force.
+    plan: dict[str, str] = {}
     for path, after_payload in after_by_path.items():
         after_digest = after_payload.get("sha256")
         before_payload = before_by_path.get(path)
@@ -196,36 +204,31 @@ def rewind_to_checkpoint(
             # restore it: leave it in place and report it. Never a delete.
             if current_digest is None:
                 # Nothing is on disk and there is no digest to restore from,
-                # so there is nothing this rewind can do for the path.
-                deleted.append(path)
+                # so there is nothing this rewind can do for the path. That is
+                # unrecoverable, not deleted: no deletion happened and no
+                # restore is possible, so reporting it as deleted claimed work
+                # the rewind never did and hid the path behind ok=True (#1854).
+                unrecoverable.append(
+                    f"{path}: file missing and checkpoint-time observation has no digest, cannot restore"
+                )
                 continue
             unrecoverable.append(
                 f"{path}: checkpoint-time observation has no digest, cannot restore, file left in place"
             )
             continue
         if before_digest is None:
-            try:
-                p = Path(path)
-                if p.exists():
-                    if not dry_run:
-                        # A post-checkpoint observation without a digest gives
-                        # nothing to compare against, so there is nothing to
-                        # verify before the unlink. Comparing anyway made the
-                        # delete branch conflict forever, so a forced rewind
-                        # left post-checkpoint files in the workspace while
-                        # reporting that it ran (#1806).
-                        if expected_after is not None and file_digest(path) != expected_after:
-                            conflicts.append(f"{path}: digest changed before delete")
-                            continue
-                        p.unlink()
-                        if p.exists():
-                            conflicts.append(f"{path}: failed to delete")
-                            continue
-                    deleted.append(path)
-                else:
-                    deleted.append(path)
-            except OSError as exc:
-                conflicts.append(f"{path}: delete failed: {exc}")
+            # No pre-checkpoint observation: the file is deletable when its
+            # post-checkpoint digest matches what is on disk, because that
+            # verifies the checkpoint-era bytes are gone. Without that digest
+            # the checkpoint-era record says nothing about the path, so
+            # unlinking it can delete a file that pre-existed the checkpoint;
+            # only force authorizes that risk (#1854).
+            if expected_after is None and not force:
+                conflicts.append(
+                    f"{path}: post-checkpoint observation has no digest to verify the file was created after the checkpoint; deletion requires --force"
+                )
+                continue
+            plan[path] = "delete"
         else:
             try:
                 snapshot = snapshot_path(before_digest)
@@ -239,28 +242,43 @@ def rewind_to_checkpoint(
                     f"{path}: no snapshot for digest {before_digest[:12]} (file may have been too large or unreadable at checkpoint)"
                 )
                 continue
-            if not dry_run:
-                # Same reasoning as the delete branch: without an observed
-                # post-checkpoint digest there is nothing to compare the
-                # current content against, and the restore itself is still
-                # verified against the snapshot digest below.
-                if expected_after is not None and file_digest(path) != expected_after:
-                    conflicts.append(f"{path}: digest changed before restore")
-                    continue
-                if not restore_file(path, before_digest):
-                    unrecoverable.append(f"{path}: restore failed for {before_digest[:12]}")
-                    continue
-                new_digest = file_digest(path)
-                if new_digest != before_digest:
-                    conflicts.append(
-                        f"{path}: after restore digest {new_digest[:12] if new_digest else 'missing'} != expected {before_digest[:12]}"
-                    )
-                    continue
-            reverted.append(path)
+            plan[path] = "restore"
     if not force and not dry_run and (conflicts or unrecoverable):
         raise RewindError(
             f"rewind to {to!r} has {len(conflicts)} conflict(s) and {len(unrecoverable)} unrecoverable file(s); use --force to proceed anyway or resolve conflicts. Conflicts: {conflicts[:3]} Unrecoverable: {unrecoverable[:3]}"
         )
+    # Mutation pass: the blockers above are either gone or explicitly
+    # overridden, so the plan is applied in order. Each restore re-reads and
+    # verifies the restored bytes against the snapshot digest, so a snapshot
+    # that no longer matches its recorded digest is still caught here.
+    for path, action in plan.items():
+        if action == "delete":
+            try:
+                p = Path(path)
+                if p.exists():
+                    if not dry_run:
+                        p.unlink()
+                        if p.exists():
+                            conflicts.append(f"{path}: failed to delete")
+                            continue
+                    deleted.append(path)
+                else:
+                    deleted.append(path)
+            except OSError as exc:
+                conflicts.append(f"{path}: delete failed: {exc}")
+            continue
+        before_digest = before_by_path[path].get("sha256")
+        if not dry_run:
+            if not restore_file(path, before_digest):
+                unrecoverable.append(f"{path}: restore failed for {before_digest[:12]}")
+                continue
+            new_digest = file_digest(path)
+            if new_digest != before_digest:
+                conflicts.append(
+                    f"{path}: after restore digest {new_digest[:12] if new_digest else 'missing'} != expected {before_digest[:12]}"
+                )
+                continue
+        reverted.append(path)
     if not dry_run and not conflicts and not unrecoverable:
         from continuum.recovery.gate import stamp_lineage
 

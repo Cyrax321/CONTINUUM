@@ -440,17 +440,16 @@ def test_rewind_pre_checkpoint_observation_without_digest_is_never_a_delete(
     storage.close()
 
 
-def test_rewind_post_checkpoint_observation_without_digest_still_deletes(
+def test_rewind_post_checkpoint_observation_without_digest_requires_force(
     tmp_path: Path,
 ) -> None:
-    # Issue #1806, the other side: a post-checkpoint observation without a
-    # digest left expected_after unset, so `file_digest(path) != expected_after`
-    # was always true and the file was reported as "digest changed before
-    # delete" forever. --force did not delete it either, because the `continue`
-    # skipped the unlink, so a forced rewind left post-checkpoint files in the
-    # workspace while reporting that it ran. There is nothing to verify against
-    # a digest the observation does not have: the file is by construction not
-    # part of the checkpoint state, so it is deleted and listed in deleted_files.
+    # Issue #1854 supersedes the #1806 resolution here. #1806 made a
+    # digest-less post-checkpoint observation delete unconditionally, but a
+    # digest the observation does not carry is exactly the evidence that the
+    # file was created after the checkpoint, and without it the checkpoint-era
+    # record says nothing about the path. Unlinking it can therefore delete a
+    # file that pre-existed the checkpoint, so the rewind refuses and only
+    # --force authorizes the risk.
     db = str(tmp_path / "rewind.db")
     run_id = "run_digestless_after"
     storage = SQLiteStorage(db)
@@ -476,10 +475,117 @@ def test_rewind_post_checkpoint_observation_without_digest_still_deletes(
     storage.close()
 
     storage = SQLiteStorage(db)
-    result = rewind_to_checkpoint(storage, run_id, cp.checkpoint_id)
+    with pytest.raises(RewindError, match="deletion requires --force"):
+        rewind_to_checkpoint(storage, run_id, cp.checkpoint_id)
+    assert file_b.exists(), " refusal must leave the unverified file in place"
+    storage.close()
+
+    storage = SQLiteStorage(db)
+    result = rewind_to_checkpoint(storage, run_id, cp.checkpoint_id, force=True)
     assert result.ok, f"conflicts={result.conflicts} unrecoverable={result.unrecoverable}"
     assert result.deleted_files == (str(file_b),)
     assert not file_b.exists()
+    storage.close()
+
+
+def test_rewind_missing_digestless_pre_checkpoint_file_is_unrecoverable(
+    tmp_path: Path,
+) -> None:
+    # Issue #1854 case 2: a path with a digest-less pre-checkpoint observation
+    # whose file is missing from disk used to be appended to deleted_files and
+    # reported as ok=True. No deletion happened and no restore is possible, so
+    # claiming the path as deleted reported work the rewind never did and hid
+    # the path behind a clean verdict. It is unrecoverable instead.
+    db = str(tmp_path / "rewind.db")
+    run_id = "run_digestless_missing"
+    storage = SQLiteStorage(db)
+    storage.create_run(Run(run_id=run_id, goal="digestless missing"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    file_c = workdir / "c.txt"
+    file_c.write_text("at checkpoint", encoding="utf-8")
+    from continuum.clienthooks import observe_event_payload
+
+    payload_before = observe_event_payload(
+        {"tool_name": "Write", "tool_input": {"file_path": str(file_c)}}
+    )
+    payload_before.pop("sha256", None)
+    payload_before.pop("bytes", None)
+    storage.append_event(run_id, EventType.TOOL_COMPLETED, payload_before)
+    from continuum.checkpoint.manager import CheckpointManager
+
+    cp = CheckpointManager(storage).checkpoint(run_id)
+    file_c.unlink()
+    storage.append_event(
+        run_id,
+        EventType.TOOL_COMPLETED,
+        observe_event_payload({"tool_name": "Edit", "tool_input": {"file_path": str(file_c)}}),
+    )
+    storage.close()
+
+    storage = SQLiteStorage(db)
+    with pytest.raises(RewindError, match="cannot restore"):
+        rewind_to_checkpoint(storage, run_id, cp.checkpoint_id)
+    storage.close()
+
+    # Forced past the refusal, the path is still reported as unrecoverable and
+    # never as deleted: nothing was unlinked and nothing was restored.
+    storage = SQLiteStorage(db)
+    result = rewind_to_checkpoint(storage, run_id, cp.checkpoint_id, force=True)
+    assert not result.ok
+    assert result.deleted_files == ()
+    assert any("cannot restore" in note for note in result.unrecoverable), (
+        f"unrecoverable={result.unrecoverable}"
+    )
+    storage.close()
+
+
+def test_rewind_classifies_before_mutating_any_file(tmp_path: Path) -> None:
+    # Issue #1854 case 3: the digest-less paths are classified before the
+    # filesystem is touched. An earlier deletable path used to be unlinked
+    # before a later digest-less path raised RewindError, leaving the workspace
+    # half-rewound under a failure exit. The refusal must happen with every
+    # file still in place.
+    db = str(tmp_path / "rewind.db")
+    run_id = "run_preflight"
+    storage = SQLiteStorage(db)
+    storage.create_run(Run(run_id=run_id, goal="preflight rewind"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    from continuum.checkpoint.manager import CheckpointManager
+
+    cp = CheckpointManager(storage).checkpoint(run_id)
+    storage.close()
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    file_deletable = workdir / "deletable.txt"
+    file_deletable.write_text("created after checkpoint", encoding="utf-8")
+    file_unverified = workdir / "unverified.txt"
+    file_unverified.write_text("also created after checkpoint", encoding="utf-8")
+    from continuum.clienthooks import observe_event_payload
+
+    payload_deletable = observe_event_payload(
+        {"tool_name": "Write", "tool_input": {"file_path": str(file_deletable)}}
+    )
+    payload_unverified = observe_event_payload(
+        {"tool_name": "Write", "tool_input": {"file_path": str(file_unverified)}}
+    )
+    payload_unverified.pop("sha256", None)
+    payload_unverified.pop("bytes", None)
+    storage = SQLiteStorage(db)
+    # The digest-less observation is appended first so the old single-pass loop
+    # processed and unlinked the deletable file before the refusal fired.
+    storage.append_event(run_id, EventType.TOOL_COMPLETED, payload_unverified)
+    storage.append_event(run_id, EventType.TOOL_COMPLETED, payload_deletable)
+    storage.close()
+
+    storage = SQLiteStorage(db)
+    with pytest.raises(RewindError, match="deletion requires --force"):
+        rewind_to_checkpoint(storage, run_id, cp.checkpoint_id)
+    assert file_deletable.exists(), (
+        "a refusal must not leave earlier deletable files already unlinked"
+    )
+    assert file_unverified.exists()
     storage.close()
 
 
