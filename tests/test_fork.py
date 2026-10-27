@@ -279,3 +279,115 @@ def test_an_unsafe_fork_blocks_the_parent_rollup(db: str) -> None:
     statuses, blocked = roll_up_children(SQLiteStorage(db), "run_1")
     assert any(s.run_id == child.run_id for s in statuses)
     assert blocked is True
+
+
+# --- empty tokens and oversized lessons (issue #1870) ------------------------ #
+
+
+def test_detect_fork_candidates_skips_scanning_without_distinctive_tokens() -> None:
+    """A call whose inputs carry no resource token cannot neighbour anything.
+
+    ``status: ok`` and a one-digit code are both weak tokens, so the incoming
+    set is empty and detection must return early -- without ever touching the
+    ledger, which a glob of nothing would otherwise walk for nothing.
+    """
+
+    class _NoScan(dict):
+        def items(self):  # pragma: no cover - only reached on a regression
+            raise AssertionError("actions_by_key must not be scanned")
+
+    candidates = detect_fork_candidates(
+        action_type="send_invoice",
+        tool_input={"status": "ok", "code": 1},
+        actions_by_key=_NoScan(),
+    )
+
+    assert candidates == []
+
+
+def _lessons(store: SQLiteStorage, run_id: str) -> list:
+    return [e for e in store.read_events(run_id) if e.type is EventType.ATTEMPT_LESSON]
+
+
+def test_approve_fork_trims_an_oversized_attempt_lesson(
+    db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lesson serializer must land inside its size budget, whatever came in.
+
+    A reason of thousands of characters plus long evidence entries pushes the
+    serialized AttemptLesson well past 2048 bytes. The adaptive loop must trim
+    it down and still persist one ATTEMPT_LESSON per side of the fork.
+    """
+    import json
+
+    from continuum.recovery import fork
+
+    long_subject = "unresolved approval constraint " * 24  # ~600 chars
+    gate = {
+        "uncertain_slots": [{"action_id": "act-1"}, {"action_id": "act-2"}],
+        "unsettled_authorizations": [
+            {"approval_id": f"appr-{i}", "subject": long_subject} for i in range(6)
+        ],
+        "depended_results": [
+            {"action_id": f"dep-{i}", "key": f"invoice:INV-{i:03d}"} for i in range(6)
+        ],
+    }
+
+    def fake_gate_check(*args: object, **kwargs: object) -> tuple[object, set, dict]:
+        return None, set(), gate
+
+    monkeypatch.setattr(fork, "_gate_check", fake_gate_check)
+
+    with SQLiteStorage(db) as store:
+        child = fork.approve_fork(store, "run_1", reason="r" * 3000)
+        assert len(child.run_id) > 0
+
+        for run_id in ("run_1", child.run_id):
+            lessons = _lessons(store, run_id)
+            assert len(lessons) == 1, f"{run_id} expected one lesson event"
+            payload = lessons[0].payload
+            encoded = json.dumps(payload, sort_keys=True).encode()
+            assert len(encoded) <= 2048, f"{run_id} lesson is {len(encoded)} bytes"
+
+
+def test_approve_fork_gives_up_on_a_lesson_it_cannot_shrink(
+    db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When nothing left can be trimmed, the loop breaks rather than spins.
+
+    scar_action_ids survive the loop uncapped, so sixteen long ids keep the
+    serialized lesson over budget after the evidence is emptied and the
+    falsified text is halved away. The loop must stop, and the lesson must
+    still be written to both runs -- a partial lesson beats no lesson.
+    """
+    import json
+
+    from continuum.recovery import fork
+
+    long_subject = "unresolved approval constraint " * 24  # ~600 chars
+    long_scar = "scarred-action-" * 10  # ~150 chars, x16 stays over the budget
+    gate = {
+        "uncertain_slots": [{"action_id": long_scar} for _ in range(16)],
+        "unsettled_authorizations": [
+            {"approval_id": f"appr-{i}", "subject": long_subject} for i in range(6)
+        ],
+        "depended_results": [],
+    }
+
+    def fake_gate_check(*args: object, **kwargs: object) -> tuple[object, set, dict]:
+        return None, set(), gate
+
+    monkeypatch.setattr(fork, "_gate_check", fake_gate_check)
+
+    with SQLiteStorage(db) as store:
+        child = fork.approve_fork(store, "run_1", reason="r" * 3000)
+
+        for run_id in ("run_1", child.run_id):
+            lessons = _lessons(store, run_id)
+            assert len(lessons) == 1, f"{run_id} expected one lesson event"
+            payload = lessons[0].payload
+            # everything the loop could reach for was consumed
+            assert payload["source_evidence"] == []
+            assert payload["falsified"] == ""
+            encoded = json.dumps(payload, sort_keys=True).encode()
+            assert len(encoded) > 2048  # the loop broke, not trimmed
