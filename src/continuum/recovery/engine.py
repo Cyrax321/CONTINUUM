@@ -34,7 +34,7 @@ against a live database.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -45,7 +45,7 @@ from continuum.actions.ledger import ActionLedger
 from continuum.analysis.depends import DependencyGraph as SourceDependencyGraph
 from continuum.checkpoint.manager import CheckpointManager, RestoredRun
 from continuum.environment.diff import EnvironmentDiff
-from continuum.events import EventType
+from continuum.events import Event, EventType
 from continuum.gate import collect_consumed_authorities
 from continuum.models import (
     Action,
@@ -66,7 +66,7 @@ from continuum.recovery.planner import RepairPlan, plan_repairs
 from continuum.recovery.rules import active_rules, apply_rule_findings, run_validation_rules
 from continuum.recovery.summary import build_informed_retry
 from continuum.state.validator import StateValidator, ValidationOutcome, check_admissibility
-from continuum.storage.base import Storage
+from continuum.storage.base import CorruptedRow, Storage
 
 __all__ = ["RecoveryEngine", "RecoveryDecision", "SEVERITY"]
 
@@ -355,7 +355,11 @@ class RecoveryEngine:
         try:
             archive_aware_events = self.storage.read_all_events(run_id)
         except Exception:
-            archive_aware_events = self.storage.read_events(run_id)
+            # The log the engine exists to answer for is precisely the one
+            # that can be damaged (issue #1907): the merged read refused, so
+            # fall back to a history that stops at the first refusing row
+            # rather than re-raising into the assessment.
+            archive_aware_events = self._tolerant_history(run_id)
         for _ev in archive_aware_events:
             if _ev.type is not EventType.REVIEW_CONFIRMED:
                 continue
@@ -393,9 +397,21 @@ class RecoveryEngine:
         )
 
         action_ledger = ActionLedger(self.storage, run_id)
+        # The ledger reads the same log restore just degraded for, so it can
+        # refuse too (issue #1907). An unreadable ledger must not end the
+        # assessment, but it must not launder into "no uncertain side effects"
+        # either: the fold below runs on an empty ledger and the decision is
+        # raised to REQUEST_HUMAN below, mirroring the degraded-ledger rule
+        # already used for consumed authorities (#1066).
+        ledger_unreadable = False
+        try:
+            folded_actions = tuple(action_ledger.all())
+        except Exception:
+            folded_actions = ()
+            ledger_unreadable = True
         all_uncertain = tuple(
             a
-            for a in action_ledger.all()
+            for a in folded_actions
             if a.status
             in (ActionStatus.UNKNOWN, ActionStatus.STARTED, ActionStatus.REQUIRES_REVIEW)
         )
@@ -431,7 +447,7 @@ class RecoveryEngine:
             if broken.status is StateStatus.INVALID and broken.unprojectable_at_sequence is not None
             else None
         )
-        admissibility = check_admissibility(restored.checkpoint, action_ledger.all())
+        admissibility = check_admissibility(restored.checkpoint, folded_actions)
         if not admissibility.admissible:
             has_action_ref = any(d["consumed_inputs"]["action_ids"] for d in admissibility.details)
             status = StateStatus.REQUIRES_REVIEW if has_action_ref else StateStatus.STALE
@@ -675,15 +691,35 @@ class RecoveryEngine:
                 "consumed authority ledger unreadable: cannot clear the resume block",
             )
 
+        if ledger_unreadable:
+            # Same floor-not-overwrite rule as the authority blocks above: an
+            # empty fold is not an empty ledger, so the verdict is raised to
+            # REQUEST_HUMAN rather than asserted over a side-effect history the
+            # engine could not read (#1907).
+            mode = max((mode, RecoveryMode.REQUEST_HUMAN), key=lambda m: SEVERITY[m])
+            rationale = (
+                *rationale,
+                "action ledger unreadable: uncertain side effects cannot be ruled out",
+            )
+
         reason = "; ".join(rationale) if rationale else validation.report.reason
 
         # Post-checkpoint file observations (#208): informational evidence for
         # the resuming agent, never a factor in the decision itself.
         after_sequence = 0
-        latest_version = self.storage.latest_version(run_id)
+        try:
+            latest_version = self.storage.latest_version(run_id)
+        except Exception:
+            # A versions table that refuses to load costs the window anchor,
+            # not the verdict: the observations are best-effort evidence and
+            # the corrupted-sequence marker above already names the damage.
+            latest_version = None
         if latest_version is not None:
             after_sequence = latest_version.source_sequence
-        observations = collect_observations(self.storage, run_id, after_sequence=after_sequence)
+        try:
+            observations = collect_observations(self.storage, run_id, after_sequence=after_sequence)
+        except Exception:
+            observations = []
 
         # Build liveness section for contract
         liveness_section = None
@@ -717,14 +753,19 @@ class RecoveryEngine:
                 break
 
         # Informed retry (#265): derive the prior-attempt account from events
-        # already in the chain. Read-only, deterministic, None without history.
-        informed_retry = build_informed_retry(
-            self.storage,
-            run_id,
-            validation_report=validation.report,
-            uncertain_actions=uncertain,
-            plan=plan,
-        )
+        # already in the chain. Read-only, deterministic, None without history,
+        # and informational by contract: a log that refuses to be read here
+        # costs the block, never the verdict (#1907).
+        try:
+            informed_retry = build_informed_retry(
+                self.storage,
+                run_id,
+                validation_report=validation.report,
+                uncertain_actions=uncertain,
+                plan=plan,
+            )
+        except Exception:
+            informed_retry = None
 
         decision = RecoveryDecision(
             run_id=run_id,
@@ -753,6 +794,45 @@ class RecoveryEngine:
             pass
 
         return decision
+
+    def _tolerant_history(self, run_id: str) -> Sequence[Event]:
+        """History read that survives a damaged log (issue #1907).
+
+        ``read_all_events`` already refused, so the merged stream is unusable
+        as-is. The tolerant variants are tried in order of completeness: the
+        archive-aware one keeps the archived prefix when it is only the live
+        tail that refuses, and the live-only one still serves the tail when
+        the archive itself is unreadable (the liveness fallback it replaces).
+        Looked up by name so a storage that implements the plain readers
+        without the tolerant twins keeps the fall back it always had. A log
+        unreadable in every respect yields nothing, and the verdict then rests
+        on the degraded state and the repair plan rather than on the scans
+        this history feeds.
+        """
+        merged: Callable[[str], tuple[Sequence[Event], CorruptedRow | None]] | None = getattr(
+            self.storage, "read_all_events_until_corrupt", None
+        )
+        if merged is not None:
+            try:
+                events, _break = merged(run_id)
+            except Exception:
+                pass
+            else:
+                return events
+        live: Callable[[str], tuple[Sequence[Event], CorruptedRow | None]] | None = getattr(
+            self.storage, "read_events_until_corrupt", None
+        )
+        if live is not None:
+            try:
+                events, _break = live(run_id)
+            except Exception:
+                pass
+            else:
+                return events
+        try:
+            return list(self.storage.read_events(run_id))
+        except Exception:
+            return []
 
     def _budget_for(
         self, run_id: str, scope: Iterable[str] | None, plan: RepairPlan

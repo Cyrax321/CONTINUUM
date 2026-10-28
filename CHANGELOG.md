@@ -89,6 +89,24 @@ Test counts: ~3950 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **`RecoveryEngine.assess` degrades over a corrupted event payload instead
+  of crashing (#1907).** A row whose payload refuses to parse used to raise
+  `CorruptedRecord` out of the storage read inside `restore`, before semantic
+  projection ran, so a poisoned log ended the assessment in a traceback with
+  no verdict at all, the opposite of what the engine exists to answer.
+  `restore(on_unprojectable="degrade")` now reads the log up to the first
+  refusing row (`read_events_until_corrupt`, with a native per-row
+  implementation on SQLite and PostgreSQL and a bisection-based default that
+  any engine inherits), folds the clean prefix, and marks the restored state
+  `INVALID` at the refused sequence, exactly as a fold that refused there
+  would. `assess` then returns an advisory `REQUEST_HUMAN` verdict naming the
+  corrupted sequence, with a `repair_log` step for the broken row; the
+  archive-aware history, the action ledger, the observations window, and the
+  informed-retry block are all read tolerantly and any refusal raises the
+  verdict instead of laundering into "no side effects" or an empty history.
+  Raise mode is byte-for-byte unchanged, so the write paths `restore` feeds
+  still fail loudly on a damaged log.
+
 - **Benchmark report timestamps are timezone-aware UTC (#1823).** The Phase 6,
   fault-injection, and horizon benchmark runners now use the shared `utcnow()`
   helper, keeping report timestamps comparable across benchmark suites.
