@@ -27,7 +27,7 @@ import sqlite3
 import pytest
 from pydantic import ValidationError
 
-from continuum.actions.ledger import ActionLedger, LedgerError
+from continuum.actions.ledger import ActionLedger, LedgerError, fold_action_events
 from continuum.cli.main import main
 from continuum.events import Event, EventType
 from continuum.models import (
@@ -696,3 +696,438 @@ def test_nested_action_fields_are_used_as_fallback() -> None:
     assert chain.action_id == "act-nested-9"
     assert chain.action_type == "fetch"
     assert chain.action_status == "started"
+
+
+# -- coverage of the gaps the #1875 review flagged -------------------------
+
+
+def test_reconcile_accepts_a_matching_correlation_id(storage: SQLiteStorage, run_id: str) -> None:
+    """reconcile validates a correlation ID and settles when it matches the claim.
+
+    The claim's ID is the contract; reconcile either confirms it or wrongs it,
+    so the ID is validated on the way in and a match is required to settle.
+    """
+    ledger = ActionLedger(storage, run_id)
+    outcome = ledger.claim("charge_card", {"amount": 5}, correlation_id="cid-recon-1")
+    ledger.complete(outcome.key, external_id="tx-1", correlation_id="cid-recon-1")
+
+    settled = ledger.reconcile(outcome.key, occurred=True, correlation_id="cid-recon-1")
+    assert settled.correlation_id == "cid-recon-1"
+
+
+def test_reconcile_settles_a_correlation_id_when_the_claim_had_none(
+    storage: SQLiteStorage, run_id: str
+) -> None:
+    """A correlation ID supplied at reconcile time is accepted on an unlinked attempt."""
+    ledger = ActionLedger(storage, run_id)
+    outcome = ledger.claim("charge_card", {"amount": 5})
+
+    settled = ledger.reconcile(outcome.key, occurred=False, correlation_id="cid-recon-2")
+    assert settled.correlation_id == "cid-recon-2"
+
+
+def test_reconcile_rejects_a_mismatched_correlation_id(storage: SQLiteStorage, run_id: str) -> None:
+    """A correlation ID disagreeing with the claim's is refused (review of #1680).
+
+    Silently accepting it would link the reconciliation to an attempt the
+    caller cannot name, so the mismatch is an error rather than an override.
+    """
+    ledger = ActionLedger(storage, run_id)
+    outcome = ledger.claim("charge_card", {"amount": 5}, correlation_id="cid-recon-3")
+    ledger.complete(outcome.key, external_id="tx-3", correlation_id="cid-recon-3")
+
+    with pytest.raises(LedgerError, match="correlation_id mismatch"):
+        ledger.reconcile(outcome.key, occurred=True, correlation_id="cid-other")
+
+
+def test_fold_action_events_backfills_a_top_level_correlation_id() -> None:
+    """Events written before the nested shape carried the ID at the top level.
+
+    The fold backfills it into the action record so an old log still correlates
+    after the payload shape moved the field into the nested action.
+    """
+    events = [
+        Event(
+            run_id="r1",
+            sequence=1,
+            type=EventType.ACTION_RECORDED,
+            payload={
+                "key": "k-backfill",
+                "action": {
+                    "run_id": "r1",
+                    "action_id": "act-backfill",
+                    "action_type": "fetch",
+                    "status": "completed",
+                },
+                "correlation_id": "cid-legacy-top-level",
+            },
+        ),
+    ]
+
+    folded = fold_action_events(events)
+
+    assert folded["k-backfill"].correlation_id == "cid-legacy-top-level"
+
+
+def test_fold_action_events_accepts_an_in_memory_action_instance() -> None:
+    """The fold also takes events whose payload already carries an Action.
+
+    In-memory callers (before storage serialization) hold the model instance
+    rather than its dict form, and the fold must read it without rebuilding.
+    """
+    action = Action(
+        run_id="r1",
+        action_type="fetch",
+        status=ActionStatus.STARTED,
+        correlation_id="cid-instance",
+    )
+    events = [
+        Event.model_construct(
+            run_id="r1",
+            sequence=1,
+            type=EventType.ACTION_RECORDED,
+            payload={"key": "k-instance", "action": action},
+        ),
+    ]
+
+    folded = fold_action_events(events)
+
+    assert folded["k-instance"] is action
+
+
+def test_fold_action_events_skips_records_with_no_action_body() -> None:
+    """An action event carrying no usable action body contributes nothing.
+
+    Action details may be absent from a hand-built or partially written
+    record, and the fold must skip it rather than raise on the shape.
+    """
+    events = [
+        Event(
+            run_id="r1",
+            sequence=1,
+            type=EventType.ACTION_RECORDED,
+            payload={"key": "k-no-body"},
+        ),
+        Event(
+            run_id="r1",
+            sequence=2,
+            type=EventType.ACTION_RECORDED,
+            payload={"key": "k-null-body", "action": None},
+        ),
+    ]
+
+    assert fold_action_events(events) == {}
+
+
+def test_a_non_dict_event_payload_is_treated_as_uncorrelated() -> None:
+    """A tool event whose payload is not a mapping correlates nothing.
+
+    ``model_construct`` is how such an event reaches a reader that does not
+    re-validate: the extractor must read it as "no identifier" rather than
+    crash on the lookup.
+    """
+    events = [
+        Event.model_construct(
+            run_id="r1",
+            sequence=1,
+            type=EventType.TOOL_COMPLETED,
+            payload=None,
+        ),
+    ]
+
+    chains = correlate_evidence(events)
+
+    assert len(chains) == 1
+    chain = chains[0]
+    assert chain.status == "missing_correlation"
+    assert chain.correlation_ids == []
+
+
+def test_a_malformed_correlation_id_in_an_event_is_treated_as_absent() -> None:
+    """An identifier that fails the contract is ignored, not fatal to the chain.
+
+    The event streams a conformance runner reads are written by other
+    implementations, so an out-of-contract ID degrades the chain to
+    uncorrelated instead of dropping the action.
+    """
+    events = [
+        Event(
+            run_id="r1",
+            sequence=1,
+            type=EventType.ACTION_RECORDED,
+            payload={
+                "key": "k-bad-cid",
+                "action": {
+                    "action_id": "act-bad-cid",
+                    "action_type": "fetch",
+                    "status": "started",
+                    "correlation_id": "x" * 129,
+                },
+            },
+        ),
+    ]
+
+    chains = correlate_evidence(events)
+
+    assert len(chains) == 1
+    chain = chains[0]
+    assert chain.status == "missing_correlation"
+    assert chain.correlation_ids == []
+
+
+def test_a_later_action_event_without_a_correlation_id_keeps_the_earlier_attempts() -> None:
+    """A settle event that carries no ID does not wipe the attempt's identifiers.
+
+    Compensations and completions are separate events from the claim, and only
+    the claim (and a retry's claim) names an identifier; the chain must keep
+    the attempt's collected IDs so its tool events still match.
+    """
+    events = [
+        Event(
+            run_id="r1",
+            sequence=1,
+            type=EventType.ACTION_RECORDED,
+            payload={
+                "key": "k-multi",
+                "action_id": "act-multi",
+                "action_type": "fetch",
+                "status": "started",
+                "correlation_id": "cid-keep",
+            },
+        ),
+        Event(
+            run_id="r1",
+            sequence=2,
+            type=EventType.ACTION_COMPENSATED,
+            payload={
+                "key": "k-multi",
+                "action_id": "act-multi",
+                "action_type": "fetch",
+                "status": "compensated",
+            },
+        ),
+    ]
+
+    chains = correlate_evidence(events, correlation_id="cid-keep")
+
+    assert len(chains) == 1
+    chain = chains[0]
+    assert chain.correlation_ids == ["cid-keep"]
+    assert chain.action_status == "compensated"
+
+
+def test_a_later_action_event_fills_in_missing_action_id_and_type() -> None:
+    """A key's later events fill id and type the first event lacked.
+
+    The fold keeps the first event's shape but the chain's display fields
+    should not stay empty merely because an early hand-built record omitted
+    them.
+    """
+    events = [
+        Event(
+            run_id="r1",
+            sequence=1,
+            type=EventType.ACTION_RECORDED,
+            payload={
+                "key": "k-fill",
+                "action": {"status": "started"},
+            },
+        ),
+        Event(
+            run_id="r1",
+            sequence=2,
+            type=EventType.ACTION_COMPENSATED,
+            payload={
+                "key": "k-fill",
+                "action_id": "act-fill",
+                "action_type": "fetch",
+                "status": "compensated",
+            },
+        ),
+    ]
+
+    chains = correlate_evidence(events)
+
+    assert len(chains) == 1
+    chain = chains[0]
+    assert chain.action_id == "act-fill"
+    assert chain.action_type == "fetch"
+
+
+def test_a_keyless_action_record_without_a_correlation_id_is_reported() -> None:
+    """A keyless record with no ID is its own missing_correlation chain.
+
+    It was previously dropped entirely; with no identifier it cannot match
+    tool events, but the record is still evidence and must surface.
+    """
+    events = [
+        Event(
+            run_id="r1",
+            sequence=1,
+            type=EventType.ACTION_RECORDED,
+            payload={
+                "action": {"action_id": "act-keyless-nocid", "status": "started"},
+            },
+        ),
+    ]
+
+    chains = correlate_evidence(events)
+
+    assert len(chains) == 1
+    chain = chains[0]
+    assert chain.action_key is None
+    assert chain.status == "missing_correlation"
+
+
+def test_filtering_by_action_key_returns_only_that_chain() -> None:
+    """The action_key filter narrows the projection to one key's chain."""
+    events = [
+        Event(
+            run_id="r1",
+            sequence=1,
+            type=EventType.ACTION_RECORDED,
+            payload={
+                "key": "k-alpha",
+                "action_id": "act-alpha",
+                "action_type": "fetch",
+                "status": "started",
+                "correlation_id": "cid-a",
+            },
+        ),
+        Event(
+            run_id="r1",
+            sequence=2,
+            type=EventType.ACTION_RECORDED,
+            payload={
+                "key": "k-beta",
+                "action_id": "act-beta",
+                "action_type": "fetch",
+                "status": "started",
+                "correlation_id": "cid-b",
+            },
+        ),
+    ]
+
+    chains = correlate_evidence(events, action_key="k-beta")
+
+    assert len(chains) == 1
+    assert chains[0].action_key == "k-beta"
+
+
+def test_cli_evidence_chain_on_a_run_with_no_evidence(tmp_path) -> None:
+    """An empty run reports no chains rather than an empty header."""
+    db_path = str(tmp_path / "cli_empty_chain.db")
+    s = SQLiteStorage(db_path)
+    run = s.create_run_started(
+        Run(run_id="cli_run_empty_chain", goal="no evidence yet"), source=Origin.HUMAN
+    )
+
+    out = io.StringIO()
+    err = io.StringIO()
+    rc = main(["--db", db_path, "evidence-chain", run.run_id], out=out, err=err)
+
+    assert rc == 0
+    text = out.getvalue()
+    assert "Evidence chain for run" in text
+    assert "(no correlated actions or observations recorded)" in text
+
+
+def test_cli_evidence_chain_unmatched_only_hides_matched_chains(tmp_path) -> None:
+    """--unmatched-only drops matched chains from the report."""
+    db_path = str(tmp_path / "cli_unmatched_only.db")
+    s = SQLiteStorage(db_path)
+    run = s.create_run_started(
+        Run(run_id="cli_run_unmatched", goal="unmatched filtering"), source=Origin.HUMAN
+    )
+    run_id = run.run_id
+
+    ledger = ActionLedger(s, run_id)
+    ledger.claim("build_project", {"clean": True}, correlation_id="cid-matched")
+    # Correlate the claim so the run holds one matched chain.
+    s.append_event(
+        run_id,
+        EventType.TOOL_COMPLETED,
+        {"tool": "make", "correlation_id": "cid-matched"},
+        source=Origin.EXTERNAL_AGENT,
+    )
+
+    # An observation with an identifier no action carries: unmatched.
+    s.append_event(
+        run_id,
+        EventType.TOOL_COMPLETED,
+        {"tool": "make", "correlation_id": "cid-unknown"},
+        source=Origin.EXTERNAL_AGENT,
+    )
+
+    out_all = io.StringIO()
+    err = io.StringIO()
+    rc_all = main(["--db", db_path, "evidence-chain", run_id], out=out_all, err=err)
+    assert rc_all == 0
+    assert "[ok] MATCHED:" in out_all.getvalue()
+    assert "UNMATCHED_OBSERVATION" in out_all.getvalue()
+
+    out_filtered = io.StringIO()
+    rc_filtered = main(
+        ["--db", db_path, "evidence-chain", run_id, "--unmatched-only"],
+        out=out_filtered,
+        err=err,
+    )
+    assert rc_filtered == 0
+    text = out_filtered.getvalue()
+    assert "UNMATCHED_OBSERVATION" in text
+    assert "[ok] MATCHED:" not in text
+
+
+def test_cli_evidence_chain_renders_chains_missing_one_side(tmp_path) -> None:
+    """The human report omits the side a chain has no events for.
+
+    An unmatched action has no tool events, and an unmatched observation has
+    no action events, so neither should render a hollow section header. Each
+    kind gets its own run so the assertion is not blurred by the other chain.
+    """
+    err = io.StringIO()
+
+    def report(db_path: str, run_id: str) -> str:
+        out = io.StringIO()
+        rc = main(["--db", db_path, "evidence-chain", run_id], out=out, err=err)
+        assert rc == 0
+        return out.getvalue()
+
+    # An action with an identifier and no tool events: unmatched_action.
+    db_action = str(tmp_path / "cli_one_sided_action.db")
+    s = SQLiteStorage(db_action)
+    run = s.create_run_started(
+        Run(run_id="cli_run_one_sided_action", goal="orphan action"), source=Origin.HUMAN
+    )
+    s.append_event(
+        run.run_id,
+        EventType.ACTION_RECORDED,
+        {
+            "key": "k-one-sided",
+            "action_id": "act-one-sided",
+            "action_type": "fetch",
+            "status": "started",
+            "correlation_id": "cid-orphan-action",
+        },
+        source=Origin.DETERMINISTIC,
+    )
+    action_text = report(db_action, run.run_id)
+    assert "UNMATCHED_ACTION" in action_text
+    assert "tools:" not in action_text
+
+    # A tool event with an identifier no action carries: unmatched_observation.
+    db_tool = str(tmp_path / "cli_one_sided_tool.db")
+    s = SQLiteStorage(db_tool)
+    run = s.create_run_started(
+        Run(run_id="cli_run_one_sided_tool", goal="orphan observation"),
+        source=Origin.HUMAN,
+    )
+    s.append_event(
+        run.run_id,
+        EventType.TOOL_COMPLETED,
+        {"tool": "curl", "correlation_id": "cid-orphan-tool"},
+        source=Origin.EXTERNAL_AGENT,
+    )
+    tool_text = report(db_tool, run.run_id)
+    assert "UNMATCHED_OBSERVATION" in tool_text
+    assert "actions:" not in tool_text
