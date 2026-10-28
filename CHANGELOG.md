@@ -89,6 +89,21 @@ Test counts: ~3950 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **`ActionLedger.claim` guards its slot with a storage-level compare-and-set (#1889).**
+  Claim folded the log, decided the slot was free, and recorded without checking
+  that the log had not moved underneath it. When two workers resolved the same
+  identity before either append landed, on a backend that does not wrap claim in
+  an `atomic_claim` transaction or in a caller mixing leased and unleased
+  ledgers, both saw an unoccupied slot and both opened one, so both performed the
+  side effect. `claim` now captures the head sequence during resolution and
+  passes it as `expected_sequence` to `append_event`; a concurrent advance
+  rejects the stale write with `ConcurrentWriteError`, the losing worker re-folds
+  against the new head, discovers the winning claim, marks it `UNKNOWN` and
+  raises `UnknownSideEffect` instead of opening a second slot. An unrelated
+  concurrent event is retried rather than reported as a conflict. Deterministic
+  race coverage in `tests/test_claim_cas_concurrency.py` fails on the previous
+  claim-then-check path and passes with the compare-and-set.
+
 - **Benchmark report timestamps are timezone-aware UTC (#1823).** The Phase 6,
   fault-injection, and horizon benchmark runners now use the shared `utcnow()`
   helper, keeping report timestamps comparable across benchmark suites.
