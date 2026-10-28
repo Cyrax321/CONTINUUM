@@ -1318,6 +1318,7 @@ def build_server(
         scoped_to_run: bool = True,
         pinning: dict[str, Any] | None = None,
         grant: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
     ) -> str:
         """Claim an action in the ledger and report whether to proceed."""
         from continuum.actions.grants import GrantDenied, normalize_grant
@@ -1412,6 +1413,7 @@ def build_server(
                 scoped_to_run=scoped_to_run,
                 pinning=pinning_clean or None,
                 grant=grant_clean,
+                correlation_id=correlation_id,
             )
         except GrantDenied as exc:
             return _json(
@@ -1504,10 +1506,15 @@ def build_server(
         external_id: str | None = None,
         result: dict[str, Any] | None = None,
         consumed_inputs: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
     ) -> str:
         """Mark a claimed action as completed."""
         action = ctx.ledger(run_id).complete(
-            action_key, external_id=external_id, result=result, consumed_inputs=consumed_inputs
+            action_key,
+            external_id=external_id,
+            result=result,
+            consumed_inputs=consumed_inputs,
+            correlation_id=correlation_id,
         )
         return _json(
             {
@@ -1570,6 +1577,7 @@ def build_server(
         result: dict[str, Any] | None = None,
         note: str = "",
         consumed_inputs: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
     ) -> str:
         """Resolve an uncertain action using external evidence."""
         # `result` is accepted here because `complete` refuses an UNKNOWN action
@@ -1584,6 +1592,7 @@ def build_server(
             result=result,
             note=note,
             consumed_inputs=consumed_inputs,
+            correlation_id=correlation_id,
         )
         return _json(
             {

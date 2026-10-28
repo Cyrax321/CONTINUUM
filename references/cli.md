@@ -51,6 +51,8 @@ continuum health <run_id>                        # advisory prefix-trust health 
 continuum policy-review [run_id]                 # advisory recovery-history report by action type
 continuum impact <run_id> --evidence <id>        # downstream impact of an evidence item
 continuum provenance <run_id>                    # show provenance DAG
+continuum evidence-chain <run_id>                # correlate actions with tool observations
+      [--action-key <k>] [--correlation-id <id>] [--unmatched-only]
 continuum report --trajectory <run_id>           # claims, uncertain side effects, scar rate, stall sites
 continuum record-plan <run_id> --plan-id <id>    # record structured plan upsert. mutates
 continuum export-evidence <run_id>               # export evidence as JSON lines

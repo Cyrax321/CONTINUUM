@@ -46,6 +46,34 @@ Test counts: ~3950 collected on a minimal env.
   first pull requests, a Table of Contents, and a reference table for issue
   labels (including hacktoberfest, help wanted, and good first issue).
 
+- **Correlate observed tool events with ledger action attempts (#785).** An
+  optional bounded correlation identifier (`correlation_id`, 1-128 chars)
+  is now shared between ledger action attempts (`claim()`, `complete()`,
+  `reconcile()`, `Action`, `ActionRecordPayload`) and tool observations
+  (`TOOL_CALLED`, `TOOL_COMPLETED`, `TOOL_FAILED`). `correlate_action_events`
+  and `correlate_evidence` project read-only evidence chains (`EvidenceChain`),
+  classifying relationships as `matched`, `unmatched_action`,
+  `unmatched_observation`, `ambiguous`, or `missing_correlation`. Repeated
+  similar actions are disambiguated by distinct correlation IDs without
+  heuristic guesswork. The evidence chain survives compaction across archive
+  boundaries and remains verifiable under hash-chain tamper detection. A
+  correlated tool event never automatically settles an uncertain action,
+  preserving safe-by-default recovery semantics. Includes CLI commands
+  (`continuum evidence-chain <run-id>` and `continuum observe --correlation-id`)
+  and MCP action tool support. A retry of a failed or compensated attempt may
+  take a new correlation identifier (the ID names a single attempt); its
+  evidence chain then spans every attempt's identifier, `ambiguous` is reserved
+  for one identifier resolving to several distinct action keys, and action
+  records without a key and tool observations without an identifier are still
+  reported rather than dropped. The identifier is validated on every claim
+  path (the retry branches settle via `model_copy`, which skips field
+  validators), a malformed identifier supplied by a hook payload is dropped
+  instead of failing the observation, and a `TOOL_CALLED` event is reported as
+  `called` rather than `failed`. Evidence chains also carry every attempt's
+  identifier (`correlation_ids`), so `--correlation-id` filtering and
+  `correlate_action_events(..., correlation_id=...)` find the chain by any
+  attempt's identifier, not just the latest one.
+
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a
   repeatedly failing integration spends its own allowance instead of the run's:
