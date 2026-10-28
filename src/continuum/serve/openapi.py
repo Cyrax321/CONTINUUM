@@ -4,6 +4,12 @@ Provides a canonical OpenAPI 3.1 definition for all sidecar endpoints:
 - Action lifecycle: intercept_action, complete_action, fail_action, reconcile_action, compensate_action
 - Observability and progress: record_progress, list_actions
 - Durability and recovery: checkpoint, validate, resume, confirm
+
+The document describes the wire the reference sidecar actually speaks. Every
+``required`` list, property name and nullability below is grounded in a handler
+in ``server.py``, and ``tests/test_openapi_wire_drift.py`` drives each endpoint
+and compares the two, so the contract and the implementation cannot drift apart
+again (issue #1894).
 """
 
 from __future__ import annotations
@@ -29,7 +35,9 @@ OPENAPI_SPEC: dict[str, Any] = {
                 "summary": "Claim an action idempotency lease",
                 "description": (
                     "Atomically check whether an action has already run. If not, claims "
-                    "execution rights; if previously completed, returns the cached result."
+                    "execution rights; if previously completed, returns the cached result; "
+                    "if a previous attempt was interrupted, refuses to proceed and asks "
+                    "for external reconciliation."
                 ),
                 "operationId": "interceptAction",
                 "security": [{"BearerAuth": []}],
@@ -43,7 +51,7 @@ OPENAPI_SPEC: dict[str, Any] = {
                 },
                 "responses": {
                     "200": {
-                        "description": "Claim outcome or reusable result",
+                        "description": "Claim outcome, cached result, or refusal to proceed",
                         "content": {
                             "application/json": {
                                 "schema": {"$ref": "#/components/schemas/InterceptActionResponse"}
@@ -88,7 +96,10 @@ OPENAPI_SPEC: dict[str, Any] = {
         "/fail_action": {
             "post": {
                 "summary": "Record action failure",
-                "description": "Records that an action failed and did not produce a side effect.",
+                "description": (
+                    "Records that an action failed and produced no side effect, "
+                    "or (with ``certain`` unset) that the outcome is uncertain."
+                ),
                 "operationId": "failAction",
                 "security": [{"BearerAuth": []}],
                 "requestBody": {
@@ -110,13 +121,84 @@ OPENAPI_SPEC: dict[str, Any] = {
                     },
                     "400": {"$ref": "#/components/responses/400BadRequest"},
                     "403": {"$ref": "#/components/responses/403Forbidden"},
+                    "500": {"$ref": "#/components/responses/500Internal"},
+                },
+            }
+        },
+        "/reconcile_action": {
+            "post": {
+                "summary": "Resolve an uncertain action from external evidence",
+                "description": (
+                    "Records what the outside world says about an action whose outcome "
+                    "the run could not determine. ``occurred`` is the evidence; the "
+                    "action becomes completed or failed from it and is never retried "
+                    "blindly."
+                ),
+                "operationId": "reconcileAction",
+                "security": [{"BearerAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/ReconcileActionRequest"}
+                        }
+                    },
+                },
+                "responses": {
+                    "200": {
+                        "description": "Action settled from external evidence",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ReconcileActionResponse"}
+                            }
+                        },
+                    },
+                    "400": {"$ref": "#/components/responses/400BadRequest"},
+                    "403": {"$ref": "#/components/responses/403Forbidden"},
+                    "500": {"$ref": "#/components/responses/500Internal"},
+                },
+            }
+        },
+        "/compensate_action": {
+            "post": {
+                "summary": "Register a compensating rollback for a completed action",
+                "description": (
+                    "Records that a completed action was undone by a compensating "
+                    "action, so later recovery can see the effect was reversed."
+                ),
+                "operationId": "compensateAction",
+                "security": [{"BearerAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/CompensateActionRequest"}
+                        }
+                    },
+                },
+                "responses": {
+                    "200": {
+                        "description": "Compensation recorded against the action",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/CompensateActionResponse"}
+                            }
+                        },
+                    },
+                    "400": {"$ref": "#/components/responses/400BadRequest"},
+                    "403": {"$ref": "#/components/responses/403Forbidden"},
+                    "500": {"$ref": "#/components/responses/500Internal"},
                 },
             }
         },
         "/record_progress": {
             "post": {
                 "summary": "Record task progress and metrics",
-                "description": "Records task progress metrics into the append-only event log.",
+                "description": (
+                    "Records task progress counters into the append-only event log. "
+                    "The first call for a run creates it and must carry ``goal``; later "
+                    "calls only need ``run_id`` and ``completed``."
+                ),
                 "operationId": "recordProgress",
                 "security": [{"BearerAuth": []}],
                 "requestBody": {
@@ -200,7 +282,13 @@ OPENAPI_SPEC: dict[str, Any] = {
         "/resume": {
             "post": {
                 "summary": "Compute recovery resume decision",
-                "description": "Projects event history into contract guidance and safe restart parameters.",
+                "description": (
+                    "Projects event history into contract guidance and safe restart "
+                    "parameters. ``run_id`` may be omitted: a session that was "
+                    "interrupted and restarted has no id to send, so an absent one "
+                    'means "the run that was interrupted" and the server answers '
+                    "with mode ``no_active_run`` when there is none."
+                ),
                 "operationId": "resume",
                 "security": [{"BearerAuth": []}],
                 "requestBody": {
@@ -247,7 +335,7 @@ OPENAPI_SPEC: dict[str, Any] = {
                         "description": "Review confirmed and run unblocked",
                         "content": {
                             "application/json": {
-                                "schema": {"$ref": "#/components/schemas/ResumeResponse"}
+                                "schema": {"$ref": "#/components/schemas/ConfirmResponse"}
                             }
                         },
                     },
@@ -294,14 +382,26 @@ OPENAPI_SPEC: dict[str, Any] = {
                         "description": "Service healthy",
                         "content": {
                             "application/json": {
-                                "schema": {
-                                    "type": "object",
-                                    "properties": {
-                                        "status": {"type": "string", "example": "ok"},
-                                        "version": {"type": "string", "example": "1.0"},
-                                    },
-                                    "required": ["status", "version"],
-                                }
+                                "schema": {"$ref": "#/components/schemas/HealthResponse"}
+                            }
+                        },
+                    }
+                },
+            }
+        },
+        "/readyz": {
+            "get": {
+                "summary": "Readiness probe",
+                "description": (
+                    "Readiness check, answered identically to /healthz so a probe can use either."
+                ),
+                "operationId": "readyz",
+                "responses": {
+                    "200": {
+                        "description": "Service ready",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/HealthResponse"}
                             }
                         },
                     }
@@ -313,6 +413,19 @@ OPENAPI_SPEC: dict[str, Any] = {
                 "summary": "OpenAPI Specification",
                 "description": "Returns this OpenAPI 3.1 JSON definition.",
                 "operationId": "getOpenApiSpec",
+                "responses": {
+                    "200": {
+                        "description": "OpenAPI 3.1 specification document",
+                        "content": {"application/json": {"schema": {"type": "object"}}},
+                    }
+                },
+            }
+        },
+        "/spec": {
+            "get": {
+                "summary": "OpenAPI Specification alias",
+                "description": "Alias for /openapi.json, so clients used to either path work.",
+                "operationId": "getSpecAlias",
                 "responses": {
                     "200": {
                         "description": "OpenAPI 3.1 specification document",
@@ -364,6 +477,14 @@ OPENAPI_SPEC: dict[str, Any] = {
                 },
                 "required": ["error", "code"],
             },
+            "HealthResponse": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "example": "ok"},
+                    "version": {"type": "string", "example": "1.0"},
+                },
+                "required": ["status", "version"],
+            },
             "RunIdRequest": {
                 "type": "object",
                 "properties": {"run_id": {"type": "string"}},
@@ -374,10 +495,26 @@ OPENAPI_SPEC: dict[str, Any] = {
                 "properties": {
                     "run_id": {"type": "string"},
                     "action_type": {"type": "string"},
-                    "arguments": {"type": "object"},
-                    "key": {"type": "string"},
+                    "arguments": {
+                        "type": "object",
+                        "description": "Arguments the idempotency key is derived from.",
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": (
+                            "Explicit idempotency key. Omitted means the key is derived "
+                            "from action_type and arguments."
+                        ),
+                    },
                     "scoped_to_run": {"type": "boolean", "default": True},
-                    "grant": {"type": "object"},
+                    "grant": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "scope": {"type": "string"},
+                        },
+                        "description": "Single-use authority attached to this attempt.",
+                    },
                 },
                 "required": ["run_id", "action_type"],
             },
@@ -385,14 +522,51 @@ OPENAPI_SPEC: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "run_id": {"type": "string"},
-                    "action_id": {"type": "string"},
                     "action_type": {"type": "string"},
-                    "action_key": {"type": "string"},
-                    "proceed": {"type": "boolean"},
-                    "status": {"type": "string"},
-                    "reusable_result": {"type": "object"},
-                    "previous_result": {"type": "object"},
-                    "reconciliation_required": {"type": "boolean"},
+                    "proceed": {
+                        "type": "boolean",
+                        "description": "True when the caller may perform the action.",
+                    },
+                    "action_key": {
+                        "type": "string",
+                        "description": (
+                            "Idempotency key of the claimed or completed action; pass it "
+                            "to complete_action, fail_action or reconcile_action. Absent "
+                            "on refusal paths that carry no key (grant denied)."
+                        ),
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": (
+                            "Ledger status of the action this claim resolved "
+                            "(started, completed, unknown)."
+                        ),
+                    },
+                    "external_id": {
+                        "type": ["string", "null"],
+                        "description": "Caller-supplied id of the external effect, if any.",
+                    },
+                    "previous_result": {
+                        "type": ["object", "null"],
+                        "description": "Cached result of an already-completed action.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why the claim refuses to proceed, if it does.",
+                    },
+                    "reason_code": {
+                        "type": "string",
+                        "enum": ["grant_denied"],
+                        "description": "Canonical refusal reason, if the claim was refused.",
+                    },
+                    "grant_id": {
+                        "type": "string",
+                        "description": "The consumed single-use authority, on a grant refusal.",
+                    },
+                    "guidance": {
+                        "type": "string",
+                        "description": "What the caller should do next.",
+                    },
                 },
                 "required": ["run_id", "action_type", "proceed"],
             },
@@ -401,7 +575,16 @@ OPENAPI_SPEC: dict[str, Any] = {
                 "properties": {
                     "run_id": {"type": "string"},
                     "action_key": {"type": "string"},
-                    "result": {},
+                    "result": {
+                        "description": (
+                            "The action's outcome. Read back by a later claim as "
+                            "previous_result; any JSON value is recorded."
+                        )
+                    },
+                    "external_id": {
+                        "type": ["string", "null"],
+                        "description": "Id of the external effect this completion produced.",
+                    },
                     "consumed_inputs": {"type": "object"},
                 },
                 "required": ["run_id", "action_key"],
@@ -410,29 +593,120 @@ OPENAPI_SPEC: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "run_id": {"type": "string"},
-                    "action_key": {"type": "string"},
+                    "action_id": {"type": "string"},
+                    "action_type": {"type": "string"},
                     "status": {"type": "string", "enum": ["completed"]},
-                    "result_hash": {"type": "string"},
+                    "external_id": {
+                        "type": ["string", "null"],
+                        "description": "The external id recorded with the completion, if any.",
+                    },
                 },
-                "required": ["run_id", "action_key", "status"],
+                "required": ["run_id", "action_id", "status"],
             },
             "FailActionRequest": {
                 "type": "object",
                 "properties": {
                     "run_id": {"type": "string"},
                     "action_key": {"type": "string"},
-                    "error": {"type": "string"},
+                    "error": {"type": "string", "description": "Why the action failed."},
+                    "certain": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "True asserts no side effect happened. False (the default) "
+                            "records an uncertain outcome instead of a clean failure."
+                        ),
+                    },
                 },
-                "required": ["run_id", "action_key"],
+                "required": ["run_id", "action_key", "error"],
             },
             "ActionStatusResponse": {
                 "type": "object",
                 "properties": {
                     "run_id": {"type": "string"},
-                    "action_key": {"type": "string"},
-                    "status": {"type": "string"},
+                    "action_id": {"type": "string"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["failed", "unknown"],
+                        "description": (
+                            "failed when the failure is certain, unknown when the "
+                            "side effect may still have landed."
+                        ),
+                    },
+                    "side_effect_uncertain": {
+                        "type": "boolean",
+                        "description": "True when the failure did not rule out a side effect.",
+                    },
                 },
-                "required": ["run_id", "action_key", "status"],
+                "required": ["run_id", "action_id", "status"],
+            },
+            "ReconcileActionRequest": {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string"},
+                    "action_key": {"type": "string"},
+                    "occurred": {
+                        "type": "boolean",
+                        "description": "External evidence: the effect happened, or did not.",
+                    },
+                    "external_id": {
+                        "type": ["string", "null"],
+                        "description": "Receipt for the effect, when it occurred.",
+                    },
+                    "note": {"type": "string", "default": ""},
+                    "consumed_inputs": {"type": "object"},
+                },
+                "required": ["run_id", "action_key", "occurred"],
+            },
+            "ReconcileActionResponse": {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string"},
+                    "action_id": {"type": "string"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["completed", "failed"],
+                        "description": "Settled from the evidence: completed or failed.",
+                    },
+                    "external_id": {
+                        "type": ["string", "null"],
+                        "description": "The external id kept on record, if any.",
+                    },
+                    "side_effect_uncertain": {"type": "boolean"},
+                },
+                "required": ["run_id", "action_id", "status"],
+            },
+            "CompensateActionRequest": {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string"},
+                    "action_key": {"type": "string"},
+                    "note": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Why the compensation was needed.",
+                    },
+                    "by": {
+                        "type": ["string", "null"],
+                        "description": "Who or what performed the compensation.",
+                    },
+                },
+                "required": ["run_id", "action_key"],
+            },
+            "CompensateActionResponse": {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string"},
+                    "action_id": {"type": "string"},
+                    "action_type": {"type": "string"},
+                    "status": {"type": "string", "enum": ["compensated"]},
+                    "compensated_by": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Ids of the compensating actions recorded so far.",
+                    },
+                },
+                "required": ["run_id", "action_id", "status"],
             },
             "RecordProgressRequest": {
                 "type": "object",
@@ -440,12 +714,19 @@ OPENAPI_SPEC: dict[str, Any] = {
                     "run_id": {"type": "string"},
                     "completed": {"type": "integer"},
                     "total": {"type": "integer"},
-                    "failed": {"type": "integer"},
-                    "goal": {"type": "string"},
-                    "notes": {"type": "string"},
-                    "env": {},
+                    "failed": {"type": "integer", "default": 0},
+                    "goal": {
+                        "type": ["string", "null"],
+                        "description": "Task goal; required on the first call, which creates the run.",
+                    },
+                    "env": {
+                        "description": (
+                            "Pinned environment as a mapping of resource to version, or "
+                            "a list of name=version strings."
+                        )
+                    },
                 },
-                "required": ["run_id"],
+                "required": ["run_id", "completed"],
             },
             "RecordProgressResponse": {
                 "type": "object",
@@ -463,7 +744,7 @@ OPENAPI_SPEC: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "run_id": {"type": "string"},
-                    "reason": {"type": "string"},
+                    "reason": {"type": "string", "default": ""},
                     "env": {},
                 },
                 "required": ["run_id"],
@@ -473,8 +754,23 @@ OPENAPI_SPEC: dict[str, Any] = {
                 "properties": {
                     "run_id": {"type": "string"},
                     "checkpoint_id": {"type": "string"},
-                    "sequence": {"type": "integer"},
-                    "hash": {"type": "string"},
+                    "version": {
+                        "type": "integer",
+                        "description": "How many checkpoints this run has recorded.",
+                    },
+                    "trigger": {
+                        "type": "string",
+                        "description": "Why the checkpoint was taken (manual, compaction, ...).",
+                    },
+                    "integrity_hash": {
+                        "type": "string",
+                        "description": "Hash of the checkpointed state.",
+                    },
+                    "completed": {"type": "integer"},
+                    "source_sequence": {
+                        "type": "integer",
+                        "description": "Event sequence the checkpoint was taken at.",
+                    },
                 },
                 "required": ["run_id", "checkpoint_id"],
             },
@@ -493,27 +789,107 @@ OPENAPI_SPEC: dict[str, Any] = {
                     "run_id": {"type": "string"},
                     "safe": {"type": "boolean"},
                     "mode": {"type": "string"},
-                    "components": {"type": "array", "items": {"type": "object"}},
+                    "checkpoint_version": {"type": "integer"},
+                    "reason": {"type": "string"},
+                    "components": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "component": {"type": "string"},
+                                "component_id": {"type": ["string", "null"]},
+                                "status": {"type": "string"},
+                                "detail": {"type": "string"},
+                            },
+                        },
+                    },
+                    "environment_changes": {"type": "array", "items": {"type": "string"}},
+                    "constraint_pins": {"type": "object"},
+                    "liveness": {"type": "object"},
                 },
                 "required": ["run_id", "safe", "mode"],
             },
             "ResumeRequest": {
                 "type": "object",
                 "properties": {
-                    "run_id": {"type": "string"},
+                    "run_id": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Optional. Omitted means the active run; with no active run "
+                            "the server answers mode no_active_run."
+                        ),
+                    },
                     "expected_model": {"type": "string"},
                     "env": {},
                 },
-                "required": ["run_id"],
             },
             "ResumeResponse": {
                 "type": "object",
                 "properties": {
-                    "run_id": {"type": "string"},
-                    "mode": {"type": "string"},
+                    "run_id": {
+                        "type": ["string", "null"],
+                        "description": "Null when there is no active run to resume.",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": (
+                            "Recovery decision a client branches on: no_active_run, "
+                            "resume, request_human, blocked, ..."
+                        ),
+                    },
                     "safe": {"type": "boolean"},
-                    "next_allowed_action": {"type": "string"},
+                    "message": {
+                        "type": "string",
+                        "description": "Present in the no_active_run mode.",
+                    },
+                    "goal": {"type": ["string", "null"]},
+                    "next_allowed_action": {"type": ["string", "null"]},
+                    "human_steps": {"type": "array", "items": {"type": "string"}},
+                    "rationale": {"type": "array", "items": {"type": "string"}},
+                    "repairs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "action": {"type": "string"},
+                                "kind": {"type": "string"},
+                                "target": {"type": "string"},
+                                "reason": {"type": "string"},
+                                "requires_human": {"type": "boolean"},
+                            },
+                        },
+                    },
+                    "uncertain_actions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "action_id": {"type": "string"},
+                                "action_type": {"type": "string"},
+                                "status": {"type": "string"},
+                            },
+                        },
+                    },
+                    "progress": {
+                        "type": "object",
+                        "properties": {
+                            "completed": {"type": "integer"},
+                            "pending": {"type": "integer"},
+                            "failed": {"type": "integer"},
+                            "total": {"type": "integer"},
+                        },
+                    },
+                    "tail_evidence": {},
+                    "informed_retry": {"type": ["object", "null"]},
+                    "attempt_lessons": {"type": "array", "items": {"type": "object"}},
+                    "contract": {"type": "object"},
+                    "contract_text": {"type": "string"},
                     "report": {"type": "string"},
+                    "environment_changes": {"type": "array", "items": {"type": "string"}},
+                    "constraint_pins": {"type": "object"},
+                    "liveness": {"type": "object"},
+                    "checkpoint_version": {"type": "integer"},
+                    "validation_reason": {"type": "string"},
                 },
                 "required": ["run_id", "mode", "safe"],
             },
@@ -525,11 +901,40 @@ OPENAPI_SPEC: dict[str, Any] = {
                 },
                 "required": ["run_id"],
             },
+            "ConfirmResponse": {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string"},
+                    "mode": {"type": "string"},
+                    "safe": {"type": "boolean"},
+                    "next_allowed_action": {"type": ["string", "null"]},
+                    "report": {"type": "string"},
+                },
+                "required": ["run_id", "mode", "safe"],
+            },
             "ListActionsResponse": {
                 "type": "object",
                 "properties": {
                     "run_id": {"type": "string"},
-                    "actions": {"type": "array", "items": {"type": "object"}},
+                    "actions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "action_id": {"type": "string"},
+                                "action_type": {"type": "string"},
+                                "status": {"type": "string"},
+                                "external_id": {"type": ["string", "null"]},
+                                "side_effect_uncertain": {"type": "boolean"},
+                                "outcome_unresolved": {
+                                    "type": "boolean",
+                                    "description": (
+                                        "True when the ledger still holds the action as unsettled."
+                                    ),
+                                },
+                            },
+                        },
+                    },
                     "unresolved": {"type": "integer"},
                 },
                 "required": ["run_id", "actions", "unresolved"],
