@@ -41,10 +41,11 @@ from continuum.models import (
     EnvironmentSnapshot,
     SemanticState,
     StateCheckpoint,
+    StateStatus,
     utcnow,
 )
 from continuum.state.semantic import project
-from continuum.storage.base import Storage
+from continuum.storage.base import CorruptedRow, Storage
 
 # Resume banner persistence (issue #394): written on every checkpoint so a
 # SessionStart hook can inject a banner without opening the database. The
@@ -291,16 +292,43 @@ class CheckpointManager:
         of a ProjectionError, so a poisoned log produces a verdict rather than
         ending the assessment. Defaults to ``"raise"``: ``restore`` also feeds
         write paths that must never mistake a partial fold for state.
+
+        Degrade mode also covers a row the *reader* refuses, not only one the
+        projector refuses (issue #1907). A corrupted payload never becomes an
+        event, so it can never reach the fold; an unguarded read would raise
+        ``CorruptedRecord`` and the assessment would end in a traceback before
+        a verdict existed. In degrade mode the read stops at the first refused
+        row and the clean prefix that precedes it is marked INVALID at that
+        sequence, exactly as if the fold itself had refused there. Raise mode
+        is unchanged: the read error still propagates, byte for byte.
         """
+        degrade = on_unprojectable == "degrade"
         checkpoint = self.storage.latest_checkpoint(run_id)
 
         if checkpoint is None:
-            events = self.storage.read_events(run_id)
+            if degrade:
+                events, corrupted = self.storage.read_events_until_corrupt(run_id)
+                events = list(events)
+            else:
+                events, corrupted = list(self.storage.read_events(run_id)), None
             if not events:
+                if corrupted is not None:
+                    # Nothing loadable precedes the break, so there is no
+                    # last-good state to mark: the prefix that build_degraded
+                    # would assemble is empty, and a degraded state named
+                    # after it would claim a break with no goal, progress or
+                    # evidence behind it.
+                    raise CheckpointError(
+                        f"run {run_id!r} has no checkpoint and its first event refused to load "
+                        f"(sequence {corrupted.sequence}: {corrupted.detail})"
+                    )
                 raise CheckpointError(f"run {run_id!r} has no checkpoint and no events")
+            state = project(run_id, events, on_unprojectable=on_unprojectable)
+            if corrupted is not None:
+                state = _marked_corrupt(state, corrupted)
             return RestoredRun(
                 run_id=run_id,
-                state=project(run_id, events, on_unprojectable=on_unprojectable),
+                state=state,
                 checkpoint=None,
                 pending_events=len(events),
                 replayed=True,
@@ -312,12 +340,24 @@ class CheckpointManager:
             )
 
         cursor = self._cursor_for(checkpoint)
-        pending = self.storage.read_events(run_id, after_sequence=cursor)
+        if degrade:
+            pending, corrupted = self.storage.read_events_until_corrupt(
+                run_id, after_sequence=cursor
+            )
+            pending = list(pending)
+        else:
+            pending, corrupted = (
+                list(self.storage.read_events(run_id, after_sequence=cursor)),
+                None,
+            )
 
         if not replay or not pending:
+            state = checkpoint.state
+            if corrupted is not None:
+                state = _marked_corrupt(state, corrupted)
             return RestoredRun(
                 run_id=run_id,
-                state=checkpoint.state,
+                state=state,
                 checkpoint=checkpoint,
                 pending_events=len(pending),
                 replayed=False,
@@ -328,6 +368,8 @@ class CheckpointManager:
         state, _ = project_incremental(
             run_id, pending, base=checkpoint.state, on_unprojectable=on_unprojectable
         )
+        if corrupted is not None:
+            state = _marked_corrupt(state, corrupted)
         return RestoredRun(
             run_id=run_id,
             state=state,
@@ -430,6 +472,32 @@ def _write_resume_json(run_id: str, checkpoint: StateCheckpoint) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
+
+
+def _marked_corrupt(state: SemanticState, corrupted: CorruptedRow) -> SemanticState:
+    """Mark a folded prefix INVALID at a row the reader refused (issue #1907).
+
+    A corrupted payload never reaches the projector, so nothing inside the
+    fold names the break: the marker is applied after the fact. An earlier
+    refusal wins when there is one, because it names the first place the log
+    stopped being trustworthy: a fold that degraded at sequence N and a read
+    that refused at sequence M > N describe the same broken log, and N is the
+    tighter location.
+    """
+    if (
+        state.status is StateStatus.INVALID
+        and state.unprojectable_at_sequence is not None
+        and state.unprojectable_at_sequence <= corrupted.sequence
+    ):
+        return state
+    return state.model_copy(
+        update={
+            "status": StateStatus.INVALID,
+            "unprojectable_at_sequence": corrupted.sequence,
+            "unprojectable_event_type": corrupted.event_type,
+            "unprojectable_reason": corrupted.detail,
+        }
+    )
 
 
 def clear_resume_pointer(run_id: str) -> bool:

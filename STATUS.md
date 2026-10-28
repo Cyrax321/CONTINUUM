@@ -17,6 +17,25 @@ believed, and what is neither.
 
 ---
 
+## A corrupted event row degrades the same way a refused fold does (2026-10-28)
+
+Issue #1907: a payload that refuses to parse raised `CorruptedRecord` out of
+the storage read inside `restore`, before the fold ran, so
+`RecoveryEngine.assess` died in a traceback on the poisoned log it exists to
+answer for. The degrade machinery of #383 never saw an event to refuse. The
+storage layer now offers tolerant twins (`read_events_until_corrupt`,
+`read_all_events_until_corrupt`; native per-row on SQLite and PostgreSQL,
+bisection over windowed reads by default so any engine inherits it) that stop
+at the first refusing row and return the clean prefix plus the row's
+sequence, type and loader reason. `restore(on_unprojectable="degrade")` marks
+the prefix `INVALID` at the refused sequence and `assess` returns an advisory
+`REQUEST_HUMAN` verdict naming it, with a `repair_log` step for the broken
+row; the archive-aware history, action ledger, observations window and
+informed-retry block are read tolerantly and a refusal escalates the verdict
+instead of laundering into an empty history. Raise mode is unchanged, so the
+write paths `restore` feeds still fail loudly. Pinned by
+`tests/test_corrupted_record_degrade.py`.
+
 ## Unprojectable logs degrade instead of dying (2026-08-25)
 
 PR #385 (fix for #383) was merged on 2026-08-25. The fold accepts

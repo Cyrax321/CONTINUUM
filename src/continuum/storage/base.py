@@ -30,8 +30,9 @@ Guarantees deliberately *not* claimed
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from heapq import merge
 from pathlib import Path
 from types import TracebackType
@@ -48,6 +49,7 @@ __all__ = [
     "RunNotFound",
     "CheckpointNotFound",
     "CorruptedRecord",
+    "CorruptedRow",
     "SchemaVersionError",
 ]
 
@@ -96,6 +98,77 @@ class CorruptedRecord(StorageError):
 
     Reading is refused rather than returning state that cannot be trusted.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class CorruptedRow:
+    """A log row that refused to load, located for tolerant readers.
+
+    ``sequence`` is the refused row's own sequence number. ``event_type`` and
+    ``detail`` describe the row well enough for a recovery contract to name it
+    even when the payload that would have proved them did not survive: the
+    type column usually outlives the payload, and ``detail`` carries the
+    loader's own reason for refusing.
+    """
+
+    sequence: int
+    event_type: str
+    detail: str
+
+    @classmethod
+    def from_raw_type(cls, sequence: int, raw_type: Any, detail: str) -> CorruptedRow:
+        """Build a row location from a raw ``type`` column value.
+
+        Engines that can see the database row directly call this; the type is
+        coerced when it names a known event type and kept as-is otherwise, so
+        a corrupted row whose type column is also wrong still reports
+        something rather than "unknown" (issue #1907).
+        """
+        try:
+            event_type = str(EventType(raw_type))
+        except Exception:
+            event_type = str(raw_type) if raw_type else "unknown event"
+        return cls(sequence=sequence, event_type=event_type, detail=detail)
+
+
+def _read_until_refusal(
+    read_window: Callable[[int], Sequence[Event]],
+    low: int,
+    high: int,
+) -> tuple[Sequence[Event], CorruptedRow | None]:
+    """Read a windowed reader up to the first row that refuses to load.
+
+    ``read_window(bound)`` must read rows in ``(low, bound]`` and raise
+    :class:`CorruptedRecord` when any of them refuses. The property is
+    monotone: a window that fails at ``bound`` fails at every larger bound
+    too, which is what makes the first refusing row locatable by bisection
+    rather than by re-reading a row at a time.
+
+    Returns the clean prefix and, when a row refused, its location. The
+    location's type is "unknown event" because a reader this generic cannot
+    see the row's own columns, only the exception it raised.
+    """
+    try:
+        return list(read_window(high)), None
+    except CorruptedRecord as exc:
+        failure = exc
+
+    # Invariant: window(low) loads, window(high) does not. Shrinking the gap
+    # one halving at a time leaves high at the first refusing sequence.
+    while low + 1 < high:
+        mid = (low + high) // 2
+        try:
+            read_window(mid)
+        except CorruptedRecord:
+            high = mid
+        else:
+            low = mid
+    prefix = list(read_window(high - 1))
+    return prefix, CorruptedRow(
+        sequence=high,
+        event_type="unknown event",
+        detail=str(failure),
+    )
 
 
 class SchemaVersionError(StorageError):
@@ -260,6 +333,45 @@ class Storage(ABC):
         # merge is stable, matching sorted() for equal sequences.
         return tuple(merge(archived, live, key=lambda e: e.sequence))
 
+    def read_all_events_until_corrupt(
+        self,
+        run_id: str,
+        *,
+        upto: int | None = None,
+        rehydrate: bool = True,
+    ) -> tuple[Sequence[Event], CorruptedRow | None]:
+        """Full history up to the first refusing row, archive prefix included.
+
+        The tolerant twin of :meth:`read_all_events` (issue #1907): one
+        malformed row anywhere in the merged stream no longer costs the whole
+        history. The read stops at the first refusal and returns the clean
+        prefix that precedes it together with the refused row's location.
+
+        The stream is treated as one timeline, so a refusal in the archived
+        prefix stops the read there even though the live tail is untouched: a
+        reader that skipped the break and kept folding newer facts would claim
+        a continuity the log no longer has. ``read_events`` is consulted only
+        when the archive folds clean, which is also why an engine whose
+        archive is empty pays for one cheap call and nothing more.
+        """
+        # Compaction archives a strict prefix and keeps the anchor live,
+        # so every archived sequence precedes the live head: the live
+        # high-water mark is a valid bound for the archive too.
+        bound = upto if upto is not None else self.last_sequence(run_id)
+        archived, archived_break = _read_until_refusal(
+            lambda upto_: self.read_archived_events(run_id, upto=upto_, rehydrate=rehydrate),
+            low=0,
+            high=bound,
+        )
+        if archived_break is not None:
+            return archived, archived_break
+        live, live_break = self.read_events_until_corrupt(run_id, upto=upto, rehydrate=rehydrate)
+        if not archived:
+            return live, live_break
+        if not live:
+            return archived, live_break
+        return tuple(merge(archived, live, key=lambda e: e.sequence)), live_break
+
     def foreign_action(self, key: str, *, exclude_run: str) -> Action | None:
         """Newest action recorded under ``key`` outside ``exclude_run``.
 
@@ -410,6 +522,43 @@ class Storage(ABC):
     ) -> Sequence[Event]:
         """Live (unarchived) events in sequence order, windowed by ``after_sequence``/``upto``."""
         ...
+
+    def read_events_until_corrupt(
+        self,
+        run_id: str,
+        *,
+        after_sequence: int = 0,
+        upto: int | None = None,
+        rehydrate: bool = True,
+    ) -> tuple[Sequence[Event], CorruptedRow | None]:
+        """Live events up to the first row that refuses to load, plus that row.
+
+        The tolerant twin of :meth:`read_events` (issue #1907): rather than
+        losing the whole run to one malformed row, the read stops at the first
+        row the engine refuses and returns the clean prefix that precedes it
+        together with the refused row's location, so a diagnostic caller
+        (recovery) can answer "where does this run stand" on a log it can no
+        longer read end to end.
+
+        Everything at or after the break is deliberately unread. Folding past
+        a refused row would assemble a state the run was never in, exactly the
+        failure ``on_unprojectable="degrade"`` refuses for the projector
+        itself; the break is where trust stops.
+
+        Engines that can parse rows one at a time override this. The default
+        implementation locates the refusal by bisecting plain windowed reads,
+        which costs O(log n) probes and works against any engine, at the price
+        of an "unknown event" type (a reader this generic cannot see the row's
+        own columns).
+        """
+        bound = upto if upto is not None else self.last_sequence(run_id)
+        return _read_until_refusal(
+            lambda bound_: self.read_events(
+                run_id, after_sequence=after_sequence, upto=bound_, rehydrate=rehydrate
+            ),
+            low=after_sequence,
+            high=bound,
+        )
 
     @abstractmethod
     def last_sequence(self, run_id: str) -> int:

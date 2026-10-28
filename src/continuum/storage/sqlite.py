@@ -42,6 +42,7 @@ from continuum.storage.base import (
     CheckpointNotFound,
     ConcurrentWriteError,
     CorruptedRecord,
+    CorruptedRow,
     RunNotFound,
     Storage,
 )
@@ -832,6 +833,40 @@ class SQLiteStorage(Storage):
         with self._read() as conn:
             rows = conn.execute(query, params).fetchall()
         return [self._row_to_event(row, rehydrate=rehydrate) for row in rows]
+
+    def read_events_until_corrupt(
+        self,
+        run_id: str,
+        *,
+        after_sequence: int = 0,
+        upto: int | None = None,
+        rehydrate: bool = True,
+    ) -> tuple[Sequence[Event], CorruptedRow | None]:
+        """Live events up to the first row that refuses to load (issue #1907).
+
+        Every row is parsed on its own, so a refusal costs exactly the rows at
+        and after it: the clean prefix survives intact, and the refused row's
+        own type column and sequence locate it for the caller. The refusing
+        row may itself carry a broken type column, in which case the raw value
+        is reported as-is rather than discarded.
+        """
+        query = "SELECT * FROM events WHERE run_id = ? AND sequence > ?"
+        params: list[Any] = [run_id, after_sequence]
+        if upto is not None:
+            query += " AND sequence <= ?"
+            params.append(upto)
+        query += " ORDER BY sequence ASC"
+        with self._read() as conn:
+            rows = conn.execute(query, params).fetchall()
+        events: list[Event] = []
+        for row in rows:
+            try:
+                events.append(self._row_to_event(row, rehydrate=rehydrate))
+            except CorruptedRecord as exc:
+                return events, CorruptedRow.from_raw_type(
+                    int(row["sequence"]), row["type"], str(exc)
+                )
+        return events, None
 
     def last_sequence(self, run_id: str) -> int:
         """Highest live sequence number; 0 when the run has no events yet."""
