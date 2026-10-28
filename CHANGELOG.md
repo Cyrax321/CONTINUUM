@@ -110,6 +110,23 @@ Test counts: ~3950 collected on a minimal env.
   200 body against the document's required fields, types, and observed
   properties, so the document and the handlers cannot drift apart again.
 
+- **The wire conformance suite now validates request and response bodies
+  against the served specification, not just status codes (#1895).** The suite
+  judged a server by its HTTP statuses and a handful of individual field
+  values, so it passed servers that violate the published contract in either
+  direction: a 200 that omits a field the served spec marks required, or a
+  handler that demands a parameter the request schema does not list, both
+  ended in "All 10 conformance tests passed". The suite now resolves the
+  OpenAPI document off `GET /openapi.json` itself and checks every request it
+  sends and every response it receives against `components.schemas` (required
+  fields, declared types, enums, `$ref` pointers, 3.1 list nullability), and
+  probes every documented endpoint with a request carrying exactly the fields
+  that document marks required, so a spec-generated client being refused 400
+  fails the suite. Two tests join the run for this, `request_schema_conformance`
+  and `response_schema_conformance`, and the suite reports 12 tests. The drift
+  the companion issue documents (#1894) is exactly what these tests now catch,
+  shown failing on the pre-fix suite by `tests/test_wire_conformance.py`.
+
 - **Benchmark report timestamps are timezone-aware UTC (#1823).** The Phase 6,
   fault-injection, and horizon benchmark runners now use the shared `utcnow()`
   helper, keeping report timestamps comparable across benchmark suites.
