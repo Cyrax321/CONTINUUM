@@ -89,6 +89,44 @@ Test counts: ~3950 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **The OpenAPI 3.1 document now describes the wire the sidecar actually
+  speaks (#1894).** The spec served at `GET /openapi.json` claimed a contract
+  the reference server kept in neither direction, so a client generated from it
+  was refused and then saw responses that failed its own validation:
+  `record_progress` and `fail_action` demand `completed` and `error` that the
+  document left optional, `complete_action` and `fail_action` return `action_id`
+  where the document required `action_key`, and `CheckpointResponse` documented
+  `sequence` and `hash` while the server answers `version`, `trigger`,
+  `integrity_hash`, `completed`, and `source_sequence`. The document was
+  corrected to the implementation, not the implementation to the document: the
+  wire is the shipped, behaviour-tested surface. `resume`'s `run_id` is now
+  documented as the optional field it always was (the `no_active_run` mode
+  answers `run_id: null`), `CompleteActionRequest` documents the `external_id`
+  the server reads, the request field the server never reads (`notes`) and the
+  response fields it never sends (`reusable_result`, `reconciliation_required`)
+  are gone, and `reconcile_action`, `compensate_action`, `/readyz`, and `/spec`
+  are documented at last. `tests/test_openapi_wire_drift.py` drives every
+  endpoint with exactly the request schema's `required` list and checks every
+  200 body against the document's required fields, types, and observed
+  properties, so the document and the handlers cannot drift apart again.
+
+- **The wire conformance suite now validates request and response bodies
+  against the served specification, not just status codes (#1895).** The suite
+  judged a server by its HTTP statuses and a handful of individual field
+  values, so it passed servers that violate the published contract in either
+  direction: a 200 that omits a field the served spec marks required, or a
+  handler that demands a parameter the request schema does not list, both
+  ended in "All 10 conformance tests passed". The suite now resolves the
+  OpenAPI document off `GET /openapi.json` itself and checks every request it
+  sends and every response it receives against `components.schemas` (required
+  fields, declared types, enums, `$ref` pointers, 3.1 list nullability), and
+  probes every documented endpoint with a request carrying exactly the fields
+  that document marks required, so a spec-generated client being refused 400
+  fails the suite. Two tests join the run for this, `request_schema_conformance`
+  and `response_schema_conformance`, and the suite reports 12 tests. The drift
+  the companion issue documents (#1894) is exactly what these tests now catch,
+  shown failing on the pre-fix suite by `tests/test_wire_conformance.py`.
+
 - **Benchmark report timestamps are timezone-aware UTC (#1823).** The Phase 6,
   fault-injection, and horizon benchmark runners now use the shared `utcnow()`
   helper, keeping report timestamps comparable across benchmark suites.

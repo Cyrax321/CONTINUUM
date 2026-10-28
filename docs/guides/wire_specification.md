@@ -14,10 +14,12 @@ and health):
 - **API Version Header**: All HTTP responses include `Continuum-Version: 1.0`.
 - **Health and Discovery**:
   - `GET /healthz` - Service health and liveness probe.
-  - `GET /openapi.json` - Canonical OpenAPI 3.1.0 document.
+  - `GET /readyz` - Readiness probe, answered identically to `/healthz`.
+  - `GET /openapi.json` - Canonical OpenAPI 3.1.0 document (also served at
+    `GET /spec`).
 - **Action Lifecycle**:
   - `POST /intercept_action` - Atomically claim execution grant and check deduplication.
-  - `POST /complete_action` - Record successful result and compute result hash.
+  - `POST /complete_action` - Record a successful action outcome and its external id.
   - `POST /fail_action` - Record action failure.
   - `POST /reconcile_action` - Reconcile uncertain or interrupted action from external evidence.
   - `POST /compensate_action` - Register compensating rollback action.
@@ -68,6 +70,15 @@ The `continuum conformance` CLI tests any server implementation against the comp
 wire protocol specification. It exercises health probes, headers, action claims,
 deduplication replay, progress tracking, checkpoints, resume decisions, error formats,
 and credential separation.
+
+The suite also validates the conversation itself against the specification the
+server serves at `GET /openapi.json`: every request it sends and every response it
+receives is checked against that document's `components.schemas` (required fields,
+declared types, enums, and `$ref` pointers), and every documented endpoint is probed
+with a request carrying exactly the fields the document marks required. A server
+whose 200 responses omit a field its own spec marks required, or whose handlers
+demand a parameter the request schema does not list, fails the suite, so a pass is
+meaningful against any implementation, not just the reference one.
 
 ### Running Conformance Against a Local Server
 
