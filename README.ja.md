@@ -418,7 +418,7 @@ CONTINUUM は一つのライブラリ（`src/continuum`、132 モジュール）
 | `mcp/` | 12 の stdio ツールに加え認可 `authz.py` トークン認証、allowlist、確認トークン |
 | `serve/` | Sidecar stdio JSON ワイヤ + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | Web ダッシュボード `app.py` `hitl.py` と HITL ボタン確認、照合、完了、接頭辞信頼助言、ピン留め |
-| `cli/` | 55 の argparse コマンド、終了コードが評決、`runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 56 の argparse コマンド、終了コードが評決、`runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | OpenTelemetry スパンプロセッサーブリッジ |
 | `benchmark/` | CONTINUUM-Bench ハーネス、5 つのクラッシュシナリオ + 引数ドリフト + 14 シナリオのリカバリスイート |
 
