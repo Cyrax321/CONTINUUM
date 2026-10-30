@@ -5,10 +5,15 @@ import pytest
 from continuum.adapters import (
     AdapterRegistry,
     GenericAgentAdapter,
+    LangChainAgentAdapter,
+    LangGraphAgentAdapter,
+    OpenAIAgentAdapter,
     get_adapter,
     list_adapters,
     recover,
+    register_adapter,
 )
+from continuum.adapters import registry as registry_module
 from continuum.checkpoint import CheckpointManager
 from continuum.environment import StaticProvider, capture
 from continuum.events import EventType
@@ -26,6 +31,15 @@ def test_get_adapter_returns_the_class() -> None:
     assert get_adapter("generic") is GenericAgentAdapter
 
 
+def test_get_adapter_resolves_the_lazy_framework_factories() -> None:
+    # "generic" is the only eager factory; the other three are the lazy
+    # imports the registry exists to defer, and nothing else in the suite
+    # resolves them.
+    assert get_adapter("langchain") is LangChainAgentAdapter
+    assert get_adapter("langgraph") is LangGraphAgentAdapter
+    assert get_adapter("openai") is OpenAIAgentAdapter
+
+
 def test_unknown_adapter_raises() -> None:
     with pytest.raises(ValueError):
         get_adapter("does-not-exist")
@@ -36,6 +50,32 @@ def test_registry_register_and_get_is_local() -> None:
     reg.register("demo", lambda: GenericAgentAdapter)
     assert reg.get("demo") is GenericAgentAdapter
     assert "demo" in reg.names()
+
+
+def test_registry_all_keys_every_registered_class_by_name() -> None:
+    reg = AdapterRegistry()
+    assert reg.all() == {}
+
+    class Alpha:
+        pass
+
+    class Beta:
+        pass
+
+    # Registration order must not leak into the returned mapping.
+    reg.register("beta", lambda: Beta)
+    reg.register("alpha", lambda: Alpha)
+    assert reg.all() == {"alpha": Alpha, "beta": Beta}
+
+
+def test_register_adapter_writes_the_module_level_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    standalone = AdapterRegistry()
+    monkeypatch.setattr(registry_module, "_REGISTRY", standalone)
+    register_adapter("demo", lambda: GenericAgentAdapter)
+    assert standalone.names() == ["demo"]
+    assert get_adapter("demo") is GenericAgentAdapter
 
 
 def _seed(storage: SQLiteStorage) -> None:
