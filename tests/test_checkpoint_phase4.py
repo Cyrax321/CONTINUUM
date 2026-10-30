@@ -104,3 +104,64 @@ def test_prune_is_a_noop_when_within_keep(store: SQLiteStorage) -> None:
         mgr.checkpoint("run_1", trigger=CheckpointTrigger.MANUAL)
 
     assert mgr.prune("run_1", keep=5) == []
+
+
+def test_compaction_trigger_is_available() -> None:
+    assert CheckpointTrigger.COMPACTION == "compaction"
+
+
+def test_compaction_anchor_does_not_shadow_the_recovery_anchor(
+    store: SQLiteStorage,
+) -> None:
+    """A compaction seal must not win last_recovery_anchor (#1852).
+
+    compact_run writes its anchor after the unsafe event at a higher version;
+    stamped RECOVERY it was the newest RECOVERY checkpoint, so
+    --to-recovery-anchor rolled back to the compaction point and skipped the
+    real rollback point entirely.
+    """
+    advance(store, 2)
+    mgr = CheckpointManager(store)
+    rollback = mgr.checkpoint_on_recovery("run_1", reason="dataset went stale")
+    advance(store, 2)
+    store.compact_run("run_1")
+
+    seals = [c for c in mgr.history("run_1") if c.trigger == CheckpointTrigger.COMPACTION]
+    assert seals and all(c.version > rollback.version for c in seals)
+
+    found = mgr.last_recovery_anchor("run_1")
+    assert found is not None
+    assert found.checkpoint_id == rollback.checkpoint_id
+
+
+def test_last_recovery_anchor_is_none_when_only_compaction_anchors_exist(
+    store: SQLiteStorage,
+) -> None:
+    """A run never given a recovery decision has no rollback point (#1852).
+
+    Reporting the compaction seal here would invite callers to "roll back" to
+    the state the unsafe event already happened in.
+    """
+    advance(store, 2)
+    store.compact_run("run_1")
+
+    assert CheckpointManager(store).last_recovery_anchor("run_1") is None
+
+
+def test_prune_keeps_a_compaction_anchor(store: SQLiteStorage) -> None:
+    """The compaction seal is the state a compacted live tail starts from.
+
+    Deleting it orphans the run, so prune's keep_anchors rule covers it too,
+    not only recovery anchors.
+    """
+    advance(store, 1)
+    store.compact_run("run_1")
+    mgr = CheckpointManager(store)
+    seal = next(c for c in mgr.history("run_1") if c.trigger == CheckpointTrigger.COMPACTION)
+    for _ in range(6):
+        mgr.checkpoint("run_1", trigger=CheckpointTrigger.MANUAL)
+
+    deleted = mgr.prune("run_1", keep=3, keep_anchors=True)
+
+    assert seal.checkpoint_id not in deleted
+    assert seal.checkpoint_id in {c.checkpoint_id for c in mgr.history("run_1")}

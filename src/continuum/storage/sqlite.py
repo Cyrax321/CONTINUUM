@@ -625,7 +625,11 @@ class SQLiteStorage(Storage):
                 manager.checkpoint(
                     run_id,
                     state=state,
-                    trigger=CheckpointTrigger.RECOVERY,
+                    # The anchor seals the compacted run, not a recovery
+                    # decision: it carries no trigger=RECOVERY because
+                    # last_recovery_anchor must keep returning the true
+                    # rollback point (#1852).
+                    trigger=CheckpointTrigger.COMPACTION,
                     reason="compaction anchor",
                     force_version=True,
                     # The anchor carries the environment the run's newest

@@ -46,7 +46,8 @@ _PATTERNS = {
 #: so it cannot ship unverified; a stale entry fails the same way.
 EXPECTED: dict[tuple[str, int], tuple[str, str]] = {
     ("src/continuum/checkpoint/policy.py", 54): ("CheckpointTrigger", "decl"),
-    ("src/continuum/checkpoint/policy.py", 64): ("RECOVERY", "assign"),
+    ("src/continuum/checkpoint/policy.py", 74): ("RECOVERY", "assign"),
+    ("src/continuum/checkpoint/policy.py", 82): ("ANCHOR_TRIGGERS", "assign"),
     ("src/continuum/checkpoint/manager.py", 198): ("checkpoint", "decl"),
     ("src/continuum/recovery/cleanup.py", 24): ("cleanup_ephemeral_artifacts", "decl"),
     ("src/continuum/concurrency/lease.py", 53): ("LeaseCoordinator", "decl"),

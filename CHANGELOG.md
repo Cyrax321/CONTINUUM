@@ -89,6 +89,20 @@ Test counts: ~3950 collected on a minimal env.
   that moves while the queue is built.
 ### Fixed
 
+- **Compaction anchors no longer shadow the true rollback point (#1852).**
+  `compact_run` stamped its anchor checkpoint `trigger=RECOVERY`, but it is
+  written *after* the unsafe event at a higher version, so after a run was
+  compacted `last_recovery_anchor` -- and `continuum restore
+  --to-recovery-anchor` -- selected the compaction anchor and rolled back to
+  a state the unsafe event had already happened in, skipping the real
+  rollback point entirely. Compaction anchors now carry their own
+  `CheckpointTrigger.COMPACTION`, so `last_recovery_anchor` keeps returning
+  only true recovery anchors, and it reports `None` for a run that has only
+  ever been compacted. The anchor-keeping rules -- `CheckpointManager.prune`
+  and `cleanup_ephemeral_artifacts` -- use a shared `ANCHOR_TRIGGERS` set, so
+  a compaction seal still survives cleanup and pruning as the live tail's
+  starting state.
+
 - **Benchmark report timestamps are timezone-aware UTC (#1823).** The Phase 6,
   fault-injection, and horizon benchmark runners now use the shared `utcnow()`
   helper, keeping report timestamps comparable across benchmark suites.

@@ -73,7 +73,11 @@ def test_compaction_anchor_survives_cleanup_ephemeral_artifacts() -> None:
     checkpoints = list(storage.list_checkpoints("run_1"))
     assert len(checkpoints) == 1
     anchor_cp = checkpoints[0]
-    assert anchor_cp.trigger == CheckpointTrigger.RECOVERY
+    # The seal is COMPACTION, not RECOVERY: last_recovery_anchor must keep
+    # returning the true rollback point, and this anchor is written after the
+    # unsafe event at a higher version, so it would otherwise always shadow it
+    # (#1852).
+    assert anchor_cp.trigger == CheckpointTrigger.COMPACTION
 
     ledger = RecoveryLedger(MemoryLedgerBackend())
     deleted = cleanup_ephemeral_artifacts(storage, ledger, "run_1", keep_anchors=True)

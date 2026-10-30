@@ -48,11 +48,21 @@ __all__ = [
     "ContextPressurePolicy",
     "SIDE_EFFECT_EVENTS",
     "MILESTONE_EVENTS",
+    "ANCHOR_TRIGGERS",
 ]
 
 
 class CheckpointTrigger:
-    """Why a checkpoint was taken. Recorded on the checkpoint for auditing."""
+    """Why a checkpoint was taken. Recorded on the checkpoint for auditing.
+
+    ``RECOVERY`` and ``COMPACTION`` look interchangeable but are not: a
+    recovery anchor pins the state a decision judged unsafe to continue from,
+    and is the rollback point ``last_recovery_anchor`` returns. A compaction
+    anchor is the seal a compacted run's live tail starts from; it is taken
+    *after* the unsafe event and always at a higher version, so stamping it
+    ``RECOVERY`` made it shadow the real rollback point (#1852). Keep the two
+    distinct.
+    """
 
     MANUAL = "manual"
     INTERVAL = "interval"
@@ -62,9 +72,17 @@ class CheckpointTrigger:
     CONTEXT_PRESSURE = "context_pressure"
     RUN_COMPLETED = "run_completed"
     RECOVERY = "recovery"
+    COMPACTION = "compaction"
 
+
+#: Triggers whose checkpoints are anchors a run must keep: rollback points
+#: (recovery) and the seal a compacted run's live tail starts from
+#: (compaction). Pruning or ephemeral cleanup sweeping either one loses state
+#: the run cannot rebuild (#1852).
+ANCHOR_TRIGGERS = frozenset({CheckpointTrigger.RECOVERY, CheckpointTrigger.COMPACTION})
 
 #: Events that mean the outside world changed. Losing these is expensive:
+
 #: without a checkpoint, recovery cannot tell whether the effect happened.
 SIDE_EFFECT_EVENTS = frozenset(
     {
