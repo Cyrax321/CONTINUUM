@@ -157,6 +157,13 @@ def rewind_to_checkpoint(
     deleted: list[str] = []
     conflicts: list[str] = []
     unrecoverable: list[str] = []
+    # Planning pass (#1854): classify every observed path and collect every
+    # conflict and unrecoverable case before the filesystem is touched. Mutating
+    # inside the same loop meant an unrecoverable observation reached midway
+    # through raised RewindError with the earlier files already deleted, and a
+    # predictably unrestorable run left the workspace half-rewound.
+    planned_deletes: list[tuple[str, str | None]] = []
+    planned_reverts: list[tuple[str, str, str | None]] = []
     for path, after_payload in after_by_path.items():
         after_digest = after_payload.get("sha256")
         before_payload = before_by_path.get(path)
@@ -180,7 +187,7 @@ def rewind_to_checkpoint(
             continue
         if current_digest is None and expected_after is not None:
             if not before_observed:
-                deleted.append(path)
+                planned_deletes.append((path, expected_after))
                 continue
             if before_digest is None:
                 unrecoverable.append(
@@ -195,68 +202,95 @@ def rewind_to_checkpoint(
             # The file was already there at checkpoint time and we cannot
             # restore it: leave it in place and report it. Never a delete.
             if current_digest is None:
-                # Nothing is on disk and there is no digest to restore from,
-                # so there is nothing this rewind can do for the path.
-                deleted.append(path)
+                # Nothing is on disk and there is no digest to restore from, so
+                # there is nothing this rewind can do for the path (#1854).
+                # Reporting it as deleted claimed a mutation that never
+                # happened and left ok=True for a file that is neither restored
+                # nor deleted.
+                unrecoverable.append(
+                    f"{path}: file missing and checkpoint-time observation has no digest, cannot restore"
+                )
                 continue
             unrecoverable.append(
                 f"{path}: checkpoint-time observation has no digest, cannot restore, file left in place"
             )
             continue
         if before_digest is None:
-            try:
-                p = Path(path)
-                if p.exists():
-                    if not dry_run:
-                        # A post-checkpoint observation without a digest gives
-                        # nothing to compare against, so there is nothing to
-                        # verify before the unlink. Comparing anyway made the
-                        # delete branch conflict forever, so a forced rewind
-                        # left post-checkpoint files in the workspace while
-                        # reporting that it ran (#1806).
-                        if expected_after is not None and file_digest(path) != expected_after:
-                            conflicts.append(f"{path}: digest changed before delete")
-                            continue
-                        p.unlink()
-                        if p.exists():
-                            conflicts.append(f"{path}: failed to delete")
-                            continue
-                    deleted.append(path)
-                else:
-                    deleted.append(path)
-            except OSError as exc:
-                conflicts.append(f"{path}: delete failed: {exc}")
+            if Path(path).exists() and expected_after is None:
+                # A digest-less post-checkpoint observation with no
+                # pre-checkpoint one carries no evidence the file was created
+                # after the checkpoint: the write may have hit a file that
+                # pre-existed the run while the hook failed to read bytes.
+                # Unlinking it unchecked risks deleting content the checkpoint
+                # never owned, so the delete needs --force (#1854). The path is
+                # still planned: force authorizes the unverifiable delete, while
+                # the conflict keeps ok=False and raises without force.
+                conflicts.append(
+                    f"{path}: post-checkpoint observation has no digest to verify the file was created after the checkpoint; use --force to delete anyway"
+                )
+            planned_deletes.append((path, expected_after))
         else:
-            try:
-                snapshot = snapshot_path(before_digest)
-            except ValueError as exc:
-                # A stored digest that is not a digest names a path, not a key;
-                # report it rather than copying whatever it points at (#1268).
-                unrecoverable.append(f"{path}: {exc}")
+            planned_reverts.append((path, before_digest, expected_after))
+    if not force and not dry_run and (conflicts or unrecoverable):
+        raise RewindError(
+            f"rewind to {to!r} has {len(conflicts)} conflict(s) and {len(unrecoverable)} unrecoverable file(s); use --force to proceed anyway or resolve conflicts. Conflicts: {conflicts[:3]} Unrecoverable: {unrecoverable[:3]}"
+        )
+    # Execution pass: mutation only happens here, after the plan is either
+    # clean or explicitly forced.
+    for path, expected_after in planned_deletes:
+        if dry_run:
+            deleted.append(path)
+            continue
+        p = Path(path)
+        try:
+            if not p.exists():
+                deleted.append(path)
                 continue
-            if not snapshot.exists():
-                unrecoverable.append(
-                    f"{path}: no snapshot for digest {before_digest[:12]} (file may have been too large or unreadable at checkpoint)"
+            # A post-checkpoint observation without a digest gives nothing to
+            # compare against; a forced rewind deletes anyway (#1854). With a
+            # digest, re-verify immediately before the unlink so a concurrent
+            # writer cannot turn the delete into data loss.
+            if expected_after is not None and file_digest(path) != expected_after:
+                conflicts.append(f"{path}: digest changed before delete")
+                continue
+            p.unlink()
+            if p.exists():
+                conflicts.append(f"{path}: failed to delete")
+                continue
+            deleted.append(path)
+        except OSError as exc:
+            conflicts.append(f"{path}: delete failed: {exc}")
+    for path, before_digest, expected_after in planned_reverts:
+        try:
+            snapshot = snapshot_path(before_digest)
+        except ValueError as exc:
+            # A stored digest that is not a digest names a path, not a key;
+            # report it rather than copying whatever it points at (#1268).
+            unrecoverable.append(f"{path}: {exc}")
+            continue
+        if not snapshot.exists():
+            unrecoverable.append(
+                f"{path}: no snapshot for digest {before_digest[:12]} (file may have been too large or unreadable at checkpoint)"
+            )
+            continue
+        if not dry_run:
+            # Same reasoning as the delete branch: without an observed
+            # post-checkpoint digest there is nothing to compare the current
+            # content against, and the restore itself is still verified against
+            # the snapshot digest below.
+            if expected_after is not None and file_digest(path) != expected_after:
+                conflicts.append(f"{path}: digest changed before restore")
+                continue
+            if not restore_file(path, before_digest):
+                unrecoverable.append(f"{path}: restore failed for {before_digest[:12]}")
+                continue
+            new_digest = file_digest(path)
+            if new_digest != before_digest:
+                conflicts.append(
+                    f"{path}: after restore digest {new_digest[:12] if new_digest else 'missing'} != expected {before_digest[:12]}"
                 )
                 continue
-            if not dry_run:
-                # Same reasoning as the delete branch: without an observed
-                # post-checkpoint digest there is nothing to compare the
-                # current content against, and the restore itself is still
-                # verified against the snapshot digest below.
-                if expected_after is not None and file_digest(path) != expected_after:
-                    conflicts.append(f"{path}: digest changed before restore")
-                    continue
-                if not restore_file(path, before_digest):
-                    unrecoverable.append(f"{path}: restore failed for {before_digest[:12]}")
-                    continue
-                new_digest = file_digest(path)
-                if new_digest != before_digest:
-                    conflicts.append(
-                        f"{path}: after restore digest {new_digest[:12] if new_digest else 'missing'} != expected {before_digest[:12]}"
-                    )
-                    continue
-            reverted.append(path)
+        reverted.append(path)
     if not force and not dry_run and (conflicts or unrecoverable):
         raise RewindError(
             f"rewind to {to!r} has {len(conflicts)} conflict(s) and {len(unrecoverable)} unrecoverable file(s); use --force to proceed anyway or resolve conflicts. Conflicts: {conflicts[:3]} Unrecoverable: {unrecoverable[:3]}"
