@@ -21,6 +21,7 @@ from continuum.state.validator import StateValidator
 from continuum.storage import (
     CorruptedRecord,
     SQLiteStorage,
+    StorageError,
     open_storage,
 )
 from continuum.storage.blob import (
@@ -773,3 +774,156 @@ def test_postgres_rehydration_and_deep_verify_mock(
         blob_path.unlink()
         with pytest.raises(CorruptedRecord, match="missing or corrupt blob"):
             store._row_to_event(mock_row, rehydrate=True)
+
+
+def test_maybe_offload_payload_none_returns_empty_dict(tmp_path: Path) -> None:
+    """maybe_offload_payload(None, ...) returns ({}, False) (#1891)."""
+    result, offloaded = maybe_offload_payload(None, storage_dir=tmp_path, threshold=10)
+    assert result == {}
+    assert offloaded is False
+
+
+def test_write_blob_atomic_failure_and_stat_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """write_blob cleans up any temporary file and converts errors to StorageError (#1891)."""
+    canonical_bytes = b'{"hello":"world"}'
+    sha256_hex = hashlib.sha256(canonical_bytes).hexdigest()
+
+    # 1. Failure during atomic replace after temp file creation cleans up temp file
+    original_replace = Path.replace
+
+    def failing_replace(self: Path, target: Path) -> Path:
+        if ".tmp." in self.name:
+            assert self.exists()
+            raise OSError("simulated atomic replace failure")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", failing_replace)
+    with pytest.raises(StorageError, match=f"failed to write blob {sha256_hex}"):
+        write_blob(tmp_path, canonical_bytes, sha256_hex=sha256_hex)
+
+    blob_dir = get_blob_dir(tmp_path)
+    assert list(blob_dir.glob("*.tmp.*")) == []
+    assert not get_blob_path(tmp_path, sha256_hex).exists()
+
+    # 2. If existing blob read_bytes raises OSError during idempotency check, falls through to rewrite
+    monkeypatch.setattr(Path, "replace", original_replace)
+    blob_path = write_blob(tmp_path, canonical_bytes, sha256_hex=sha256_hex)
+    assert blob_path.exists()
+
+    original_read_bytes = Path.read_bytes
+    read_calls = 0
+
+    def flaky_read_bytes(self: Path) -> bytes:
+        nonlocal read_calls
+        if self == blob_path and read_calls == 0:
+            read_calls += 1
+            raise OSError("simulated read failure on existing blob")
+        return original_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", flaky_read_bytes)
+    blob_path.write_bytes(b"x" * len(canonical_bytes))
+    rewritten = write_blob(tmp_path, canonical_bytes, sha256_hex=sha256_hex)
+    assert rewritten == blob_path
+    assert read_calls == 1
+    assert blob_path.read_bytes() == canonical_bytes
+
+
+def test_read_blob_converts_oserror_to_corrupted_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """read_blob converts non-FileNotFoundError OSError into CorruptedRecord (#1891)."""
+    sha256_hex = "c" * 64
+    blob_path = get_blob_path(tmp_path, sha256_hex)
+
+    original_read_bytes = Path.read_bytes
+
+    def failing_read_bytes(self: Path) -> bytes:
+        if self == blob_path:
+            raise PermissionError("simulated permission denied")
+        return original_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", failing_read_bytes)
+    with pytest.raises(CorruptedRecord, match="unreadable blob"):
+        read_blob(tmp_path, sha256_hex)
+
+
+def test_load_blob_payload_invalid_descriptor_and_contents(tmp_path: Path) -> None:
+    """load_blob_payload rejects missing/non-str key and malformed blob contents (#1891)."""
+    with pytest.raises(CorruptedRecord, match=f"missing {OFFLOAD_KEY}"):
+        load_blob_payload(tmp_path, {})
+
+    with pytest.raises(CorruptedRecord, match=f"missing {OFFLOAD_KEY}"):
+        load_blob_payload(tmp_path, {OFFLOAD_KEY: 12345})
+
+    # Valid JSON that is not a dict (e.g., list)
+    list_bytes = b"[1, 2, 3]"
+    list_hash = hashlib.sha256(list_bytes).hexdigest()
+    write_blob(tmp_path, list_bytes, sha256_hex=list_hash)
+    list_desc = create_offload_descriptor(list_hash, len(list_bytes), [])
+    with pytest.raises(CorruptedRecord, match="does not deserialize to a JSON object"):
+        load_blob_payload(tmp_path, list_desc)
+
+    # Invalid JSON bytes
+    bad_json_bytes = b"{not-valid-json"
+    bad_json_hash = hashlib.sha256(bad_json_bytes).hexdigest()
+    write_blob(tmp_path, bad_json_bytes, sha256_hex=bad_json_hash)
+    bad_json_desc = create_offload_descriptor(bad_json_hash, len(bad_json_bytes), [])
+    with pytest.raises(CorruptedRecord, match="failed to decode"):
+        load_blob_payload(tmp_path, bad_json_desc)
+
+    # Non-UTF-8 bytes
+    bad_utf8_bytes = b"\xff\xfe\xfd"
+    bad_utf8_hash = hashlib.sha256(bad_utf8_bytes).hexdigest()
+    write_blob(tmp_path, bad_utf8_bytes, sha256_hex=bad_utf8_hash)
+    bad_utf8_desc = create_offload_descriptor(bad_utf8_hash, len(bad_utf8_bytes), [])
+    with pytest.raises(CorruptedRecord, match="failed to decode"):
+        load_blob_payload(tmp_path, bad_utf8_desc)
+
+
+def test_audit_blob_descriptor_oserror_and_size_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """audit_blob_descriptor reports BLOB_MISSING on OSError and BLOB_DIGEST_MISMATCH on size (#1891)."""
+    payload = {"status": "ok"}
+    canonical_bytes = to_json(payload).encode("utf-8")
+    expected_hash = hashlib.sha256(canonical_bytes).hexdigest()
+    blob_path = write_blob(tmp_path, canonical_bytes, sha256_hex=expected_hash)
+    size = len(canonical_bytes)
+
+    # 1. Size mismatch when digest matches
+    wrong_size_descriptor = create_offload_descriptor(expected_hash, size + 10, payload.keys())
+    size_violation = audit_blob_descriptor(
+        tmp_path,
+        wrong_size_descriptor,
+        run_id="run_1",
+        sequence=3,
+        event_id="ev_3",
+        prefix="check",
+    )
+    assert size_violation is not None
+    assert size_violation.kind == "BLOB_DIGEST_MISMATCH"
+    assert f"size {size} != expected {size + 10}" in size_violation.detail
+    assert size_violation.detail.startswith("check: ")
+
+    # 2. OSError while reading existing blob
+    valid_descriptor = create_offload_descriptor(expected_hash, size, payload.keys())
+    original_read_bytes = Path.read_bytes
+
+    def failing_read_bytes(self: Path) -> bytes:
+        if self == blob_path:
+            raise OSError("simulated disk read error")
+        return original_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", failing_read_bytes)
+    read_violation = audit_blob_descriptor(
+        tmp_path,
+        valid_descriptor,
+        run_id="run_1",
+        sequence=4,
+        event_id="ev_4",
+    )
+    assert read_violation is not None
+    assert read_violation.kind == "BLOB_MISSING"
+    assert "unreadable blob" in read_violation.detail
