@@ -395,6 +395,118 @@ def test_budget_status_names_the_global_scope_explicitly(ledger: RecoveryLedger)
     }
 
 
+def test_budget_reports_the_configured_dependency_limit(ledger: RecoveryLedger) -> None:
+    """The contract's budget line must name the configured ceiling, not the default (#1846).
+
+    A dependency budgeted at one attempt that has spent it must read as
+    exhausted: reporting the caller's default of three claimed two attempts
+    remained while the decision escalated on the budget being spent.
+    """
+    ledger.record_attempt("run_1", scope="postgres", dependency="postgres")
+    budgets = {"dependency_budgets": {"postgres": 1}}
+
+    status = ledger.budget("run_1", scope="postgres", dependency_budgets=budgets)
+    assert status.max_attempts == 1
+    assert status.attempts == 1
+    assert status.remaining == 0
+    assert status.exhausted is True
+    assert status.requires_human is True
+
+    # The bare mapping spelling resolves the same way.
+    bare = ledger.budget("run_1", scope="postgres", dependency_budgets={"postgres": 1})
+    assert bare.max_attempts == 1
+    assert bare.exhausted is True
+
+
+def test_budget_run_wide_reads_the_registry_default(ledger: RecoveryLedger) -> None:
+    """A run-wide query honours the registry's default_max_attempts (#1846)."""
+    ledger.record_attempt("run_1")
+    status = ledger.budget("run_1", dependency_budgets={"default_max_attempts": 2})
+    assert status.max_attempts == 2
+    assert status.attempts == 1
+    assert status.exhausted is False
+
+
+def test_budget_without_budgets_keeps_the_caller_limit(ledger: RecoveryLedger) -> None:
+    """No registry means the caller's number stands, so current callers are unchanged."""
+    ledger.record_attempt("run_1")
+    status = ledger.budget("run_1", max_attempts=3)
+    assert status.max_attempts == 3
+    assert status.exhausted is False
+
+
+def test_requires_human_honours_dependency_budgets_for_a_scope_query(
+    ledger: RecoveryLedger,
+) -> None:
+    """A dependency asked about by scope is asked about by name (#1816).
+
+    The engine queries ``requires_human`` with ``scope=`` while charging a
+    dependency budget, so a scope query that ignored the registry read the
+    caller's default and never escalated on a budget the dependency had spent.
+    """
+    ledger.record_attempt("run_1", scope="postgres")
+    ledger.record_attempt("run_1", scope="postgres")
+    budgets = {"postgres": 1}
+
+    assert ledger.requires_human("run_1", scope="postgres", dependency_budgets=budgets) is True
+    # The same question asked by dependency -- the behaviour already correct.
+    assert ledger.requires_human("run_1", dependency="postgres", dependency_budgets=budgets) is True
+    # Without the registry the caller's limit stands: the fix does not invent
+    # a ceiling the caller did not supply.
+    assert ledger.requires_human("run_1", scope="postgres") is False
+
+
+def test_requires_human_run_wide_reads_the_registry_default(ledger: RecoveryLedger) -> None:
+    """A run-wide query honours the registry's default_max_attempts (#1816)."""
+    ledger.record_attempt("run_g")
+    ledger.record_attempt("run_g")
+
+    assert ledger.requires_human("run_g", dependency_budgets={"default_max_attempts": 1}) is True
+    assert ledger.requires_human("run_g") is False
+
+
+def test_assess_contract_evidence_names_the_configured_dependency_limit(
+    tmp_path: Path,
+) -> None:
+    """The sealed contract must not contradict the decision it records (#1846).
+
+    A dependency budgeted at one attempt with that attempt spent escalates to
+    request_human, but the contract's budget evidence line used to cite the
+    ledger's untouched default and cryptographically attest two attempts
+    remained. The engine passes its budgets to the ledger's budget query now,
+    so the evidence states the configured 1 of 1.
+    """
+    from continuum.events import EventType
+    from continuum.models import Run
+    from continuum.storage import SQLiteStorage
+
+    db = tmp_path / "engine_budget.db"
+    budgets = {"dependency_budgets": {"postgres": 1}}
+    ledger = RecoveryLedger(MemoryLedgerBackend())
+    ledger.record_attempt(
+        "run_engine_budget",
+        scope="postgres",
+        note="restart",
+        dependency="postgres",
+        dependency_budgets=budgets,
+    )
+
+    with SQLiteStorage(str(db)) as storage:
+        run_id = "run_engine_budget"
+        storage.create_run(Run(run_id=run_id, goal="test budget contradiction"))
+        storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+
+        engine = RecoveryEngine(storage, ledger=ledger, dependency_budgets=budgets)
+        decision = engine.assess(run_id, scope=["postgres"])
+
+    assert decision.mode.value == "request_human"
+    line = next((e for e in decision.contract.evidence if "recovery budget" in str(e)), None)
+    assert line is not None, decision.contract.evidence
+    assert "1 of 1 attempts used, 0 remaining" in line, line
+    # The contract is still a contract: it verifies against its own evidence.
+    assert verify_contract(decision.contract) is True
+
+
 def test_concurrent_appenders_serialise_under_the_lock() -> None:
     """Two ledgers on one backend must not lose attempts to a race."""
     backend = MemoryLedgerBackend()

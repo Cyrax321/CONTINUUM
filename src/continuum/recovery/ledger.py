@@ -475,6 +475,39 @@ def _ceiling(limit: int, global_limit: int | None) -> int:
     return min(limit, global_limit)
 
 
+def _scoped_limit(
+    resolved: str | None,
+    max_attempts: int,
+    dependency_budgets: Mapping[str, Any] | None,
+) -> int:
+    """The attempt ceiling for a resolved scope, honouring a limits registry.
+
+    A named scope reads the limit the registry holds for that dependency, and
+    run-wide (``None``) reads the registry's ``default_max_attempts``: a query
+    asked about a dependency by scope is the same question as one asked about
+    it by name, and the registry's global default is the run-wide ceiling
+    (#1816). Without a registry the caller's number stands, so a query that
+    carries no budgets is unchanged.
+
+    Booleans are rejected the way :func:`load_budgets` rejects them: a budget
+    file cannot make ``true`` a ceiling, and neither can a hand-built mapping.
+    """
+    if dependency_budgets is None:
+        return max_attempts
+    if resolved is None:
+        default_max = dependency_budgets.get("default_max_attempts")
+        if isinstance(default_max, int) and not isinstance(default_max, bool):
+            return default_max
+        return max_attempts
+    limit = max_attempts_for_dependency(dependency_budgets, resolved, fallback=max_attempts)
+    if limit is None:
+        # Unreachable while ``fallback`` is an int, but the resolution
+        # signature allows no ceiling at all, and a zero budget is a real
+        # "no attempts" ceiling rather than an absent one.
+        return max_attempts
+    return limit
+
+
 def _marker_covers(entry: RecoveryLedgerEntry, scope: str | None) -> bool:
     """Whether an anchored ``human_required`` marker blocks ``scope``.
 
@@ -857,7 +890,13 @@ class RecoveryLedger:
             for e in entries
         ):
             return True
-        limit = _ceiling(max_attempts, global_max_attempts)
+        # A scope or run-wide query honours the limits registry too: querying a
+        # dependency by scope asked the same question as querying it by name,
+        # and reading only the caller's default made a dependency budgeted at
+        # one attempt report a third attempt's worth of room (#1816).
+        limit = _ceiling(
+            _scoped_limit(resolved, max_attempts, dependency_budgets), global_max_attempts
+        )
         return self._attempt_count(entries, resolved) >= limit
 
     def budget(
@@ -867,6 +906,7 @@ class RecoveryLedger:
         scope: object = None,
         max_attempts: int = 3,
         global_max_attempts: int | None = None,
+        dependency_budgets: Mapping[str, Any] | None = None,
     ) -> BudgetStatus:
         """The allowance standing for ``scope``: counts only, for a contract or
         a CLI to print.
@@ -875,10 +915,18 @@ class RecoveryLedger:
         the scope it actually resolved, so a caller whose ownership was
         ambiguous can see that it fell back to the run-wide bucket rather than
         silently getting a private one.
+
+        ``dependency_budgets`` supplies the ceiling the registry configures for
+        the resolved scope, run-wide default included. The number the caller
+        passes is a default, not an override: a dependency budgeted at one
+        attempt must be reported as such, or the sealed contract asserts
+        attempts remain for a budget that is already spent (#1846).
         """
         resolved = resolve_scope(scope)
         entries = self.entries(run_id)
-        limit = _ceiling(max_attempts, global_max_attempts)
+        limit = _ceiling(
+            _scoped_limit(resolved, max_attempts, dependency_budgets), global_max_attempts
+        )
         escalated = any(
             e.kind == LedgerEntryKind.GATE.value
             and e.gate == HUMAN_REQUIRED

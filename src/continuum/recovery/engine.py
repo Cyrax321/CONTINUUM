@@ -770,7 +770,15 @@ class RecoveryEngine:
         if self._ledger is None:
             return None
         try:
-            return self._ledger.budget(run_id, scope=resolve_scope(scope, *plan.scopes))
+            # The budgets the engine was built with name the ceilings the
+            # contract asserts: without them the ledger reports its default of
+            # three attempts and the sealed evidence line claims room remains
+            # for a dependency budget that is already spent (#1846).
+            return self._ledger.budget(
+                run_id,
+                scope=resolve_scope(scope, *plan.scopes),
+                dependency_budgets=self.dependency_budgets,
+            )
         except Exception:
             return None
 
