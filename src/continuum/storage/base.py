@@ -95,7 +95,27 @@ class CorruptedRecord(StorageError):
     """A stored record failed validation or its integrity hash.
 
     Reading is refused rather than returning state that cannot be trusted.
+
+    When the refusing record is an event row, ``run_id`` and ``sequence``
+    locate it so a caller whose job is diagnosis (recovery, under
+    ``on_unprojectable="degrade"``) can fold the clean prefix that precedes
+    it instead of losing the whole run (issue #1907). Both are ``None`` for
+    refusals raised outside a per-row read, where no location exists.
     """
+
+    run_id: str | None
+    sequence: int | None
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        run_id: str | None = None,
+        sequence: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.sequence = sequence
 
 
 class SchemaVersionError(StorageError):

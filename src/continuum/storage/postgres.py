@@ -933,7 +933,9 @@ class PostgresStorage(Storage):
         except (ValueError, json.JSONDecodeError, TypeError) as exc:
             raise CorruptedRecord(
                 f"event {row['event_id']!r} (run {row['run_id']!r}, seq {row['sequence']}) "
-                f"failed to load: {exc}"
+                f"failed to load: {exc}",
+                run_id=row["run_id"],
+                sequence=int(row["sequence"]),
             ) from exc
 
         if rehydrate and is_offload_descriptor(raw_payload):
@@ -943,7 +945,9 @@ class PostgresStorage(Storage):
                 effective_payload = load_blob_payload(self.storage_dir, raw_payload)
             except CorruptedRecord as exc:
                 raise CorruptedRecord(
-                    f"event sequence {seq} (run {row['run_id']!r}) missing or corrupt blob {sha256_hex!r}: {exc}"
+                    f"event sequence {seq} (run {row['run_id']!r}) missing or corrupt blob {sha256_hex!r}: {exc}",
+                    run_id=row["run_id"],
+                    sequence=seq,
                 ) from exc
         else:
             effective_payload = raw_payload
@@ -964,7 +968,9 @@ class PostgresStorage(Storage):
         except (ValueError, ValidationError, TypeError) as exc:
             raise CorruptedRecord(
                 f"event {row['event_id']!r} (run {row['run_id']!r}, seq {row['sequence']}) "
-                f"failed to load: {exc}"
+                f"failed to load: {exc}",
+                run_id=row["run_id"],
+                sequence=int(row["sequence"]),
             ) from exc
 
     def verify_events(self, run_id: str, *, deep: bool = False) -> IntegrityReport:

@@ -45,7 +45,7 @@ from continuum.actions.ledger import ActionLedger
 from continuum.analysis.depends import DependencyGraph as SourceDependencyGraph
 from continuum.checkpoint.manager import CheckpointManager, RestoredRun
 from continuum.environment.diff import EnvironmentDiff
-from continuum.events import EventType
+from continuum.events import Event, EventType
 from continuum.gate import collect_consumed_authorities
 from continuum.models import (
     Action,
@@ -66,7 +66,7 @@ from continuum.recovery.planner import RepairPlan, plan_repairs
 from continuum.recovery.rules import active_rules, apply_rule_findings, run_validation_rules
 from continuum.recovery.summary import build_informed_retry
 from continuum.state.validator import StateValidator, ValidationOutcome, check_admissibility
-from continuum.storage.base import Storage
+from continuum.storage.base import CorruptedRecord, Storage
 
 __all__ = ["RecoveryEngine", "RecoveryDecision", "SEVERITY"]
 
@@ -354,6 +354,11 @@ class RecoveryEngine:
         # gain.
         try:
             archive_aware_events = self.storage.read_all_events(run_id)
+        except CorruptedRecord as exc:
+            # A damaged log still gets an advisory verdict (#1907): fold the
+            # clean prefix and let the INVALID state below force the verdict.
+            # These scans can only lose evidence, never downgrade it.
+            archive_aware_events = self._events_tolerant_to_corruption(run_id, exc)
         except Exception:
             archive_aware_events = self.storage.read_events(run_id)
         for _ev in archive_aware_events:
@@ -393,9 +398,18 @@ class RecoveryEngine:
         )
 
         action_ledger = ActionLedger(self.storage, run_id)
+        unreadable_ledger: CorruptedRecord | None = None
+        try:
+            folded_actions: Sequence[Action] = action_ledger.all()
+        except CorruptedRecord as exc:
+            # The ledger cannot be folded on a damaged log (#1907): treat every
+            # side effect as unenumerated rather than as resolved, the same
+            # floor-not-overwrite rule the consumed-authority branch applies.
+            folded_actions = ()
+            unreadable_ledger = exc
         all_uncertain = tuple(
             a
-            for a in action_ledger.all()
+            for a in folded_actions
             if a.status
             in (ActionStatus.UNKNOWN, ActionStatus.STARTED, ActionStatus.REQUIRES_REVIEW)
         )
@@ -431,7 +445,7 @@ class RecoveryEngine:
             if broken.status is StateStatus.INVALID and broken.unprojectable_at_sequence is not None
             else None
         )
-        admissibility = check_admissibility(restored.checkpoint, action_ledger.all())
+        admissibility = check_admissibility(restored.checkpoint, folded_actions)
         if not admissibility.admissible:
             has_action_ref = any(d["consumed_inputs"]["action_ids"] for d in admissibility.details)
             status = StateStatus.REQUIRES_REVIEW if has_action_ref else StateStatus.STALE
@@ -632,6 +646,19 @@ class RecoveryEngine:
             run_budget_exhausted=run_budget_exhausted,
         )
 
+        if unreadable_ledger is not None:
+            # Folded at a corrupted record, the side-effect ledger is evidence
+            # of absence, not absence of evidence: REQUEST_HUMAN is the floor
+            # (#1907), the same floor-not-overwrite rule applied to an
+            # unreadable authority ledger above.
+            mode = max((mode, RecoveryMode.REQUEST_HUMAN), key=lambda m: SEVERITY[m])
+            rationale = (
+                *rationale,
+                f"action ledger unreadable (corrupted record at sequence "
+                f"{unreadable_ledger.sequence}): uncertain side effects cannot "
+                f"be enumerated",
+            )
+
         # Authority lifecycle (issue #289c): consumed authorities block resume
         # until an external probe reconciles them. The gate already refuses
         # forwarding, but the recovery decision must also surface the block
@@ -678,12 +705,16 @@ class RecoveryEngine:
         reason = "; ".join(rationale) if rationale else validation.report.reason
 
         # Post-checkpoint file observations (#208): informational evidence for
-        # the resuming agent, never a factor in the decision itself.
+        # the resuming agent, never a factor in the decision itself -- so a log
+        # that cannot be read costs the section, not the verdict (#1907).
         after_sequence = 0
         latest_version = self.storage.latest_version(run_id)
         if latest_version is not None:
             after_sequence = latest_version.source_sequence
-        observations = collect_observations(self.storage, run_id, after_sequence=after_sequence)
+        try:
+            observations = collect_observations(self.storage, run_id, after_sequence=after_sequence)
+        except CorruptedRecord:
+            observations = []
 
         # Build liveness section for contract
         liveness_section = None
@@ -718,13 +749,18 @@ class RecoveryEngine:
 
         # Informed retry (#265): derive the prior-attempt account from events
         # already in the chain. Read-only, deterministic, None without history.
-        informed_retry = build_informed_retry(
-            self.storage,
-            run_id,
-            validation_report=validation.report,
-            uncertain_actions=uncertain,
-            plan=plan,
-        )
+        # Also None when the chain cannot be read: advisory evidence, not a
+        # signal (#1907).
+        try:
+            informed_retry = build_informed_retry(
+                self.storage,
+                run_id,
+                validation_report=validation.report,
+                uncertain_actions=uncertain,
+                plan=plan,
+            )
+        except CorruptedRecord:
+            informed_retry = None
 
         decision = RecoveryDecision(
             run_id=run_id,
@@ -753,6 +789,26 @@ class RecoveryEngine:
             pass
 
         return decision
+
+    def _events_tolerant_to_corruption(
+        self, run_id: str, refusal: CorruptedRecord
+    ) -> Sequence[Event]:
+        """Full history on a readable log; the clean prefix on a damaged one.
+
+        ``read_all_events`` refuses at the first row it cannot parse, which on
+        a corrupted log would cost the confirmation, provenance, liveness and
+        risk scans everything after it. The refusal locates the damage
+        (#1907), so re-reading up to that sequence salvages what survived;
+        the INVALID state folded by ``restore`` keeps the verdict honest about
+        what is missing. A refusal with no location cannot be bounded, so the
+        scans see an empty history rather than a silently truncated one.
+        """
+        if refusal.sequence is None:
+            return []
+        try:
+            return self.storage.read_all_events(run_id, upto=refusal.sequence - 1)
+        except Exception:
+            return []
 
     def _budget_for(
         self, run_id: str, scope: Iterable[str] | None, plan: RepairPlan
