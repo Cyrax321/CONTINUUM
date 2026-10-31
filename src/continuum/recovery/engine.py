@@ -703,7 +703,7 @@ class RecoveryEngine:
             plan=plan,
             reason=reason,
             scope=scope,
-            budget=self._budget_for(run_id, scope, plan),
+            budget=self._budget_for(run_id, scope, plan, active_budgets, active_ledger),
             post_checkpoint_observations=observations,
             liveness=liveness_section,
             triggering_risks=triggering_risks,
@@ -755,7 +755,12 @@ class RecoveryEngine:
         return decision
 
     def _budget_for(
-        self, run_id: str, scope: Iterable[str] | None, plan: RepairPlan
+        self,
+        run_id: str,
+        scope: Iterable[str] | None,
+        plan: RepairPlan,
+        dependency_budgets: Mapping[str, Any] | None = None,
+        ledger: RecoveryLedger | None = None,
     ) -> BudgetStatus | None:
         """The attempt budget this decision charges, or ``None`` when unknown.
 
@@ -767,10 +772,21 @@ class RecoveryEngine:
         in the decision, so a ledger that cannot be read costs a line of
         evidence and nothing else.
         """
-        if self._ledger is None:
+        if ledger is None:
             return None
         try:
-            return self._ledger.budget(run_id, scope=resolve_scope(scope, *plan.scopes))
+            if scope is None:
+                run_wide = ledger.budget(run_id, dependency_budgets=dependency_budgets)
+                if run_wide.exhausted or any(
+                    entry.kind == "gate" and entry.gate == "human_required" and entry.scope is None
+                    for entry in ledger.entries(run_id)
+                ):
+                    return run_wide
+            return ledger.budget(
+                run_id,
+                scope=resolve_scope(scope, *plan.scopes),
+                dependency_budgets=dependency_budgets,
+            )
         except Exception:
             return None
 
@@ -839,7 +855,7 @@ class RecoveryEngine:
         self,
         run_id: str,
         *,
-        max_attempts: int = 3,
+        max_attempts: int | None = None,
         dependency: str | None = None,
         dependencies: Iterable[str] | None = None,
         contract: RecoveryContract | None = None,

@@ -954,6 +954,82 @@ def test_flaky_dependency_exhausting_budget_escalates_to_request_human(
     assert decision_scoped.plan.first.requires_human is False
 
 
+def test_assess_honors_run_wide_default_recovery_budget(store: SQLiteStorage) -> None:
+    """An exhausted run-wide default budget must reach the recovery verdict."""
+    seed(store)
+    ledger = RecoveryLedger(MemoryLedgerBackend())
+    ledger.record_attempt("run_1")
+    ledger.record_attempt("run_1")
+    engine = RecoveryEngine(
+        store,
+        ledger=ledger,
+        dependency_budgets={"default_max_attempts": 2},
+    )
+
+    decision = engine.assess("run_1", current_environment=env("v3"))
+
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    assert "recovery budget exhausted for run" in " ".join(decision.rationale)
+    assert any(
+        "2 of 2 attempts used, 0 remaining" in evidence for evidence in decision.contract.evidence
+    )
+
+
+def test_assess_uses_supplied_ledger_for_budget_evidence(store: SQLiteStorage) -> None:
+    """A ledger supplied to assess() must also supply the contract's budget evidence."""
+    seed(store)
+    engine = RecoveryEngine(store)
+    supplied_ledger = RecoveryLedger(MemoryLedgerBackend())
+    supplied_ledger.record_attempt("run_1")
+
+    decision = engine.assess(
+        "run_1",
+        current_environment=env("v3"),
+        ledger=supplied_ledger,
+        dependency_budgets={"default_max_attempts": 3},
+    )
+
+    assert any("1 of 3 attempts used" in evidence for evidence in decision.contract.evidence)
+
+
+def test_global_assessment_reports_exhausted_run_wide_budget(
+    store: SQLiteStorage,
+) -> None:
+    """Run-wide exhaustion stays visible even when the plan names one dependency."""
+    seed(store)
+    store.append_event(
+        "run_1",
+        EventType.DEPENDENCY_DECLARED,
+        {"resource": "ext:weather-api", "version": "v1"},
+    )
+    CheckpointManager(store).checkpoint(
+        "run_1",
+        environment=capture(
+            "run_1",
+            StaticProvider(dataset="v3", **{"ext:weather-api": "v1"}),
+        ),
+    )
+    ledger = RecoveryLedger(MemoryLedgerBackend())
+    budgets = {"default_max_attempts": 2}
+    ledger.record_attempt("run_1", dependency_budgets=budgets)
+    ledger.record_attempt("run_1", dependency_budgets=budgets)
+    engine = RecoveryEngine(store, ledger=ledger, dependency_budgets=budgets)
+
+    decision = engine.assess(
+        "run_1",
+        current_environment=capture(
+            "run_1",
+            StaticProvider(dataset="v3", **{"ext:weather-api": "v2"}),
+        ),
+    )
+
+    assert any(step.target == "ext:weather-api" for step in decision.plan.steps)
+    assert any(
+        "2 of 2 attempts used, 0 remaining" in evidence for evidence in decision.contract.evidence
+    )
+    assert not any("0 of 2 attempts used" in evidence for evidence in decision.contract.evidence)
+
+
 def test_engine_record_attempt_and_requires_human_delegates(
     store: SQLiteStorage,
 ) -> None:

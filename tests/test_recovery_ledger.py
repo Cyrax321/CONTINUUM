@@ -351,6 +351,133 @@ def test_dependency_without_an_explicit_budget_uses_the_global_default(
     )
 
 
+def test_scoped_query_honors_dependency_budget_without_a_marker(
+    ledger: RecoveryLedger,
+) -> None:
+    """A scoped query applies the dependency's configured ceiling even when
+    attempts were recorded before the caller supplied the budget registry.
+    """
+    ledger.record_attempt("run_1", dependency="ext:weather-api")
+    ledger.record_attempt("run_1", dependency="ext:payments")
+    ledger.record_attempt("run_1", dependency="ext:payments")
+    budgets = {
+        "default_max_attempts": 2,
+        "dependency_budgets": {"ext:weather-api": 1},
+    }
+
+    assert (
+        ledger.requires_human("run_1", scope=["ext:weather-api"], dependency_budgets=budgets)
+        is True
+    )
+    assert (
+        ledger.requires_human("run_1", scope=["ext:payments"], dependency_budgets=budgets) is True
+    )
+
+
+def test_run_wide_query_honors_default_max_attempts(ledger: RecoveryLedger) -> None:
+    """The run-wide query uses the registry default, not only max_attempts."""
+    ledger.record_attempt("run_1")
+    ledger.record_attempt("run_1")
+    budgets = {"default_max_attempts": 2}
+
+    assert ledger.requires_human("run_1", dependency_budgets=budgets) is True
+    assert ledger.requires_human("run_1", max_attempts=5, dependency_budgets=budgets) is True
+
+
+def test_omitted_max_attempts_uses_configured_default_for_run_wide_apis(
+    ledger: RecoveryLedger,
+) -> None:
+    budgets = {"default_max_attempts": 5}
+    for _ in range(4):
+        ledger.record_attempt("run_1", dependency_budgets=budgets)
+
+    assert ledger.requires_human("run_1", dependency_budgets=budgets) is False
+    assert ledger.budget("run_1", dependency_budgets=budgets).max_attempts == 5
+
+
+def test_explicit_max_attempts_caps_configured_default_for_run_wide_apis(
+    ledger: RecoveryLedger,
+) -> None:
+    budgets = {"default_max_attempts": 5}
+    for _ in range(2):
+        ledger.record_attempt("run_1", dependency_budgets=budgets)
+
+    assert ledger.requires_human("run_1", max_attempts=2, dependency_budgets=budgets) is True
+    assert ledger.budget("run_1", max_attempts=2, dependency_budgets=budgets).max_attempts == 2
+
+
+def test_omitted_max_attempts_preserves_three_attempt_fallback(
+    ledger: RecoveryLedger,
+) -> None:
+    for _ in range(2):
+        ledger.record_attempt("run_1", dependency_budgets={})
+    assert ledger.requires_human("run_1", dependency_budgets={}) is False
+    assert ledger.budget("run_1", dependency_budgets={}).max_attempts == 3
+
+
+def test_record_attempt_without_limit_does_not_anchor_fallback_gate(
+    ledger: RecoveryLedger,
+) -> None:
+    """The query fallback must not become a permanent recording-time limit."""
+    for _ in range(3):
+        ledger.record_attempt("run_1", dependency_budgets={})
+        ledger.record_attempt("run_1", dependency="ext:unnamed", dependency_budgets={})
+
+    assert ledger.requires_human("run_1", max_attempts=5, dependency_budgets={}) is False
+    assert (
+        ledger.requires_human(
+            "run_1", dependency="ext:unnamed", max_attempts=5, dependency_budgets={}
+        )
+        is False
+    )
+
+
+def test_run_wide_explicit_max_attempts_caps_registry_default(
+    ledger: RecoveryLedger,
+) -> None:
+    """A registry default must not loosen an explicit caller threshold."""
+    budgets = {"default_max_attempts": 5}
+    ledger.record_attempt("run_1")
+    ledger.record_attempt("run_1")
+
+    assert ledger.requires_human("run_1", max_attempts=2, dependency_budgets=budgets) is True
+    status = ledger.budget("run_1", max_attempts=2, dependency_budgets=budgets)
+    assert status.max_attempts == 2
+
+
+def test_run_wide_default_budget_marker_survives_compaction(
+    ledger: RecoveryLedger,
+) -> None:
+    """Recording at the configured run-wide threshold anchors escalation."""
+    budgets = {"default_max_attempts": 2}
+    ledger.record_attempt("run_1", dependency_budgets=budgets)
+    ledger.record_attempt("run_1", dependency_budgets=budgets)
+
+    assert ledger.requires_human("run_1", dependency_budgets=budgets) is True
+    assert any(
+        entry.kind == LedgerEntryKind.GATE.value
+        and entry.gate == "human_required"
+        and entry.anchor
+        and entry.scope is None
+        for entry in ledger.entries("run_1")
+    )
+
+    removed = ledger.compact("run_1", keep=1)
+
+    assert removed == 2
+    assert ledger.attempts("run_1") == 0
+    assert ledger.requires_human("run_1", dependency_budgets=budgets) is True
+
+
+def test_run_wide_default_respects_global_max_attempts(ledger: RecoveryLedger) -> None:
+    """The global ceiling can tighten, but never loosen, the registry default."""
+    ledger.record_attempt("run_1")
+    ledger.record_attempt("run_1")
+    budgets = {"default_max_attempts": 5}
+
+    assert ledger.requires_human("run_1", dependency_budgets=budgets, global_max_attempts=2) is True
+
+
 def test_dependency_budget_takes_precedence_over_the_global_default(
     ledger: RecoveryLedger,
 ) -> None:
@@ -577,3 +704,76 @@ def test_deriving_dependencies_from_contract_and_scope(ledger: RecoveryLedger) -
     assert ledger.requires_human("run_1", contract=contract, dependency_budgets=budgets) is True
     # But a scoped check on dataset alone is not exhausted.
     assert ledger.requires_human("run_1", scope=["dataset"], dependency_budgets=budgets) is False
+
+
+def test_explicit_max_attempts_caps_configured_dependency_and_run_wide_defaults(
+    ledger: RecoveryLedger,
+) -> None:
+    budgets = {
+        "default_max_attempts": 5,
+        "dependency_budgets": {"ext:api": 5},
+    }
+    for _ in range(2):
+        ledger.record_attempt("run_1", dependency_budgets=budgets)
+        ledger.record_attempt("run_1", dependency="ext:api", dependency_budgets=budgets)
+
+    assert ledger.requires_human("run_1", max_attempts=2, dependency_budgets=budgets)
+    assert ledger.requires_human(
+        "run_1", dependency="ext:api", max_attempts=2, dependency_budgets=budgets
+    )
+    assert ledger.budget("run_1", max_attempts=2, dependency_budgets=budgets).max_attempts == 2
+    assert (
+        ledger.budget(
+            "run_1", scope="ext:api", max_attempts=2, dependency_budgets=budgets
+        ).max_attempts
+        == 2
+    )
+
+
+def test_record_attempt_uses_configured_run_wide_default_and_marker_survives_compaction(
+    ledger: RecoveryLedger,
+) -> None:
+    budgets = {"default_max_attempts": 2}
+    ledger.record_attempt("run_1", dependency_budgets=budgets)
+    ledger.record_attempt("run_1", dependency_budgets=budgets)
+
+    assert ledger.requires_human("run_1", dependency_budgets=budgets)
+    assert any(
+        entry.kind == LedgerEntryKind.GATE.value
+        and entry.gate == "human_required"
+        and entry.scope is None
+        and entry.anchor
+        for entry in ledger.entries("run_1")
+    )
+
+    ledger.compact("run_1", keep=1)
+    assert ledger.requires_human("run_1", dependency_budgets=budgets)
+
+
+def test_record_attempt_without_limit_does_not_write_permanent_marker(
+    ledger: RecoveryLedger,
+) -> None:
+    for _ in range(3):
+        ledger.record_attempt("run_1", dependency_budgets={})
+
+    assert not ledger.requires_human("run_1", max_attempts=5, dependency_budgets={})
+    assert not any(
+        entry.kind == LedgerEntryKind.GATE.value and entry.gate == "human_required"
+        for entry in ledger.entries("run_1")
+    )
+
+
+def test_requires_human_falls_back_when_budget_configuration_cannot_load(
+    ledger: RecoveryLedger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import continuum.budgets
+
+    for _ in range(3):
+        ledger.record_attempt("run_1", dependency_budgets={})
+
+    def fail_to_load(_path: object) -> dict[str, object]:
+        raise OSError("configuration unavailable")
+
+    monkeypatch.setattr(continuum.budgets, "load_budgets", fail_to_load)
+    assert ledger.requires_human("run_1")
+    assert ledger.budget("run_1").max_attempts == 3
