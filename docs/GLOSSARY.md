@@ -3,7 +3,8 @@
 Every term here is used in issues and in code. Definitions point to the implementation so they can be verified, not inferred.
 
 - **Anchor**  
-  A checkpoint or ledger entry that must survive cleanup and compaction. In code a checkpoint with `trigger == CheckpointTrigger.RECOVERY` (`src/continuum/checkpoint/policy.py:64`) and a ledger entry with `anchor == True` (`src/continuum/recovery/ledger.py:214`) are anchors. `CheckpointManager.prune` and `RecoveryLedger.compact` keep anchors while dropping older ephemeral entries. See `src/continuum/recovery/cleanup.py:24` for the cleanup rule that preserves referenced anchors.
+  A checkpoint or ledger entry that must survive cleanup and compaction. In code a checkpoint with `trigger in ANCHOR_TRIGGERS` (`src/continuum/checkpoint/policy.py:82`) -- `CheckpointTrigger.RECOVERY` (`src/continuum/checkpoint/policy.py:74`) for the state a decision judged unsafe to continue from, or `CheckpointTrigger.COMPACTION` for the seal a compacted run's live tail starts from -- and a ledger entry with `anchor == True` (`src/continuum/recovery/ledger.py:214`) are anchors.
+  `CheckpointManager.prune` and `RecoveryLedger.compact` keep anchors while dropping older ephemeral entries. See `src/continuum/recovery/cleanup.py:24` for the cleanup rule that preserves referenced anchors.
 
 - **Lease**  
   A short lived, per run ownership claim that prevents two recoveries from acting as authority at once. Implemented by `LeaseCoordinator` in `src/continuum/concurrency/lease.py:53`. The recovery ledger can be constructed with a `LeaseCoordinator` (`src/continuum/recovery/ledger.py:501`) so `append_decision` and `record_attempt` acquire the lease for the run. `Phase 4` added the `RECOVERY` trigger to `CheckpointTrigger` and the `StateCheckpoint.reason` field so a lease protected anchor can be created atomically via `CheckpointManager.checkpoint_on_recovery`.
