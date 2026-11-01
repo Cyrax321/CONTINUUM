@@ -45,14 +45,14 @@ import shutil
 import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from continuum.actions.reconciliation import Reconciler, Resolution
 from continuum.environment.file_snapshot import file_digest
 from continuum.events import Event, EventType
-from continuum.models import UTC, Action, ActionStatus
+from continuum.models import Action, ActionStatus
 from continuum.storage.base import Storage
 
 __all__ = [

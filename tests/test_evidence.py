@@ -494,10 +494,9 @@ def test_adapter_reads_the_action_from_stdin(tmp_path: Path) -> None:
 def test_stat_mtime_is_utc_aware(tmp_path: Path) -> None:
     """_stat records mtime as an explicit UTC ISO-8601 timestamp with timezone (#1930)."""
     import os
-    from datetime import datetime
+    from datetime import UTC, datetime
 
     from continuum.evidence import _stat
-    from continuum.models import UTC
 
     target = tmp_path / "test_artifact.txt"
     target.write_text("content", encoding="utf-8")
