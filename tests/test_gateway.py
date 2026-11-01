@@ -3621,3 +3621,42 @@ def test_an_http_route_matches_a_client_spelling_its_default_port(
             run_id="run_1",
         )
         assert decision.allow, host
+
+
+def test_duplicate_json_keys_are_refused_with_400(db: str, gateway: str) -> None:
+    """A re-stated object key does not reach the upstream at all (#1851).
+
+    Python's ``json`` keeps the *last* value for a repeated key, so the claim
+    check read ``"pre_claimed_invoice"`` while a first-key parser (Go, C++)
+    would execute ``"target_invoice"`` -- an id the gateway never authorized.
+    The gateway forwards raw bytes, so the two readings were both live at
+    once. Refusing the body closes both: neither value is forwarded.
+    """
+    claim(db, "invoice:pre_claimed_invoice")
+    status, body = _post_raw(
+        gateway, "/v1/invoices", '{"id": "target_invoice", "id": "pre_claimed_invoice"}'
+    )
+    assert status == 400
+    assert "duplicate key" in body["error"]
+
+
+def test_duplicate_tenant_keys_are_refused_with_400(db: str, gateway: str) -> None:
+    """Re-stating the tenant key cannot bypass tenant isolation either (#1851).
+
+    The same last-key asymmetry applies to the bound-tenant check: one parser
+    reads the tenant the gateway checked, another reads the tenant the upstream
+    runs as. Refuse before any of them is trusted.
+    """
+    claim(db, "invoice:seed")
+    status, body = _post_raw(
+        gateway, "/v1/invoices", '{"id": "seed", "tenant": "a", "tenant": "b"}'
+    )
+    assert status == 400
+    assert "duplicate key" in body["error"]
+
+
+def test_a_body_with_unique_keys_is_unaffected(db: str, gateway: str) -> None:
+    """Refusing duplicates is not a refusal to forward: unique keys pass."""
+    claim(db, "invoice:seed")
+    status, body = _post_raw(gateway, "/v1/invoices", '{"id": "seed"}')
+    assert status != 400 or "duplicate key" not in body.get("error", "")

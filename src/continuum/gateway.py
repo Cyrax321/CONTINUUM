@@ -82,6 +82,28 @@ class _MalformedBody(Exception):
     """Internal signal: the request body could not be read as JSON (issue #323)."""
 
 
+class _DuplicateKeys(Exception):
+    """Internal signal: a JSON object restated a key (issue #1851)."""
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """``object_pairs_hook`` that refuses a JSON object re-stating one key.
+
+    Python's ``json`` keeps the *last* value for a repeated key, so the
+    gateway's claim, tenant, and authority checks would read one value while
+    a parser that takes the first (Go, C++) reads another. The raw bytes are
+    forwarded verbatim, so that other value is what an upstream would execute
+    against -- after the gateway authorized its rival. Fail closed instead:
+    refuse the body outright, and neither value is forwarded (#1851).
+    """
+    seen: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in seen:
+            raise _DuplicateKeys(f"duplicate key in JSON object: {key!r}")
+        seen[key] = value
+    return seen
+
+
 #: Requests larger than this are refused with 413 before the body is read.
 #: A proxy that reads unbounded bodies into memory is a denial-of-service
 #: surface against the very agent it protects.
@@ -718,8 +740,9 @@ class GatewayServer:
                 writes the refusal itself and raises, 413 with
                 :class:`_BodyTooLarge` when it is longer than ``max_bytes``, 400
                 with :class:`_MalformedBody` when it is not JSON this proxy can
-                decode (issue #323). Callers catch both and return, since the
-                response is already on the wire.
+                decode (issue #323) or when a JSON object re-states a key
+                (issue #1851, via :class:`_DuplicateKeys`). Callers catch both
+                and return, since the response is already on the wire.
                 """
                 transfer_encodings = self.headers.get_all("Transfer-Encoding", [])
                 if transfer_encodings:
@@ -777,7 +800,15 @@ class GatewayServer:
                     # with no body at all.
                     return {}, b""
                 try:
-                    parsed = json.loads(raw)
+                    parsed = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
+                except _DuplicateKeys as exc:
+                    # The body parsed, so it is not malformed, but it cannot be
+                    # forwarded either: the checks would read one value for a
+                    # repeated key while an upstream reads another, and every
+                    # upstream the gateway protects must see the same object it
+                    # authorized (#1851).
+                    self._respond(400, {"error": str(exc)})
+                    raise _MalformedBody from exc
                 except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                     # Answering with an empty mapping instead would send the
                     # request on to be refused for a missing template field,
