@@ -135,7 +135,8 @@ TOOL_COUNT_DOCS = [
 #: "twelve MCP tools", "the twelve-tool server". The number may be digits or
 #: a word up to thirteen, and up to one adjective may sit before "tools".
 _TOOL_COUNT_CLAIM = re.compile(
-    r"\b(\d+|eleven|twelve|thirteen)[-\s]+(?:stdio\s+|MCP\s+)?tools\b", re.IGNORECASE
+    r"\b(\d+|eleven|twelve|thirteen)[-\s]+(?:(?:stdio\s+|MCP\s+)?tools\b|tool\s+server\b)",
+    re.IGNORECASE,
 )
 _WORD_TO_NUM = {"eleven": 11, "twelve": 12, "thirteen": 13}
 
