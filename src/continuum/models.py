@@ -63,6 +63,8 @@ __all__ = [
     "ConstraintPinned",
     "ConstraintRetracted",
     "ConstraintPin",
+    "ConstraintPinsVerified",
+    "ConstraintPinDropped",
     "AttemptLesson",
     "AuthorityConsumed",
     "AuthorityReconciled",
@@ -594,6 +596,39 @@ class ConstraintPin(BaseModel):
         if not _SHA256_PATTERN.fullmatch(value):
             raise ValueError("sha256 must be exactly 64 lowercase hex characters")
         return value
+
+
+class ConstraintPinsVerified(BaseModel):
+    """Payload of ``CONSTRAINT_PINS_VERIFIED`` (issue #1413).
+
+    Records active constraint pin digest, count, and verification status
+    across log compaction and pre-compaction hooks.
+    """
+
+    model_config = Frozen
+
+    digest: str | None = None
+    count: int = 0
+    verified: bool = True
+    pins: tuple[dict[str, Any], ...] = ()
+
+
+class ConstraintPinDropped(BaseModel):
+    """Payload of ``CONSTRAINT_PIN_DROPPED`` (issue #1413).
+
+    Emitted when an active constraint fails verification or cannot be re-anchored.
+    """
+
+    model_config = Frozen
+
+    constraint_id: str = Field(strict=True)
+    sha256: str = Field(strict=True)
+    reason: str = "failed_verification"
+
+    @field_validator("constraint_id")
+    @classmethod
+    def _constraint_id_is_a_label(cls, value: str) -> str:
+        return _validated_constraint_id(value)
 
 
 class AttemptLesson(BaseModel):

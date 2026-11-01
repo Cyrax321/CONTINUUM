@@ -559,6 +559,13 @@ class _Accumulator:
             if constraint_id not in self.unmatched_pin_retractions:
                 self.unmatched_pin_retractions.append(constraint_id)
 
+    def constraint_dropped(self, event: Event) -> None:
+        """Fold a dropped or failed constraint pin (issue #1413)."""
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        constraint_id = payload.get("constraint_id")
+        if constraint_id and constraint_id in self.pins:
+            del self.pins[constraint_id]
+
     def attempt_lesson(self, event: Event) -> None:
         """Fold a recorded attempt lesson into the accumulator."""
         lesson = AttemptLesson.model_validate(event.payload)
@@ -769,6 +776,8 @@ def _dispatch(acc: _Accumulator, event: Event) -> bool:
             acc.constraint_pinned(event)
         case EventType.CONSTRAINT_RETRACTED:
             acc.constraint_retracted(event)
+        case EventType.CONSTRAINT_PIN_DROPPED:
+            acc.constraint_dropped(event)
         case EventType.ATTEMPT_LESSON:
             acc.attempt_lesson(event)
         case EventType.TRAJECTORY_REPORT:
@@ -842,6 +851,8 @@ _NON_PROJECTING = frozenset(
         # memory: a tombstone records that something was deleted from the
         # projected memory index, not that the assistant's state changed.
         EventType.MEMORY_TOMBSTONED,
+        # constraints (issue #1413): audit record of active constraint verification
+        EventType.CONSTRAINT_PINS_VERIFIED,
     }
 )
 
