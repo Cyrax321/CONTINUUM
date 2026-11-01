@@ -644,3 +644,493 @@ def test_repinned_constraint_no_registry_clears_pending_drop(tmp_path: Path, mon
         if e.component is Component.PIN and e.component_id == "sec_pin"
     ]
     assert not any(e.status is StateStatus.REQUIRES_REVIEW for e in pin_entries)
+
+
+def test_cli_argparse_accepts_pin_and_constraints_scopes() -> None:
+    """Argparse parser for continuum confirm must accept --scope pin and --scope constraints."""
+    from continuum.cli.main import build_parser
+
+    parser = build_parser()
+    args_pin = parser.parse_args(["confirm", "run_123", "--scope", "pin"])
+    assert args_pin.scope == ["pin"]
+    assert args_pin.run_id == "run_123"
+
+    args_constraints = parser.parse_args(["confirm", "run_123", "--scope", "constraints"])
+    assert args_constraints.scope == ["constraints"]
+
+    args_multi = parser.parse_args(["confirm", "run_123", "--scope", "pin", "goal"])
+    assert args_multi.scope == ["pin", "goal"]
+
+
+def test_constraint_pin_dropped_supports_soft_level(tmp_path: Path, monkeypatch) -> None:
+    """ConstraintPinDropped supports level='soft' and validator treats it as advisory."""
+    from continuum.models import ConstraintPinDropped
+
+    drop = ConstraintPinDropped(
+        constraint_id="soft_cid",
+        sha256="abc" * 21 + "a",
+        reason="soft_warning",
+        level="soft",
+    )
+    assert drop.level == "soft"
+
+    monkeypatch.setattr(
+        "continuum.security.constraints.DEFAULT_CONSTRAINTS_PATH", tmp_path / "nonexistent.json"
+    )
+    db = str(tmp_path / "soft_drop.db")
+    storage = SQLiteStorage(db)
+    run_id = "run_soft_drop"
+    storage.create_run(Run(run_id=run_id, goal="test soft drop"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    storage.append_event(run_id, EventType.CONSTRAINT_PIN_DROPPED, drop.model_dump())
+
+    engine = RecoveryEngine(storage)
+    decision = engine.assess(run_id)
+    pin_entries = [
+        e
+        for e in decision.validation.report.statuses
+        if e.component is Component.PIN and e.component_id == "soft_cid"
+    ]
+    assert not any(e.status is StateStatus.REQUIRES_REVIEW for e in pin_entries)
+
+
+def test_guidance_for_unreadable_registry_advises_repair(tmp_path: Path, monkeypatch) -> None:
+    """When the constraints registry is unreadable, human guidance instructs repairing it."""
+    constraints_path = tmp_path / ".continuum" / "constraints.json"
+    constraints_path.parent.mkdir(parents=True, exist_ok=True)
+    constraints_path.write_text("invalid json {{{", encoding="utf-8")
+    monkeypatch.setattr("continuum.security.constraints.DEFAULT_CONSTRAINTS_PATH", constraints_path)
+
+    db = str(tmp_path / "guidance_repair.db")
+    storage = SQLiteStorage(db)
+    run_id = "run_unreadable_reg"
+    storage.create_run(Run(run_id=run_id, goal="test unreadable registry"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+
+    engine = RecoveryEngine(storage)
+    decision = engine.assess(run_id)
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    guidance = human_steps_for(decision, run_id=run_id)
+    assert any("repair unreadable constraints registry file" in g for g in guidance)
+    assert not any("--scope pin" in g for g in guidance)
+
+
+def test_failed_verification_invalidates_earlier_pin_confirmation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A subsequent failed verification invalidates earlier pin confirmations."""
+    monkeypatch.setattr(
+        "continuum.security.constraints.DEFAULT_CONSTRAINTS_PATH", tmp_path / "nonexistent.json"
+    )
+    db = str(tmp_path / "failed_audit_inval.db")
+    storage = SQLiteStorage(db)
+    run_id = "run_audit_inval"
+    storage.create_run(Run(run_id=run_id, goal="test audit invalidation"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PIN_DROPPED,
+        {"constraint_id": "audit_pin", "sha256": "abc" * 21 + "a", "level": "hard"},
+    )
+    # Human confirms the pin
+    storage.append_event(
+        run_id,
+        EventType.REVIEW_CONFIRMED,
+        {"components": ["pin"]},
+        source=Origin.HUMAN,
+    )
+    engine = RecoveryEngine(storage)
+    d1 = engine.assess(run_id)
+    assert not any(
+        e.component is Component.PIN and e.status is StateStatus.REQUIRES_REVIEW
+        for e in d1.validation.report.statuses
+    )
+
+    # Now a verification event arrives with verified: false
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINS_VERIFIED,
+        {"verified": False, "unverified": ["audit_pin"]},
+        source=Origin.DETERMINISTIC,
+    )
+    d2 = engine.assess(run_id)
+    assert d2.mode is RecoveryMode.REQUEST_HUMAN
+    assert any(
+        e.component is Component.PIN
+        and e.component_id == "audit_pin"
+        and e.status is StateStatus.REQUIRES_REVIEW
+        for e in d2.validation.report.statuses
+    )
+
+
+def test_registry_predicate_change_invalidates_prior_pin_confirmation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When an operator modifies a predicate in constraints.json, prior pin confirmations do not mask it."""
+    import argparse
+
+    from continuum.cli.main import cmd_confirm
+
+    constraints_path = tmp_path / ".continuum" / "constraints.json"
+    constraints_path.parent.mkdir(parents=True, exist_ok=True)
+    spec_data = [
+        {
+            "id": "mutating_pin",
+            "level": "hard",
+            "predicate": "initial predicate text",
+            "scope": ["*"],
+        }
+    ]
+    constraints_path.write_text(json.dumps({"constraints": spec_data}), encoding="utf-8")
+    monkeypatch.setattr("continuum.security.constraints.DEFAULT_CONSTRAINTS_PATH", constraints_path)
+
+    db = str(tmp_path / "reg_change.db")
+    storage = SQLiteStorage(db)
+    run_id = "run_reg_change"
+    storage.create_run(Run(run_id=run_id, goal="test registry change"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    # Pinned to initial predicate
+    initial_sha = predicate_digest("initial predicate text")
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        {"constraint_id": "mutating_pin", "sha256": initial_sha},
+    )
+
+    # Operator confirms
+    args = argparse.Namespace(run_id=run_id, scope=["pin"], tolerate_unknown=False, model=None)
+    cmd_confirm(args, storage, None, None)
+
+    engine = RecoveryEngine(storage)
+    d1 = engine.assess(run_id)
+    assert not any(
+        e.component is Component.PIN and e.status is StateStatus.REQUIRES_REVIEW
+        for e in d1.validation.report.statuses
+    )
+
+    # Operator modifies the predicate in constraints.json
+    spec_data[0]["predicate"] = "changed predicate text that demands new compliance"
+    constraints_path.write_text(json.dumps({"constraints": spec_data}), encoding="utf-8")
+
+    d2 = engine.assess(run_id)
+    assert d2.mode is RecoveryMode.REQUEST_HUMAN
+    pin_entry = next(
+        e
+        for e in d2.validation.report.statuses
+        if e.component is Component.PIN and e.component_id == "mutating_pin"
+    )
+    assert pin_entry.status is StateStatus.REQUIRES_REVIEW
+    assert "predicate digest mismatch" in pin_entry.detail
+
+
+def test_untrusted_verification_event_rejected(tmp_path: Path, monkeypatch) -> None:
+    """An agent-originated CONSTRAINT_PINS_VERIFIED event with verified: true cannot clear review."""
+    monkeypatch.setattr(
+        "continuum.security.constraints.DEFAULT_CONSTRAINTS_PATH", tmp_path / "nonexistent.json"
+    )
+    db = str(tmp_path / "untrusted_audit.db")
+    storage = SQLiteStorage(db)
+    run_id = "run_untrusted_audit"
+    storage.create_run(Run(run_id=run_id, goal="test untrusted audit"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        {"constraint_id": "agent_pin", "sha256": "abc" * 21 + "a"},
+    )
+    # Trusted audit failed
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINS_VERIFIED,
+        {"verified": False, "unverified": ["agent_pin"]},
+        source=Origin.DETERMINISTIC,
+    )
+    # Agent tries to self-certify with verified: true
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINS_VERIFIED,
+        {"verified": True},
+        source=Origin.EXTERNAL_AGENT,
+    )
+
+    engine = RecoveryEngine(storage)
+    decision = engine.assess(run_id)
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    assert any(
+        e.component is Component.PIN
+        and e.component_id == "agent_pin"
+        and e.status is StateStatus.REQUIRES_REVIEW
+        for e in decision.validation.report.statuses
+    )
+
+
+def test_soft_drop_does_not_mask_prior_hard_drop(tmp_path: Path, monkeypatch) -> None:
+    """A later soft drop event for the same CID does not overwrite sticky hard-drop status."""
+    monkeypatch.setattr(
+        "continuum.security.constraints.DEFAULT_CONSTRAINTS_PATH", tmp_path / "nonexistent.json"
+    )
+    db = str(tmp_path / "sticky_hard.db")
+    storage = SQLiteStorage(db)
+    run_id = "run_sticky_hard"
+    storage.create_run(Run(run_id=run_id, goal="test sticky hard drop"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    # Hard drop
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PIN_DROPPED,
+        {"constraint_id": "sticky_cid", "sha256": "abc" * 21 + "a", "level": "hard"},
+    )
+    # Later soft drop arrives
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PIN_DROPPED,
+        {"constraint_id": "sticky_cid", "sha256": "abc" * 21 + "a", "level": "soft"},
+    )
+
+    engine = RecoveryEngine(storage)
+    decision = engine.assess(run_id)
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    entry = next(
+        e
+        for e in decision.validation.report.statuses
+        if e.component is Component.PIN and e.component_id == "sticky_cid"
+    )
+    assert entry.status is StateStatus.REQUIRES_REVIEW
+
+
+def test_event_only_retraction_requires_review(tmp_path: Path, monkeypatch) -> None:
+    """Retraction of an event-log-only hard pin requires human confirmation."""
+    monkeypatch.setattr(
+        "continuum.security.constraints.DEFAULT_CONSTRAINTS_PATH", tmp_path / "nonexistent.json"
+    )
+    db = str(tmp_path / "retraction_rev.db")
+    storage = SQLiteStorage(db)
+    run_id = "run_retraction_rev"
+    storage.create_run(Run(run_id=run_id, goal="test retraction review"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        {"constraint_id": "retracted_cid", "sha256": "abc" * 21 + "a"},
+    )
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_RETRACTED,
+        {"constraint_id": "retracted_cid"},
+    )
+
+    engine = RecoveryEngine(storage)
+    decision = engine.assess(run_id)
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    entry = next(
+        e
+        for e in decision.validation.report.statuses
+        if e.component is Component.PIN and e.component_id == "retracted_cid"
+    )
+    assert entry.status is StateStatus.REQUIRES_REVIEW
+    assert "retracted" in entry.detail
+
+
+def test_registry_does_not_hide_event_only_pins_or_failed_verification(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A registry on disk does not bypass event-log dropped pins or failed verifications."""
+    constraints_path = tmp_path / ".continuum" / "constraints.json"
+    constraints_path.parent.mkdir(parents=True, exist_ok=True)
+    spec_data = [
+        {
+            "id": "registered_pin",
+            "level": "hard",
+            "predicate": "audit events must be recorded",
+            "scope": ["*"],
+        }
+    ]
+    constraints_path.write_text(json.dumps({"constraints": spec_data}), encoding="utf-8")
+    monkeypatch.setattr("continuum.security.constraints.DEFAULT_CONSTRAINTS_PATH", constraints_path)
+
+    db = str(tmp_path / "reg_no_hide.db")
+    storage = SQLiteStorage(db)
+    run_id = "run_reg_no_hide"
+    storage.create_run(Run(run_id=run_id, goal="test registry no hide"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    # Registered pin is pinned but failed verification
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        {
+            "constraint_id": "registered_pin",
+            "sha256": predicate_digest("audit events must be recorded"),
+        },
+    )
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINS_VERIFIED,
+        {"verified": False, "unverified": ["registered_pin"]},
+        source=Origin.DETERMINISTIC,
+    )
+    # Event-only pin was dropped
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PIN_DROPPED,
+        {"constraint_id": "event_only_pin", "sha256": "123" * 21 + "1", "level": "hard"},
+    )
+
+    engine = RecoveryEngine(storage)
+    decision = engine.assess(run_id)
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    pin_statuses = {
+        e.component_id: e.status
+        for e in decision.validation.report.statuses
+        if e.component is Component.PIN
+    }
+    assert pin_statuses.get("registered_pin") is StateStatus.REQUIRES_REVIEW
+    assert pin_statuses.get("event_only_pin") is StateStatus.REQUIRES_REVIEW
+
+
+def test_concurrent_validations_do_not_leak_confirmations() -> None:
+    """A shared StateValidator instance must not leak confirmations across different validate() calls."""
+    from continuum.events import Event
+
+    validator = StateValidator()
+    run_id = "run_thread_safe"
+    events_unconfirmed = [
+        Event(
+            event_id="e1",
+            run_id=run_id,
+            sequence=1,
+            type=EventType.RUN_STARTED,
+            payload={"goal": "test", "total": 1},
+            source=Origin.EXTERNAL_AGENT,
+        ),
+    ]
+    state_unconfirmed = project(run_id, events_unconfirmed)
+
+    # First call with confirmed=True
+    outcome_confirmed = validator.validate(state_unconfirmed, confirmed=True)
+    assert outcome_confirmed.safe
+
+    # Second call with confirmed=False must NOT inherit confirmation from the first call
+    outcome_unconfirmed = validator.validate(state_unconfirmed, confirmed=False)
+    assert not outcome_unconfirmed.safe
+    assert any(
+        e.component is Component.GOAL and e.status is StateStatus.REQUIRES_REVIEW
+        for e in outcome_unconfirmed.report.statuses
+    )
+
+
+def test_one_shot_events_iterator_not_exhausted(tmp_path: Path, monkeypatch) -> None:
+    """When events is a generator/iterator, earlier validation checks must not exhaust it before _check_constraints."""
+    from continuum.events import Event
+
+    monkeypatch.setattr(
+        "continuum.security.constraints.DEFAULT_CONSTRAINTS_PATH", tmp_path / "nonexistent.json"
+    )
+    run_id = "run_iter_events"
+    events = [
+        Event(
+            event_id="e1",
+            run_id=run_id,
+            sequence=1,
+            type=EventType.RUN_STARTED,
+            payload={"goal": "test", "total": 1},
+        ),
+        Event(
+            event_id="e2",
+            run_id=run_id,
+            sequence=2,
+            type=EventType.CONSTRAINT_PIN_DROPPED,
+            payload={"constraint_id": "iter_pin", "sha256": "abc" * 21 + "a", "level": "hard"},
+        ),
+    ]
+    state = project(run_id, events)
+
+    # Pass as a generator (one-shot iterator)
+    event_iter = (ev for ev in events)
+    validator = StateValidator()
+    outcome = validator.validate(state, events=event_iter)
+    assert not outcome.safe
+    assert any(
+        e.component is Component.PIN
+        and e.component_id == "iter_pin"
+        and e.status is StateStatus.REQUIRES_REVIEW
+        for e in outcome.report.statuses
+    )
+
+
+def test_repinned_constraint_with_different_digest_requires_review(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Re-pinning a dropped constraint with a different predicate digest retains review requirement."""
+    monkeypatch.setattr(
+        "continuum.security.constraints.DEFAULT_CONSTRAINTS_PATH", tmp_path / "nonexistent.json"
+    )
+    db = str(tmp_path / "repin_diff_digest.db")
+    storage = SQLiteStorage(db)
+    run_id = "run_repin_diff"
+    storage.create_run(Run(run_id=run_id, goal="test repin diff digest"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    # Pinned with original sha
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        {"constraint_id": "diff_pin", "sha256": "111" * 21 + "1"},
+    )
+    # Dropped
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PIN_DROPPED,
+        {"constraint_id": "diff_pin", "sha256": "111" * 21 + "1", "level": "hard"},
+    )
+    # Re-pinned with DIFFERENT sha!
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PINNED,
+        {"constraint_id": "diff_pin", "sha256": "222" * 21 + "2"},
+    )
+
+    engine = RecoveryEngine(storage)
+    decision = engine.assess(run_id)
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    entry = next(
+        e
+        for e in decision.validation.report.statuses
+        if e.component is Component.PIN and e.component_id == "diff_pin"
+    )
+    assert entry.status is StateStatus.REQUIRES_REVIEW
+
+
+def test_scoped_assess_still_escalates_dropped_hard_pin(tmp_path: Path, monkeypatch) -> None:
+    """A scoped assessment must escalate a dropped hard pin, not resume past it.
+
+    The scoped path skips the self-certification checks (they re-flag unrelated
+    components), but a dropped hard pin is a governance violation independent
+    of the dependency scope, so the pin audit runs on both paths (issue #1414).
+    """
+    monkeypatch.setattr(
+        "continuum.security.constraints.DEFAULT_CONSTRAINTS_PATH", tmp_path / "nonexistent.json"
+    )
+    db = str(tmp_path / "scoped_drop.db")
+    storage = SQLiteStorage(db)
+    run_id = "run_scoped_drop"
+    storage.create_run(Run(run_id=run_id, goal="test scoped drop"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test", "total": 1})
+    storage.append_event(
+        run_id,
+        EventType.DEPENDENCY_DECLARED,
+        {"resource": "dataset", "version": "v1"},
+    )
+    storage.append_event(
+        run_id,
+        EventType.CONSTRAINT_PIN_DROPPED,
+        {"constraint_id": "scoped_pin", "sha256": "abc" * 21 + "a", "level": "hard"},
+    )
+
+    engine = RecoveryEngine(storage)
+    decision = engine.assess_scoped(run_id, ["dataset"])
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    assert any(
+        e.component is Component.PIN
+        and e.component_id == "scoped_pin"
+        and e.status is StateStatus.REQUIRES_REVIEW
+        for e in decision.validation.report.statuses
+    )

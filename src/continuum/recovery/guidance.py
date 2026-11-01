@@ -22,7 +22,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from continuum.models import Component, RecoveryMode, StateStatus
+from continuum.models import (
+    Component,
+    ComponentValidationEntry,
+    RecoveryMode,
+    StateStatus,
+)
 from continuum.recovery.engine import RecoveryDecision
 from continuum.recovery.planner import RepairKind
 
@@ -125,12 +130,19 @@ def human_steps_for(
                     + (f"  (no probe registered in {reconcilers_path})")
                 )
         elif step.kind is RepairKind.HUMAN_REVIEW:
-            statuses = ()
+            statuses: list[ComponentValidationEntry] = []
             if hasattr(decision, "validation") and hasattr(
                 getattr(decision, "validation", None), "report"
             ):
                 statuses = decision.validation.report.statuses
-            if step.target.startswith("pin:") or any(
+            # An unreadable registry cannot be cleared by a pin confirmation:
+            # the only remedy is repairing the file and reassessing.
+            if step.target.startswith("registry"):
+                steps.append(
+                    f"repair unreadable constraints registry file (.continuum/constraints.json), "
+                    f"then rerun `continuum assess {run_id}`"
+                )
+            elif step.target.startswith("pin:") or any(
                 e.component is Component.PIN and e.component_id == step.target for e in statuses
             ):
                 cid = step.target.removeprefix("pin:")

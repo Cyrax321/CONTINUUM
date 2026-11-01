@@ -22,7 +22,7 @@ import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -624,6 +624,7 @@ class ConstraintPinDropped(BaseModel):
     constraint_id: str = Field(strict=True)
     sha256: str = Field(strict=True)
     reason: str = "failed_verification"
+    level: Literal["hard", "soft"] = "hard"
 
     @field_validator("constraint_id")
     @classmethod

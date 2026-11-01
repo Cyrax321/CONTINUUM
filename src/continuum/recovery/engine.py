@@ -372,12 +372,60 @@ class RecoveryEngine:
                 if pin_id:
                     confirmed_components.discard(str(pin_id).strip().lower())
                 continue
+            if _ev.type is EventType.CONSTRAINT_PINS_VERIFIED:
+                # A failed verification clears earlier pin confirmations: the
+                # operator approved the prior audit, not this failed one.
+                payload = (
+                    _ev.payload
+                    if isinstance(_ev.payload, dict)
+                    else (_ev.payload.model_dump() if hasattr(_ev.payload, "model_dump") else {})
+                )
+                if payload.get("verified") is False:
+                    confirmed_components.discard("pin")
+                    confirmed_components.discard("constraints")
+                    for pin_id in payload.get("unverified", []):
+                        if isinstance(pin_id, str):
+                            confirmed_components.discard(pin_id.strip().lower())
+                continue
             if _ev.type is not EventType.REVIEW_CONFIRMED:
                 continue
             # Only human confirmations clear self-certification; an agent
             # must not be able to confirm its own work (issue #201).
             if _ev.source != Origin.HUMAN:
                 continue
+
+            # A confirmation covers the registry digest it was recorded
+            # against: if the operator changed a predicate afterwards, the old
+            # confirmation must not mask the new mismatch.
+            conf_reg_digest = (
+                _ev.payload.get("registry_digest") if isinstance(_ev.payload, dict) else None
+            )
+            if conf_reg_digest:
+                from continuum.security.constraints import load_constraints_or_none
+
+                try:
+                    curr_reg = load_constraints_or_none(asserted_by=Origin.DETERMINISTIC)
+                except Exception:
+                    curr_reg = None
+                conf_pred_digests = (
+                    _ev.payload.get("predicate_digests") if isinstance(_ev.payload, dict) else None
+                )
+                if curr_reg is not None and curr_reg.digest != conf_reg_digest:
+                    # The registry changed after this confirmation, so it only
+                    # covers components whose predicate digest still matches.
+                    raw_scope = _ev.payload.get("components") or _ev.payload.get("scope")
+                    if isinstance(raw_scope, (list, tuple, set)):
+                        for _c in raw_scope:
+                            if isinstance(_c, str) and _c.lower() not in ("pin", "constraints"):
+                                spec = curr_reg.get(_c)
+                                if (
+                                    spec
+                                    and conf_pred_digests
+                                    and conf_pred_digests.get(_c) == spec.digest
+                                ):
+                                    confirmed_components.add(_c.strip().lower())
+                    continue
+
             raw_scope = _ev.payload.get("components")
             if raw_scope is None:
                 raw_scope = _ev.payload.get("scope")
