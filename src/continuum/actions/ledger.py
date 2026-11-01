@@ -446,6 +446,8 @@ class ActionLedger:
         self._lease = lease
         self._holder_id = holder_id or ""
         self._ttl = ttl
+        self._folded_cache: dict[str, Action] | None = None
+        self._cache_head: int = 0
 
     # -- single-writer ---------------------------------------------------- #
 
@@ -532,7 +534,7 @@ class ActionLedger:
         the field existed carries ``None`` and is re-derived from its stored
         arguments with no volatile declaration, which is the pre-#1052 rule.
         """
-        if action.budget_authorization_id is not None:
+        if getattr(action, "budget_authorization_id", None) is not None:
             return action.budget_authorization_id
         return self._budget_authorization_id(action.action_type, None, dict(action.arguments), ())
 
@@ -664,7 +666,7 @@ class ActionLedger:
             key=lambda e: e.sequence,
         )
 
-    def _replay(self) -> dict[str, Action]:
+    def _replay(self, *, refresh: bool = False) -> dict[str, Action]:
         """Rebuild the ledger by folding action events. Cheap and verifiable.
 
         Archived events (compaction, issue #239) fold too: a claim settled
@@ -674,7 +676,12 @@ class ActionLedger:
         sorted, so they merge linearly instead of paying a re-sort on this
         hot path.
         """
-        return fold_action_events(self._merged_events())
+        head = self.storage.last_sequence(self.run_id)
+        if self._folded_cache is not None and not refresh and head == self._cache_head:
+            return self._folded_cache
+        self._folded_cache = fold_action_events(self._merged_events())
+        self._cache_head = head
+        return self._folded_cache
 
     def folded(self) -> dict[str, Action]:
         """Public view of the ``key -> newest action`` fold, archive included."""
@@ -1087,7 +1094,13 @@ class ActionLedger:
             # rather than explicit key; keep forensic searchable.
             with suppress(Exception):
                 payload["rendered_key"] = str(action.arguments.get("record_key"))
-        self.storage.append_event(self.run_id, event_type, payload, source=self._source)
+        evt = self.storage.append_event(self.run_id, event_type, payload, source=self._source)
+        if self._folded_cache is not None and evt.sequence == self._cache_head + 1:
+            self._folded_cache[key] = action
+            self._cache_head = evt.sequence
+        else:
+            self._folded_cache = None
+            self._cache_head = evt.sequence
         return action
 
     @staticmethod
