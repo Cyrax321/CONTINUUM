@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
@@ -655,11 +656,17 @@ def test_storage_urls_are_accepted_in_several_forms(tmp_path: Path) -> None:
         assert memory.list_runs() == []
 
 
-def test_postgres_url_is_routed_to_postgres_backend() -> None:
+def test_postgres_url_is_routed_to_postgres_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     # A postgres URL is no longer refused with NotImplementedError; it is routed
     # to PostgresStorage. Without the driver installed that fails clearly
     # (RuntimeError mentioning psycopg) rather than silently falling back to
     # SQLite, which would mask a misconfiguration.
+    #
+    # The missing-driver path is pinned deterministically: with psycopg actually
+    # installed the constructor would instead try to connect, and either succeed
+    # (DID NOT RAISE) or report a connect error whose text never mentions the
+    # driver - both make this test environment-dependent.
+    monkeypatch.setitem(sys.modules, "psycopg", None)
     with pytest.raises(RuntimeError, match="psycopg"):
         open_storage("postgresql://localhost/continuum")
 
