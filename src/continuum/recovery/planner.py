@@ -14,6 +14,12 @@ Steps are declarative. The planner does not execute anything; it produces the
 plan the recovery contract will gate on, and the agent (or a human) carries it
 out. Keeping planning free of side effects means a plan can be inspected,
 diffed, logged and tested without touching the world.
+
+Risk-driven steps arrive as typed ``RiskSignal`` projections from
+``continuum.recovery.risk``. Interpreting monitor payloads and locating a
+rollback anchor is risk work, not planning: keeping that interpretation out of
+this module is what lets ``plan_repairs`` stay a pure projection with a typed
+signature instead of duck-typing over free-form events (issue #1423 review).
 """
 
 from __future__ import annotations
@@ -28,8 +34,10 @@ from continuum.models import (
     ActionStatus,
     Component,
     ComponentValidationEntry,
+    SemanticState,
     StateStatus,
 )
+from continuum.recovery.risk import RiskSignal, locate_last_fact_gathering_step
 
 __all__ = ["RepairKind", "RepairStep", "RepairPlan", "plan_repairs"]
 
@@ -55,7 +63,17 @@ class RepairKind(StrEnum):
     """Recompute a finding that rested on changed support."""
 
     REVIEW_DECISION = "review_decision"
-    """Re-examine a decision whose justification no longer holds."""
+    """Re-examine a decision whose justification no longer holds.
+
+    The target is always a decision id; ``next_allowed_action`` is handed to
+    agents verbatim, so a step whose target is not a decision must carry its
+    own kind rather than borrowing this one (issue #1423 review)."""
+
+    REPLAN_EXCLUDING = "replan_excluding"
+    """Re-plan with the named repeating trajectory excluded (issue #1423).
+
+    The target is a step id or an action signature the risk feed flagged as
+    repeating, never a decision id."""
 
     RENEW_APPROVAL = "renew_approval"
     """Obtain a fresh human approval."""
@@ -81,6 +99,7 @@ _ORDER: dict[RepairKind, int] = {
     RepairKind.REDERIVE_EVIDENCE: 6,
     RepairKind.REDERIVE_FINDING: 7,
     RepairKind.REVIEW_DECISION: 8,
+    RepairKind.REPLAN_EXCLUDING: 9,
 }
 
 
@@ -256,6 +275,8 @@ def plan_repairs(
     unprojectable: tuple[int, str, str] | None = None,
     exhausted_dependencies: Collection[str] = (),
     run_budget_exhausted: bool = False,
+    risk_events: Sequence[RiskSignal] = (),
+    state: SemanticState | None = None,
 ) -> RepairPlan:
     """Build an ordered repair plan from validation findings and ledger state.
 
@@ -270,6 +291,11 @@ def plan_repairs(
     renders ``next_allowed: continue`` over a verdict of requires_human: prose
     and structure disagreeing, with a machine reader most likely to act on the
     structure. The break becomes a step so required_actions names real work.
+
+    ``risk_events`` are typed ``RiskSignal`` projections from
+    ``continuum.recovery.risk``, never raw events, and ``state`` is the semantic
+    state their interpretation reads when a rollback target has to be located
+    (issue #1423).
     """
     steps: list[RepairStep] = []
 
@@ -332,6 +358,88 @@ def plan_repairs(
         )
         if step is not None:
             steps.append(step)
+
+    for signal in risk_events:
+        trig_lower = signal.trigger.strip().lower()
+
+        if trig_lower == "loop":
+            targets: list[str] = []
+            if signal.step_id is not None:
+                targets.append(signal.step_id)
+            repeated = (
+                signal.detail.get("repeating_steps")
+                or signal.detail.get("repeated_steps")
+                or signal.detail.get("action_signature")
+                or signal.detail.get("action")
+            )
+            if isinstance(repeated, (list, tuple)):
+                for item in repeated:
+                    cleaned = item.strip() if isinstance(item, str) else None
+                    if cleaned and cleaned not in targets:
+                        targets.append(cleaned)
+            else:
+                cleaned = repeated.strip() if isinstance(repeated, str) else None
+                if cleaned and cleaned not in targets:
+                    targets.append(cleaned)
+            if not targets:
+                # A loop verdict with no locatable target leaves the replanning
+                # agent nothing to avoid: the gap #1426 describes. Name the
+                # episode (or at least the trigger) so the plan is still
+                # actionable instead of empty under a replan verdict.
+                targets.append(signal.episode_id or f"trigger_{trig_lower}")
+            for target in targets:
+                # The parenthetical is this step's own provenance: the event's
+                # step_id would describe a different step than the one this
+                # repair names (issue #1423 review), so the target itself and
+                # the trigger and episode are all that belong here.
+                reason = (
+                    f"replan excluding the repeating trajectory at {target} "
+                    f"(trigger: {trig_lower}, episode_id: {signal.episode_id or 'none'})"
+                )
+                steps.append(
+                    RepairStep(
+                        kind=RepairKind.REPLAN_EXCLUDING,
+                        target=target,
+                        reason=reason,
+                        blocking=True,
+                        requires_human=False,
+                    )
+                )
+
+        elif trig_lower == "meltdown":
+            fact_step = locate_last_fact_gathering_step(
+                state, trigger_step_id=signal.step_id, detail=signal.detail
+            )
+            trigger_step = signal.step_id or "none"
+            episode = signal.episode_id or "none"
+            if fact_step is not None:
+                target = fact_step
+                reason = (
+                    f"rollback to the last verified fact-gathering step {target} "
+                    f"before the anomalous cascade (step_id: {trigger_step}, "
+                    f"trigger: {trig_lower}, episode_id: {episode})"
+                )
+            else:
+                # No honest anchor exists. Never back-fill the trigger step and
+                # claim it is the last verified fact-gathering step: it is the
+                # step that was melting down, and the reason is the one field
+                # an operator reads first (issue #1423 review).
+                target = signal.step_id or signal.episode_id or "run"
+                reason = (
+                    f"no verified fact-gathering step could be located before the "
+                    f"anomalous cascade; the rollback point must be chosen by "
+                    f"inspecting {target} (step_id: {trigger_step}, trigger: "
+                    f"{trig_lower}, episode_id: {episode})"
+                )
+            steps.append(
+                RepairStep(
+                    kind=RepairKind.HUMAN_REVIEW,
+                    target=target,
+                    reason=reason,
+                    blocking=True,
+                    requires_human=True,
+                )
+            )
 
     seen: set[tuple[RepairKind, str]] = set()
     unique: list[RepairStep] = []
