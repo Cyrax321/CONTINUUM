@@ -7,7 +7,7 @@ divergent using configurable comparison strategies.
 
 Three backends ship:
 
-- ``exact``: current behaviour (sha256 of normalised arguments)
+- ``exact``: byte-equal canonical JSON of the arguments (keys sorted)
 - ``fuzzy``: token-set Jaccard over stringified argument values (stdlib only,
   sub-millisecond, catches LLM paraphrasing without any external service)
 - ``embedding``: caller-supplied callable that maps text to a float vector;
@@ -86,11 +86,19 @@ def jaccard(a: frozenset[str], b: frozenset[str]) -> float:
 
 
 def _args_text(args: dict[str, Any]) -> str:
-    """Flatten arguments into comparable text."""
-    parts = []
-    for v in args.values():
-        parts.append(str(v))
-    return " ".join(parts)
+    """Flatten arguments into canonical, comparable text.
+
+    Keys are carried alongside their values: two calls that merely share
+    values under different keys are not the same call, so flattening values
+    alone made ``{"recipient_account": "ACC-999"}`` and
+    ``{"sender_account": "ACC-999"}`` indistinguishable (issue #1865). The
+    text is also independent of insertion order, so equal dictionaries score
+    equal whatever order the caller built them in.
+    """
+    try:
+        return json.dumps(args, sort_keys=True, default=str)
+    except (TypeError, ValueError):  # pragma: no cover - unsortable keys
+        return " ".join(f"{k}={v}" for k, v in sorted(args.items()))
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -188,7 +196,3 @@ def similarity_backend(name_or_config: str | SimilarityConfig) -> SimilarityConf
     if kind is None:
         raise ValueError(f"unknown similarity backend {name_or_config!r}")
     return SimilarityConfig(kind=kind)
-
-
-# Keep unused imports referenced for mypy strict
-_ = json

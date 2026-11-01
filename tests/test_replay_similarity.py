@@ -51,6 +51,53 @@ def test_exact_kind_still_works() -> None:
     assert similarity({"a": 1}, {"b": 2}, cfg) == 0.0
 
 
+# --- argument flattening (issue #1865) --------------------------------------------- #
+
+
+def test_shared_values_under_different_keys_are_not_identical() -> None:
+    """``_args_text`` must carry keys, or two unrelated calls collapse to one.
+
+    Before, both of these flattened to ``"ACC-999 100"``: EXACT scored 1.0 and
+    the guard returned the cached result of a completely different operation.
+    """
+    exact = SimilarityConfig(kind="exact")
+    fuzzy = SimilarityConfig(kind="fuzzy")
+    to_account = {"recipient_account": "ACC-999", "amount": 100}
+    from_account = {"sender_account": "ACC-999", "fee": 100}
+
+    assert similarity(to_account, from_account, exact) == 0.0
+    assert similarity(to_account, from_account, fuzzy) < fuzzy.fork_threshold
+
+
+def test_equal_dictionaries_match_regardless_of_insertion_order() -> None:
+    """Canonical text is sorted, so equal dicts score 1.0 under EXACT.
+
+    Before, insertion order alone made the same call look completely fresh,
+    silently defeating replay deduplication.
+    """
+    cfg = SimilarityConfig(kind="exact")
+    call_a = {"user": "alice", "repo": "continuum"}
+    call_b = {"repo": "continuum", "user": "alice"}
+
+    assert call_a == call_b
+    assert similarity(call_a, call_b, cfg) == 1.0
+    assert similarity(call_a, {"user": "alice", "repo": "continuum2"}, cfg) == 0.0
+
+
+def test_nested_arguments_flatten_canonically() -> None:
+    """A nested mapping is sorted too, not stringified in caller order."""
+    cfg = SimilarityConfig(kind="exact")
+
+    assert similarity({"meta": {"b": 1, "a": 2}}, {"meta": {"a": 2, "b": 1}}, cfg) == 1.0
+
+    # and unserialisable values still flatten deterministically
+    class Opaque:
+        def __str__(self) -> str:
+            return "opaque-value"
+
+    assert similarity({"obj": Opaque(), "n": 1}, {"n": 1, "obj": Opaque()}, cfg) == 1.0
+
+
 # --- classify_call ---------------------------------------------------------------- #
 
 
@@ -212,7 +259,7 @@ def test_classify_call_embedding_ragged_vector_no_false_fork() -> None:
     # Ragged embedding vectors must not misclassify as fork (issue #1608)
     cfg = SimilarityConfig(
         kind="embedding",
-        embedder=lambda t: [1.0, 0.0] if t == "target" else [3.0, 4.0, 100.0],
+        embedder=lambda t: [1.0, 0.0] if "target" in t else [3.0, 4.0, 100.0],
     )
     kind, match = classify_call(
         new_key="k_new",
@@ -270,3 +317,30 @@ def test_similarity_backend_unknown_name_quotes_input() -> None:
     # The error message must show the offending value so operators can fix it.
     with pytest.raises(ValueError, match="'not-a-backend'"):
         similarity_backend("not-a-backend")
+
+
+def test_classify_call_no_longer_replays_a_different_operation() -> None:
+    """The end-to-end shape from the report: same values under different keys
+    used to classify as ``replay`` and hand back the cached result of an
+    unrelated completed operation."""
+    cfg = SimilarityConfig(kind="exact")
+    prior = {
+        "k1": {
+            "action_type": "transfer_funds",
+            "arguments": {"sender_account": "ACC-999", "fee": 100},
+            "status": "completed",
+            "result": {"transferred": True},
+        }
+    }
+
+    kind, matched = classify_call(
+        new_key="k_new",
+        new_args={"recipient_account": "ACC-999", "amount": 100},
+        action_type="transfer_funds",
+        prior_actions=prior,
+        config=cfg,
+        run_id="run_1",
+    )
+
+    assert kind == "fresh"
+    assert matched is None
