@@ -491,9 +491,10 @@ def test_adapter_reads_the_action_from_stdin(tmp_path: Path) -> None:
     assert completed.stdout.strip().splitlines()[-1] == "occurred=true"
 
 
-def test_stat_mtime_is_utc_aware(tmp_path: Path) -> None:
+def test_stat_mtime_is_utc_aware(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """_stat records mtime as an explicit UTC ISO-8601 timestamp with timezone (#1930)."""
     import os
+    import time
     from datetime import UTC, datetime
 
     from continuum.evidence import _stat
@@ -502,7 +503,17 @@ def test_stat_mtime_is_utc_aware(tmp_path: Path) -> None:
     target.write_text("content", encoding="utf-8")
     os.utime(target, (1767225600, 1767225600))
 
-    stat_result = _stat(str(target))
+    if hasattr(time, "tzset"):
+        monkeypatch.setenv("TZ", "America/New_York")
+        time.tzset()
+        try:
+            stat_result = _stat(str(target))
+        finally:
+            monkeypatch.delenv("TZ", raising=False)
+            time.tzset()
+    else:
+        stat_result = _stat(str(target))
+
     assert stat_result is not None
     assert stat_result["bytes"] == len("content")
     mtime_str = stat_result["mtime"]
