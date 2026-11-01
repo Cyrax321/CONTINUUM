@@ -1134,3 +1134,35 @@ def test_scoped_assess_still_escalates_dropped_hard_pin(tmp_path: Path, monkeypa
         and e.status is StateStatus.REQUIRES_REVIEW
         for e in decision.validation.report.statuses
     )
+
+
+def test_cli_confirm_scope_pin_goes_through_the_parser(tmp_path: Path, monkeypatch) -> None:
+    """`continuum confirm <run> --scope pin` must survive the argument parser.
+
+    The handler allowlist alone is not enough: argparse validates --scope
+    before cmd_confirm runs, so the parser must accept the pin scope too
+    (review feedback on the original escalation change).
+    """
+    import io
+
+    from continuum.cli import main
+
+    monkeypatch.setattr(
+        "continuum.security.constraints.DEFAULT_CONSTRAINTS_PATH", tmp_path / "nonexistent.json"
+    )
+    db = str(tmp_path / "cli_scope_pin.db")
+    run_id = "run_cli_scope"
+    with SQLiteStorage(db) as storage:
+        storage.create_run(Run(run_id=run_id, goal="test cli scope pin"))
+        storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test", "total": 1})
+
+    out, err = io.StringIO(), io.StringIO()
+    code = main(["--db", db, "confirm", run_id, "--scope", "pin"], out=out, err=err)
+    assert code == 0, err.getvalue()
+
+    with SQLiteStorage(db) as reopened:
+        events = reopened.read_events(run_id)
+    confirmations = [e for e in events if e.type is EventType.REVIEW_CONFIRMED]
+    assert len(confirmations) == 1
+    assert confirmations[0].payload["components"] == ["pin"]
+    assert confirmations[0].source is Origin.HUMAN
