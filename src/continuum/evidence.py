@@ -52,7 +52,7 @@ from typing import Any
 from continuum.actions.reconciliation import Reconciler, Resolution
 from continuum.environment.file_snapshot import file_digest
 from continuum.events import Event, EventType
-from continuum.models import Action, ActionStatus
+from continuum.models import UTC, Action, ActionStatus
 from continuum.storage.base import Storage
 
 __all__ = [
@@ -247,7 +247,10 @@ def _stat(path: str) -> dict[str, Any] | None:
         info = Path(path).stat()
     except OSError:
         return None
-    return {"bytes": info.st_size, "mtime": datetime.fromtimestamp(info.st_mtime).isoformat()}
+    return {
+        "bytes": info.st_size,
+        "mtime": datetime.fromtimestamp(info.st_mtime, tz=UTC).isoformat(),
+    }
 
 
 @dataclass(frozen=True, slots=True)
