@@ -143,27 +143,40 @@ def build_provenance_graph(events: Any) -> ProvenanceGraph:
     events may have been written before validation).
 
     The fold is deterministic and hash-stable: same events yield same graph.
+
+    ``graph.nodes`` is keyed by ``event_id``, but an invalidation names the
+    *domain* id of the thing it voids (``decision_id`` / ``finding_id``), so
+    the fold keeps an index from domain id to the node that carries it and
+    invalidations resolve through it. Without the index the lookup compared
+    a domain id against ``event_id`` keys, never matched, and every
+    invalidation was silently dropped (issue #1850).
     """
     graph = ProvenanceGraph()
+    # Domain id -> event id of the node carrying it, so invalidations land on
+    # the node they mean to void instead of looking up a key that never
+    # existed.
+    domain_nodes: dict[str, str] = {}
     # First pass: nodes
     for ev in sorted(events, key=lambda e: e.sequence):
         pld: dict[str, Any] = ev.payload if isinstance(ev.payload, dict) else {}
         if ev.type == getattr(EventType, "DECISION_INVALIDATED", None):
             dec_id = pld.get("decision_id")
-            if isinstance(dec_id, str) and dec_id in graph.nodes:
+            node_id = domain_nodes.get(dec_id) if isinstance(dec_id, str) else None
+            if node_id is not None:
                 reason = pld.get("reason") or pld.get("invalidated_reason")
-                graph.nodes[dec_id] = replace(
-                    graph.nodes[dec_id],
+                graph.nodes[node_id] = replace(
+                    graph.nodes[node_id],
                     status=StateStatus.INVALID,
                     invalidated_reason=str(reason) if reason is not None else None,
                 )
             continue
         elif ev.type == getattr(EventType, "FINDING_INVALIDATED", None):
             find_id = pld.get("finding_id")
-            if isinstance(find_id, str) and find_id in graph.nodes:
+            node_id = domain_nodes.get(find_id) if isinstance(find_id, str) else None
+            if node_id is not None:
                 reason = pld.get("reason") or pld.get("invalidated_reason")
-                graph.nodes[find_id] = replace(
-                    graph.nodes[find_id],
+                graph.nodes[node_id] = replace(
+                    graph.nodes[node_id],
                     status=StateStatus.INVALID,
                     invalidated_reason=str(reason) if reason is not None else None,
                 )
@@ -186,6 +199,15 @@ def build_provenance_graph(events: Any) -> ProvenanceGraph:
             payload=dict(ev.payload) if isinstance(ev.payload, dict) else {},
         )
         graph.add_node(node)
+        domain_id = (
+            pld.get("decision_id")
+            if ev.type == EventType.DECISION_CREATED
+            else pld.get("finding_id")
+            if ev.type == EventType.FINDING_ADDED
+            else None
+        )
+        if isinstance(domain_id, str) and domain_id:
+            domain_nodes[domain_id] = node.event_id
 
     # Second pass: edges
     for node in list(graph.nodes.values()):
