@@ -12,12 +12,15 @@ package).
 
 ```python
 from continuum.security.attestation import (
-    generate_keypair, sign_chain, verify_attestation, Attestation,
+    generate_keypair,
+    sign_chain,
+    verify_attestation,
+    Attestation,
 )
 
 priv_pem, pub_pem = generate_keypair()
 attest = sign_chain(priv_pem, run_id, trusted_through_seq, chain_hash, signer="ci")
-verify_attestation(attest)                              # True
+verify_attestation(attest)  # True
 verify_attestation(attest, expected_chain_hash=chain_hash)  # True
 ```
 

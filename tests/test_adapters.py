@@ -388,3 +388,42 @@ def test_start_run_refuses_a_log_that_begins_without_run_started(store: SQLiteSt
 
     with pytest.raises(ValueError, match="does not begin with RUN_STARTED"):
         adapter.start_run(goal="Original", run_id="run_122")
+
+
+def test_start_run_finds_a_run_start_the_compaction_archived_out_of_the_live_tail(
+    store: SQLiteStorage,
+) -> None:
+    """The backfill reads the archive first, so compaction cannot make it re-append.
+
+    ``start_run`` looks for the log's first event to decide whether the start
+    is already recorded. Compaction moves that prefix into the archive and
+    leaves markers in the live tail, so a check that read the live tail alone
+    would see a non-empty log whose first event is not ``RUN_STARTED`` and
+    either re-append a second start or refuse the run outright. The archive is
+    consulted first precisely so a compacted run is indistinguishable from a
+    live one here (issue #1555).
+
+    This is the case the shipped tests miss: none of them compact anything, so
+    deleting the archive read leaves them green.
+    """
+    from continuum.events import EventType
+
+    adapter = GenericAgentAdapter(store)
+    adapter.start_run(goal="Analyze documents", run_id="run_123")
+    store.append_event("run_123", EventType.TASK_UPDATED, {"note": "work began"})
+
+    # Compact the prefix: RUN_STARTED leaves the live tail for the archive.
+    archived = store.compact_run("run_123", through_sequence=1)
+    assert archived["archived"] >= 1
+    live = [e.type for e in store.read_events("run_123")]
+    assert EventType.RUN_STARTED not in live, (
+        "fixture: the start must be archived out of the live tail, which is the "
+        "shape that defeats a live-tail-only check"
+    )
+    assert store.read_archived_events("run_123")[0].type is EventType.RUN_STARTED
+
+    # Re-entering must still find the one recorded start and not add another.
+    run = adapter.start_run(goal="Analyze documents", run_id="run_123")
+    assert run.run_id == "run_123"
+    starts = [e for e in store.read_all_events(run.run_id) if e.type is EventType.RUN_STARTED]
+    assert len(starts) == 1

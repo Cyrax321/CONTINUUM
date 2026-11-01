@@ -28,8 +28,7 @@ class RevokedPolicyRule:
 
     def evaluate(
         self, state: SemanticState, environment: EnvironmentSnapshot | None = None
-    ) -> list[ComponentValidationEntry]:
-        ...
+    ) -> list[ComponentValidationEntry]: ...
 ```
 
 `name` namespaces every finding the rule reports, in the contract, in the JSON

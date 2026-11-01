@@ -109,6 +109,17 @@ def _bench_table_lines(horizon_report: Any, fault_report: Any | None = None) -> 
     lines.append(
         f"Accuracy: {acc}  Unnecessary escalation: {unnec}  Repair precision: {prec}  Duplicate side effects: {dup_side}  Duplicate work: {dup_work}  Compression: {comp}"
     )
+    # The duplicate counts are only meaningful as measurements when the probe
+    # that produces them is visible: ``avoided`` is how many post-reconstruction
+    # re-attempts the ledger refused, and it is positive in every healthy run.
+    # Publishing it next to the zeros is what separates a measurement from a
+    # hardcoded constant (#1572).
+    avoided = sum(r.metrics.get("duplicate_work_avoided", 0) for r in horizon_report.results)
+    performed = sum(r.metrics.get("side_effects_performed", 0) for r in horizon_report.results)
+    lines.append("")
+    lines.append(
+        f"Side effects performed: {performed}  Duplicate re-attempts refused by the ledger: {avoided}"
+    )
     lines.append("")
     lines.append("| Scenario | Cycles | Years | Correct | Actual | Accuracy |")
     lines.append("| --- | --- | --- | --- | --- | --- |")

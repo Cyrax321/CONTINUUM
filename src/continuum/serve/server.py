@@ -26,11 +26,12 @@ require the ``mcp`` extra. Authentication is a fail-closed shared secret (see
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import sys
 import threading
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, TextIO, cast
 
 from continuum.actions.ledger import ActionLedger
@@ -135,31 +136,126 @@ class BadRequest(SidecarError):
 class SidecarAuth:
     """Fail-closed shared-secret authentication for the sidecar.
 
-    When ``expected`` is ``None`` (the default), authentication is disabled and
-    the sidecar behaves as before. When set, every call must present the
-    matching ``auth_token`` parameter or it is refused -- reads as well as
-    writes, not only the methods in ``MUTATING``. A missing or wrong secret
-    always refuses; an empty configured secret refuses rather than opening the
-    door.
+    Supports per-client tokens and a dedicated confirmation credential.
+    When configured, calls must present a matching bearer token in the
+    Authorization header or auth_token parameter. Confirmation (the confirm method)
+    requires a dedicated confirm credential so that normal client agents cannot
+    self-certify or approve human reviews.
+
+    Token comparisons use constant-time matching (hmac.compare_digest) to eliminate
+    timing side channels.
     """
 
-    def __init__(self, expected: str | None = None) -> None:
-        self.expected = expected
+    def __init__(
+        self,
+        expected: str | None = None,
+        *,
+        client_tokens: str | Sequence[str] | set[str] | None = None,
+        confirm_token: str | None = None,
+    ) -> None:
+        tokens: set[str] = set()
+        if expected and expected.strip():
+            tokens.add(expected.strip())
+        if client_tokens is not None:
+            if isinstance(client_tokens, str):
+                for item in client_tokens.split(","):
+                    if item.strip():
+                        tokens.add(item.strip())
+            else:
+                for item in client_tokens:
+                    if str(item).strip():
+                        tokens.add(str(item).strip())
+        self.client_tokens = tokens
+        self.confirm_token = (
+            confirm_token.strip() if confirm_token and confirm_token.strip() else None
+        )
+
+    @classmethod
+    def from_environ(cls, env: Mapping[str, str] | None = None) -> SidecarAuth:
+        """Construct SidecarAuth from environment variables."""
+        environ = os.environ if env is None else env
+        single = environ.get("CONTINUUM_SERVE_TOKEN") or None
+        multi = environ.get("CONTINUUM_SERVE_CLIENT_TOKENS") or None
+        tokens: list[str] = []
+        if single and single.strip():
+            tokens.append(single.strip())
+        if multi:
+            tokens.extend([item.strip() for item in multi.split(",") if item.strip()])
+        confirm_token = environ.get("CONTINUUM_SERVE_CONFIRM_TOKEN") or None
+        return cls(
+            expected=tokens[0] if tokens else None,
+            client_tokens=tokens if tokens else None,
+            confirm_token=confirm_token,
+        )
+
+    @property
+    def expected(self) -> str | None:
+        """First configured client token, for backward compatibility."""
+        if not self.client_tokens:
+            return None
+        return next(iter(self.client_tokens))
+
+    @expected.setter
+    def expected(self, val: str | None) -> None:
+        self.client_tokens.clear()
+        if val and val.strip():
+            self.client_tokens.add(val.strip())
+
+    @property
+    def client_auth_disabled(self) -> bool:
+        """True when no client secret is configured."""
+        return len(self.client_tokens) == 0
 
     @property
     def disabled(self) -> bool:
-        """True when no secret is configured, so authentication is off."""
-        return self.expected is None or self.expected == ""
+        """True when neither client tokens nor confirm token are configured."""
+        return self.client_auth_disabled and self.confirm_token is None
 
     def verify(self, token: str | None) -> None:
-        """Accept matching tokens; raise NotAuthorized otherwise, unless disabled."""
-        if self.disabled:
+        """Accept matching client tokens; raise NotAuthorized otherwise, unless disabled."""
+        if self.client_auth_disabled:
             return
-        if not token or token != self.expected:
+        if not token:
             raise NotAuthorized(
                 "expected shared secret (set CONTINUUM_SERVE_TOKEN on the server "
                 "and pass auth_token on the client)"
             )
+        token_bytes = token.encode("utf-8")
+        matched = False
+        for candidate in self.client_tokens:
+            if hmac.compare_digest(token_bytes, candidate.encode("utf-8")):
+                matched = True
+        if not matched:
+            raise NotAuthorized(
+                "expected shared secret (set CONTINUUM_SERVE_TOKEN on the server "
+                "and pass auth_token on the client)"
+            )
+
+    def verify_confirm(self, token: str | None) -> None:
+        """Verify confirm credential; normal client tokens are explicitly rejected."""
+        if self.confirm_token is not None:
+            if not token:
+                raise NotAuthorized(
+                    "confirm requires dedicated confirm credential (set CONTINUUM_SERVE_CONFIRM_TOKEN "
+                    "on the server and provide confirm_token or Authorization header)"
+                )
+            if not hmac.compare_digest(token.encode("utf-8"), self.confirm_token.encode("utf-8")):
+                raise NotAuthorized(
+                    "an agent holding a normal token cannot call confirm; "
+                    "dedicated confirm credential required"
+                )
+            return
+
+        # No confirm token configured on server:
+        if not self.client_auth_disabled:
+            # Client auth is enabled, but no confirm token configured: fail closed!
+            raise NotAuthorized(
+                "confirm requires dedicated confirm credential (set CONTINUUM_SERVE_CONFIRM_TOKEN "
+                "on the server); an agent holding a normal token cannot call confirm"
+            )
+
+        # Entire auth system is disabled (testing/local unauthenticated mode)
+        return
 
 
 def _require(params: dict[str, Any], key: str) -> Any:
@@ -254,11 +350,17 @@ def _declare_dependencies(server: SidecarServer, run_id: str, env: Any) -> None:
 class SidecarServer:
     """Dispatches wire-protocol methods onto CONTINUUM's core operations."""
 
-    def __init__(self, database: str | None = None, *, storage: Storage | None = None) -> None:
+    def __init__(
+        self,
+        database: str | None = None,
+        *,
+        storage: Storage | None = None,
+        auth: SidecarAuth | None = None,
+    ) -> None:
         self.database = database or os.environ.get("CONTINUUM_DB") or "continuum.db"
         self.storage: Storage = storage or open_storage(self.database)
         self.adapter = GenericAgentAdapter(self.storage)
-        self.auth = SidecarAuth(os.environ.get("CONTINUUM_SERVE_TOKEN") or None)
+        self.auth = auth or SidecarAuth.from_environ()
 
     # -- core helpers (mirror ContinuumMCP) ---------------------------------- #
 
@@ -376,28 +478,27 @@ class SidecarServer:
             f"run {run_id!r} update retried {attempts} times without committing"
         )
 
-    def dispatch(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    def dispatch(
+        self,
+        method: str,
+        params: dict[str, Any],
+        token: str | None = None,
+    ) -> dict[str, Any]:
         """Authenticate, then route to the handler for ``method``.
 
         The secret is required for every method, not just the ones in
-        ``MUTATING``. That is deliberate, and it is where the sidecar diverges
-        from the MCP server's mutating-only policy: the MCP server talks to a
-        client the user launched on their own machine, whereas any process that
-        can reach this pipe can speak the protocol. Reads are worth closing
-        because of what they return -- ``resume`` hands back the goal string,
-        ``list_actions`` the arguments and results of external side effects.
-        Gating those on the same secret costs nothing by default, since
-        ``CONTINUUM_SERVE_TOKEN`` unset disables authentication entirely.
-
-        A ``MUTATING``-only variant of this check used to exist here as an
-        unreferenced helper. Restoring it would open reads to unauthenticated
-        callers in exactly the deployments that bothered to set a secret, so the
-        policy is pinned by tests in ``tests/test_serve.py`` (issue #95).
+        ``MUTATING``. Calling confirm requires a dedicated confirm credential
+        so that agents holding normal client tokens cannot self-approve.
         """
         handler = _HANDLERS.get(method)
         if handler is None:
             raise MethodNotFound(method)
-        self.auth.verify(params.get("auth_token"))
+        if method == "confirm":
+            confirm_cred = token or params.get("confirm_token") or params.get("auth_token")
+            self.auth.verify_confirm(confirm_cred)
+        else:
+            client_cred = token or params.get("auth_token")
+            self.auth.verify(client_cred)
         return cast("dict[str, Any]", handler(self, params))
 
     # -- wire loop ---------------------------------------------------------- #
@@ -484,6 +585,7 @@ class SidecarHTTP:
                 if getattr(self, "close_connection", False):
                     self.send_header("Connection", "close")
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Continuum-Version", "1.0")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -642,27 +744,52 @@ class SidecarHTTP:
                     # handler and closed the connection unanswered (#582).
                     self._json(400, {"error": str(exc)})
                     return
+                header_token: str | None = None
+                auth_header = self.headers.get("Authorization")
+                if auth_header:
+                    scheme, _, token_val = auth_header.partition(" ")
+                    if scheme.lower() == "bearer" and token_val.strip():
+                        header_token = token_val.strip()
+
+                confirm_header = self.headers.get("X-Continuum-Confirm-Token")
+                if method == "confirm" and confirm_header and confirm_header.strip():
+                    header_token = confirm_header.strip()
+
                 try:
-                    result = sidecar_ref.dispatch(method, params)
+                    result = sidecar_ref.dispatch(method, params, token=header_token)
                 except MethodNotFound as exc:
-                    self._json(404, {"error": str(exc)})
+                    self._json(404, {"error": str(exc), "code": exc.code})
                     return
                 except NotAuthorized as exc:
-                    self._json(403, {"error": str(exc)})
+                    self._json(403, {"error": str(exc), "code": exc.code})
                     return
                 except BadParams as exc:
-                    self._json(400, {"error": str(exc)})
+                    self._json(400, {"error": str(exc), "code": exc.code})
                     return
                 except SidecarError as exc:
-                    self._json(500, {"error": str(exc)})
+                    self._json(500, {"error": str(exc), "code": exc.code})
                     return
                 except Exception as exc:  # storage errors (missing run etc.)
-                    self._json(500, {"error": str(exc)})
+                    self._json(500, {"error": str(exc), "code": "internal"})
                     return
                 self._json(200, result)
 
+            def do_GET(self) -> None:
+                """Route GET requests for health probes and OpenAPI schema."""
+                path = self.path.split("?")[0].rstrip("/")
+                if path in ("/healthz", "/readyz"):
+                    self._json(200, {"status": "ok", "version": "1.0"})
+                    return
+                if path in ("/openapi.json", "/spec"):
+                    from continuum.serve.openapi import get_openapi_spec
+
+                    self._json(200, get_openapi_spec())
+                    return
+                self._json(404, {"error": f"not found: {self.path}", "code": "not_found"})
+
         server = http.server.ThreadingHTTPServer((bind, port), Handler)
         self.httpd = server
+        self.bind = bind
         self.port = int(server.server_address[1])
         self._thread: threading.Thread | None = None
 
@@ -677,7 +804,8 @@ class SidecarHTTP:
 
     def shutdown(self) -> None:
         """Shut the HTTP server down and close it."""
-        self.httpd.shutdown()
+        if self._thread is not None and self._thread.is_alive():
+            self.httpd.shutdown()
         self.httpd.server_close()
 
 

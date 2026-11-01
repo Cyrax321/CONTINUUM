@@ -386,3 +386,145 @@ def test_rewind_reports_a_poisoned_digest_rather_than_following_it(
     # The workspace file was never overwritten with out-of-store content.
     assert file_a.read_text(encoding="utf-8") == "at checkpoint"
     storage.close()
+
+
+def test_rewind_pre_checkpoint_observation_without_digest_is_never_a_delete(
+    tmp_path: Path,
+) -> None:
+    # Issue #1806: a pre-checkpoint TOOL_COMPLETED that records the path but no
+    # digest (the PostToolUse hook races the writer, the file can be held
+    # exclusively or unreadable, so observe_event_payload records the path
+    # without bytes/sha256) used to take the "created after the checkpoint"
+    # branch and unlink a file the checkpoint-era log recorded a write to, with
+    # zero conflicts and ok=True. The observation is a weaker fact, not an
+    # absent one: the file was already there and cannot be restored, so it must
+    # be left in place and reported, never deleted.
+    db = str(tmp_path / "rewind.db")
+    run_id = "run_digestless_before"
+    storage = SQLiteStorage(db)
+    storage.create_run(Run(run_id=run_id, goal="digestless before"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    file_a = workdir / "a.txt"
+    file_a.write_text("content at checkpoint", encoding="utf-8")
+    from continuum.clienthooks import observe_event_payload
+
+    payload_before = observe_event_payload(
+        {"tool_name": "Write", "tool_input": {"file_path": str(file_a)}}
+    )
+    # The hook read failed, so the observation carries the path only.
+    payload_before.pop("sha256", None)
+    payload_before.pop("bytes", None)
+    storage.append_event(run_id, EventType.TOOL_COMPLETED, payload_before)
+    from continuum.checkpoint.manager import CheckpointManager
+
+    cp = CheckpointManager(storage).checkpoint(run_id)
+    payload_after = observe_event_payload(
+        {"tool_name": "Edit", "tool_input": {"file_path": str(file_a)}}
+    )
+    storage.append_event(run_id, EventType.TOOL_COMPLETED, payload_after)
+    storage.close()
+
+    # Without force the rewind refuses rather than silently losing the file.
+    storage = SQLiteStorage(db)
+    with pytest.raises(RewindError, match="unrecoverable"):
+        rewind_to_checkpoint(storage, run_id, cp.checkpoint_id)
+    result = rewind_to_checkpoint(storage, run_id, cp.checkpoint_id, force=True)
+    assert any("no digest" in m for m in result.unrecoverable), (
+        f"digest-less observation should be reported, got {result.unrecoverable}"
+    )
+    # The file is still on disk, untouched: never a delete.
+    assert file_a.read_text(encoding="utf-8") == "content at checkpoint"
+    assert result.deleted_files == ()
+    storage.close()
+
+
+def test_rewind_post_checkpoint_observation_without_digest_still_deletes(
+    tmp_path: Path,
+) -> None:
+    # Issue #1806, the other side: a post-checkpoint observation without a
+    # digest left expected_after unset, so `file_digest(path) != expected_after`
+    # was always true and the file was reported as "digest changed before
+    # delete" forever. --force did not delete it either, because the `continue`
+    # skipped the unlink, so a forced rewind left post-checkpoint files in the
+    # workspace while reporting that it ran. There is nothing to verify against
+    # a digest the observation does not have: the file is by construction not
+    # part of the checkpoint state, so it is deleted and listed in deleted_files.
+    db = str(tmp_path / "rewind.db")
+    run_id = "run_digestless_after"
+    storage = SQLiteStorage(db)
+    storage.create_run(Run(run_id=run_id, goal="digestless after"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    from continuum.checkpoint.manager import CheckpointManager
+
+    cp = CheckpointManager(storage).checkpoint(run_id)
+    storage.close()
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    file_b = workdir / "b.txt"
+    file_b.write_text("created after checkpoint", encoding="utf-8")
+    from continuum.clienthooks import observe_event_payload
+
+    payload_b = observe_event_payload(
+        {"tool_name": "Write", "tool_input": {"file_path": str(file_b)}}
+    )
+    payload_b.pop("sha256", None)
+    payload_b.pop("bytes", None)
+    storage = SQLiteStorage(db)
+    storage.append_event(run_id, EventType.TOOL_COMPLETED, payload_b)
+    storage.close()
+
+    storage = SQLiteStorage(db)
+    result = rewind_to_checkpoint(storage, run_id, cp.checkpoint_id)
+    assert result.ok, f"conflicts={result.conflicts} unrecoverable={result.unrecoverable}"
+    assert result.deleted_files == (str(file_b),)
+    assert not file_b.exists()
+    storage.close()
+
+
+def test_rewind_restores_when_post_checkpoint_observation_has_no_digest(
+    tmp_path: Path,
+) -> None:
+    # Issue #1806, the restore branch of the same comparison: a digest-bearing
+    # pre-checkpoint observation plus a digest-less post-checkpoint one made
+    # `file_digest(path) != expected_after` compare a real digest against None,
+    # conflict forever, and never restore the file even with --force. Without
+    # an observed post-checkpoint digest there is nothing to compare the
+    # current content against, and the restore itself is still verified against
+    # the snapshot digest afterwards.
+    db = str(tmp_path / "rewind.db")
+    run_id = "run_digestless_restore"
+    storage = SQLiteStorage(db)
+    storage.create_run(Run(run_id=run_id, goal="digestless restore"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    file_a = workdir / "a.txt"
+    file_a.write_text("at checkpoint", encoding="utf-8")
+    from continuum.clienthooks import observe_event_payload
+    from continuum.environment.file_snapshot import snapshot_file
+
+    payload_before = observe_event_payload(
+        {"tool_name": "Write", "tool_input": {"file_path": str(file_a)}}
+    )
+    snapshot_file(file_a, sha256=payload_before.get("sha256"))
+    storage.append_event(run_id, EventType.TOOL_COMPLETED, payload_before)
+    from continuum.checkpoint.manager import CheckpointManager
+
+    cp = CheckpointManager(storage).checkpoint(run_id)
+    file_a.write_text("modified after checkpoint", encoding="utf-8")
+    payload_after = observe_event_payload(
+        {"tool_name": "Edit", "tool_input": {"file_path": str(file_a)}}
+    )
+    payload_after.pop("sha256", None)
+    payload_after.pop("bytes", None)
+    storage.append_event(run_id, EventType.TOOL_COMPLETED, payload_after)
+    storage.close()
+
+    storage = SQLiteStorage(db)
+    result = rewind_to_checkpoint(storage, run_id, cp.checkpoint_id)
+    assert result.ok, f"conflicts={result.conflicts} unrecoverable={result.unrecoverable}"
+    assert file_a.read_text(encoding="utf-8") == "at checkpoint"
+    assert result.reverted_files == (str(file_a),)
+    storage.close()

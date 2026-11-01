@@ -667,18 +667,21 @@ def _entry_at(path: Path, host: str, scope: str, project_root: Path) -> dict[str
 def _registration_sites(
     cwd: Path,
 ) -> Iterator[tuple[str, Path, str, dict[str, Any] | None]]:
-    """Every place a registration for this project could live, most specific first.
+    """Every place a registration for this project could live, in the host's own precedence.
 
-    Project scope leads because it is cwd-relative: its answer depends on the
-    checkout rather than on whose account the process runs as. Local and user
-    scope follow, in that order, because ``mcp install`` defaults to local and
-    local beats project in the host's own precedence. The scope travels with
-    each site because a host whose per-user file nests by project can only be
-    read back once the checkout it belongs to is named again.
+    Local leads: it is the per-user file for this project, and the CLI's own
+    ``--scope`` help states local wins over the committed ``.mcp.json``, so
+    when both scopes hold a registration the one the host actually runs is
+    local. Reading project first made the permission probe declare the client
+    name of a registration the host ignores while the effective one bakes a
+    different one (#1764). Project follows, then user, the broadest scope
+    last. The scope travels with each site because a host whose per-user file
+    nests by project can only be read back once the checkout it belongs to is
+    named again.
     """
     for scope, key in (
-        ("project", "project_settings"),
         ("local", "local_settings"),
+        ("project", "project_settings"),
         ("user", "user_settings"),
     ):
         for host, profile in HOST_PROFILES.items():

@@ -26,6 +26,7 @@ import pytest
 from continuum.mcp.observation import (
     MAX_OBSERVED_CLIENTS,
     MAX_OBSERVED_NAME_LENGTH,
+    SCHEMA_VERSION,
     declared_client_name,
     observation_path,
     read_observed_clients,
@@ -252,7 +253,7 @@ def test_the_observed_name_never_reaches_the_hash_chained_event_log(tmp_path: Pa
         pytest.param("{not json", "unparseable", id="malformed-json"),
         pytest.param(json.dumps({"schema": 99}), "unknown schema", id="wrong-schema"),
         pytest.param(json.dumps({"observed_clients": "nope"}), "wrong shape", id="not-a-dict"),
-        pytest.param(json.dumps({"schema": 1, "observed_clients": [1, 2]}), "a list", id="list"),
+        pytest.param(json.dumps({"schema": 2, "observed_clients": [1, 2]}), "a list", id="list"),
         pytest.param("", "empty", id="empty-file"),
     ],
 )
@@ -331,18 +332,78 @@ def test_a_malformed_handshake_yields_no_name(params: Any, expected: str | None)
     assert declared_client_name(params) == expected
 
 
-def test_a_list_of_names_in_one_value_is_recorded_individually(tmp_path: Path) -> None:
-    """An allowlist naming three hosts records three names, not one string.
+def test_a_multi_word_name_is_recorded_verbatim_not_split(tmp_path: Path) -> None:
+    r"""One connection declares one name, and that name is what gets recorded.
 
-    ``authz`` splits on commas and whitespace, so ``"a, b"`` authorizes both
-    ``a`` and ``b``. Recording the raw value would make the doctor compare
-    ``"a, b"`` against ``"b"`` and report a healthy registration as a mismatch.
+    A host's ``clientInfo.name`` is whatever the host sent. Splitting it on the
+    separators an allowlist uses -- which is how ``authz`` reads a value that
+    names several authorized callers -- would record names the host never
+    declared: a connection from a host named ``"Visual Studio Code"`` used to
+    record three entries, and the doctor then reported a mismatch against
+    clients that do not exist (#1805).
+    """
+    db = tmp_path / "continuum.db"
+
+    record_observed_client(str(db), "Visual Studio Code")
+
+    clients = read_observed_clients(str(db))
+    assert list(clients) == ["Visual Studio Code"]
+    assert clients["Visual Studio Code"]["count"] == 1
+
+
+def test_an_allowlist_style_value_is_recorded_as_the_one_name_it_is(tmp_path: Path) -> None:
+    """The separators an allowlist splits on are not separators for a name.
+
+    ``authz`` splits a declared *allowlist value* on commas and whitespace, so
+    ``"a, b"`` authorizes both callers, but an observed name is not an
+    allowlist value: recording it whole is what keeps the doctor comparing the
+    name a host sent against the name the registration authorizes.
     """
     db = tmp_path / "continuum.db"
 
     record_observed_client(str(db), "cursor, gemini-cli claude-code")
 
-    assert sorted(read_observed_clients(str(db))) == ["claude-code", "cursor", "gemini-cli"]
+    clients = read_observed_clients(str(db))
+    assert list(clients) == ["cursor, gemini-cli claude-code"]
+    assert clients["cursor, gemini-cli claude-code"]["count"] == 1
+
+
+def test_a_file_from_the_splitting_code_is_discarded_not_carried_forward(
+    tmp_path: Path,
+) -> None:
+    r"""An upgrade never reports the fragments the old code recorded.
+
+    Before #1805, one connection from a host named ``"Visual Studio Code"``
+    wrote three entries into the file, and those entries are still on disk for
+    a database that saw such a connection. Nothing prunes them in place: they
+    are dropped because the file's schema version no longer matches, so the
+    doctor reports "unknown" rather than the misleading mismatch, and the next
+    observation writes a current-format file that holds only names hosts sent.
+    """
+    db = tmp_path / "continuum.db"
+    path = observation_path(str(db))
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "observed_clients": {
+                    "Visual": {"count": 1, "last_seen": "2026-10-01T00:00:00", "seq": 1},
+                    "Studio": {"count": 1, "last_seen": "2026-10-01T00:00:00", "seq": 2},
+                    "Code": {"count": 1, "last_seen": "2026-10-01T00:00:00", "seq": 3},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert read_observed_clients(str(db)) == {}, "the fragments must not survive a version bump"
+
+    record_observed_client(str(db), "Visual Studio Code")
+
+    clients = read_observed_clients(str(db))
+    assert list(clients) == ["Visual Studio Code"]
+    assert json.loads(path.read_text(encoding="utf-8"))["schema"] == SCHEMA_VERSION
 
 
 def test_the_file_cannot_grow_without_bound(tmp_path: Path) -> None:
@@ -389,8 +450,13 @@ def test_a_corrupt_count_does_not_break_the_next_write(tmp_path: Path) -> None:
     db = tmp_path / "continuum.db"
     path = observation_path(str(db))
     path.parent.mkdir(parents=True)
+    # The fixture must carry the current schema, or read_observed_clients
+    # discards the whole file before the writer ever sees the bad count and the
+    # test passes without exercising the repair it claims to check.
     path.write_text(
-        json.dumps({"schema": 1, "observed_clients": {"claude-code": {"count": "many"}}}),
+        json.dumps(
+            {"schema": SCHEMA_VERSION, "observed_clients": {"claude-code": {"count": "many"}}}
+        ),
         encoding="utf-8",
     )
 

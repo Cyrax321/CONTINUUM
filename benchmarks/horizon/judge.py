@@ -1,14 +1,15 @@
 """Judge rubric for horizon recovery decisions.
 
 Per scenario, the correct mode is labeled at construction time. The judge
-scores the engine's actual decision against the label and computes the six
-required metrics. Deterministic, no LLM, no network.
+scores the engine's actual decision against the label. The six required
+metrics are computed by the runner from real storage and ledger state, not
+here: a judge that could produce them from labels alone would make them
+constants. Deterministic, no LLM, no network.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from .scenarios import HorizonScenario
 
@@ -66,37 +67,3 @@ def judge(scenario: HorizonScenario, actual_mode: str) -> JudgeResult:
         repair_correct=repair_correct,
         notes=notes,
     )
-
-
-def score_suite(results: list[JudgeResult]) -> dict[str, Any]:
-    """Compute the six required metrics for the horizon suite."""
-    total = len(results)
-    if total == 0:
-        return {
-            "accuracy": 0.0,
-            "unnecessary_human_escalation_rate": 0.0,
-            "repair_precision": 0.0,
-            "duplicate_side_effects": 0,
-            "duplicate_work": 0.0,
-            "compression_ratio": 0.0,
-        }
-    passed = sum(1 for r in results if r.passed)
-    accuracy = round(passed / total, 3)
-    unnecessary = sum(1 for r in results if r.unnecessary_escalation)
-    unnecessary_rate = round(unnecessary / total, 3)
-    repair_needed = [r for r in results if r.repair_needed]
-    repair_correct = sum(1 for r in repair_needed if r.repair_correct)
-    repair_precision = round(repair_correct / len(repair_needed), 3) if repair_needed else 1.0
-    # Placeholders for the other three metrics: they are computed by the
-    # driver from actual storage/ledger state, not just judge labels.
-    # For now, report 0 for duplicates and 1.0 for compression as the
-    # horizon driver is focused on decision correctness; the full
-    # implementation will wire these from the driver's ledger and token counts.
-    return {
-        "accuracy": accuracy,
-        "unnecessary_human_escalation_rate": unnecessary_rate,
-        "repair_precision": repair_precision,
-        "duplicate_side_effects": 0,
-        "duplicate_work": 0.0,
-        "compression_ratio": 1.0,
-    }

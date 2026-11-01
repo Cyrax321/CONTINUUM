@@ -160,6 +160,12 @@ def rewind_to_checkpoint(
     for path, after_payload in after_by_path.items():
         after_digest = after_payload.get("sha256")
         before_payload = before_by_path.get(path)
+        # An observation exists even when it records no digest, which is not
+        # the same thing as no observation at all. Conflating the two makes a
+        # digest-less pre-checkpoint observation mean "the file did not exist
+        # at checkpoint time" and deletes a file the checkpoint-era log
+        # recorded a write to (#1806).
+        before_observed = isinstance(before_payload, dict)
         before_digest = before_payload.get("sha256") if isinstance(before_payload, dict) else None
         current_digest = file_digest(path)
         expected_after = after_digest if isinstance(after_digest, str) else None
@@ -173,11 +179,28 @@ def rewind_to_checkpoint(
             )
             continue
         if current_digest is None and expected_after is not None:
-            if before_digest is None:
+            if not before_observed:
                 deleted.append(path)
+                continue
+            if before_digest is None:
+                unrecoverable.append(
+                    f"{path}: file missing and checkpoint-time observation has no digest, cannot restore"
+                )
                 continue
             conflicts.append(
                 f"{path}: file missing but last observed digest {expected_after[:12]} exists"
+            )
+            continue
+        if before_observed and before_digest is None:
+            # The file was already there at checkpoint time and we cannot
+            # restore it: leave it in place and report it. Never a delete.
+            if current_digest is None:
+                # Nothing is on disk and there is no digest to restore from,
+                # so there is nothing this rewind can do for the path.
+                deleted.append(path)
+                continue
+            unrecoverable.append(
+                f"{path}: checkpoint-time observation has no digest, cannot restore, file left in place"
             )
             continue
         if before_digest is None:
@@ -185,7 +208,13 @@ def rewind_to_checkpoint(
                 p = Path(path)
                 if p.exists():
                     if not dry_run:
-                        if file_digest(path) != expected_after:
+                        # A post-checkpoint observation without a digest gives
+                        # nothing to compare against, so there is nothing to
+                        # verify before the unlink. Comparing anyway made the
+                        # delete branch conflict forever, so a forced rewind
+                        # left post-checkpoint files in the workspace while
+                        # reporting that it ran (#1806).
+                        if expected_after is not None and file_digest(path) != expected_after:
                             conflicts.append(f"{path}: digest changed before delete")
                             continue
                         p.unlink()
@@ -211,7 +240,11 @@ def rewind_to_checkpoint(
                 )
                 continue
             if not dry_run:
-                if file_digest(path) != expected_after:
+                # Same reasoning as the delete branch: without an observed
+                # post-checkpoint digest there is nothing to compare the
+                # current content against, and the restore itself is still
+                # verified against the snapshot digest below.
+                if expected_after is not None and file_digest(path) != expected_after:
                     conflicts.append(f"{path}: digest changed before restore")
                     continue
                 if not restore_file(path, before_digest):

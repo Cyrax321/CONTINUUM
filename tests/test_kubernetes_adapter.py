@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -9,6 +10,7 @@ import pytest
 
 from continuum.actions.ledger import ActionLedger
 from continuum.adapters import AdapterAction, KubernetesAdapter
+from continuum.adapters.kubernetes import _pod_name
 from continuum.models import Run
 from continuum.storage import SQLiteStorage
 
@@ -17,6 +19,39 @@ def _storage() -> SQLiteStorage:
     storage = SQLiteStorage(":memory:")
     storage.create_run(Run(run_id="run_k8s", goal="run a Kubernetes job"))
     return storage
+
+
+def _adapter(
+    monkeypatch: pytest.MonkeyPatch,
+    storage: SQLiteStorage | None = None,
+    *,
+    namespace: str = "default",
+) -> tuple[KubernetesAdapter, list[list[str]]]:
+    """An available adapter whose every kubectl argv is recorded.
+
+    ``intercept_action`` is bypassed, as the pinned-argv test does, so the
+    ledger's own deduplication cannot swallow a second call the regression
+    tests need to see reach kubectl.
+    """
+    adapter = KubernetesAdapter(storage or _storage(), namespace=namespace)
+    monkeypatch.setattr(KubernetesAdapter, "available", staticmethod(lambda: True))
+    argvs: list[list[str]] = []
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        argvs.append(args)
+        return SimpleNamespace(stdout="job output")
+
+    def intercept_action(
+        run_id: str,
+        action_type: str,
+        action_fn: Callable[[], str],
+        **_: object,
+    ) -> str:
+        return action_fn()
+
+    monkeypatch.setattr("continuum.adapters.kubernetes.subprocess.run", fake_run)
+    monkeypatch.setattr(adapter, "intercept_action", intercept_action)
+    return adapter, argvs
 
 
 @pytest.mark.parametrize(
@@ -100,9 +135,10 @@ def test_run_job_builds_the_expected_action_and_returns_stdout(
     assert captured["args"] == [
         "kubectl",
         "run",
-        "continuum-job",
+        "continuum-job-0786df27ca76",
         "-n",
         "jobs",
+        "--rm",
         "--image",
         "example/app:latest",
         "--",
@@ -134,3 +170,74 @@ def test_run_job_captures_subprocess_failure_in_result(
     assert result.error is not None
     assert result.error.startswith("CalledProcessError:")
     assert len(ActionLedger(adapter.storage, "run_k8s").pending()) == 1
+
+
+def test_run_job_gives_each_job_in_a_namespace_a_distinct_pod_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every job after the first no longer loses the race for one name (#1807).
+
+    With a hardcoded name the pod survived the first call, and the API server
+    refused the next one with ``AlreadyExists``, so a namespace could run
+    exactly one ``run_job``, ever, and two concurrent runs collided even on
+    the first. Distinct commands and distinct images within one run now
+    reach kubectl under distinct names.
+    """
+    adapter, argvs = _adapter(monkeypatch, namespace="jobs")
+
+    adapter.run_job("run_k8s", "example/app:latest", "python worker.py")
+    adapter.run_job("run_k8s", "example/app:latest", "python other.py")
+    adapter.run_job("run_k8s", "example/app:other", "python worker.py")
+
+    pod_names = [argv[2] for argv in argvs]
+    assert len(pod_names) == 3
+    assert len(set(pod_names)) == 3
+    for name in pod_names:
+        assert name != "continuum-job"
+        assert _pod_name_matches_dns1123(name)
+
+
+def test_run_job_reuses_one_pod_name_for_a_replay_of_the_same_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replay of the same logical job lands on the same name (#1807).
+
+    The name is derived from the run id and the action's idempotency basis,
+    so a recovery replay does not invent a second pod for one job.
+    """
+    adapter, argvs = _adapter(monkeypatch)
+
+    adapter.run_job("run_k8s", "example/app:latest", "python worker.py")
+    adapter.run_job("run_k8s", "example/app:latest", "python worker.py")
+    adapter.run_job("run_other", "example/app:latest", "python worker.py")
+
+    pod_names = [argv[2] for argv in argvs]
+    assert (
+        pod_names[0]
+        == pod_names[1]
+        == _pod_name("run_k8s", "example/app:latest", "python worker.py")
+    )
+    assert pod_names[2] != pod_names[0]
+
+
+def test_pod_name_stays_a_valid_label_when_the_run_id_is_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run ids that kubernetes would reject must not leak into the name.
+
+    ``run_k8s`` carries an underscore and this fixture's other ids uppercase
+    letters; interpolation would produce an invalid DNS-1123 label, so the
+    name is built from hex digest characters instead.
+    """
+    adapter, argvs = _adapter(monkeypatch)
+
+    adapter.run_job("Run_K8s_2026", "example/app:latest", "python worker.py")
+
+    assert _pod_name_matches_dns1123(argvs[0][2])
+    assert _pod_name("Run_K8s_2026", "example/app:latest", "python worker.py").startswith(
+        "continuum-job-"
+    )
+
+
+def _pod_name_matches_dns1123(name: str) -> bool:
+    return re.fullmatch(r"continuum-job-[0-9a-f]{12}", name) is not None

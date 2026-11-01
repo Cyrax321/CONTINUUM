@@ -8,9 +8,9 @@ evidence resting on it, to the finding, to the final decision.
 from continuum.state.validator import StateValidator, validate_state
 
 outcome = validate_state(state, current_environment=env, expected_model="gpt-4o")
-print(outcome.report.safe_to_resume)            # overall verdict: True only when every component is VALID
-for entry in outcome.report.statuses:           # per-component StateStatus
-    print(entry.component, entry.status)        # VALID | STALE | CONFLICTED | UNKNOWN | INVALID
+print(outcome.report.safe_to_resume)  # overall verdict: True only when every component is VALID
+for entry in outcome.report.statuses:  # per-component StateStatus
+    print(entry.component, entry.status)  # VALID | STALE | CONFLICTED | UNKNOWN | INVALID
 ```
 
 ## StateValidator

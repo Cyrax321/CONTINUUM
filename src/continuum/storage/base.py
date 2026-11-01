@@ -30,7 +30,8 @@ Guarantees deliberately *not* claimed
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from heapq import merge
 from pathlib import Path
 from types import TracebackType
@@ -284,6 +285,15 @@ class Storage(ABC):
         Same capability contract as :meth:`action_index_drift`.
         """
         raise NotImplementedError
+
+    @contextmanager
+    def atomic_claim(self, run_id: str, key: str | None = None) -> Iterator[None]:
+        """Wrap claim resolution and recording in an atomic transaction.
+
+        Storage backends implement this to ensure no racing writer can resolve
+        and append concurrently on the same store.
+        """
+        yield
 
     # -- lifecycle -------------------------------------------------------- #
 

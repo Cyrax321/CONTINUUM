@@ -735,3 +735,375 @@ def test_serve_checkpoint_projects_full_history_after_compaction(tmp_path: Path)
     state = project("run_sc", storage.read_all_events("run_sc"))
     assert state.goal is not None
     assert state.goal.constraints == ["fragile", "same-day"]
+
+
+# --- the wire client (#1746) ------------------------------------------------
+
+
+def test_sidecar_client_round_trips_one_request_over_in_memory_streams() -> None:
+    """The client's outgoing frame is exactly what a real stdio server answers."""
+    from continuum.serve import SidecarClient
+
+    reply_wire = io.StringIO()
+    frame = (
+        json_line(0, "record_progress", {"run_id": "r1", "completed": 2, "total": 5, "goal": "g"})
+        + "\n"
+    )
+    make_server().serve_stdio(io.StringIO(frame), reply_wire)
+
+    out = io.StringIO()
+    client = SidecarClient(io.StringIO(reply_wire.getvalue()), out)
+    result = client.request("record_progress", run_id="r1", completed=2, total=5, goal="g")
+
+    assert result["completed"] == 2
+    assert result["pending"] == 3
+    assert result["total"] == 5
+    # The frame the client wrote is the frame the server just accepted, byte for byte.
+    assert out.getvalue() == frame
+
+
+def test_sidecar_client_raises_on_error_response() -> None:
+    """An error frame is a :class:`SidecarClientError`, never a returned dict."""
+    from continuum.serve import SidecarClient, SidecarClientError
+
+    out = io.StringIO()
+    inbox = io.StringIO(
+        '{"id": 0, "error": {"type": "not_authorized", "message": "no token supplied"}}\n'
+    )
+    client = SidecarClient(inbox, out)
+    with pytest.raises(SidecarClientError, match="not_authorized: no token supplied"):
+        client.request("resume", run_id="r1")
+
+
+def test_sidecar_client_raises_when_the_sidecar_closes_the_connection() -> None:
+    """EOF mid-request is reported rather than returning ``None``."""
+    from continuum.serve import SidecarClient, SidecarClientError
+
+    client = SidecarClient(io.StringIO(""), io.StringIO())
+    with pytest.raises(SidecarClientError, match="sidecar closed the connection"):
+        client.request("resume", run_id="r1")
+
+
+def test_sidecar_client_skips_blank_lines_and_other_ids() -> None:
+    """Blank lines and frames for other ids are not answers, they are noise."""
+    from continuum.serve import SidecarClient
+
+    inbox = io.StringIO(
+        '\n{"id": 99, "result": {"mode": "replay"}}\n{"id": 0, "result": {"mode": "resume"}}\n'
+    )
+    client = SidecarClient(inbox, io.StringIO())
+    assert client.request("resume") == {"mode": "resume"}
+
+
+def test_sidecar_client_request_id_advances_per_call() -> None:
+    """Each call carries the next id, so interleaved replies stay separable."""
+    from continuum.serve import SidecarClient
+
+    out = io.StringIO()
+    inbox = io.StringIO('{"id": 0, "result": {"ok": "a"}}\n{"id": 1, "result": {"ok": "b"}}\n')
+    client = SidecarClient(inbox, out)
+
+    assert client.request("record_progress") == {"ok": "a"}
+    assert client.request("record_progress") == {"ok": "b"}
+
+    sent = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+    assert [line["id"] for line in sent] == [0, 1]
+    assert [line["method"] for line in sent] == ["record_progress", "record_progress"]
+
+
+def test_sidecar_client_close_suppresses_errors_from_a_broken_out_stream() -> None:
+    """``close`` never propagates: a server must still shut down cleanly."""
+    from continuum.serve import SidecarClient
+
+    class Exploding(io.StringIO):
+        def close(self) -> None:
+            raise OSError("already closed elsewhere")
+
+    client = SidecarClient(io.StringIO(""), Exploding())
+    client.close()  # must not raise
+
+
+def test_subprocess_client_delegates_to_the_wrapped_client() -> None:
+    """``SubprocessClient.__getattr__`` forwards to the wire client."""
+    from continuum.serve import SidecarClient, SubprocessClient
+
+    inbox = io.StringIO('{"id": 0, "result": {"mode": "resume"}}\n')
+    inner = SidecarClient(inbox, io.StringIO())
+    proc = SubprocessClient(_FakeProcess(), inner)
+
+    assert proc.request("resume") == {"mode": "resume"}
+    assert proc._next_id == 1  # the attribute lives on the wrapped client
+
+
+def test_subprocess_client_terminate_kills_a_process_that_ignores_sigterm() -> None:
+    """``terminate`` escalates to kill when the five-second wait expires."""
+    from continuum.serve import SidecarClient, SubprocessClient
+    from continuum.serve.server import SidecarServer  # noqa: F401  (import sanity)
+
+    proc = _FakeProcess(hang=True)
+    client = SubprocessClient(proc, SidecarClient(io.StringIO(""), io.StringIO()))
+    client.terminate()
+
+    assert proc.terminated
+    assert proc.killed
+
+
+def test_subprocess_client_terminate_waits_for_a_polite_exit() -> None:
+    from continuum.serve import SidecarClient, SubprocessClient
+
+    proc = _FakeProcess()
+    client = SubprocessClient(proc, SidecarClient(io.StringIO(""), io.StringIO()))
+    client.terminate()
+
+    assert proc.terminated
+    assert not proc.killed
+
+
+class _FakeProcess:
+    """The bit of ``subprocess.Popen`` ``SubprocessClient`` and
+    ``serve_subprocess`` depend on, without a real process."""
+
+    def __init__(self, hang: bool = False) -> None:
+        self.terminated = False
+        self.killed = False
+        self.hang = hang
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def wait(self, timeout: float | None = None) -> int:
+        import subprocess as _sp
+
+        if self.hang and timeout is not None:
+            raise _sp.TimeoutExpired(cmd="continuum serve", timeout=timeout)
+        return 0
+
+
+def test_serve_subprocess_passes_the_token_through_the_environment(monkeypatch) -> None:
+    """The token reaches the child as ``CONTINUUM_SERVE_TOKEN``."""
+    import subprocess
+
+    from continuum.serve import serve_subprocess
+
+    captured: dict = {}
+
+    class FakePopen:
+        def __init__(self, cmd, stdin, stdout, env, text, bufsize) -> None:
+            captured["env"] = env
+            self.stdin = stdin
+            self.stdout = stdout
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    serve_subprocess("ignored.db", token="sekret")
+
+    assert captured["env"]["CONTINUUM_SERVE_TOKEN"] == "sekret"
+
+
+def test_serve_subprocess_omits_the_token_when_none_was_given(monkeypatch) -> None:
+    import subprocess
+
+    from continuum.serve import serve_subprocess
+
+    captured: dict = {}
+
+    class FakePopen:
+        def __init__(self, cmd, stdin, stdout, env, text, bufsize) -> None:
+            captured["env"] = env
+            self.stdin = stdin
+            self.stdout = stdout
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    serve_subprocess("ignored.db")
+
+    assert "CONTINUUM_SERVE_TOKEN" not in captured["env"]
+
+
+def test_run_serve_over_stdio_returns_zero_and_closes_the_server(monkeypatch) -> None:
+    """The stdio branch is the default transport; the server always closes."""
+    import continuum.serve
+    from continuum.serve import run_serve
+
+    closed: list[bool] = []
+
+    class FakeServer:
+        def __init__(self, database=None) -> None:
+            pass
+
+        def serve_stdio(self, instream, outstream) -> int:
+            return 0
+
+        def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(continuum.serve, "SidecarServer", FakeServer)
+
+    assert run_serve(db=None, transport="stdio") == 0
+    assert closed == [True]
+
+
+def test_run_serve_over_http_shuts_the_server_down(monkeypatch) -> None:
+    """The http branch runs the loop, then shuts down and closes the server."""
+    import continuum.serve
+    from continuum.serve import run_serve
+
+    events: list[str] = []
+
+    class FakeHTTP:
+        def __init__(self, server, port: int = 8765, bind: str = "127.0.0.1") -> None:
+            events.append(f"init:{port}")
+            self.port = port
+            self.bind = bind
+
+        def serve_forever(self) -> None:
+            events.append("serve")
+
+        def shutdown(self) -> None:
+            events.append("shutdown")
+
+    class FakeServer:
+        def __init__(self, database=None) -> None:
+            events.append(f"server:{database}")
+
+        def serve_stdio(self, instream, outstream) -> int:  # pragma: no cover
+            return 0
+
+        def close(self) -> None:
+            events.append("close")
+
+    monkeypatch.setattr(continuum.serve, "SidecarServer", FakeServer)
+    monkeypatch.setattr("continuum.serve.server.SidecarHTTP", FakeHTTP)
+
+    assert run_serve(db=None, transport="http", port=9100) == 0
+    assert events == ["server:None", "init:9100", "serve", "shutdown", "close"]
+
+
+def test_run_serve_http_survives_ctrl_c_and_still_shuts_down(monkeypatch, capsys) -> None:
+    """``KeyboardInterrupt`` is the normal way a foreground server stops."""
+    import continuum.serve
+    from continuum.serve import run_serve
+
+    events: list[str] = []
+
+    class FakeHTTP:
+        def __init__(self, server, port: int = 8765, bind: str = "127.0.0.1") -> None:
+            events.append(f"init:{port}")
+            self.port = port
+            self.bind = bind
+
+        def serve_forever(self) -> None:
+            raise KeyboardInterrupt
+
+        def shutdown(self) -> None:
+            events.append("shutdown")
+
+    class FakeServer:
+        def __init__(self, database=None) -> None:
+            events.append(f"server:{database}")
+
+        def serve_stdio(self, instream, outstream) -> int:  # pragma: no cover
+            return 0
+
+        def close(self) -> None:
+            events.append("close")
+
+    monkeypatch.setattr(continuum.serve, "SidecarServer", FakeServer)
+    monkeypatch.setattr("continuum.serve.server.SidecarHTTP", FakeHTTP)
+
+    assert run_serve(db=None, transport="http") == 0
+    # The finally block is the whole point: shutdown then close must still run
+    # after the interrupt, in that order.
+    assert events == ["server:None", "init:8765", "shutdown", "close"]
+    assert "CONTINUUM sidecar listening on http://127.0.0.1:8765" in capsys.readouterr().out
+
+
+def test_cmd_serve_runs_over_stdio_and_closes_the_storage(tmp_path) -> None:
+    """``cmd_serve`` hands the CLI's parsed args to ``run_serve`` and returns it."""
+    from continuum.serve import cmd_serve
+    from continuum.storage.sqlite import SQLiteStorage
+
+    closed: list[bool] = []
+
+    class TrackingStorage(SQLiteStorage):
+        def close(self) -> None:
+            closed.append(True)
+            super().close()
+
+    s = TrackingStorage(str(tmp_path / "cmd_serve2.db"))
+
+    class Args:
+        # run_serve builds a real SidecarServer from this, so None (or
+        # CONTINUUM_DB) would open continuum.db in the working directory.
+        db = str(tmp_path / "cmd_serve.db")
+        transport = "stdio"
+        port = 8765
+
+    # run_serve's stdio branch defaults to sys.stdin/sys.stdout, which pytest
+    # does not let it read; an empty stream is the "no requests" shape.
+    import sys
+
+    real_stdin = sys.stdin
+    sys.stdin = io.StringIO("")
+    try:
+        assert cmd_serve(Args, s, io.StringIO(), io.StringIO()) == 0
+    finally:
+        sys.stdin = real_stdin
+    assert closed == [True]
+
+
+def test_cmd_serve_leaves_a_non_storage_object_alone(tmp_path) -> None:
+    """Only a real ``Storage`` is closed; anything else is passed through."""
+    from continuum.serve import cmd_serve
+
+    class Args:
+        # As above: an explicit path keeps the test from opening the default
+        # continuum.db in whatever directory pytest runs from.
+        db = str(tmp_path / "non_storage.db")
+        transport = "stdio"
+        port = 8765
+
+    import sys
+
+    real_stdin = sys.stdin
+    sys.stdin = io.StringIO("")
+    try:
+        # storage=None is the real shape on a run that did not open a database.
+        assert cmd_serve(Args, None, io.StringIO(), io.StringIO()) == 0
+    finally:
+        sys.stdin = real_stdin
+
+
+def test_cmd_serve_forwards_the_db_transport_and_port() -> None:
+    """The knobs the CLI parses reach ``run_serve`` unchanged."""
+    import continuum.serve
+    from continuum.serve import cmd_serve
+
+    seen: dict = {}
+
+    def fake_run_serve(
+        db=None, transport="stdio", instream=None, outstream=None, port=8765, bind=None
+    ):
+        seen.update(db=db, transport=transport, port=port, bind=bind)
+        return 7
+
+    monkeypatch_target = continuum.serve
+    original = monkeypatch_target.run_serve
+    monkeypatch_target.run_serve = fake_run_serve
+    try:
+
+        class Args:
+            db = "runs.db"
+            transport = "http"
+            port = 9999
+            bind = "127.0.0.1"
+
+        class StorageLike:
+            pass
+
+        assert cmd_serve(Args, StorageLike(), io.StringIO(), io.StringIO()) == 7
+    finally:
+        monkeypatch_target.run_serve = original
+
+    assert seen == {"db": "runs.db", "transport": "http", "port": 9999, "bind": "127.0.0.1"}

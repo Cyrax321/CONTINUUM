@@ -33,7 +33,6 @@ import contextlib
 import datetime
 import json
 import os
-import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -47,7 +46,6 @@ __all__ = [
     "observation_path",
     "read_observed_clients",
     "record_observed_client",
-    "split_declared_names",
 ]
 
 #: The side file's directory, beside the database. ``.continuum/`` is already
@@ -60,8 +58,11 @@ OBSERVATION_DIRNAME = ".continuum"
 OBSERVATION_FILENAME = "mcp-client-observations.json"
 
 #: Bumped when the shape changes, so a reader can tell an old file from a
-#: broken one instead of parsing either as the current format.
-SCHEMA_VERSION = 1
+#: broken one instead of parsing either as the current format. 2: names are
+#: recorded verbatim (#1805); a file written by the 1 code that split a
+#: declared name on allowlist separators may hold fragments no host sent, so
+#: it is discarded rather than carried into the doctor's report.
+SCHEMA_VERSION = 2
 
 #: A client name arrives from an untrusted peer, so it is bounded before it
 #: reaches the filesystem: longer than any real host needs, short enough that a
@@ -73,9 +74,22 @@ MAX_OBSERVED_NAME_LENGTH = 128
 #: from growing the file without limit, evicting the least recently seen first.
 MAX_OBSERVED_CLIENTS = 32
 
-#: How ``authz`` splits an allowlist value. Recorded from the same separators
-#: so the doctor compares individual names, never list syntax.
-_LIST_SPLIT = re.compile(r"[\s,]+")
+
+def _normalized_name(name: Any) -> str | None:
+    """One declared name, stripped and bounded, or ``None`` when unusable.
+
+    The bound is what keeps an untrusted peer's string off the filesystem as
+    more than a bounded number of bytes. A name that is blank after stripping
+    or past the length bound is unusable rather than truncatable: a truncated
+    name is a name the host never sent, which is exactly the guess this
+    module's contract says it must never make.
+    """
+    if not isinstance(name, str):
+        return None
+    text = name.strip()
+    if not text or len(text) > MAX_OBSERVED_NAME_LENGTH:
+        return None
+    return text
 
 
 def observation_path(database: str) -> Path:
@@ -110,30 +124,7 @@ def declared_client_name(params: Any) -> str | None:
     info = params.get("clientInfo")
     if not isinstance(info, dict):
         return None
-    name = info.get("name")
-    if not isinstance(name, str):
-        return None
-    name = name.strip()
-    if not name or len(name) > MAX_OBSERVED_NAME_LENGTH:
-        return None
-    return name
-
-
-def split_declared_names(value: str) -> list[str]:
-    """Every individual client name a declared value contains.
-
-    ``authz`` splits an allowlist on commas and whitespace, so a value naming
-    three clients authorizes three callers. Recording the raw string would make
-    the doctor compare ``"a, b"`` against ``"b"`` and call a healthy
-    registration a mismatch.
-    """
-    if not isinstance(value, str):
-        return []
-    return [
-        name
-        for name in (part[:MAX_OBSERVED_NAME_LENGTH] for part in _LIST_SPLIT.split(value.strip()))
-        if name
-    ]
+    return _normalized_name(info.get("name"))
 
 
 def read_observed_clients(database: str) -> dict[str, dict[str, Any]]:
@@ -176,9 +167,19 @@ def record_observed_client(database: str, name: str) -> None:
     gap while refusing the connection would be an outage. Writes are atomic, so
     a failure leaves the previous contents intact rather than a truncated file
     a reader would have to treat as corruption.
+
+    ``name`` is one connection's declared name and is recorded verbatim. A
+    host's name is whatever the host sent: splitting it on the separators an
+    allowlist uses (which is how ``authz`` reads a value that names several
+    authorized callers) would record names the host never declared. One
+    connection from a host named ``"Visual Studio Code"`` used to fill the
+    record with three names no host sent, and the doctor then reported a
+    mismatch against clients that do not exist; the name is also validated the
+    same way :func:`declared_client_name` validates it, so an unusable value
+    records nothing rather than a bounded fragment of itself.
     """
-    names = split_declared_names(name)
-    if not names:
+    declared = _normalized_name(name)
+    if declared is None:
         return
     path = observation_path(database)
     try:
@@ -189,16 +190,15 @@ def record_observed_client(database: str, name: str) -> None:
         # The stamp has one-second resolution, so a burst of connections lands
         # on identical values and "least recently seen" would be decided by
         # whatever order the file happened to be written in.
-        sequence = max(_sequence_of(entry) for entry in clients.values()) if clients else 0
-        for declared in names:
-            entry = clients.get(declared)
-            count = entry.get("count") if isinstance(entry, dict) else None
-            sequence += 1
-            clients[declared] = {
-                "count": (count if isinstance(count, int) and count > 0 else 0) + 1,
-                "last_seen": stamp,
-                "seq": sequence,
-            }
+        sequence = max((_sequence_of(entry) for entry in clients.values()), default=0)
+        entry = clients.get(declared)
+        count = entry.get("count") if isinstance(entry, dict) else None
+        sequence += 1
+        clients[declared] = {
+            "count": (count if isinstance(count, int) and count > 0 else 0) + 1,
+            "last_seen": stamp,
+            "seq": sequence,
+        }
         if len(clients) > MAX_OBSERVED_CLIENTS:
             clients = dict(
                 sorted(

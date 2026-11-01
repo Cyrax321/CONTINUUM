@@ -210,6 +210,7 @@ def test_validator_marks_precompaction_evidence_partial(tmp_path) -> None:
     with SQLiteStorage(db) as store:
         store.create_run_started(Run(run_id="run_parent", goal="parent task"))
         _evidence_run(store)
+        store.append_event("run_parent", EventType.TASK_UPDATED, {"task": "active task"})
         adapter = GenericAgentAdapter(store)
         adapter.compact_context("run_parent", retained_events=1, compacted_events=2)
 
@@ -223,9 +224,60 @@ def test_validator_marks_precompaction_evidence_partial(tmp_path) -> None:
             ("evidence", "ev2"),
         }
         by_id = {e.component_id: e for e in partial}
-        assert "context compacted at sequence 4" in by_id["ev1"].detail
+        assert "context compacted at sequence 5" in by_id["ev1"].detail
         assert "2 event(s) summarised" in by_id["ev1"].detail
         assert outcome.state.evidence[0].status is StateStatus.PARTIAL
+
+
+def test_validator_compaction_window_distinguishes_retained_and_compacted(tmp_path) -> None:
+    """Validator marks compacted prefix PARTIAL while leaving retained tail VALID."""
+    from continuum.state.semantic import project
+
+    db = str(tmp_path / "test.db")
+    with SQLiteStorage(db) as store:
+        run_id = "r_comp"
+        store.create_run_started(Run(run_id=run_id, goal="test"))
+
+        # Append evidence early at sequence 2
+        store.append_event(
+            run_id,
+            EventType.EVIDENCE_ADDED,
+            {"evidence_id": "ev_early", "claim": "early fact"},
+        )
+
+        # Intermediate task events: sequences 3, 4, 5, 6, 7
+        for i in range(5):
+            store.append_event(run_id, EventType.TASK_UPDATED, {"task": f"t_{i}"})
+
+        # Append evidence late at sequence 8
+        store.append_event(
+            run_id,
+            EventType.EVIDENCE_ADDED,
+            {"evidence_id": "ev_recent", "claim": "recent fact"},
+        )
+
+        # At sequence 9, record context compaction:
+        # 2 early events compacted into summary (sequences 2 and 3), 5 retained (sequences 4..8).
+        store.append_event(
+            run_id,
+            EventType.PRECOMPACT_HOOK,
+            {"retained_events": 5, "compacted_events": 2},
+        )
+
+        # Append evidence post-compaction at sequence 10
+        store.append_event(
+            run_id,
+            EventType.EVIDENCE_ADDED,
+            {"evidence_id": "ev_post", "claim": "post compaction fact"},
+        )
+
+        events = list(store.read_events(run_id))
+        outcome = validate_state(project(run_id, events), events=events)
+
+        statuses = {ev.evidence_id: ev.status for ev in outcome.state.evidence}
+        assert statuses["ev_early"] is StateStatus.PARTIAL
+        assert statuses["ev_recent"] is StateStatus.VALID
+        assert statuses["ev_post"] is StateStatus.VALID
 
 
 def test_validator_skips_compaction_with_bad_counts(tmp_path) -> None:

@@ -208,6 +208,7 @@ it in advance.
 class Registry:
     def register(self, name: str, service: object) -> None: ...
     def get(self, name: str, type_: type[T]) -> T: ...
+
     # reversible: removing a plugin tears down only what it contributed
 ```
 

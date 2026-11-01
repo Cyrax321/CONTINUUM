@@ -737,28 +737,6 @@ class RecoveryLedger:
                     note=f"attempt {count} for scope {label} reached the escalation "
                     f"threshold {limit}",
                 )
-                count = (
-                    sum(
-                        1
-                        for e in entries
-                        if e.kind == LedgerEntryKind.ATTEMPT.value and e.scope is None
-                    )
-                    + 1
-                )
-                escalated = any(
-                    e.kind == LedgerEntryKind.GATE.value and e.gate == HUMAN_REQUIRED
-                    for e in entries
-                )
-                if max_attempts is not None and count >= max_attempts and not escalated:
-                    self._seal_and_save(
-                        run_id,
-                        [*entries, sealed],
-                        kind=LedgerEntryKind.GATE,
-                        gate=HUMAN_REQUIRED,
-                        anchor=True,
-                        note=f"attempt {count} reached the escalation threshold {max_attempts}",
-                    )
-                return count
 
         return count
 

@@ -29,8 +29,8 @@ from continuum.storage import SQLiteStorage
 
 store = SQLiteStorage("continuum.db")
 decision = RecoveryEngine(store).assess("my-task", current_environment=None)
-print(decision.mode)      # RecoveryMode.RESUME, REQUEST_HUMAN, ...
-print(decision.safe)      # bool, also exit code 0 means safe
+print(decision.mode)  # RecoveryMode.RESUME, REQUEST_HUMAN, ...
+print(decision.safe)  # bool, also exit code 0 means safe
 print(decision.contract.model_dump(mode="json"))
 print(human_steps_for(decision, run_id="my-task"))  # executable next steps
 ```
@@ -176,9 +176,11 @@ TEMPLATE = """
 <pre>{{evidence_text}}</pre>
 """
 
+
 @app.get("/")
 def index():
     return '<a href="/run/my-task">open my-task</a>'
+
 
 @app.get("/run/<run_id>")
 def run_page(run_id: str):
@@ -189,32 +191,44 @@ def run_page(run_id: str):
         return jsonify(error=str(exc)), 404
     decision = RecoveryEngine(store).assess(run_id)
     evidence = export_evidence(store, run_id)[-5:]
-    return render_template_string(TEMPLATE,
-        run_id=run_id, mode=decision.mode.value, safe=decision.safe,
+    return render_template_string(
+        TEMPLATE,
+        run_id=run_id,
+        mode=decision.mode.value,
+        safe=decision.safe,
         goal=decision.state.goal.description,
         completed=decision.state.progress.completed,
         total=decision.state.progress.total,
         contract_text=json.dumps(decision.contract.model_dump(mode="json"), indent=2),
         human_steps=human_steps_for(decision, run_id=run_id),
-        evidence_text=json.dumps(evidence, indent=2))
+        evidence_text=json.dumps(evidence, indent=2),
+    )
+
 
 @app.get("/api/run/<run_id>/resume")
 def api_resume(run_id: str):
     store = SQLiteStorage(DB)
     decision = RecoveryEngine(store).assess(run_id)
     payload = {
-        "run_id": decision.run_id, "mode": decision.mode.value, "safe": decision.safe,
+        "run_id": decision.run_id,
+        "mode": decision.mode.value,
+        "safe": decision.safe,
         "next_allowed_action": decision.next_allowed_action,
         "contract": decision.contract.model_dump(mode="json"),
         "human_steps": human_steps_for(decision, run_id=run_id),
-        "progress": {"completed": decision.state.progress.completed, "pending": decision.state.progress.pending}
+        "progress": {
+            "completed": decision.state.progress.completed,
+            "pending": decision.state.progress.pending,
+        },
     }
     return jsonify(payload)
+
 
 @app.get("/api/run/<run_id>/evidence")
 def api_evidence(run_id: str):
     store = SQLiteStorage(DB)
     return jsonify(export_evidence(store, run_id))
+
 
 if __name__ == "__main__":
     app.run(port=8766)

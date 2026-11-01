@@ -62,3 +62,305 @@ def test_explicit_requirements_overrides_manifest(tmp_path: Path) -> None:
     _write(tmp_path, "pyproject.toml", '[project]\nname="x"\ndependencies=["numpy"]\n')
     graph = DependencyGraph(tmp_path, requirements=["pandas"])
     assert graph.declared == {"pandas"}
+
+
+def test_mixed_case_and_distribution_aliases_agree(tmp_path: Path) -> None:
+    # Regression test for issue #1606:
+    # Declared names are lower-cased while imports may be mixed-case (FastAPI)
+    # or use distinct import module names (Pillow -> PIL, PyYAML -> yaml).
+    _write(
+        tmp_path,
+        "pyproject.toml",
+        '[project]\nname="demo"\ndependencies=["PyYAML>=6.0", "fastapi", "Pillow"]\n',
+    )
+    mod = _write(
+        tmp_path,
+        "mod.py",
+        "from FastAPI import APIRouter\nfrom PIL import Image\nimport yaml\n",
+    )
+    graph = DependencyGraph(tmp_path)
+    assert graph.declared == {"fastapi", "pillow", "pyyaml"}
+
+    # owner_of identifies declared dependencies regardless of import casing or alias
+    assert graph.owner_of(mod) == {"fastapi", "pillow", "pyyaml"}
+
+    # files_using resolves via declared distribution name or import module name
+    assert graph.files_using("fastapi") == {mod}
+    assert graph.files_using("FastAPI") == {mod}
+    assert graph.files_using("pillow") == {mod}
+    assert graph.files_using("Pillow") == {mod}
+    assert graph.files_using("PIL") == {mod}
+    assert graph.files_using("pyyaml") == {mod}
+    assert graph.files_using("PyYAML") == {mod}
+    assert graph.files_using("yaml") == {mod}
+
+    # All imports are declared, so none are reported as third-party undeclared
+    assert graph.third_party_imports(mod) == set()
+
+
+def test_custom_aliases_and_stdlib_casing(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "requirements.txt",
+        "company-sdk>=1.0\n",
+    )
+    mod = _write(
+        tmp_path,
+        "worker.py",
+        "import cProfile\nimport os\nfrom sdk.client import Client\nimport requests\n",
+    )
+    graph = DependencyGraph(tmp_path, aliases={"company-sdk": "sdk"})
+    assert graph.is_stdlib("cProfile") is True
+    assert graph.is_stdlib("OS") is True
+    assert graph.owner_of(mod) == {"company-sdk"}
+    assert graph.files_using("company-sdk") == {mod}
+    assert graph.files_using("sdk") == {mod}
+    assert graph.third_party_imports(mod) == {"requests"}
+
+
+def test_google_namespace_and_protobuf_scoping(tmp_path: Path) -> None:
+    # protobuf should only match google.protobuf, never claiming unrelated google.* packages
+    _write(
+        tmp_path,
+        "pyproject.toml",
+        '[project]\nname="demo"\ndependencies=["protobuf>=4.0"]\n',
+    )
+    mod_proto = _write(
+        tmp_path,
+        "proto_mod.py",
+        "import google.protobuf\nfrom google import protobuf\n",
+    )
+    mod_cloud = _write(
+        tmp_path,
+        "cloud_mod.py",
+        "import google.cloud.storage\nfrom google.cloud import storage\n",
+    )
+    graph = DependencyGraph(tmp_path)
+    assert graph.declared == {"protobuf"}
+
+    assert graph.owner_of(mod_proto) == {"protobuf"}
+    assert graph.owner_of(mod_cloud) == set()
+
+    assert graph.files_using("protobuf") == {mod_proto}
+    assert graph.files_using("google.protobuf") == {mod_proto}
+    assert graph.files_using("google.cloud.storage") == {mod_cloud}
+
+    assert graph.third_party_imports(mod_proto) == set()
+    assert graph.third_party_imports(mod_cloud) == {"google.cloud.storage"}
+
+
+def test_pep503_canonicalization_and_distribution_spellings(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "requirements.txt",
+        "scikit_learn>=1.0\nopencv_python\npython_dateutil\n",
+    )
+    mod = _write(
+        tmp_path,
+        "mod.py",
+        "import sklearn\nimport cv2\nimport dateutil\n",
+    )
+    graph = DependencyGraph(tmp_path)
+    assert graph.declared == {"scikit_learn", "opencv_python", "python_dateutil"}
+    assert graph.owner_of(mod) == {"scikit_learn", "opencv_python", "python_dateutil"}
+
+    assert graph.files_using("scikit-learn") == {mod}
+    assert graph.files_using("scikit_learn") == {mod}
+    assert graph.files_using("sklearn") == {mod}
+    assert graph.files_using("opencv-python") == {mod}
+    assert graph.files_using("cv2") == {mod}
+    assert graph.files_using("python-dateutil") == {mod}
+    assert graph.files_using("dateutil") == {mod}
+
+    assert graph.third_party_imports(mod) == set()
+
+
+def test_installed_metadata_aliases_and_fallback(tmp_path: Path, monkeypatch) -> None:
+    import importlib.metadata
+
+    from continuum.analysis import depends
+
+    mock_dists = {
+        "custommod": ["custom-distribution"],
+        "google": ["protobuf"],
+    }
+    monkeypatch.setattr(importlib.metadata, "packages_distributions", lambda: mock_dists)
+    depends._installed_packages_distributions.cache_clear()
+    depends._installed_dist_to_imports.cache_clear()
+    depends._installed_import_to_dists.cache_clear()
+
+    _write(
+        tmp_path,
+        "requirements.txt",
+        "custom_distribution>=1.0\n",
+    )
+    mod = _write(
+        tmp_path,
+        "app.py",
+        "import custommod\n",
+    )
+    graph = DependencyGraph(tmp_path)
+    assert graph.owner_of(mod) == {"custom_distribution"}
+    assert graph.files_using("custom-distribution") == {mod}
+    assert graph.files_using("custom_distribution") == {mod}
+    assert graph.files_using("custommod") == {mod}
+    assert graph.third_party_imports(mod) == set()
+
+    # Fallback when metadata access raises
+    monkeypatch.setattr(
+        importlib.metadata,
+        "packages_distributions",
+        lambda: (_ for _ in ()).throw(RuntimeError("metadata error")),
+    )
+    depends._installed_packages_distributions.cache_clear()
+    depends._installed_dist_to_imports.cache_clear()
+    depends._installed_import_to_dists.cache_clear()
+
+    assert depends._installed_packages_distributions() == {}
+    assert depends._installed_dist_to_imports() == {}
+    assert depends._installed_import_to_dists() == {}
+
+    fallback_graph = DependencyGraph(tmp_path, requirements=["foo"])
+    assert fallback_graph.declared == {"foo"}
+
+    # Restore clean caches
+    monkeypatch.undo()
+    depends._installed_packages_distributions.cache_clear()
+    depends._installed_dist_to_imports.cache_clear()
+    depends._installed_import_to_dists.cache_clear()
+
+
+def test_custom_aliases_sequence_and_relative_path_resolution(tmp_path: Path) -> None:
+    mod = _write(
+        tmp_path,
+        "worker.py",
+        "import sub_a\nimport sub_b\n",
+    )
+    graph = DependencyGraph(
+        tmp_path,
+        requirements=["my-dist"],
+        aliases={"my-dist": ["sub_a", "sub_b"]},
+    )
+    assert graph.owner_of(mod) == {"my-dist"}
+    assert graph.owner_of(Path("worker.py")) == {"my-dist"}
+    assert graph.owner_of(tmp_path / "absent.py") == set()
+
+    assert graph.files_using("my-dist") == {mod}
+    assert graph.files_using("sub_a") == {mod}
+    assert graph.files_using("sub_b") == {mod}
+
+    assert graph.third_party_imports(mod) == set()
+    assert graph.third_party_imports(Path("worker.py")) == set()
+    assert graph.third_party_imports(tmp_path / "absent.py") == set()
+
+
+def test_scan_skips_excluded_dirs_and_syntax_errors(tmp_path: Path) -> None:
+    _write(tmp_path, ".venv/ignored.py", "import requests\n")
+    _write(tmp_path, "broken.py", "def broken syntax (\n")
+    good = _write(tmp_path, "good.py", "import requests\n")
+    graph = DependencyGraph(tmp_path, requirements=["requests"])
+    assert graph.files_using("requests") == {good}
+    assert graph.owner_of(good) == {"requests"}
+
+
+def test_scan_os_error_handling(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        Path,
+        "rglob",
+        lambda self, pattern: (_ for _ in ()).throw(OSError("disk error")),
+    )
+    graph = DependencyGraph(tmp_path, requirements=["requests"])
+    assert graph.files_using("requests") == set()
+
+
+def test_malformed_pyproject_fallback(tmp_path: Path) -> None:
+    _write(tmp_path, "pyproject.toml", "[invalid toml format ==\n")
+    graph = DependencyGraph(tmp_path)
+    assert graph.declared == set()
+
+
+def test_google_namespace_distribution_candidates(tmp_path: Path) -> None:
+    """google-* distributions map to google.<sub> imports without false matches."""
+    app = _write(
+        tmp_path,
+        "app.py",
+        "from google.cloud import storage\nimport google.auth\n",
+    )
+    bq_app = _write(
+        tmp_path,
+        "bq.py",
+        "from google.cloud import bigquery\n",
+    )
+    sub_app = _write(
+        tmp_path,
+        "sub.py",
+        "from google.cloud.storage import Client\nimport google.cloud.storage.blob\n",
+    )
+    graph = DependencyGraph(
+        tmp_path,
+        requirements=["google-cloud-storage", "google-auth>=2.0"],
+    )
+    assert graph.owner_of(app) == {"google-cloud-storage", "google-auth"}
+    assert graph.files_using("google-cloud-storage") == {app, sub_app}
+    assert graph.files_using("google_cloud_storage") == {app, sub_app}
+    assert graph.files_using("google-auth") == {app}
+    assert graph.third_party_imports(app) == set()
+    assert graph.third_party_imports(sub_app) == set()
+
+    # google-cloud-storage must not claim files importing google.cloud.bigquery
+    assert graph.owner_of(bq_app) == set()
+    assert bq_app not in graph.files_using("google-cloud-storage")
+    assert graph.third_party_imports(bq_app) == {"google.cloud.bigquery"}
+
+    proto_graph = DependencyGraph(tmp_path, requirements=["protobuf"])
+    assert proto_graph.owner_of(app) == set()
+    assert proto_graph.files_using("protobuf") == set()
+
+
+def test_versioned_google_cloud_service_imports(tmp_path: Path) -> None:
+    """Versioned client modules (e.g. tasks_v2, kms_v1) map to their service distribution."""
+    tasks_app = _write(
+        tmp_path,
+        "tasks.py",
+        "from google.cloud import tasks_v2\nimport google.cloud.kms_v1\n",
+    )
+    graph = DependencyGraph(
+        tmp_path,
+        requirements=["google-cloud-tasks", "google-cloud-kms"],
+    )
+    assert graph.owner_of(tasks_app) == {"google-cloud-tasks", "google-cloud-kms"}
+    assert graph.files_using("google-cloud-tasks") == {tasks_app}
+    assert graph.files_using("google-cloud-kms") == {tasks_app}
+    assert graph.files_using("google.cloud.tasks_v2") == {tasks_app}
+    assert graph.third_party_imports(tasks_app) == set()
+
+
+def test_common_dist_to_imports_agrees_with_installed_packages_distributions() -> None:
+    """_COMMON_DIST_TO_IMPORTS must agree with packages_distributions() when installed."""
+    import importlib.metadata
+
+    from continuum.analysis.depends import _COMMON_DIST_TO_IMPORTS, _canonical_dist
+
+    try:
+        installed = importlib.metadata.packages_distributions()
+    except Exception:
+        return
+    if not installed:
+        return
+
+    installed_dist_to_imports: dict[str, set[str]] = {}
+    for imp, dists in installed.items():
+        imp_lower = imp.strip().lower()
+        for d in dists:
+            installed_dist_to_imports.setdefault(_canonical_dist(d), set()).add(imp_lower)
+
+    for dist, expected_imports in _COMMON_DIST_TO_IMPORTS.items():
+        canon = _canonical_dist(dist)
+        if canon in installed_dist_to_imports:
+            actual_imports = installed_dist_to_imports[canon]
+            for exp in expected_imports:
+                top_part = exp.split(".")[0]
+                assert top_part in actual_imports, (
+                    f"Distribution {dist!r} expects import {exp!r}, "
+                    f"but packages_distributions() reports {actual_imports}"
+                )

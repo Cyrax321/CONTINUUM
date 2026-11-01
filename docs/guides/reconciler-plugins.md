@@ -27,8 +27,7 @@ from continuum.plugins import Reconciliation
 class OutboxReconciler:
     name = "outbox"
 
-    def reconcile(self, action: Action) -> Reconciliation:
-        ...
+    def reconcile(self, action: Action) -> Reconciliation: ...
 ```
 
 `Reconciliation` is three-valued, and the third value is not a hedge:
@@ -119,9 +118,7 @@ class OtelSpanReconciler:
     def reconcile(self, action: Action) -> Reconciliation:
         # Search for spans matching the action's idempotency key or action_id
         try:
-            spans = self.client.find_spans(
-                attributes={"continuum.action_id": action.action_id}
-            )
+            spans = self.client.find_spans(attributes={"continuum.action_id": action.action_id})
         except Exception as exc:
             # An error can be returned as None or allowed to raise to fail closed
             return Reconciliation(occurred=None, note=f"trace backend query failed: {exc}")

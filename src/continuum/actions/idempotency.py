@@ -355,6 +355,9 @@ def identity_tokens(
     rendered as one, since a row id of ``4821`` identifies a row as well as
     ``INV-001`` identifies an invoice (issue #36) -- plus the basename and
     basename-stem of any path-like value, and the same for ``external_id``.
+    Arguments are traversed through whatever collection shape the caller used --
+    lists, tuples, sets, or nested mappings -- so a resource named inside a
+    tuple or a set yields the same tokens it would inside a list (issue #1815).
     Weak tokens are dropped so the fallback never matches on incidental values:
     tokens shorter than three characters, or ones that appear in the fixed
     weak-token or stopword lists.
@@ -382,7 +385,10 @@ def identity_tokens(
         elif isinstance(value, Mapping):
             for v in value.values():
                 collect(v)
-        elif isinstance(value, list):
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            # Every collection shape names the same resource whatever the caller
+            # packed it in, so a tuple or set is traversed like a list rather
+            # than dropped (issue #1815).
             for v in value:
                 collect(v)
 

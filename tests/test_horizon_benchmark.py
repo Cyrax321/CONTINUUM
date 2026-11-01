@@ -66,6 +66,71 @@ def test_abort_scenario_reaches_abort_through_the_risk_path() -> None:
     assert result.metrics["correct_mode"] == "abort"
 
 
+def test_duplicate_metrics_are_measured_not_hardcoded() -> None:
+    """The published zeros must be able to fail (#1572).
+
+    A benchmark that can only ever print ``0`` for ``duplicate_side_effects``
+    is a constant, not a measurement: a broken dedup path would report the
+    same number as a working one. This drives the horizon driver's ledger
+    probe directly, then breaks the ledger the way a real regression would
+    (``claim`` stops recognising completed actions). Both duplicate metrics
+    must move off zero. If they do not, the headline claim in the README is
+    unverifiable and this test is the thing that says so.
+    """
+
+    from benchmarks.horizon.driver import HorizonRun, SimulatedClock
+    from continuum.actions import ActionLedger, ActionOutcome
+    from continuum.checkpoint import CheckpointManager
+    from continuum.events import EventType
+    from continuum.models import Run
+    from continuum.storage import SQLiteStorage
+
+    def fresh_run() -> HorizonRun:
+        storage = SQLiteStorage(":memory:")
+        storage.create_run(Run(run_id="probe", goal="probe"))
+        storage.append_event("probe", EventType.RUN_STARTED, {"goal": "probe"})
+        return HorizonRun(
+            run_id="probe",
+            storage=storage,
+            clock=SimulatedClock(),
+            manager=CheckpointManager(storage),
+        )
+
+    # Healthy path: one effect per cycle, and every post-reconstruction
+    # re-attempt is refused by the ledger.
+    horizon = fresh_run()
+    for cycle in range(3):
+        horizon.perform_effect(cycle)
+        horizon.reperform_after_reconstruction(cycle)
+    assert horizon.side_effects_performed == 3
+    assert horizon.duplicate_work_avoided == 3
+    assert horizon.duplicate_side_effects() == 0, "a healthy run must report zero duplicates"
+
+    # Broken path: the ledger forgets every completion, exactly as a
+    # compaction or restore that dropped the action index would. A resumed
+    # agent cannot tell, so it performs the work again.
+    horizon = fresh_run()
+    for cycle in range(3):
+        horizon.perform_effect(cycle)
+
+    real_claim = ActionLedger.claim
+
+    def amnesiac_claim(self: ActionLedger, *args: object, **kwargs: object) -> ActionOutcome:
+        outcome = real_claim(self, *args, **kwargs)
+        return ActionOutcome(key=outcome.key, action=outcome.action, fresh=True)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ActionLedger, "claim", amnesiac_claim)
+        horizon.reperform_after_reconstruction(0)
+    assert horizon.side_effects_performed == 4, (
+        "an amnesiac ledger should have re-executed the effect"
+    )
+    assert horizon.duplicate_side_effects() == 1, (
+        "duplicate_side_effects must be 1 once the ledger stops deduplicating; "
+        "if it stays 0 the published metric is a constant, not a measurement"
+    )
+
+
 def test_the_engines_abort_path_is_reachable_independently_of_the_scenario() -> None:
     """The mechanism the abort scenario depends on is real engine behaviour.
 
@@ -235,7 +300,6 @@ def test_shared_emitter_schema_with_fault_injection() -> None:
     import json
     import os
     import tempfile
-    from datetime import datetime
 
     from benchmarks.horizon.emitter import emit_horizon_report
     from benchmarks.horizon.runner import run_horizon_suite
@@ -245,9 +309,10 @@ def test_shared_emitter_schema_with_fault_injection() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         from benchmarks.fault_injection.emitter import emit_fault_injection_report
         from continuum.benchmark.phase6.metrics import BenchmarkReport
+        from continuum.models import utcnow
 
         dummy_fault = BenchmarkReport(
-            generated_at=datetime.now(),
+            generated_at=utcnow(),
             results=[
                 ScenarioResult(
                     scenario="fault_test",
@@ -270,3 +335,36 @@ def test_shared_emitter_schema_with_fault_injection() -> None:
                 assert "scenario" in r
                 assert "outcome" in r
                 assert "metrics" in r
+
+
+@pytest.mark.slow
+def test_benchmark_report_timestamps_are_utc_aware(monkeypatch: pytest.MonkeyPatch) -> None:
+    """All benchmark entry points stamp reports with timezone-aware UTC."""
+    from datetime import timedelta
+
+    from benchmarks.fault_injection import runner as fault_runner
+    from benchmarks.horizon.runner import run_horizon_suite
+    from continuum.benchmark.phase6.harness import run_benchmark
+
+    assert run_benchmark([]).generated_at.utcoffset() == timedelta(0)
+    assert run_horizon_suite([]).generated_at.utcoffset() == timedelta(0)
+
+    monkeypatch.setattr(
+        fault_runner,
+        "run_fault_injection_suite",
+        lambda faults=None: (
+            [],
+            {
+                "total": 0,
+                "detected": 0,
+                "detection_rate": 0.0,
+                "unsafe_resume": 0,
+                "unsafe_resume_rate": 0.0,
+                "false_positive_rate": 0.0,
+                "false_positive": False,
+                "propagation_distance": 0.0,
+            },
+        ),
+    )
+
+    assert fault_runner.run_benchmark_suite().generated_at.utcoffset() == timedelta(0)

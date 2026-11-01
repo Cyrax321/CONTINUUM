@@ -20,9 +20,12 @@ import pytest
 from pydantic import ValidationError
 
 from continuum.recovery.health import (
+    DEFAULT_LIVENESS_PATH,
     DEFAULT_MAX_SILENCE_SECONDS,
     CadenceContract,
+    LivenessResult,
     advisory_text,
+    evaluate,
     load_cadence_contract,
     silence_seconds,
 )
@@ -64,6 +67,11 @@ def test_silence_seconds_subtracts_two_aware_datetimes() -> None:
 
 def test_silence_seconds_is_zero_at_the_same_instant() -> None:
     assert silence_seconds(NOW, NOW) == 0.0
+
+
+def test_silence_seconds_negative_when_clock_skew_backwards() -> None:
+    last = NOW + timedelta(seconds=30)
+    assert silence_seconds(NOW, last) == -30.0
 
 
 # --- load_cadence_contract -------------------------------------------------- #
@@ -115,7 +123,27 @@ def test_load_refuses_an_unknown_key(tmp_path: Path) -> None:
         load_cadence_contract(path)
 
 
+def test_default_liveness_path_is_relative_to_cwd() -> None:
+    assert Path(".continuum/liveness.json") == DEFAULT_LIVENESS_PATH
+
+
 # --- the validator ---------------------------------------------------------- #
+
+
+def test_contract_is_frozen() -> None:
+    cfg = CadenceContract()
+    with pytest.raises(ValidationError):
+        cfg.max_silence_seconds = 1  # type: ignore[misc]
+
+
+def test_contract_forbids_extra_fields() -> None:
+    with pytest.raises(ValidationError):
+        CadenceContract(unexpected=1)  # type: ignore[call-arg]
+
+
+def test_scopes_positive_rejects_non_int_value() -> None:
+    with pytest.raises(ValueError, match="must be an int >= 1"):
+        CadenceContract._scopes_positive({"open_claim": "not-an-int"})  # type: ignore[dict-item]
 
 
 def test_a_blank_phase_scope_key_is_refused() -> None:
@@ -250,3 +278,72 @@ def test_advisory_text_defaults_the_phase_when_the_key_is_absent() -> None:
     text = advisory_text({"breached": False, "silence_seconds": 1.0, "threshold_seconds": 60})
 
     assert "(phase otherwise)" in text
+
+
+# --- evaluate --------------------------------------------------------------- #
+
+
+def test_evaluate_no_events_is_not_breached() -> None:
+    result = evaluate(NOW, None)
+    assert isinstance(result, LivenessResult)
+    assert result.breached is False
+    assert result.silence_seconds is None
+    assert result.last_event_ts is None
+    assert result.has_open_claim is False
+    assert result.phase == "otherwise"
+
+
+def test_evaluate_no_events_uses_open_claim_phase_when_claimed() -> None:
+    assert evaluate(NOW, None, has_open_claim=True).phase == "open_claim"
+
+
+def test_evaluate_not_breached_within_threshold() -> None:
+    contract = CadenceContract(max_silence_seconds=100, phase_scopes={"otherwise": 100})
+    last = NOW - timedelta(seconds=50)
+    result = evaluate(NOW, last, contract=contract)
+    assert result.breached is False
+    assert result.silence_seconds == 50.0
+    assert result.threshold_seconds == 100
+
+
+def test_evaluate_breached_when_silence_exceeds_threshold() -> None:
+    contract = CadenceContract(max_silence_seconds=100, phase_scopes={"otherwise": 100})
+    last = NOW - timedelta(seconds=101)
+    assert evaluate(NOW, last, contract=contract).breached is True
+
+
+def test_evaluate_not_breached_exactly_at_threshold() -> None:
+    contract = CadenceContract(max_silence_seconds=100, phase_scopes={"otherwise": 100})
+    last = NOW - timedelta(seconds=100)
+    assert evaluate(NOW, last, contract=contract).breached is False
+
+
+def test_evaluate_not_breached_when_silence_is_negative() -> None:
+    contract = CadenceContract(max_silence_seconds=100, phase_scopes={"otherwise": 100})
+    last = NOW + timedelta(seconds=5)
+    assert evaluate(NOW, last, contract=contract).breached is False
+
+
+def test_evaluate_uses_open_claim_scope_when_claimed() -> None:
+    contract = CadenceContract(max_silence_seconds=1000, phase_scopes={"open_claim": 50})
+    last = NOW - timedelta(seconds=60)
+    result = evaluate(NOW, last, contract=contract, has_open_claim=True)
+    assert result.breached is True
+    assert result.phase == "open_claim"
+    assert result.threshold_seconds == 50
+
+
+def test_evaluate_normalises_naive_datetimes() -> None:
+    contract = CadenceContract(max_silence_seconds=100)
+    naive_now = NOW.replace(tzinfo=None)
+    naive_last = (NOW - timedelta(seconds=5)).replace(tzinfo=None)
+    result = evaluate(naive_now, naive_last, contract=contract)
+    assert result.now.tzinfo is UTC
+    assert result.last_event_ts is not None
+    assert result.last_event_ts.tzinfo is UTC
+
+
+def test_evaluate_contract_method_matches_module_function() -> None:
+    contract = CadenceContract(max_silence_seconds=100)
+    last = NOW - timedelta(seconds=50)
+    assert contract.evaluate(NOW, last) == evaluate(NOW, last, contract=contract)

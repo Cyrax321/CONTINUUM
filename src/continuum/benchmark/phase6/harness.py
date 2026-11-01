@@ -15,7 +15,6 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +23,7 @@ from continuum.benchmark.phase6.metrics import (
     RecoveryOutcome,
     ScenarioResult,
 )
+from continuum.models import utcnow
 
 __all__ = [
     "ScenarioContext",
@@ -96,7 +96,7 @@ def run_benchmark(scenarios: list[tuple[str, ScenarioFn]]) -> BenchmarkReport:
     as JSON and Markdown.
     """
     return BenchmarkReport(
-        generated_at=datetime.now(),
+        generated_at=utcnow(),
         results=[run_scenario(name, fn) for name, fn in scenarios],
     )
 

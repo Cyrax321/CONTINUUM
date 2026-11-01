@@ -1550,6 +1550,30 @@ def test_status_provenance_json(db: str) -> None:
     assert any(row["who"] == "observed" for row in data["provenance"])
 
 
+def test_status_json_honours_global_flag(db: str) -> None:
+    code, out, _ = run("--db", db, "--json", "status", "run_1")
+    assert code == 0
+    payload = json.loads(out)
+    assert payload["run_id"] == "run_1"
+    assert payload["goal"]["description"] == "Analyze 100 documents"
+    assert payload["goal"]["version"] == 1
+    assert payload["version"] == 0
+    assert payload["progress"]["completed"] == 60
+    assert payload["progress"]["pending"] == 40
+    assert payload["progress"]["failed"] == 0
+    assert payload["progress"]["total"] == 100
+    assert payload["decisions"]["valid"] == 0
+    assert payload["decisions"]["total"] == 0
+
+
+def test_status_json_honours_subcommand_flag(db: str) -> None:
+    code, out, _ = run("--db", db, "status", "run_1", "--json")
+    assert code == 0
+    payload = json.loads(out)
+    assert payload["run_id"] == "run_1"
+    assert payload["goal"]["description"] == "Analyze 100 documents"
+
+
 # --- scoped recovery CLI smoke (issue #110) --------------------------------- #
 
 
@@ -1784,6 +1808,23 @@ def test_status_on_an_unprojectable_run_names_the_break_and_fails(db: str) -> No
     assert code == ExitCode.CORRUPTED
     assert "PROJECTION FAILURE" in out
     assert "TASK_UPDATED" in out
+    assert "Traceback" not in out and "Traceback" not in err
+
+
+def test_status_json_degraded_run_includes_failure_and_exits_corrupted(db: str) -> None:
+    _poison(db)
+    code, out, err = run("--db", db, "--json", "status", "run_1")
+
+    assert code == ExitCode.CORRUPTED
+    payload = json.loads(out)
+    assert payload["run_id"] == "run_1"
+    assert "projection_failed_at" in payload
+    failure = payload["projection_failed_at"]
+    assert failure["type"] == "TASK_UPDATED"
+    with SQLiteStorage(db) as store:
+        poisoned = list(store.read_events("run_1"))[-1]
+    assert failure["sequence"] == poisoned.sequence
+    assert "exceeds total" in failure["reason"]
     assert "Traceback" not in out and "Traceback" not in err
 
 

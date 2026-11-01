@@ -14,12 +14,35 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 from continuum.cli import ExitCode, main
 from continuum.events import EventType
-from continuum.models import Origin, Run
+from continuum.models import (
+    Component,
+    ComponentValidationEntry,
+    Evidence,
+    Finding,
+    Goal,
+    Origin,
+    RecoveryContract,
+    RecoveryMode,
+    RecoverySafety,
+    Run,
+    SemanticState,
+    StateStatus,
+    StateValidationResult,
+)
+from continuum.recovery.briefing_curation import (
+    _MAX_QUARANTINE_ITEMS,
+    _latest_agent_summary,
+    _quarantine,
+    curate_briefing,
+    render_curated_briefing,
+)
 from continuum.storage import SQLiteStorage
 
 
@@ -207,3 +230,309 @@ def test_raw_summary_diagnostic_reads_the_archive_after_compaction(db: str) -> N
     assert code == ExitCode.OK, err
     assert "No reasoning summary recorded" not in out
     assert json.loads(out)["summary"]["plan_stack"] == ["settle outstanding amount for INV-001"]
+
+
+# --- unit tests: quarantine, pin conflicts and rendering (issue #1755) ------ #
+#
+# The CLI-driven tests above cover the happy path through a real database. The
+# branches below are deterministic functions of their inputs alone, so they are
+# exercised directly with in-memory states and a stub storage: no fixture, no
+# filesystem, no recovery engine to build just to reach one line of curation.
+
+
+class _StubStorage:
+    """Storage stand-in exposing only ``read_all_events``.
+
+    ``_latest_agent_summary`` and ``curate_briefing`` fold the run's events
+    through that single method, so a canned list is the whole surface they
+    need. Returns a fresh copy per call so a test cannot mutate the fixture.
+    """
+
+    def __init__(self, events: list[Any]) -> None:
+        self._events = events
+
+    def read_all_events(self, run_id: str) -> list[Any]:
+        return list(self._events)
+
+
+def _event(payload: dict[str, Any]) -> SimpleNamespace:
+    """A REASONING_SUMMARY event with the given payload."""
+    return SimpleNamespace(type=EventType.REASONING_SUMMARY, payload=payload)
+
+
+def _decision(*statuses: ComponentValidationEntry, state: Any = None) -> Any:
+    """A decision carrying only what curation and the pin check read.
+
+    Built from the real contract, report and state models where they exist;
+    ``SimpleNamespace`` glues them into the shape ``RecoveryDecision`` exposes,
+    without having to run the engine to produce one.
+    """
+    return SimpleNamespace(
+        mode=RecoveryMode.RESUME,
+        safe=True,
+        contract=RecoveryContract(
+            run_id="run_1",
+            recovery_status=RecoverySafety.SAFE_TO_RESUME,
+            reason="checkpoint verified",
+            next_allowed_action="resume",
+        ),
+        state=state
+        or SemanticState(run_id="run_1", goal=Goal(description="Settle the invoice batch")),
+        informed_retry=None,
+        validation=SimpleNamespace(
+            report=StateValidationResult(run_id="run_1", statuses=list(statuses))
+        ),
+    )
+
+
+def test_quarantine_lists_non_valid_items_with_kind_id_and_reason() -> None:
+    """Stale, invalid and requires-review items surface under their kind."""
+    state = SimpleNamespace(
+        evidence=[
+            Evidence(summary="vendor list snapshot", status=StateStatus.STALE),
+            Evidence(summary="quote from the draft email", status=StateStatus.INVALID),
+        ],
+        findings=[Finding(claim="INV-004 is settled", status=StateStatus.REQUIRES_REVIEW)],
+    )
+    assert _quarantine(state) == [
+        {
+            "kind": "evidence",
+            "id": "vendor list snapshot",
+            "reason": "status stale - do not rely on this",
+        },
+        {
+            "kind": "evidence",
+            "id": "quote from the draft email",
+            "reason": "status invalid - do not rely on this",
+        },
+        {
+            "kind": "finding",
+            "id": "INV-004 is settled",
+            "reason": "status requires_review - do not rely on this",
+        },
+    ]
+
+
+def test_quarantine_skips_valid_items_and_empty_state() -> None:
+    """VALID items never enter quarantine; a clean state yields no list."""
+    clean = SimpleNamespace(
+        evidence=[Evidence(summary="vendor list snapshot"), Evidence(summary="ledger hash")],
+        findings=[Finding(claim="INV-004 is settled")],
+    )
+    assert _quarantine(clean) == []
+    assert _quarantine(SimpleNamespace(evidence=[], findings=[])) == []
+
+
+def test_quarantine_falls_back_to_evidence_id_without_summary() -> None:
+    """An evidence item with an empty summary is named by its id."""
+    evidence = Evidence(summary="", status=StateStatus.STALE)
+    quarantined = _quarantine(SimpleNamespace(evidence=[evidence], findings=[]))
+    assert quarantined == [
+        {
+            "kind": "evidence",
+            "id": evidence.evidence_id,
+            "reason": "status stale - do not rely on this",
+        }
+    ]
+
+
+def test_quarantine_is_bounded() -> None:
+    """The quarantine block caps at _MAX_QUARANTINE_ITEMS, first-seen order."""
+    state = SimpleNamespace(
+        evidence=[Evidence(summary=f"evidence {i}", status=StateStatus.STALE) for i in range(10)],
+        findings=[Finding(claim=f"claim {i}", status=StateStatus.INVALID) for i in range(10)],
+    )
+    quarantined = _quarantine(state)
+    assert len(quarantined) == _MAX_QUARANTINE_ITEMS
+    assert quarantined[0]["id"] == "evidence 0"
+    assert quarantined[-1]["id"] == f"evidence {_MAX_QUARANTINE_ITEMS - 1}"
+    # Everything past the cap is dropped, not merely unrendered.
+    assert "evidence 9" not in {item["id"] for item in quarantined}
+
+
+def test_agent_summary_pins_conflict_with_validation_report() -> None:
+    """A pinned resource the fold reports conflicted means pins_hold is False."""
+    events = [
+        _event(
+            {
+                "summary": {"plan_stack": ["match INV-004 to the ledger"]},
+                "pinning": {"vendors.csv": "sha-v1"},
+            }
+        )
+    ]
+    decision = _decision(
+        ComponentValidationEntry(
+            component=Component.ENVIRONMENT,
+            component_id="vendors.csv",
+            status=StateStatus.CONFLICTED,
+        )
+    )
+    summary, pins_hold = _latest_agent_summary(_StubStorage(events), "run_1", decision)
+    assert summary == {"plan_stack": ["match INV-004 to the ledger"]}
+    assert pins_hold is False
+
+
+def test_agent_summary_pins_hold_without_overlap() -> None:
+    """A conflicted resource no pin names leaves the summary rehydratable."""
+    events = [
+        _event(
+            {
+                "summary": {"plan_stack": ["match INV-004 to the ledger"]},
+                "pinning": {"vendors.csv": "sha-v1"},
+            }
+        )
+    ]
+    decision = _decision(
+        ComponentValidationEntry(
+            component=Component.ENVIRONMENT,
+            component_id="ledger.csv",
+            status=StateStatus.CONFLICTED,
+        )
+    )
+    _, pins_hold = _latest_agent_summary(_StubStorage(events), "run_1", decision)
+    assert pins_hold is True
+
+
+def test_agent_summary_ignores_conflicts_that_name_no_component() -> None:
+    """A conflict entry without a component_id cannot match any pin."""
+    events = [
+        _event(
+            {
+                "summary": {"plan_stack": ["match INV-004 to the ledger"]},
+                "pinning": {"vendors.csv": "sha-v1"},
+            }
+        )
+    ]
+    decision = _decision(
+        ComponentValidationEntry(
+            component=Component.ENVIRONMENT,
+            component_id=None,
+            status=StateStatus.CONFLICTED,
+        )
+    )
+    _, pins_hold = _latest_agent_summary(_StubStorage(events), "run_1", decision)
+    assert pins_hold is True
+
+
+def test_agent_summary_without_pinning_passes() -> None:
+    """Unpinned summaries carry no world to contradict, so they always pass."""
+    events = [_event({"summary": {"plan_stack": ["match INV-004 to the ledger"]}})]
+    # A conflicted report is irrelevant when the summary pins nothing.
+    decision = _decision(
+        ComponentValidationEntry(
+            component=Component.ENVIRONMENT,
+            component_id="vendors.csv",
+            status=StateStatus.CONFLICTED,
+        )
+    )
+    _, pins_hold = _latest_agent_summary(_StubStorage(events), "run_1", decision)
+    assert pins_hold is True
+
+
+def test_agent_summary_with_malformed_payload_yields_empty_summary() -> None:
+    """A summary field that is not a dict degrades to {} rather than crashing."""
+    events = [_event({"summary": "the vendor list looked off"})]
+    summary, pins_hold = _latest_agent_summary(_StubStorage(events), "run_1", _decision())
+    assert summary == {}
+    assert pins_hold is True
+
+
+def test_agent_summary_missing_returns_none() -> None:
+    """A run with no REASONING_SUMMARY yields None, not an empty section."""
+    assert _latest_agent_summary(_StubStorage([]), "run_1", _decision()) is None
+
+
+def test_curate_briefing_omits_agent_summary_when_pins_conflict() -> None:
+    """A pin-conflicted summary drops out of sections and lands in omitted."""
+    events = [
+        _event(
+            {
+                "summary": {"plan_stack": ["match INV-004 to the ledger"]},
+                "pinning": {"vendors.csv": "sha-v1"},
+            }
+        )
+    ]
+    decision = _decision(
+        ComponentValidationEntry(
+            component=Component.ENVIRONMENT,
+            component_id="vendors.csv",
+            status=StateStatus.CONFLICTED,
+        )
+    )
+    curated = curate_briefing(_StubStorage(events), "run_1", decision)
+    titles = [section["title"] for section in curated["sections"]]
+    assert not any("last session left off" in title for title in titles)
+    assert curated["omitted"] == [
+        {
+            "kind": "agent summary",
+            "reason": "environment pins on the newest summary no longer hold; "
+            "read it via `continuum briefing <run_id> --raw-summary`",
+        }
+    ]
+
+
+def test_render_quarantine_block_exact_format() -> None:
+    """Quarantined items render under the header, one indented line each."""
+    curated: dict[str, Any] = {
+        "sections": [],
+        "quarantine": [
+            {
+                "kind": "evidence",
+                "id": "vendor list snapshot",
+                "reason": "status stale - do not rely on this",
+            },
+            {
+                "kind": "finding",
+                "id": "INV-004 is settled",
+                "reason": "status requires_review - do not rely on this",
+            },
+        ],
+        "omitted": [],
+    }
+    assert render_curated_briefing(curated) == [
+        "do not trust (quarantined):",
+        "  [evidence] vendor list snapshot - status stale - do not rely on this",
+        "  [finding] INV-004 is settled - status requires_review - do not rely on this",
+        "",
+    ]
+
+
+def test_render_omitted_entries_exact_format() -> None:
+    """Omissions render as one omitted: line naming kind and reason."""
+    reason = (
+        "environment pins on the newest summary no longer hold; "
+        "read it via `continuum briefing <run_id> --raw-summary`"
+    )
+    curated: dict[str, Any] = {
+        "sections": [],
+        "quarantine": [],
+        "omitted": [{"kind": "agent summary", "reason": reason}],
+    }
+    assert render_curated_briefing(curated) == [f"omitted: agent summary - {reason}"]
+
+
+def test_render_sections_keep_titles_lines_and_trailing_blank() -> None:
+    """Each section renders its title, indented lines, then a blank line."""
+    curated: dict[str, Any] = {
+        "sections": [
+            {"title": "recovery verdict (verified, sealed contract)", "lines": ["a", "b"]},
+            {"title": "semantic state (verified, projected from events)", "lines": ["c"]},
+        ],
+        "quarantine": [],
+        "omitted": [],
+    }
+    assert render_curated_briefing(curated) == [
+        "recovery verdict (verified, sealed contract)",
+        "  a",
+        "  b",
+        "",
+        "semantic state (verified, projected from events)",
+        "  c",
+        "",
+    ]
+
+
+def test_render_empty_curation_produces_no_lines() -> None:
+    """Nothing to say renders as nothing, not an empty header."""
+    curated: dict[str, Any] = {"sections": [], "quarantine": [], "omitted": []}
+    assert render_curated_briefing(curated) == []

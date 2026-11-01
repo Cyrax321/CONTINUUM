@@ -233,3 +233,49 @@ async def test_the_same_run_written_deterministically_does_resume(
     )
     assert decision.mode is RecoveryMode.RESUME
     assert decision.safe
+
+
+def test_decision_and_finding_invalidation_updates_graph_nodes() -> None:
+    from continuum.events import Event, EventType
+    from continuum.provenance.graph import StateStatus, build_provenance_graph
+
+    events = [
+        Event(
+            run_id="test_run",
+            sequence=1,
+            type=EventType.DECISION_CREATED,
+            event_id="d1",
+            payload={"decision_id": "d1", "summary": "test decision"},
+        ),
+        Event(
+            run_id="test_run",
+            sequence=2,
+            type=EventType.FINDING_ADDED,
+            event_id="f1",
+            payload={"finding_id": "f1", "title": "test finding"},
+        ),
+        Event(
+            run_id="test_run",
+            sequence=3,
+            type=EventType.DECISION_INVALIDATED,
+            event_id="d_inv",
+            payload={"decision_id": "d1", "reason": "superseded by new decision"},
+        ),
+        Event(
+            run_id="test_run",
+            sequence=4,
+            type=EventType.FINDING_INVALIDATED,
+            event_id="f_inv",
+            payload={"finding_id": "f1", "invalidated_reason": "false positive report"},
+        ),
+    ]
+
+    graph = build_provenance_graph(events)
+
+    assert "d1" in graph.nodes
+    assert graph.nodes["d1"].status == StateStatus.INVALID
+    assert graph.nodes["d1"].invalidated_reason == "superseded by new decision"
+
+    assert "f1" in graph.nodes
+    assert graph.nodes["f1"].status == StateStatus.INVALID
+    assert graph.nodes["f1"].invalidated_reason == "false positive report"

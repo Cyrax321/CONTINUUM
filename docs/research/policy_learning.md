@@ -50,12 +50,26 @@ from continuum.storage import SQLiteStorage
 
 with SQLiteStorage("demo.db") as store:
     store.create_run(Run(run_id="run_1", goal="g"))
-    store.append_event("run_1", EventType.RECOVERY_STARTED, {"mode": "repair_and_resume", "plan": [
-        {"kind": "revalidate_dependency", "target": "dataset", "requires_human": False},
-    ]})
-    store.append_event("run_1", EventType.RECOVERY_STARTED, {"mode": "repair_and_resume", "plan": [
-        {"kind": "revalidate_dependency", "target": "dataset", "requires_human": False},
-    ]})  # repeated: the first repair did not hold
+    store.append_event(
+        "run_1",
+        EventType.RECOVERY_STARTED,
+        {
+            "mode": "repair_and_resume",
+            "plan": [
+                {"kind": "revalidate_dependency", "target": "dataset", "requires_human": False},
+            ],
+        },
+    )
+    store.append_event(
+        "run_1",
+        EventType.RECOVERY_STARTED,
+        {
+            "mode": "repair_and_resume",
+            "plan": [
+                {"kind": "revalidate_dependency", "target": "dataset", "requires_human": False},
+            ],
+        },
+    )  # repeated: the first repair did not hold
     ledger = ActionLedger(store, "run_1")
     action = ledger.claim("github.create_issue", {"title": "x"}).action
     ledger.reconcile(action.action_id, occurred=True)

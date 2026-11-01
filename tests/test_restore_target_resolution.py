@@ -177,3 +177,32 @@ def test_a_checkpoint_belonging_to_another_run_is_not_a_valid_target() -> None:
     )
     with pytest.raises(ValueError, match="no checkpoint"):
         _anchor_for(storage, RUN_ID, foreign.checkpoint_id)
+
+
+def test_anchor_for_checkpoint_id_fallback_when_point_lookup_misses() -> None:
+    """When get_checkpoint raises CheckpointNotFound, list_checkpoints resolves the id.
+
+    Issue #1770: the fallback loop over storage.list_checkpoints was trapped
+    inside the int(text) numeric conversion block, making it unreachable for
+    any non-numeric checkpoint ID.
+    """
+    from continuum.storage.base import CheckpointNotFound
+
+    storage = _storage()
+    cid = _put_checkpoint(storage, version=1, sequence=42)
+
+    class StorageWithoutPointLookup:
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+
+        def get_checkpoint(self, checkpoint_id: str) -> object:
+            raise CheckpointNotFound(checkpoint_id)
+
+        def list_checkpoints(self, run_id: str) -> list[object]:
+            return self._inner.list_checkpoints(run_id)
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
+    wrapper = StorageWithoutPointLookup(storage)
+    assert _anchor_for(wrapper, RUN_ID, cid) == 42

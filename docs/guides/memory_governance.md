@@ -172,6 +172,7 @@ Forensic join links a poisoned record back to its origin. Each claim may carry `
 
 ```python
 from continuum.actions.ledger import forensic_join_across_runs
+
 hits = forensic_join_across_runs(store, "rec-42")
 for h in hits:
     print(h["rendered_key"], h["origin_digest"], h["observation_event"])

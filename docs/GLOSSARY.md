@@ -33,7 +33,7 @@ Every term here is used in issues and in code. Definitions point to the implemen
   `AdapterAction` (`src/continuum/adapters/actions.py:31`) is the uniform `name + params + dep_scope` operation that every adapter emits. `AdapterResult` carries the outcome. `run_action` is the facade over `AgentAdapter.intercept_action` where the ledger provides idempotency and the telemetry hook (`on_event`, issue 162) can observe each execution.
 
 - **Telemetry**
-  Optional observer callback `on_event` on `run_action` (`src/continuum/adapters/actions.py:60`). Disabled by default. Receives `(AdapterAction, AdapterResult)` for every execution, whether completed or failed. A raising observer is suppressed so observability cannot break the action it observes.
+  Optional observer callback `on_event` on `run_action` (`src/continuum/adapters/actions.py:86`). Disabled by default. Receives `(AdapterAction, AdapterResult)` for every execution, whether completed or failed. A raising observer is suppressed so observability cannot break the action it observes.
 
 - **Liveness**
   Silence as a recovery signal. Cadence contracts in `src/continuum/recovery/health.py` declare how long each phase may go quiet; `continuum watch` evaluates the log against them, appending `LIVENESS_SILENCE_DETECTED` on breach and `LIVENESS_RECOVERED` on recovery (`src/continuum/events.py`). Breach is advisory: it informs the engine decision without replacing validation.

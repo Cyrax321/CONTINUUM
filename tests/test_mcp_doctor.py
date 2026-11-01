@@ -1351,3 +1351,60 @@ def test_every_host_registration_is_found_and_its_env_is_read(
         doctor._registration_env(registration).get("CONTINUUM_MCP_MUTATING_CLIENTS")
         == profile["mutating_clients"]
     ), f"{host} env was read through the wrong key"
+
+
+def test_find_registration_prefers_the_local_scope_over_the_committed_one(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The effective registration is the local one, so that is what the doctor reads (#1764).
+
+    Both the CLI's ``--scope`` help and the install path state local wins over
+    the committed ``.mcp.json``. The sites used to be read project first, so a
+    checkout carrying both scopes had the permission probe declare the client
+    name of a registration the host ignores while the effective one bakes a
+    different name.
+    """
+    home = _isolated_home(monkeypatch, tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+
+    _write_registration(project, "committed-name")
+    (home / ".claude.json").write_text(
+        json.dumps(
+            {
+                "projects": {
+                    str(project): {
+                        "mcpServers": {
+                            SERVER_NAME: {
+                                "type": "stdio",
+                                "command": str(SCRIPTS_DIR / "continuum-mcp"),
+                                "args": ["--db", str(project / "continuum.db")],
+                                "env": {"CONTINUUM_MCP_MUTATING_CLIENTS": "effective-name"},
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    found = find_registration(project)
+
+    assert found is not None
+    assert found["scope"] == "local"
+    assert found["baked_client"] == "effective-name"
+
+
+def test_find_registration_still_reads_the_committed_entry_without_a_local_one(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """No local registration means the committed one is read, and cited as such."""
+    _isolated_home(monkeypatch, tmp_path)
+    _write_registration(tmp_path, "committed-name")
+
+    found = find_registration(tmp_path)
+
+    assert found is not None
+    assert found["scope"] == "project"
+    assert found["baked_client"] == "committed-name"

@@ -13,7 +13,7 @@ import pytest
 
 from continuum.events import EventType
 from continuum.models import Origin, Run
-from continuum.otel import observation_from_span, record_span
+from continuum.otel import _attr, observation_from_span, record_span
 from continuum.storage import SQLiteStorage
 
 
@@ -122,3 +122,106 @@ def test_processor_factory_gives_install_hint_without_sdk(
 
     with pytest.raises(RuntimeError, match="opentelemetry-api"):
         make_span_processor(SQLiteStorage(db))
+
+
+def test_attr_fallback_on_objects_lacking_get() -> None:
+    class CustomAttributes:
+        pass
+
+    assert observation_from_span("custom_tool", CustomAttributes()) is None
+
+    class RaisingAttributes:
+        def __getattr__(self, name: str) -> object:
+            raise AttributeError(name)
+
+    assert observation_from_span("custom_tool", RaisingAttributes()) is None
+
+    class FlakyGetDict(dict):
+        called = False
+
+        def __getattribute__(self, name: str) -> object:
+            if name == "get" and not FlakyGetDict.called:
+                FlakyGetDict.called = True
+                raise AttributeError("transient failure")
+            return super().__getattribute__(name)
+
+    assert _attr(FlakyGetDict({"tool.name": "build"}), "tool.name") == "build"
+
+
+def test_record_span_records_span_and_trace_id(db: str) -> None:
+    span = FakeSpan("execute_tool", {"tool.name": "send_invoice"})
+    got = record_span(
+        SQLiteStorage(db),
+        span.name,
+        span.attributes,
+        run_id="run_1",
+        span_id="span-123",
+        trace_id="trace-456",
+    )
+    assert got == "run_1"
+    with SQLiteStorage(db) as store:
+        events = store.read_events("run_1")
+    last_event = events[-1]
+    assert last_event.type is EventType.TOOL_COMPLETED
+    assert last_event.payload["span_id"] == "span-123"
+    assert last_event.payload["trace_id"] == "trace-456"
+    assert last_event.payload["tool"] == "send_invoice"
+
+
+def test_record_span_non_qualifying_span_returns_none(db: str) -> None:
+    got = record_span(
+        SQLiteStorage(db),
+        "llm_call",
+        {"gen_ai.request.model": "gpt-4"},
+        run_id="run_1",
+    )
+    assert got is None
+
+
+def test_processor_lifecycle_methods_and_context(monkeypatch: pytest.MonkeyPatch, db: str) -> None:
+    import sys
+    import types
+
+    from continuum.otel import make_span_processor
+
+    fake_trace = types.ModuleType("opentelemetry.sdk.trace")
+
+    class SpanProcessor:
+        pass
+
+    class ReadableSpan:
+        pass
+
+    fake_trace.SpanProcessor = SpanProcessor
+    fake_trace.ReadableSpan = ReadableSpan
+
+    monkeypatch.setitem(sys.modules, "opentelemetry", types.ModuleType("opentelemetry"))
+    monkeypatch.setitem(sys.modules, "opentelemetry.sdk", types.ModuleType("opentelemetry.sdk"))
+    monkeypatch.setitem(sys.modules, "opentelemetry.sdk.trace", fake_trace)
+
+    processor = make_span_processor(SQLiteStorage(db), run_id="run_1")
+    assert processor.on_start(None) is None
+    assert processor.shutdown() is True
+    assert processor.force_flush() is True
+    assert processor.force_flush(1000) is True
+
+    class FakeContext:
+        span_id = "span-001"
+        trace_id = "trace-999"
+
+    class ContextSpan(FakeSpan):
+        def __init__(self, name: str, attributes: dict[str, object], ok: bool = True) -> None:
+            super().__init__(name, attributes, ok=ok)
+            self.context = FakeContext()
+
+    span = ContextSpan("execute_tool", {"tool.name": "read_file", "path": "/data/f.txt"})
+    processor.on_end(span)  # type: ignore[arg-type]
+
+    with SQLiteStorage(db) as store:
+        events = store.read_events("run_1")
+    last = events[-1]
+    assert last.type is EventType.TOOL_COMPLETED
+    assert last.payload["tool"] == "read_file"
+    assert last.payload["path"] == "/data/f.txt"
+    assert last.payload["span_id"] == "span-001"
+    assert last.payload["trace_id"] == "trace-999"

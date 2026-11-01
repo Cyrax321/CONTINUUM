@@ -54,3 +54,16 @@ def test_k8s_adapter_imports_without_cluster() -> None:
     assert adapter.available() is False
     with pytest.raises(RuntimeError):
         adapter.run_job("run_1", "alpine", "echo hi")
+
+
+def test_python_inproc_surfaces_the_failed_code_stderr(tmp_path) -> None:
+    """A failed in-process run reports the interpreter's message, not just the status (#1760)."""
+    adapter = PythonInProcAdapter(_storage(), str(tmp_path / "work"))
+    result = adapter.run_python(
+        "run_1", "import sys; sys.stderr.write('the missing import'); sys.exit(9)"
+    )
+
+    assert result.status == "failed"
+    assert "the missing import" in (result.error or "")
+    [entry] = ActionLedger(adapter.storage, "run_1").pending()
+    assert "the missing import" in (entry.last_error or "")

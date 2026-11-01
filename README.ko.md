@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI 진입점
 continuum-mcp --help             # MCP 서버 진입점 ([mcp] 또는 [dev] 필요)
-pytest -q                        # 최소 환경에서 약 3680개 수집, 약 3,636개 통과, 약 41개 스킵 (정확한 수는 환경에 따라 다름)
+pytest -q                        # 최소 환경에서 약 3950개 수집, 약 3,636개 통과, 약 41개 스킵 (정확한 수는 환경에 따라 다름)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI가 강제하는 세 가지 게이트
 ```
@@ -120,7 +120,9 @@ from continuum import EventType, Run, SQLiteStorage, project
 
 store = SQLiteStorage("agent.db")
 store.create_run(Run(run_id="run_4821", goal="10,000개 문서 분석"))
-store.append_event("run_4821", EventType.RUN_STARTED, {"goal": "10,000개 문서 분석", "total": 10_000})
+store.append_event(
+    "run_4821", EventType.RUN_STARTED, {"goal": "10,000개 문서 분석", "total": 10_000}
+)
 
 for i, doc in enumerate(documents):
     analyze(doc)
@@ -128,7 +130,7 @@ for i, doc in enumerate(documents):
 
 # 충돌 후, 새로운 프로세스는 중단된 지점에서 정확히 재개한다:
 state = project("run_4821", store.read_events("run_4821"))
-print(state.progress.completed)            # 이미 완료, 반복하지 않음
+print(state.progress.completed)  # 이미 완료, 반복하지 않음
 print(store.verify_events("run_4821").ok)  # True, 충돌 후에도 체인은 온전함
 ```
 
@@ -416,7 +418,7 @@ CONTINUUM은 하나의 라이브러리(`src/continuum`, 132 모듈) plus 대규�
 | `mcp/` | 12개 stdio 도구 plus 인가 `authz.py` 토큰 인증, allowlist, 확인 토큰 |
 | `serve/` | Sidecar stdio JSON 와이어 + HTTP `CONTINUUM_SERVE_TOKEN` |
 | `dashboard/` | 웹 대시보드 `app.py` `hitl.py`와 HITL 버튼 확인, 조정, 완료, 접두사 신뢰 조언, 고정 |
-| `cli/` | 54개 argparse 명령, 종료 코드가 평결, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
+| `cli/` | 55개 argparse 명령, 종료 코드가 평결, `runs, start, inspect, resume, verify, health, tree, benchmark, attest, dashboard` |
 | `otel.py` | OpenTelemetry 스팬 프로세서 브리지 |
 | `benchmark/` | CONTINUUM-Bench 하네스, 5개 크래시 시나리오 + 인자 드리프트 + 14 시나리오 복구 스위트 |
 

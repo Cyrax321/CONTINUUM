@@ -180,6 +180,45 @@ def test_failed_span_does_not_settle_as_not_occurred(db: str, tmp_path: Path) ->
         assert probe.resolve(action) is None
 
 
+def test_otel_span_settles_from_completed_span_after_earlier_failed_span(
+    db: str, tmp_path: Path
+) -> None:
+    """A retried tool call whose completed span follows a failed one settles.
+
+    Issue #1784: OtelSpanReconciler stopped at the first matching span of
+    either kind, so a failed attempt followed by a successful retry returned
+    None at the failure and never saw the completed span that proved the effect.
+    """
+    target = tmp_path / "out.txt"
+    claim(db, "write_file", target)
+    with SQLiteStorage(db) as store:
+        # First attempt failed.
+        record_span(
+            store,
+            "execute_tool",
+            {"gen_ai.tool.name": "write_file", "file_path": str(target)},
+            ok=False,
+            span_id="span_fail",
+        )
+        # Second attempt succeeded.
+        record_span(
+            store,
+            "execute_tool",
+            {"gen_ai.tool.name": "write_file", "file_path": str(target)},
+            ok=True,
+            span_id="span_success",
+            trace_id="trace_success",
+        )
+
+    probe = OtelSpanReconciler(SQLiteStorage(db), "run_1")
+    with SQLiteStorage(db) as store:
+        action = ActionLedger(store, "run_1").pending()[0]
+        resolution = probe.resolve(action)
+        assert resolution is not None
+        assert resolution.occurred is True
+        assert "span_success" in resolution.note
+
+
 # --- AC2: artifact_check proves absence ----------------------------------- #
 
 

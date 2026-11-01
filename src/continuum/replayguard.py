@@ -115,6 +115,7 @@ def evaluate(
         GuardKind.DENY_RECLAIM,
         f"previous attempt of {action_type!r} {rendered_key!r} is closed "
         f"({status.value}); claim again before retrying",
+        key=key,
     )
 
 

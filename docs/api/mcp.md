@@ -118,6 +118,7 @@ otherwise diagnose by hand:
 | `continuum mcp install` again           | Idempotent. An unchanged install rewrites the same values; a moved one repoints. Nothing is duplicated.                                                                                        |
 | `continuum mcp remove`                  | Deletes the entries install wrote and recognises; a foreign or hand-edited entry under the same name is left alone.                                                                            |
 | `pip uninstall continuum-agent`         | Removes the code; the registration survives and now points at nothing. Run `continuum mcp remove` to clear it, so a host does not keep trying to spawn a server that no longer exists.         |
+| Committed a path expression             | Portable across supported POSIX environments: the host expands `${CLAUDE_PROJECT_DIR:-.}/.venv/bin/continuum-mcp` at spawn time. `continuum doctor` reports it `unresolved`, not `stale`, because a path the doctor cannot expand is not evidence of a broken one, and does not tell you to re-bake an absolute path over it. |
 
 Re-running `install` after any of the first three rows is the documented
 remediation and is always safe, which is what makes the command usable from a

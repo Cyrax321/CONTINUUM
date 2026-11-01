@@ -167,6 +167,43 @@ def test_verify_rejects_an_anchored_log_with_no_archive(db: str) -> None:
     assert code == ExitCode.CORRUPTED
 
 
+def test_verify_accounts_for_the_archived_prefix(tmp_path: Path) -> None:
+    """Issue #1814: verify_events counted only live rows in ``checked`` and
+    seeded ``trusted_through`` at 0, so a report understated how many events
+    were audited on a compacted run, and one bad live row discarded a fully
+    verified archive prefix instead of describing the prefix that still
+    holds."""
+    db = str(tmp_path / "a.db")
+    with SQLiteStorage(db) as store:
+        store.create_run_started(Run(run_id="run_1", goal="test"))
+        for i in range(10):
+            store.append_event("run_1", EventType.TASK_UPDATED, {"task": f"t_{i}"})
+        store.compact_run("run_1", through_sequence=5)
+
+        archived = store.read_archived_events("run_1")
+        live = store.read_events("run_1")
+        assert [e.sequence for e in archived] == [1, 2, 3, 4, 5]
+        assert [e.sequence for e in live] == [6, 7, 8, 9, 10, 11, 12, 13]
+
+        clean = store.verify_events("run_1")
+        assert clean.ok, [v.kind for v in clean.violations]
+        assert clean.checked == len(archived) + len(live)
+        assert clean.trusted_through["run_1"] == live[-1].sequence
+
+        # Tamper with the first live row: the archive verified in full, so
+        # trusted_through must keep it instead of collapsing to 0.
+        store._connection.execute(
+            "UPDATE events SET hash = 'bad_hash' WHERE run_id = 'run_1' "
+            "AND sequence = (SELECT MIN(sequence) FROM events WHERE run_id = 'run_1')"
+        )
+        tampered = store.verify_events("run_1")
+
+    assert not tampered.ok
+    assert any(v.kind == "TAMPERED_CONTENT" for v in tampered.violations)
+    assert tampered.checked == len(archived) + len(live)
+    assert tampered.trusted_through["run_1"] == archived[-1].sequence
+
+
 def test_resume_works_on_a_compacted_run(db: str) -> None:
     for i in range(3):
         work(db, i)

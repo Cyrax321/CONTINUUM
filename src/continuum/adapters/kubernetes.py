@@ -14,11 +14,27 @@ from continuum.adapters import run_action
 from continuum.adapters.actions import AdapterAction, AdapterResult
 from continuum.adapters.generic import GenericAgentAdapter
 from continuum.recovery.engine import RecoveryEngine
+from continuum.security.hashing import stable_hash
 from continuum.storage.base import Storage
 
 __all__ = [
     "KubernetesAdapter",
 ]
+
+
+def _pod_name(run_id: str, image: str, command: str) -> str:
+    """A pod name unique to this (run, image, command) triple.
+
+    A fixed name let a namespace run exactly one ``run_job``, ever: the pod
+    stayed behind after the first call, and the API server then refused the
+    same name with ``AlreadyExists`` (issue #1807). Hashing the triple instead
+    of interpolating it gives distinct calls distinct names while a replay of
+    the same logical job, the same run, image and command, lands on the same
+    name again. Only hex characters survive into the name, so a run id with
+    characters kubernetes rejects still yields a valid DNS-1123 label.
+    """
+    digest = stable_hash({"run_id": run_id, "image": image, "command": command})
+    return f"continuum-job-{digest[:12]}"
 
 
 class KubernetesAdapter(GenericAgentAdapter):
@@ -57,9 +73,16 @@ class KubernetesAdapter(GenericAgentAdapter):
     ) -> AdapterResult:
         """Run ``sh -c command`` as a one-shot pod from ``image``.
 
-        Executes ``kubectl run continuum-job -n <namespace> --image <image>``
+        Executes ``kubectl run <pod-name> -n <namespace> --rm --image <image>``
         in the adapter's namespace and returns the pod's stdout as
-        ``AdapterResult.output``. A non-zero exit or a kubectl failure is
+        ``AdapterResult.output``. The pod name is derived from the run id and
+        the action's idempotency basis (its image and command), so two
+        different jobs in one namespace get distinct names and stop
+        colliding, while a replay of the same job reuses its own name.
+        ``--rm`` deletes the pod when it completes, the same cleanup the
+        container adapter gets from ``docker run --rm``; without it every
+        completed pod stays behind and blocks its own name from ever being
+        used again (issue #1807). A non-zero exit or a kubectl failure is
         captured into the result (status ``failed`` with ``error`` set)
         rather than raised, because the attempt is already recorded in the
         ledger. Raises ``RuntimeError`` up front when kubectl or the
@@ -74,9 +97,10 @@ class KubernetesAdapter(GenericAgentAdapter):
                 [
                     "kubectl",
                     "run",
-                    "continuum-job",
+                    _pod_name(run_id, image, command),
                     "-n",
                     self.namespace,
+                    "--rm",
                     "--image",
                     image,
                     "--",

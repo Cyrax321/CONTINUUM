@@ -506,6 +506,10 @@ class StateValidator:
         if isinstance(summary, str) and summary.strip():
             detail = f"{detail}; summary: {summary.strip()[:160]}"
 
+        latest_seq = int(latest.sequence)
+        retained_start = latest_seq - retained
+        compacted_start = retained_start - compacted
+
         evidence = []
         changed = False
         for item in state.evidence:
@@ -514,8 +518,7 @@ class StateValidator:
             if (
                 item.status is StateStatus.VALID
                 and isinstance(source_sequence, int)
-                and source_sequence <= int(latest.sequence)
-                and source_sequence >= int(latest.sequence) - compacted
+                and compacted_start <= source_sequence < retained_start
             ):
                 evidence.append(item.model_copy(update={"status": StateStatus.PARTIAL}))
                 entries.append(

@@ -355,14 +355,18 @@ def _extract_run_id(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str | None
     """Try to find a continuum_run_id from function arguments.
 
     Checks kwargs first, then the first positional argument if it's a dict
-    with the key.
+    with the key. A falsy id (``None`` or ``""``) is absence, not a run named
+    ``"None"``, so it is skipped rather than stringified, the same rule the
+    positional form already applies.
     """
-    if "continuum_run_id" in kwargs:
-        return str(kwargs["continuum_run_id"])
-    if "run_id" in kwargs:
-        return str(kwargs["run_id"])
+    continuum_run_id = kwargs.get("continuum_run_id")
+    if continuum_run_id:
+        return str(continuum_run_id)
+    run_id = kwargs.get("run_id")
+    if run_id:
+        return str(run_id)
     if args and isinstance(args[0], dict):
-        run_id = args[0].get("continuum_run_id")
-        if run_id:
-            return str(run_id)
+        dict_run_id = args[0].get("continuum_run_id")
+        if dict_run_id:
+            return str(dict_run_id)
     return None

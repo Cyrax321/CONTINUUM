@@ -62,6 +62,54 @@ class TestEnsureOpenAIAgents:
             oa._ensure_openai_agents()
 
 
+class TestFormatAnnotation:
+    """``_format_annotation`` renders source text for an ``exec``-built wrapper (#1748).
+
+    The wrapper's source carries the real annotations because the OpenAI Agents
+    SDK derives the tool's JSON schema from them: typing every parameter
+    ``Any`` drops the real types, and the SDK then emits a schema with no
+    ``type`` key, which strict validators (OpenRouter) reject. Both branches
+    are pure -- no SDK import is touched at call time, which is exactly why
+    they can be tested without it installed.
+    """
+
+    def test_an_empty_annotation_reads_as_any(self) -> None:
+        """``inspect.Parameter.empty`` is the "no annotation" sentinel.
+
+        This is the branch that keeps a parameter untyped from landing in the
+        generated source, and the one return statement with no direct test
+        before (#1748).
+        """
+        import inspect
+
+        from continuum.adapters.openai import _format_annotation
+
+        assert _format_annotation(inspect.Parameter.empty) == "Any"
+
+    def test_a_str_annotation_renders_as_source(self) -> None:
+        """The rendered text must be what source code would say, not a repr."""
+        from continuum.adapters.openai import _format_annotation
+
+        assert _format_annotation(str) == "str"
+        assert _format_annotation(int) == "int"
+
+    def test_a_generic_annotation_renders_its_parameters(self) -> None:
+        """A subscripted generic must keep its argument in the rendered text."""
+        from typing import Optional
+
+        from continuum.adapters.openai import _format_annotation
+
+        assert _format_annotation(Optional[str]) == "Optional[str]"  # noqa: UP045
+
+    def test_a_list_annotation_renders_the_inner_type(self) -> None:
+        """``typing.List`` renders as written, not as the modern builtin."""
+        from typing import List  # noqa: UP035
+
+        from continuum.adapters.openai import _format_annotation
+
+        assert _format_annotation(List[str]) == "List[str]"  # noqa: UP035, UP006
+
+
 class TestContinuumContext:
     def test_to_semantic_state_minimal(self) -> None:
         from continuum.adapters.openai import ContinuumContext
@@ -121,6 +169,18 @@ class TestExtractRunId:
         result = _extract_run_id(None)
         assert result is None
 
+    def test_a_wrapper_without_a_context_attribute_gives_no_run_id(self) -> None:
+        """An unrelated object matches neither the ``isinstance`` nor the duck-type branch.
+
+        ``_extract_continuum_context`` answers ``None`` rather than raising for
+        a context it does not recognise, because hooks run for every agent
+        state change: an unrelated context type is not an error so much as a
+        run that is not ours (#1748).
+        """
+        from continuum.adapters.openai import _extract_run_id
+
+        assert _extract_run_id(object()) is None
+
 
 class TestExtractRunIdFromToolContext:
     def test_from_tool_input_dict(self) -> None:
@@ -140,6 +200,38 @@ class TestExtractRunIdFromToolContext:
         ctx.context = inner_ctx
         result = _extract_run_id_from_tool_context(ctx)
         assert result == "run_fallback"
+
+    def test_a_none_context_gives_no_run_id(self) -> None:
+        """The absent-context guard, before ``tool_input`` is ever consulted (#1748)."""
+        from continuum.adapters.openai import _extract_run_id_from_tool_context
+
+        assert _extract_run_id_from_tool_context(None) is None
+
+    def test_a_falsy_run_id_in_tool_input_falls_back(self) -> None:
+        """An empty id falls through rather than claiming the empty run.
+
+        A falsy value is absence, not a run name: on read it would otherwise
+        point the side effect at a run that does not exist (#1748).
+        """
+        from continuum.adapters.openai import ContinuumContext, _extract_run_id_from_tool_context
+
+        inner_ctx = ContinuumContext(continuum_run_id="run_falsy_parent")
+        ctx = MagicMock()
+        ctx.tool_input = {"continuum_run_id": ""}
+        ctx.context = inner_ctx
+        result = _extract_run_id_from_tool_context(ctx)
+        assert result == "run_falsy_parent"
+
+    def test_a_non_dict_tool_input_falls_back(self) -> None:
+        """``tool_input`` is only read when it is actually a dict."""
+        from continuum.adapters.openai import ContinuumContext, _extract_run_id_from_tool_context
+
+        inner_ctx = ContinuumContext(continuum_run_id="run_nondict_parent")
+        ctx = MagicMock()
+        ctx.tool_input = "raw payload"
+        ctx.context = inner_ctx
+        result = _extract_run_id_from_tool_context(ctx)
+        assert result == "run_nondict_parent"
 
 
 class TestAdapterConstruction:

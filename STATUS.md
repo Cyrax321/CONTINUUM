@@ -244,11 +244,11 @@ failure paths:
 
 ```python
 if mcp_context is None:
-    return                    # allows
+    return  # allows
 try:
     params = mcp_context.session.client_params
 except ValueError:
-    return                    # allows
+    return  # allows
 ```
 
 The `ValueError` path is reachable: `Context.request_context` raises exactly

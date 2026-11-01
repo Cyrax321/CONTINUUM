@@ -36,6 +36,7 @@ continuum --json <command>                    # machine-readable output
 | `tree <run_id> [--limit <n>]` | Show a parent run and its children. `--limit` shows only the newest `n` children. |
 | `fork <run_id> --reason <text>` | Approve a divergent continuation as a child run. Mutates storage. |
 | `compact <run_id>` | Archive the pre-anchor log prefix. Mutates storage. |
+| `conformance --url <endpoint> [--token <tok>] [--confirm-token <tok>]` | Run wire protocol conformance test suite against HTTP endpoint. |
 | `checkpoint <run_id>` | Force a state checkpoint. |
 | `observe` | Record one observed tool completion. Mutates storage. |
 | `gateway` | Run the enforcing HTTP proxy for registered upstreams. Mutates storage. |

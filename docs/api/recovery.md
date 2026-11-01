@@ -9,7 +9,9 @@ from continuum.recovery.engine import RecoveryEngine
 
 engine = RecoveryEngine(storage)
 decision = engine.assess(run_id, current_environment=env)
-print(decision.mode)        # RESUME | REPAIR_AND_RESUME | ROLLBACK | WAIT | REQUEST_HUMAN | REPLAN | ABORT
+print(
+    decision.mode
+)  # RESUME | REPAIR_AND_RESUME | ROLLBACK | WAIT | REQUEST_HUMAN | REPLAN | ABORT
 if decision.permits("resume"):
     ...
 ```
