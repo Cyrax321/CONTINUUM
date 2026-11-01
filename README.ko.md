@@ -396,7 +396,7 @@ RESUME < REPAIR_AND_RESUME < REPLAN < WAIT < REQUEST_HUMAN < ROLLBACK < ABORT
 
 ### 모듈 맵, 하나의 라이브러리, 많은 표면
 
-CONTINUUM은 하나의 라이브러리(`src/continuum`, 132 모듈) plus 대규모 테스트 스위트(186 테스트 파일, 약 2,809 테스트)이다. 모든 모듈은 하나의 해시 체인 이벤트 로그에 추가하고 재생한다.
+CONTINUUM은 하나의 라이브러리(`src/continuum`, 150 모듈) plus 대규모 테스트 스위트(224 테스트 파일, 약 2,809 테스트)이다. 모든 모듈은 하나의 해시 체인 이벤트 로그에 추가하고 재생한다.
 
 | 모듈 | 역할 |
 |:--|:--|
