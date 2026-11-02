@@ -64,7 +64,9 @@ browser = ["playwright>=1.40"]
 # lazily so the core library stays dependency-free.
 kubernetes = ["kubernetes>=29"]
 # The OpenTelemetry bridge is optional: the core library never imports it.
-otel = ["opentelemetry-api>=1.20"]
+# The SDK is included because the span processor factory and its tests use the
+# SDK's SpanProcessor base and ReadableSpan types.
+otel = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
 # The LangGraph adapter is optional: it wraps langgraph's StateGraph and tool
 # decorators with CONTINUUM's durability layer.
 langgraph = ["langgraph>=0.2"]

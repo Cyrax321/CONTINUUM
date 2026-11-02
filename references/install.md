@@ -27,7 +27,7 @@ uv pip install -e .
 
 # Composable extras
 uv pip install -e ".[mcp]"           # MCP server (13 stdio tools), requires mcp>=2.0
-uv pip install -e ".[otel]"          # OpenTelemetry bridge, opentelemetry-api>=1.20
+uv pip install -e ".[otel]"          # OpenTelemetry bridge, API + SDK >=1.20
 uv pip install -e ".[browser]"       # BrowserAdapter, Playwright (run playwright install chromium separately)
 uv pip install -e ".[kubernetes]"    # KubernetesAdapter, Kubernetes client; kubectl and a cluster remain external
 uv pip install -e ".[langgraph]"     # LangGraph adapter
@@ -49,15 +49,16 @@ Combine freely: `[dev]` already includes `mcp`, `langgraph`, `langchain`, `opena
 |:--|:--|:--|:--|
 | `pydantic>=2.7` | `pyproject.toml:30` (core `dependencies`) | Immutable models, hash-chained events | **Yes, always** |
 | `mcp>=2.0` | `pyproject.toml:58` (`[mcp]`), also in `[dev]` | MCP server (`continuum-mcp`) stdio transport | Only for MCP server (also pulled transitively by `openai-agents`) |
- | `opentelemetry-api>=1.20` | `pyproject.toml:67` (`[otel]`) | Span-processor bridge (`continuum.otel`) | Only for OTel directly; may appear transitively via instrumentation |
+| `opentelemetry-api>=1.20` | `pyproject.toml:69` (`[otel]`) | Span-processor bridge (`continuum.otel`) | Only for OTel directly; may appear transitively via instrumentation |
+| `opentelemetry-sdk>=1.20` | `pyproject.toml:69` (`[otel]`) | SDK span processor used by the OTel bridge | Only for OTel directly |
 | `playwright>=1.40` | `pyproject.toml:61` (`[browser]`) | Browser automation through `BrowserAdapter`; install Chromium separately | Only for `BrowserAdapter` |
 | `kubernetes>=29` | `pyproject.toml:65` (`[kubernetes]`) | Kubernetes availability check for `KubernetesAdapter`; `kubectl` and a configured cluster remain external | Only for `KubernetesAdapter` |
-| `cryptography>=45.0` | `pyproject.toml:81` (`[attest]`), also in `[dev]` | Ed25519 event-chain attestation | Only for `continuum attest` |
-| `spiffe>=0.3.0` | `pyproject.toml:84` (`[spiffe]`) | SPIFFE Workload API client (py-spiffe) for binding workload identities to attestations (issue #745) | Only for SPIFFE Workload API use in `continuum attest`, `continuum attest-verify`, and `continuum resume` (`--spiffe`, `--workload-provider spiffe`, or the default provider); without it those checks fail closed |
-| `psycopg>=3.2` | `pyproject.toml:87` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
-| `langgraph>=0.2` | `pyproject.toml:70` (`[langgraph]`) | LangGraph adapter | Only for LangGraph (also pulled transitively by `langchain`) |
-| `openai-agents>=0.2` | `pyproject.toml:73` (`[openai]`) | OpenAI Agents SDK adapter | Only for OpenAI |
-| `langchain>=0.3` | `pyproject.toml:76` (`[langchain]`) | LangChain adapter | Only for LangChain |
+| `langgraph>=0.2` | `pyproject.toml:72` (`[langgraph]`) | LangGraph adapter | Only for LangGraph (also pulled transitively by `langchain`) |
+| `openai-agents>=0.2` | `pyproject.toml:75` (`[openai]`) | OpenAI Agents SDK adapter | Only for OpenAI |
+| `langchain>=0.3` | `pyproject.toml:78` (`[langchain]`) | LangChain adapter | Only for LangChain |
+| `cryptography>=45.0` | `pyproject.toml:83` (`[attest]`), also in `[dev]` | Ed25519 event-chain attestation | Only for `continuum attest` |
+| `spiffe>=0.3.0` | `pyproject.toml:86` (`[spiffe]`) | SPIFFE Workload API client (py-spiffe) for binding workload identities to attestations (issue #745) | Only for SPIFFE Workload API use in `continuum attest`, `continuum attest-verify`, and `continuum resume` (`--spiffe`, `--workload-provider spiffe`, or the default provider); without it those checks fail closed |
+| `psycopg>=3.2` | `pyproject.toml:89` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
 | **Dev / test tooling** (all in `pyproject.toml:33-50` `[dev]`) | | | Only for contributors |
 | `pytest>=8.0`, `pytest-cov>=5.0`, `pytest-asyncio>=0.23` |  | Test runner + coverage + async MCP tests | Dev |
 | `hypothesis>=6.0` |  | Property-based tests (hashing, models) | Dev |

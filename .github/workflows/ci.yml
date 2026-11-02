@@ -63,7 +63,7 @@ jobs:
 
       - name: Install dev dependencies
         if: needs.detect.outputs.docs-only != 'true'
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,otel]"
 
       # Issue #281: the PowerShell launcher must work from a fresh clone,
       # which on this runner means no .venv. uv is present on GitHub
