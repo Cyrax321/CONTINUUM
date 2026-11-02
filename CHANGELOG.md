@@ -38,6 +38,15 @@ Test counts: ~4400 collected on a minimal env.
   through `RecoveryEngine` and `GenericAgentAdapter`. Scoped budgets prevent noisy
   external dependencies from exhausting the run-wide recovery ceiling.
 
+- **Reviewer fatigue telemetry and audit events for human oversight (#1411, #1407, #296).**
+  Add reviewer fatigue detection and telemetry for human-in-the-loop oversight.
+  Introduces three audit-grade events (`REVIEW_PARKED`, `REVIEW_BATCH_APPROVED`,
+  `FATIGUE_SIGNAL_RECORDED`) that maintain append-only hash chain integrity.
+  Provides `FatigueContract` to enforce dwell time thresholds and complexity floors,
+  integrating into `ActionLedger.flag_for_review`, `reconcile`, and `reconcile_batch`,
+  CLI `health`, the HITL dashboard, and HTTP sidecar endpoints to surface advisory warnings
+  when rapid rubber-stamped batch approvals occur.
+
 - **Risk-informed recovery assessment emits located repair guidance (#1423).**
   `RecoveryEngine.assess()` already mapped `RISK_OBSERVED` triggers to recovery
   modes (#303); the winning risk events now also shape the repair plan through
