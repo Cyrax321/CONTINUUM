@@ -85,26 +85,29 @@ def _step(
 
 
 @pytest.mark.parametrize(
-    ("trigger", "expected_mode"),
+    ("trigger", "expected_mode", "score"),
     [
-        ("loop", RecoveryMode.REPLAN),
-        ("error_cascade", RecoveryMode.WAIT),
-        ("latency_anomaly", RecoveryMode.RESUME),
-        ("token_runaway", RecoveryMode.WAIT),
-        ("silent_abort", RecoveryMode.REPAIR_AND_RESUME),
-        ("meltdown", RecoveryMode.ROLLBACK),
-        ("side_effect_duplicate", RecoveryMode.ABORT),
-        ("governance_decay", RecoveryMode.REQUEST_HUMAN),
+        ("loop", RecoveryMode.REPLAN, 0.95),
+        ("error_cascade", RecoveryMode.WAIT, 0.95),
+        ("latency_anomaly", RecoveryMode.RESUME, 0.95),
+        # token_runaway is score-aware (#1422): 0.5 sits below the default 0.8
+        # threshold, so the mapping's WAIT is the mode this row pins. The
+        # at/above-threshold escalation has its own test below.
+        ("token_runaway", RecoveryMode.WAIT, 0.5),
+        ("silent_abort", RecoveryMode.REPAIR_AND_RESUME, 0.95),
+        ("meltdown", RecoveryMode.ROLLBACK, 0.95),
+        ("side_effect_duplicate", RecoveryMode.ABORT, 0.95),
+        ("governance_decay", RecoveryMode.REQUEST_HUMAN, 0.95),
     ],
 )
 def test_deterministic_mode_selection_across_all_triggers(
-    tmp_path: Path, trigger: str, expected_mode: RecoveryMode
+    tmp_path: Path, trigger: str, expected_mode: RecoveryMode, score: float
 ) -> None:
     db = str(tmp_path / f"{trigger}.db")
     with SQLiteStorage(db) as store:
         run_id = f"run_{trigger}"
         _make_run(store, run_id=run_id)
-        ingest_risk(store, run_id, {"trigger": trigger, "score": 0.95})
+        ingest_risk(store, run_id, {"trigger": trigger, "score": score})
 
         decision = RecoveryEngine(store).assess(run_id, replay=False)
         assert decision.mode is expected_mode
@@ -112,6 +115,22 @@ def test_deterministic_mode_selection_across_all_triggers(
             assert len(decision.contract.triggering_risks) == 1
         else:
             assert len(decision.contract.triggering_risks) == 0
+
+
+def test_token_runaway_escalates_to_abort_at_the_configured_threshold(tmp_path: Path) -> None:
+    # #1422: evaluation is score-aware, so a token runaway the monitor is at
+    # least threshold-confident about escalates past the mapped WAIT to ABORT
+    # instead of proposing the wait the plain lookup used to.
+    db = str(tmp_path / "token_escalate.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_token_escalate"
+        _make_run(store, run_id=run_id)
+        ingest_risk(store, run_id, {"trigger": "token_runaway", "score": 0.95})
+
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    assert decision.mode is RecoveryMode.ABORT
+    assert decision.contract.reason == "risk token_runaway triggers abort"
 
 
 # --- RiskSignal extraction (the typed projection the planner consumes) ---
