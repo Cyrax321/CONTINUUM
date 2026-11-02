@@ -71,6 +71,15 @@ wire protocol specification. It exercises health probes, headers, action claims,
 deduplication replay, progress tracking, checkpoints, resume decisions, error formats,
 and credential separation.
 
+The suite also validates the conversation itself against the specification the
+server serves at `GET /openapi.json`: every request it sends and every response it
+receives is checked against that document's `components.schemas` (required fields,
+declared types, enums, and `$ref` pointers), and every documented endpoint is probed
+with a request carrying exactly the fields the document marks required. A server
+whose 200 responses omit a field its own spec marks required, or whose handlers
+demand a parameter the request schema does not list, fails the suite, so a pass is
+meaningful against any implementation, not just the reference one.
+
 ### Running Conformance Against a Local Server
 
 1. Start the sidecar:
