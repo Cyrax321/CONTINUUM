@@ -38,7 +38,6 @@ from continuum.recovery.risk_policy import (
     load_risk_policy,
 )
 from continuum.storage.base import Storage
-from continuum.storage.base import Storage
 
 __all__ = [
     "ingest_risk",
