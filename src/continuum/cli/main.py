@@ -3056,6 +3056,22 @@ def cmd_gateway(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     return ExitCode.OK
 
 
+def _detached_startup_timeout() -> float:
+    """Seconds to wait for a detached daemon child to bind and write its PID.
+
+    The detached-process readiness window used to be hardcoded to half a
+    second, which Python startup alone routinely exceeds on Windows, so a
+    healthy child was reported as started before it had bound, and a child
+    that died right after was reported the same way. Five seconds is the
+    realistic floor, overridable for tests (#1855).
+    """
+    raw = os.environ.get("CONTINUUM_DAEMON_STARTUP_TIMEOUT_S", "5.0")
+    try:
+        return max(0.05, float(raw))
+    except ValueError:
+        return 5.0
+
+
 def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err: Any) -> int:
     """Run CONTINUUM as a background daemon (gateway + watch).
 
@@ -3102,14 +3118,22 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
             run_id = active.run_id if active else None
         else:
             db_path = getattr(args, "db", None)
+            # SQLite lives on disk, so a missing file means there is nothing to
+            # probe, and opening it here would create it. Server-backed URLs
+            # have no file to stat, so they are probed through open_storage
+            # directly instead of being silently skipped (#1855).
+            db_path_str = str(db_path) if db_path is not None else None
+            scheme = db_path_str.split("://", 1)[0].lower() if db_path_str else ""
             probe_path = (
-                Path(_resolve_path(db_path))
-                if db_path and str(db_path).startswith("sqlite://")
-                else Path(db_path)
-                if db_path
+                Path(_resolve_path(db_path_str))
+                if scheme == "sqlite" and db_path_str is not None
+                else None
+                if scheme in ("postgres", "postgresql")
+                else Path(db_path_str)
+                if db_path_str
                 else None
             )
-            if db_path and db_path != ":memory:" and probe_path and probe_path.exists():
+            if db_path and db_path != ":memory:" and (probe_path is None or probe_path.exists()):
                 try:
                     probe_storage = open_storage(db_path)
                     try:
@@ -3117,7 +3141,7 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
                         run_id = active.run_id if active else None
                     finally:
                         probe_storage.close()
-                except (sqlite3.Error, StorageError, ValueError, OSError) as exc:
+                except (sqlite3.Error, StorageError, ValueError, RuntimeError, OSError) as exc:
                     print(
                         f"warning: failed to probe active run from {db_path}: {exc}",
                         file=err,
@@ -3206,7 +3230,7 @@ def cmd_daemon(args: argparse.Namespace, storage: Storage | None, out: Any, err:
         poll_fn = getattr(proc, "poll", None)
         child_pid: int | None = None
 
-        deadline = time.monotonic() + 0.5
+        deadline = time.monotonic() + _detached_startup_timeout()
         while time.monotonic() < deadline:
             if callable(poll_fn):
                 rc = poll_fn()

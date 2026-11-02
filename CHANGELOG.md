@@ -163,6 +163,20 @@ Test counts: ~3950 collected on a minimal env.
 
 ### Fixed
 
+- **The daemon's active-run probe and detached startup deadline work on
+  server-backed storage (#1855).** The probe gated on `Path(db).exists()`,
+  which is never true for a `postgresql://` URL, so the daemon silently bound
+  with `run_id=None` instead of the live run. Only SQLite is now gated on
+  filesystem existence, since a missing SQLite file means nothing to probe and
+  opening it would create it; server-backed URLs are probed through
+  `open_storage` directly, and a probe that fails (no `psycopg` extra, an
+  unreachable host) prints a warning rather than aborting the launch. The
+  detached-process readiness deadline was hardcoded to 500ms, which Python
+  startup alone routinely exceeds on Windows, so a healthy child was reported
+  as started before it had bound. It is now five seconds and overridable via
+  `CONTINUUM_DAEMON_STARTUP_TIMEOUT_S`, and a child that exits during the
+  window is still reported as an error.
+
 - **The OpenAPI 3.1 document now describes the wire the sidecar actually
   speaks (#1894).** The spec served at `GET /openapi.json` claimed a contract
   the reference server kept in neither direction, so a client generated from it
