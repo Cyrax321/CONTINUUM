@@ -63,6 +63,8 @@ def approve_merge(
     if not reason or not reason.strip():
         raise ValueError("a merge needs a stated reason; the reason is the audit")
     if source_run_id is not None:
+        if source_run_id == run_id:
+            raise ValueError("cannot merge a run into itself")
         storage.get_run(source_run_id)
 
     if anchor_sequence is None:
@@ -70,6 +72,14 @@ def approve_merge(
         anchor = latest.source_sequence if latest else 0
     else:
         anchor = int(anchor_sequence)
+        if anchor < 0:
+            raise ValueError(f"anchor_sequence must be non-negative, got {anchor}")
+
+    source_anchor: int | None = None
+    if source_anchor_sequence is not None:
+        source_anchor = int(source_anchor_sequence)
+        if source_anchor < 0:
+            raise ValueError(f"source_anchor_sequence must be non-negative, got {source_anchor}")
 
     if source_run_id is None:
         derivation, carry_set, summary = check_preconditions(

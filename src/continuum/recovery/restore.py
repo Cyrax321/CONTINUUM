@@ -141,6 +141,8 @@ def approve_restore(
 
     if anchor_sequence is not None:
         anchor = int(anchor_sequence)
+        if anchor < 0:
+            raise ValueError(f"anchor_sequence must be non-negative, got {anchor}")
     else:
         anchor = _anchor_for(storage, run_id, target)
 
