@@ -48,14 +48,14 @@ EXPECTED: dict[tuple[str, int], tuple[str, str]] = {
     ("src/continuum/checkpoint/policy.py", 54): ("CheckpointTrigger", "decl"),
     ("src/continuum/checkpoint/policy.py", 74): ("RECOVERY", "assign"),
     ("src/continuum/checkpoint/policy.py", 82): ("ANCHOR_TRIGGERS", "assign"),
-    ("src/continuum/checkpoint/manager.py", 198): ("checkpoint", "decl"),
+    ("src/continuum/checkpoint/manager.py", 226): ("checkpoint", "decl"),
     ("src/continuum/recovery/cleanup.py", 24): ("cleanup_ephemeral_artifacts", "decl"),
     ("src/continuum/concurrency/lease.py", 53): ("LeaseCoordinator", "decl"),
     ("src/continuum/recovery/ledger.py", 214): ("anchor", "assign"),
     ("src/continuum/recovery/ledger.py", 527): ("RecoveryLedger", "decl"),
     ("src/continuum/recovery/ledger.py", 534): ("LeaseCoordinator", "ref"),
     ("src/continuum/recovery/contract.py", 377): ("build_contract", "decl"),
-    ("src/continuum/recovery/engine.py", 497): ("check_admissibility", "ref"),
+    ("src/continuum/recovery/engine.py", 511): ("check_admissibility", "ref"),
     ("src/continuum/recovery/impact.py", 53): ("DependencyGraph", "decl"),
     ("src/continuum/recovery/planner.py", 140): ("RepairPlan", "decl"),
     ("src/continuum/reconcilers.py", 498): ("probe_authority_verdict", "decl"),
@@ -70,7 +70,7 @@ EXPECTED: dict[tuple[str, int], tuple[str, str]] = {
     ("src/continuum/models.py", 1506): ("EnvResource", "decl"),
     ("src/continuum/models.py", 1518): ("EnvironmentSnapshot", "decl"),
     ("src/continuum/models.py", 1565): ("RecoveryContract", "decl"),
-    ("src/continuum/models.py", 1653): ("StateCheckpoint", "decl"),
+    ("src/continuum/models.py", 1654): ("StateCheckpoint", "decl"),
 }
 
 

@@ -163,6 +163,26 @@ Test counts: ~3950 collected on a minimal env.
 
 ### Fixed
 
+- **A damaged event log yields an advisory verdict instead of a traceback
+  (#1907).** `RecoveryEngine.assess` asks for `restore(...,
+  on_unprojectable="degrade")` on purpose, but the degrade contract only
+  covered events that could be read and then fail to fold: a row whose
+  payload could not be parsed at all raised `CorruptedRecord` out of
+  `storage.read_events` before projection ran, and out of the engine's
+  auxiliary readers, so `assess` crashed on the one run it was built for.
+  `CorruptedRecord` now locates the refusing row (`run_id` and `sequence`),
+  `CheckpointManager.restore` folds the clean prefix that precedes it and
+  marks the state `INVALID` at the refused sequence, and `assess` degrades
+  its auxiliary readers (the all-events scan, the action ledger, the file
+  observations, and the informed-retry account) instead of letting the read
+  error escape. A checkpoint whose own `STATE_CHECKPOINTED` annotation row is
+  the unreadable one falls back, under `"degrade"`, to the cursor a missing
+  annotation already takes, instead of escaping before the pending read. An
+  unreadable action ledger forces `REQUEST_HUMAN`, because
+  an in-flight side effect that cannot be enumerated cannot be assumed
+  resolved. Write paths keep the default `"raise"` behaviour and fail loudly
+  on a log they cannot trust.
+
 - **`ActionLedger.claim` guards its slot with a storage-level compare-and-set (#1889).**
   Claim folded the log, decided the slot was free, and recorded without checking
   that the log had not moved underneath it. When two workers resolved the same
