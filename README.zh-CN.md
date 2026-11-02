@@ -94,7 +94,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI 入口
 continuum-mcp --help             # MCP 服务器入口（需要 [mcp] 或 [dev]）
-pytest -q                        # 最小环境中约 3950 个收集，约 3,636 个通过，约 41 个跳过（具体数量因环境而异）
+pytest -q                        # 最小环境中约 4400 个收集，约 4,100 个通过，约 0 个跳过（具体数量因环境而异）
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI 强制的三扇门禁
 ```
@@ -411,7 +411,7 @@ Schema v6。SQLite 为主，Postgres 经 CI 验证。单一日志，多重投影
 
 ### 模块映射，一库多面
 
-CONTINUUM 是一个库（`src/continuum`，150 个模块）加上大型测试套件（230 个测试文件，约 2,809 个测试）。所有模块追加并重放同一个哈希链事件日志：
+CONTINUUM 是一个库（`src/continuum`，152 个模块）加上大型测试套件（236 个测试文件，约 4400 个测试）。所有模块追加并重放同一个哈希链事件日志：
 
 | 模块 | 职责 |
 |:--|:--|

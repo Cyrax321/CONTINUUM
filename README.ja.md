@@ -95,7 +95,7 @@ uv pip install "continuum-agent[mcp] @ git+https://github.com/Cyrax321/CONTINUUM
 ```bash
 continuum --help                 # CLI エントリーポイント
 continuum-mcp --help             # MCP サーバーエントリーポイント（[mcp] または [dev] が必要）
-pytest -q                        # 最小環境で約 3950 件収集、約 3,636 件通過、約 41 件スキップ（正確な数は異なる）
+pytest -q                        # 最小環境で約 4400 件収集、約 4,100 件通過、約 0 件スキップ（正確な数は異なる）
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # CI が強制する三つのゲート
 ```
@@ -396,7 +396,7 @@ RESUME < REPAIR_AND_RESUME < REPLAN < WAIT < REQUEST_HUMAN < ROLLBACK < ABORT
 
 ### モジュールマップ、一つのライブラリ、多くの面
 
-CONTINUUM は一つのライブラリ（`src/continuum`、150 モジュール）に加え大規模なテストスイート（230 テストファイル、約 2,809 テスト）である。すべてのモジュールは一つのハッシュチェーンイベントログに追記し再生する。
+CONTINUUM は一つのライブラリ（`src/continuum`、152 モジュール）に加え大規模なテストスイート（236 テストファイル、約 4400 テスト）である。すべてのモジュールは一つのハッシュチェーンイベントログに追記し再生する。
 
 | モジュール | 役割 |
 |:--|:--|
