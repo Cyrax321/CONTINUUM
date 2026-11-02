@@ -10,6 +10,12 @@ Test counts: ~4400 collected on a minimal env.
 
 ### Added
 
+- **Plan step locations on trajectory stall sites (#1463).**
+  `TrajectoryReport.stall_sites` (`continuum report --trajectory`) now names
+  the plan step enclosing repeated retries or failures as `action_type@step`,
+  derived by joining action event sequences against `PLAN_UPSERT` step spans.
+  Falls back to the bare action type when no plan is recorded.
+
 - **Per-dependency human gate budget in RecoveryLedger (#1428).**
   `RecoveryLedger.record_attempt`, `RecoveryLedger.attempts`, and
   `RecoveryLedger.requires_human` now support deriving recovery dependencies

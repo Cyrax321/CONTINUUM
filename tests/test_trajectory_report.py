@@ -11,6 +11,8 @@ from typing import Any
 
 from continuum.analysis.trajectory_report import (
     TRAJECTORY_REPORT_CAP_BYTES,
+    _locate_action_type_step,
+    _plan_step_spans,
     analyze_trajectory,
     build_trajectory_report,
     health_maybe_generate_trajectory_report,
@@ -21,7 +23,7 @@ from continuum.analysis.trajectory_report import (
 )
 from continuum.checkpoint import CheckpointManager
 from continuum.events import Event, EventType
-from continuum.models import Origin, Run, TrajectoryReport
+from continuum.models import Action, ActionStatus, Origin, Run, TrajectoryReport
 from continuum.state.semantic import project
 from continuum.storage import SQLiteStorage
 
@@ -988,3 +990,393 @@ def test_cli_report_run_with_no_events_says_so() -> None:
         assert payload["trajectory_report"] is None
     finally:
         pathlib.Path(path).unlink(missing_ok=True)
+
+
+def test_stall_sites_join_to_plan_step_span() -> None:
+    """Stall sites name the action type and the plan step whose span contains it (issue #1463)."""
+    storage = _make_storage()
+    try:
+        run_id = "run_1"
+        # Plan step 1
+        storage.append_event(
+            run_id,
+            EventType.PLAN_UPSERT,
+            {
+                "plan_id": "p1",
+                "units": [
+                    {
+                        "id": "step_fetch",
+                        "title": "fetch records",
+                        "status": "working",
+                        "depends_on": [],
+                    },
+                    {
+                        "id": "step_pay",
+                        "title": "process payment",
+                        "status": "pending",
+                        "depends_on": ["step_fetch"],
+                    },
+                ],
+            },
+        )
+        _add_failed_action(storage, run_id, "fetch_invoice", "inv:1")
+        _add_failed_action(storage, run_id, "fetch_invoice", "inv:2")
+
+        # Advance to plan step 2
+        storage.append_event(
+            run_id,
+            EventType.PLAN_UPSERT,
+            {
+                "plan_id": "p1",
+                "units": [
+                    {
+                        "id": "step_fetch",
+                        "title": "fetch records",
+                        "status": "done",
+                        "depends_on": [],
+                    },
+                    {
+                        "id": "step_pay",
+                        "title": "process payment",
+                        "status": "working",
+                        "depends_on": ["step_fetch"],
+                    },
+                ],
+            },
+        )
+        _add_failed_action(storage, run_id, "charge_card", "card:1")
+        _add_failed_action(storage, run_id, "charge_card", "card:2")
+
+        end = storage.last_sequence(run_id)
+        report = build_trajectory_report(storage, run_id, window_start=1, window_end=end)
+        assert "fetch_invoice@step_fetch" in report.stall_sites
+        assert "charge_card@step_pay" in report.stall_sites
+    finally:
+        storage.close()
+
+
+def test_stall_sites_fallback_without_plan_records_bare_action_type() -> None:
+    """A run without any plan upserted falls back to the bare action type (issue #1463)."""
+    storage = _make_storage()
+    try:
+        run_id = "run_1"
+        _add_failed_action(storage, run_id, "fetch_invoice", "inv:1")
+        _add_failed_action(storage, run_id, "fetch_invoice", "inv:2")
+        end = storage.last_sequence(run_id)
+        report = build_trajectory_report(storage, run_id, window_start=1, window_end=end)
+        assert report.stall_sites == ["fetch_invoice"]
+    finally:
+        storage.close()
+
+
+def test_render_trajectory_report_includes_located_stall_sites() -> None:
+    """The rendered trajectory report displays located stall sites (issue #1463)."""
+    report = TrajectoryReport(
+        report_id="rep-1234",
+        window_start=1,
+        window_end=20,
+        compaction_seq=20,
+        attempts=4,
+        total_attempts=4,
+        uncertain_count=0,
+        scar_rate=0.5,
+        stall_sites=["fetch_invoice@step_fetch", "charge_card@step_pay"],
+    )
+    lines = render_trajectory_report(report)
+    assert any(
+        "stall_sites: fetch_invoice@step_fetch, charge_card@step_pay" in line for line in lines
+    )
+
+
+def test_stall_sites_with_partial_plan_upsert_merges() -> None:
+    """Partial PLAN_UPSERT merges update cumulative plan state without losing earlier steps."""
+    storage = _make_storage()
+    try:
+        run_id = "run_1"
+        storage.append_event(
+            run_id,
+            EventType.PLAN_UPSERT,
+            {
+                "plan_id": "p1",
+                "units": [
+                    {
+                        "id": "step_1",
+                        "title": "first step",
+                        "status": "working",
+                    },
+                    {
+                        "id": "step_2",
+                        "title": "second step",
+                        "status": "pending",
+                    },
+                ],
+            },
+        )
+        _add_failed_action(storage, run_id, "first_action", "act:1")
+        _add_failed_action(storage, run_id, "first_action", "act:2")
+
+        # Partial upsert only marks step_1 done; step_2 is implicitly next (still pending)
+        storage.append_event(
+            run_id,
+            EventType.PLAN_UPSERT,
+            {
+                "plan_id": "p1",
+                "units": [
+                    {
+                        "id": "step_1",
+                        "title": "first step",
+                        "status": "done",
+                    },
+                ],
+            },
+        )
+        _add_failed_action(storage, run_id, "second_action", "act:3")
+        _add_failed_action(storage, run_id, "second_action", "act:4")
+
+        end = storage.last_sequence(run_id)
+        report = build_trajectory_report(storage, run_id, window_start=1, window_end=end)
+        assert "first_action@step_1" in report.stall_sites
+        assert "second_action@step_2" in report.stall_sites
+    finally:
+        storage.close()
+
+
+def test_stall_sites_after_plan_completion_records_bare_action_type() -> None:
+    """When a plan marks all units done, subsequent stalls fall back to bare action type."""
+    storage = _make_storage()
+    try:
+        run_id = "run_1"
+        storage.append_event(
+            run_id,
+            EventType.PLAN_UPSERT,
+            {
+                "plan_id": "p1",
+                "units": [
+                    {
+                        "id": "step_1",
+                        "title": "only step",
+                        "status": "working",
+                    },
+                ],
+            },
+        )
+        # Advance and complete plan
+        storage.append_event(
+            run_id,
+            EventType.PLAN_UPSERT,
+            {
+                "plan_id": "p1",
+                "units": [
+                    {
+                        "id": "step_1",
+                        "title": "only step",
+                        "status": "done",
+                    },
+                ],
+            },
+        )
+        # Stalling action happens after the plan finished
+        _add_failed_action(storage, run_id, "cleanup_task", "clean:1")
+        _add_failed_action(storage, run_id, "cleanup_task", "clean:2")
+
+        end = storage.last_sequence(run_id)
+        report = build_trajectory_report(storage, run_id, window_start=1, window_end=end)
+        assert report.stall_sites == ["cleanup_task"]
+    finally:
+        storage.close()
+
+
+def test_stall_sites_when_all_remaining_units_blocked() -> None:
+    """When all remaining units are blocked, subsequent stalls fall back to bare action type."""
+    storage = _make_storage()
+    try:
+        run_id = "run_1"
+        storage.append_event(
+            run_id,
+            EventType.PLAN_UPSERT,
+            {
+                "plan_id": "p1",
+                "units": [
+                    {
+                        "id": "step_1",
+                        "title": "step one",
+                        "status": "blocked",
+                    },
+                ],
+            },
+        )
+        _add_failed_action(storage, run_id, "fallback_task", "task:1")
+        _add_failed_action(storage, run_id, "fallback_task", "task:2")
+
+        end = storage.last_sequence(run_id)
+        report = build_trajectory_report(storage, run_id, window_start=1, window_end=end)
+        assert report.stall_sites == ["fallback_task"]
+    finally:
+        storage.close()
+
+
+def test_stall_sites_reupsert_unit_without_status_defaults_to_pending() -> None:
+    """Re-upserting a unit without status resets it to pending matching projection semantics."""
+    storage = _make_storage()
+    try:
+        run_id = "run_1"
+        # Initial upsert: step_a is done, step_b is working
+        storage.append_event(
+            run_id,
+            EventType.PLAN_UPSERT,
+            {
+                "plan_id": "p1",
+                "units": [
+                    {"id": "step_a", "title": "A", "status": "done"},
+                    {"id": "step_b", "title": "B", "status": "working"},
+                ],
+            },
+        )
+        # Re-upsert step_a with no status (resets to pending)
+        storage.append_event(
+            run_id,
+            EventType.PLAN_UPSERT,
+            {
+                "plan_id": "p1",
+                "units": [
+                    {"id": "step_a", "title": "A"},
+                    {"id": "step_b", "title": "B", "status": "done"},
+                ],
+            },
+        )
+        # step_b is done, step_a reset to pending, so step_a becomes active
+        _add_failed_action(storage, run_id, "retry_step_a", "act:1")
+        _add_failed_action(storage, run_id, "retry_step_a", "act:2")
+
+        end = storage.last_sequence(run_id)
+        report = build_trajectory_report(storage, run_id, window_start=1, window_end=end)
+        assert "retry_step_a@step_a" in report.stall_sites
+    finally:
+        storage.close()
+
+
+def test_plan_step_spans_and_locate_coverage() -> None:
+    """Comprehensive branch coverage for _plan_step_spans and _locate_action_type_step."""
+    # Empty spans
+    assert _locate_action_type_step("act", [], {}, []) is None
+
+    # Events with malformed PLAN_UPSERT payload (non-dict payload, non-list units, non-dict units, empty id)
+    ev_malformed_payload = Event.model_construct(
+        run_id="r1",
+        sequence=1,
+        type=EventType.PLAN_UPSERT,
+        payload="not-a-dict",
+    )
+    ev_malformed_units = Event(
+        run_id="r1",
+        sequence=2,
+        type=EventType.PLAN_UPSERT,
+        payload={"units": "not-a-list"},
+    )
+    ev_malformed_unit_entries = Event(
+        run_id="r1",
+        sequence=3,
+        type=EventType.PLAN_UPSERT,
+        payload={
+            "units": [
+                None,
+                123,
+                {"id": ""},
+                {"step_id": "step_alt", "status": "in_progress"},
+            ]
+        },
+    )
+    spans = _plan_step_spans([ev_malformed_payload, ev_malformed_units, ev_malformed_unit_entries])
+    assert len(spans) == 1
+    assert spans[0] == ("step_alt", 3, 3)
+
+    # _plan_step_spans when no transitions occurred
+    assert (
+        _plan_step_spans([Event(run_id="r1", sequence=1, type=EventType.TASK_UPDATED, payload={})])
+        == []
+    )
+
+    # _locate_action_type_step when stalling_keys match ACTION_RECONCILED and ACTION_COMPENSATED
+    latest_actions = {
+        "key1": Action(
+            run_id="r1", action_id="a1", action_type="stall_op", status=ActionStatus.FAILED
+        ),
+    }
+    events = [
+        Event(run_id="r1", sequence=1, type=EventType.ACTION_RECONCILED, payload={"key": "key1"}),
+        Event(run_id="r1", sequence=2, type=EventType.ACTION_COMPENSATED, payload={"key": "key1"}),
+    ]
+    spans_2 = [("step_x", 1, 5)]
+    assert _locate_action_type_step("stall_op", events, latest_actions, spans_2) == "step_x"
+
+    # _locate_action_type_step when payload has no raw_key but has action dict
+    events_no_raw_key = [
+        Event(
+            run_id="r1",
+            sequence=2,
+            type=EventType.ACTION_RECORDED,
+            payload={
+                "action": {
+                    "run_id": "r1",
+                    "action_id": "a2",
+                    "action_type": "stall_op",
+                    "status": "failed",
+                }
+            },
+        ),
+    ]
+    assert (
+        _locate_action_type_step("stall_op", events_no_raw_key, latest_actions, spans_2) == "step_x"
+    )
+
+    # _locate_action_type_step when stalling_keys not matched, fallback loop for ACTION_RECORDED
+    events_mismatched_key = [
+        Event(run_id="r1", sequence=1, type=EventType.WORK_COMPLETED, payload={}),
+        Event(
+            run_id="r1",
+            sequence=2,
+            type=EventType.ACTION_RECORDED,
+            payload={
+                "key": "other_key",
+                "action": {
+                    "run_id": "r1",
+                    "action_id": "a2",
+                    "action_type": "stall_op",
+                    "status": "failed",
+                },
+            },
+        ),
+    ]
+    assert (
+        _locate_action_type_step("stall_op", events_mismatched_key, latest_actions, spans_2)
+        == "step_x"
+    )
+
+    # _locate_action_type_step when action_type is completely missing from events
+    assert (
+        _locate_action_type_step("unknown_op", events_mismatched_key, latest_actions, spans_2)
+        is None
+    )
+
+    # _locate_action_type_step when events have non-dict payload
+    ev_non_dict_payload = [
+        Event.model_construct(
+            run_id="r1", sequence=1, type=EventType.ACTION_RECORDED, payload="not-dict"
+        ),
+    ]
+    assert (
+        _locate_action_type_step("stall_op", ev_non_dict_payload, latest_actions, spans_2) is None
+    )
+
+    # _locate_action_type_step when event sequences fall outside all spans
+    assert (
+        _locate_action_type_step("stall_op", events, latest_actions, [("step_far", 10, 20)]) is None
+    )
+
+    # _stall_sites with an event missing key
+    ev_no_key = [
+        Event(run_id="r1", sequence=1, type=EventType.ACTION_RECORDED, payload={}),
+    ]
+    from continuum.analysis.trajectory_report import _stall_sites
+
+    assert _stall_sites(ev_no_key) == []
