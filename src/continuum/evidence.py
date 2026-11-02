@@ -45,7 +45,7 @@ import shutil
 import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -247,7 +247,10 @@ def _stat(path: str) -> dict[str, Any] | None:
         info = Path(path).stat()
     except OSError:
         return None
-    return {"bytes": info.st_size, "mtime": datetime.fromtimestamp(info.st_mtime).isoformat()}
+    return {
+        "bytes": info.st_size,
+        "mtime": datetime.fromtimestamp(info.st_mtime, tz=UTC).isoformat(),
+    }
 
 
 @dataclass(frozen=True, slots=True)

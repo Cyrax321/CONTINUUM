@@ -38,6 +38,20 @@ class FakeTTY(io.StringIO):
         return True
 
 
+@pytest.fixture(autouse=True)
+def _isolate_terminal_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test a clean colour baseline.
+
+    `should_colour()` reads NO_COLOR and TERM from the environment, so an
+    exported NO_COLOR or TERM=dumb in the surrounding shell (IDE test runners,
+    Emacs, non-interactive CI) would silently disable colour and fail the
+    tests below for reasons that have nothing to do with the code under test.
+    Tests that exercise suppression set those variables themselves.
+    """
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+
 @pytest.fixture
 def db(tmp_path: Path) -> Iterator[str]:
     path = str(tmp_path / "demo.db")

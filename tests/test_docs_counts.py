@@ -191,6 +191,75 @@ def test_readme_module_and_file_counts_match_the_tree() -> None:
     )
 
 
+#: The module-map section's heading, in every language a README is translated
+#: into (#1702). Each README carries exactly one heading naming modules -- the
+#: section that states the figures -- so it is the trigger that separates
+#: "this file states the sentence" from "this file says nothing to check".
+_MODULE_MAP_HEADING_RES = re.compile(
+    r"^#{2,3}\s+[^\n]*(?:module|módulo|モジュール|모듈|模块)",
+    re.IGNORECASE | re.MULTILINE,
+)
+#: The module figure, same sentence in every language: `src/continuum`, then a
+#: number, then the local word for module. Spanish and Portuguese share
+#: "módulos", Japanese and Korean use the full-width separator, and Chinese
+#: suffixes the counter 个.
+_MODULE_MAP_COUNT_RES = re.compile(
+    r"`src/continuum`[,，、]\s*(\d+)\s*(?:个\s*)?(?:modules?|módulos|モジュール|모듈|模块)"
+)
+#: The test-file figure in the same sentence, in every translation.
+_TEST_FILE_COUNT_RES = re.compile(
+    r"(\d+)\s*(?:个\s*)?(?:test files|archivos de test|テストファイル|테스트 파일|arquivos de teste|测试文件)"
+)
+
+
+def _module_map_figure(path: Path, pattern: re.Pattern[str]) -> int:
+    """The single figure ``path`` states for ``pattern`` (#1702).
+
+    A file that states none is a translation whose phrasing drifted past what
+    the guard can read; a file that states two is one a reader cannot trust.
+    Either is an error, and the error names the file, because a translated
+    README that drifted silently is exactly what this check exists to catch.
+    """
+    text = path.read_text(encoding="utf-8")
+    figures = {int(m) for m in pattern.findall(text)}
+    assert figures, f"{path} states no figure the guard can read in the module-map sentence"
+    assert len(figures) == 1, f"{path} states inconsistent figures: {sorted(figures)}"
+    return figures.pop()
+
+
+def test_every_readme_module_and_file_counts_match_the_tree() -> None:
+    """Every README stating the module-map sentence agrees with the tree (#1702).
+
+    The module-map figure once drifted by 7 across five translated READMEs
+    while the guard read only README.md, so a contributor renumbering the
+    English sentence left the other five wrong and nothing failed. Now every
+    README.*.md with a module-map section is read, and each states exactly one
+    module count and one test-file count within the same tolerance the English
+    guard uses -- ambiguity is an error, never a guess between two figures.
+    """
+    live_modules = _tree_module_count()
+    live_tests = _tree_test_file_count()
+    checked = 0
+    for readme in sorted(ROOT.glob("README*.md")):
+        if not _MODULE_MAP_HEADING_RES.search(readme.read_text(encoding="utf-8")):
+            # A README without the section owes no figures.
+            continue
+        checked += 1
+        stated_modules = _module_map_figure(readme, _MODULE_MAP_COUNT_RES)
+        assert abs(live_modules - stated_modules) <= TREE_COUNT_TOLERANCE, (
+            f"{readme} says {stated_modules} modules but the tree has "
+            f"{live_modules}: the module-map sentence needs the figure "
+            "from `_tree_module_count`"
+        )
+        stated_tests = _module_map_figure(readme, _TEST_FILE_COUNT_RES)
+        assert abs(live_tests - stated_tests) <= TREE_COUNT_TOLERANCE, (
+            f"{readme} says {stated_tests} test files but the tree has "
+            f"{live_tests}: the module-map sentence needs the figure "
+            "from `_tree_test_file_count`"
+        )
+    assert checked >= 1, "no README states a module-map section; the anchor drifted"
+
+
 #: Prose forms of the fault-injection suite's size ("7-fault", "7 fault").
 #: ``faults.py`` is the ground truth and it imports nothing from ``continuum``
 #: (``dataclasses`` only), so the guard reads the corpus directly instead of
@@ -328,6 +397,32 @@ def test_landing_page_meta_cli_count_matches_the_parser() -> None:
         f"the landing page advertises {stated} CLI commands but build_parser() "
         f"registers {actual}: re-sync the meta description in docs/index.html"
     )
+
+
+def test_architecture_docs_cli_command_counts_match_the_parser() -> None:
+    """The architecture diagrams and HTML page pin their CLI counts to the parser (#1386)."""
+    expected = _cli_subcommand_count()
+
+    arch_md = ROOT / "docs" / "diagrams" / "architecture.md"
+    if arch_md.exists():
+        text = arch_md.read_text(encoding="utf-8")
+        matches = re.findall(r"CLI,\s*(\d+)\s*commands", text)
+        matches += re.findall(r"\|\s*CLI commands\s*\|\s*(\d+)\s*\|", text)
+        for count_str in matches:
+            assert int(count_str) == expected, (
+                f"{arch_md.name} states {count_str} CLI commands, but build_parser() "
+                f"registers {expected}"
+            )
+
+    arch_html = ROOT / "docs" / "architecture.html"
+    if arch_html.exists():
+        text = arch_html.read_text(encoding="utf-8")
+        matches = re.findall(r"CLI\s*-\s*(\d+)\s*commands", text)
+        for count_str in matches:
+            assert int(count_str) == expected, (
+                f"{arch_html.name} states {count_str} CLI commands, but build_parser() "
+                f"registers {expected}"
+            )
 
 
 def test_documented_counts_agree() -> None:
@@ -599,8 +694,22 @@ def test_readme_module_and_test_file_counts_match_tree() -> None:
         f"README says {documented_tests} test files but tests/ carries {live_tests}"
     )
 
+    arch_html = ROOT / "docs" / "architecture.html"
+    if arch_html.exists():
+        arch_text = arch_html.read_text(encoding="utf-8")
+        m_match = re.search(r"<b>(\d+)</b>\s+modules", arch_text)
+        t_match = re.search(r"<b>(\d+)</b>\s+test files", arch_text)
+        if m_match and t_match:
+            arch_modules, arch_tests = int(m_match.group(1)), int(t_match.group(1))
+            assert abs(live_modules - arch_modules) <= TREE_COUNT_TOLERANCE, (
+                f"docs/architecture.html says {arch_modules} modules but src/continuum carries {live_modules}"
+            )
+            assert abs(live_tests - arch_tests) <= TREE_COUNT_TOLERANCE, (
+                f"docs/architecture.html says {arch_tests} test files but tests/ carries {live_tests}"
+            )
 
-def test_pyproject_line_references_in_docs():
+
+def test_pyproject_line_references_in_docs() -> None:
     """Verify pyproject.toml:NN references in docs point to valid dependency lines.
 
     Design note: These are line numbers, and any added extra shifts them.

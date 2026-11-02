@@ -47,10 +47,13 @@ jobs:
                   thank: false,
                 };
               } else {
-                // COMMENT reviews do not change approval status.
-                // No artifact is written; the apply workflow skips.
+                // COMMENT and other non-approval reviews do not change status.
+                // Write an explicit skip intent so the apply workflow cleanly skips.
                 core.info("Comment review: nothing to do.");
-                return;
+                intent = {
+                  skip: true,
+                  pr_number: pr.number,
+                };
               }
             } else {
               const action = context.payload.action;

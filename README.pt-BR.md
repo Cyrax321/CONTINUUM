@@ -195,7 +195,7 @@ Passo a passo completo com código em `docs/recovery_walkthrough.md` (`examples/
 | Adaptadores de frameworks | Integrações Python genérico, OpenAI Agents SDK, LangGraph e LangChain |
 | Loop de planejamento seguro | Verificação de observações com dois sinais escala ramos de alto risco para REQUIRES_REVIEW |
 | Revalidação periódica | Ambiente verificado novamente em agenda, detectando deriva no meio da execução dentro de um ciclo |
-| Log à prova de adulteração | Log de eventos encadeado (55 tipos de eventos) com verificação de integridade |
+| Log à prova de adulteração | Log de eventos encadeado (57 tipos de eventos) com verificação de integridade |
 | Porta de cumprimento | Chamadas de efeitos colaterais não reivindicadas são recusadas antes de disparar, mensagens de negação ensinam o protocolo de reivindicação |
 | Hooks de observação | Cada arquivo que uma CLI de código escreve se torna evidência verificada por digest, fora do controle do modelo |
 | Briefing de sessão | Sessões frescas aprendem o estado da execução de forma determinística no início, incluindo o resumo de raciocínio da sessão anterior |
@@ -387,7 +387,7 @@ Esquema v6. SQLite é primário, Postgres verificado por CI. Um log, muitas proj
 
 | Tabela | Propósito |
 |:--|:--|
-| `events` | Log somente anexado encadeado (55 tipos de eventos) |
+| `events` | Log somente anexado encadeado (57 tipos de eventos) |
 | `runs` | Metadados de execução com `parent_run_id` para multiagente |
 | `versions` | Instantâneos de SemanticState por checkpoint |
 | `checkpoints` | Registros de checkpoint selados com âncoras `RECOVERY` |
@@ -397,7 +397,7 @@ Esquema v6. SQLite é primário, Postgres verificado por CI. Um log, muitas proj
 
 ### Mapa de módulos, uma biblioteca, muitas superfícies
 
-O CONTINUUM é uma biblioteca (`src/continuum`, 132 módulos) mais uma suíte de testes grande (186 arquivos de teste, ~2,809 testes). Todos os módulos acrescentam e reproduzem um log de eventos encadeado:
+O CONTINUUM é uma biblioteca (`src/continuum`, 150 módulos) mais uma suíte de testes grande (230 arquivos de teste, ~2,809 testes). Todos os módulos acrescentam e reproduzem um log de eventos encadeado:
 
 | Módulo | Papel |
 |:--|:--|

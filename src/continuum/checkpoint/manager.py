@@ -30,13 +30,14 @@ from pathlib import Path
 from typing import Literal
 
 from continuum.checkpoint.policy import (
+    ANCHOR_TRIGGERS,
     CheckpointDecision,
     CheckpointPolicy,
     CheckpointTrigger,
     PolicyContext,
     default_policy,
 )
-from continuum.events import EventType
+from continuum.events import Event, EventType
 from continuum.models import (
     EnvironmentSnapshot,
     SemanticState,
@@ -349,9 +350,13 @@ class CheckpointManager:
 
         A recovery anchor is a checkpoint whose trigger is ``RECOVERY``: it marks
         the exact state a non-resume decision judged unsafe to continue from, so
-        it is the right place to roll back to. When ``before_version`` is given,
-        only anchors at or before that version are considered, which lets a
-        caller ask "where would I have rolled back to right before event X?"
+        it is the right place to roll back to. Compaction anchors are stamped
+        ``COMPACTION`` precisely so they stay out of this set: a compaction anchor
+        is written *after* the unsafe event at a higher version, so it would
+        otherwise always win and silently hide the real rollback point (#1852).
+        When ``before_version`` is given, only anchors at or before that version
+        are considered, which lets a caller ask "where would I have rolled back
+        to right before event X?"
         """
         anchors = [
             c
@@ -382,12 +387,14 @@ class CheckpointManager:
         )
 
     def prune(self, run_id: str, *, keep: int = 5, keep_anchors: bool = True) -> list[str]:
-        """Drop old checkpoints while keeping recent history and recovery anchors.
+        """Drop old checkpoints while keeping recent history and anchors.
 
         The ``keep`` newest checkpoints (by version) are always retained. Of the
-        older checkpoints, those whose trigger is ``RECOVERY`` are preserved when
-        ``keep_anchors`` is true, since deleting a known rollback point defeats
-        the purpose of checkpointing. Returns the ids that were removed.
+        older checkpoints, those with an anchor trigger (a rollback point or a
+        compaction seal) are preserved when ``keep_anchors`` is true, since
+        deleting a known rollback point defeats the purpose of checkpointing
+        and deleting a compaction seal orphans the compacted run's live tail.
+        Returns the ids that were removed.
         """
         if keep < 1:
             keep = 1
@@ -400,11 +407,19 @@ class CheckpointManager:
         for c in ordered[:-keep]:
             if c.checkpoint_id in keepers:
                 continue
-            if keep_anchors and c.trigger == CheckpointTrigger.RECOVERY:
+            if keep_anchors and c.trigger in ANCHOR_TRIGGERS:
                 continue
             self.storage.delete_checkpoint(c.checkpoint_id)
             deleted.append(c.checkpoint_id)
         return deleted
+
+    def reinject_constraints(
+        self, run_id: str, *, constraints_path: Path | None = None
+    ) -> list[Event]:
+        """Post-compaction constraint re-injection and verification hook (issue #1413)."""
+        from continuum.security.constraints import reinject_constraint_pins
+
+        return reinject_constraint_pins(self.storage, run_id, constraints_path=constraints_path)
 
 
 def _write_resume_json(run_id: str, checkpoint: StateCheckpoint) -> None:

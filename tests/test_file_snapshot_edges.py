@@ -147,3 +147,59 @@ def test_restore_file_will_not_copy_a_file_outside_the_store(
     assert not workspace.exists()
     # The traversal target is untouched as well as unread.
     assert secret.read_text() == "TOP_SECRET"
+
+
+def test_restore_file_restores_snapshot_contents(tmp_path: Path, monkeypatch: Any) -> None:
+    # The successful read path: content addressed by snapshot_file comes back
+    # byte for byte, and the .tmp stage is gone once the replace lands.
+    snapshot_dir = tmp_path / "snapshots"
+    monkeypatch.setattr(file_snapshot, "_SNAPSHOT_DIR", snapshot_dir)
+    source = tmp_path / "f.txt"
+    source.write_bytes(b"snapshot payload v1")
+    dst = tmp_path / "workspace" / "restored.txt"
+    dst.parent.mkdir()
+
+    digest = hashlib.sha256(b"snapshot payload v1").hexdigest()
+    assert file_snapshot.snapshot_file(source) == snapshot_dir / digest
+
+    assert file_snapshot.restore_file(dst, digest) is True
+    assert dst.read_bytes() == b"snapshot payload v1"
+    assert not dst.with_suffix(".tmp").exists()
+
+
+def test_restore_file_creates_missing_parent_directories(tmp_path: Path, monkeypatch: Any) -> None:
+    # A restore target often sits in a subdirectory the workspace never made,
+    # so the parents are created rather than the restore failing with ENOENT.
+    snapshot_dir = tmp_path / "snapshots"
+    monkeypatch.setattr(file_snapshot, "_SNAPSHOT_DIR", snapshot_dir)
+    payload = b"nested payload"
+    digest = hashlib.sha256(payload).hexdigest()
+    snapshot_dir.mkdir()
+    (snapshot_dir / digest).write_bytes(payload)
+    dst = tmp_path / "deep" / "newly" / "created" / "file.txt"
+    assert not dst.parent.exists()
+
+    assert file_snapshot.restore_file(dst, digest) is True
+    assert dst.read_bytes() == payload
+
+
+def test_restore_file_returns_false_when_the_write_fails(tmp_path: Path, monkeypatch: Any) -> None:
+    # A read-only or otherwise unwritable destination is a restore failure, not
+    # an exception: the copy stage raising OSError must come back as False with
+    # the destination untouched.
+    snapshot_dir = tmp_path / "snapshots"
+    monkeypatch.setattr(file_snapshot, "_SNAPSHOT_DIR", snapshot_dir)
+    payload = b"payload"
+    digest = hashlib.sha256(payload).hexdigest()
+    snapshot_dir.mkdir()
+    (snapshot_dir / digest).write_bytes(payload)
+    dst = tmp_path / "workspace" / "restored.txt"
+    dst.parent.mkdir()
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(file_snapshot.shutil, "copyfile", boom)
+
+    assert file_snapshot.restore_file(dst, digest) is False
+    assert not dst.exists()

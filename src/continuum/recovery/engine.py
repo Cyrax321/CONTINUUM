@@ -50,6 +50,8 @@ from continuum.gate import collect_consumed_authorities
 from continuum.models import (
     Action,
     ActionStatus,
+    Component,
+    ComponentValidationEntry,
     EnvironmentSnapshot,
     Origin,
     RecoveryContract,
@@ -57,6 +59,7 @@ from continuum.models import (
     RecoverySafety,
     SemanticState,
     StateStatus,
+    StateValidationResult,
 )
 from continuum.plugins import Registry, ValidationRule
 from continuum.recovery.contract import build_contract
@@ -270,6 +273,7 @@ class RecoveryEngine:
         self.validator = validator or StateValidator(strict_unknown=strict_unknown)
         self.strict_unknown = strict_unknown
         self.ledger = ledger
+        self._ledger = ledger
         self.dependency_budgets = dependency_budgets
         self._manager = CheckpointManager(storage)
         self._validation_rules: tuple[object, ...] = tuple(validation_rules or ())
@@ -356,13 +360,72 @@ class RecoveryEngine:
             archive_aware_events = self.storage.read_all_events(run_id)
         except Exception:
             archive_aware_events = self.storage.read_events(run_id)
-        for _ev in archive_aware_events:
+        for _ev in sorted(archive_aware_events, key=lambda event: event.sequence):
+            if _ev.type in (
+                EventType.CONSTRAINT_PINNED,
+                EventType.CONSTRAINT_PIN_DROPPED,
+                EventType.CONSTRAINT_RETRACTED,
+            ):
+                confirmed_components.discard("pin")
+                confirmed_components.discard("constraints")
+                pin_id = _ev.payload.get("constraint_id") if isinstance(_ev.payload, dict) else None
+                if pin_id:
+                    confirmed_components.discard(str(pin_id).strip().lower())
+                continue
+            if _ev.type is EventType.CONSTRAINT_PINS_VERIFIED:
+                # A failed verification clears earlier pin confirmations: the
+                # operator approved the prior audit, not this failed one.
+                payload = (
+                    _ev.payload
+                    if isinstance(_ev.payload, dict)
+                    else (_ev.payload.model_dump() if hasattr(_ev.payload, "model_dump") else {})
+                )
+                if payload.get("verified") is False:
+                    confirmed_components.discard("pin")
+                    confirmed_components.discard("constraints")
+                    for pin_id in payload.get("unverified", []):
+                        if isinstance(pin_id, str):
+                            confirmed_components.discard(pin_id.strip().lower())
+                continue
             if _ev.type is not EventType.REVIEW_CONFIRMED:
                 continue
             # Only human confirmations clear self-certification; an agent
             # must not be able to confirm its own work (issue #201).
             if _ev.source != Origin.HUMAN:
                 continue
+
+            # A confirmation covers the registry digest it was recorded
+            # against: if the operator changed a predicate afterwards, the old
+            # confirmation must not mask the new mismatch.
+            conf_reg_digest = (
+                _ev.payload.get("registry_digest") if isinstance(_ev.payload, dict) else None
+            )
+            if conf_reg_digest:
+                from continuum.security.constraints import load_constraints_or_none
+
+                try:
+                    curr_reg = load_constraints_or_none(asserted_by=Origin.DETERMINISTIC)
+                except Exception:
+                    curr_reg = None
+                conf_pred_digests = (
+                    _ev.payload.get("predicate_digests") if isinstance(_ev.payload, dict) else None
+                )
+                if curr_reg is not None and curr_reg.digest != conf_reg_digest:
+                    # The registry changed after this confirmation, so it only
+                    # covers components whose predicate digest still matches.
+                    raw_scope = _ev.payload.get("components") or _ev.payload.get("scope")
+                    if isinstance(raw_scope, (list, tuple, set)):
+                        for _c in raw_scope:
+                            if isinstance(_c, str) and _c.lower() not in ("pin", "constraints"):
+                                spec = curr_reg.get(_c)
+                                if (
+                                    spec
+                                    and conf_pred_digests
+                                    and conf_pred_digests.get(_c) == spec.digest
+                                ):
+                                    confirmed_components.add(_c.strip().lower())
+                    continue
+
             raw_scope = _ev.payload.get("components")
             if raw_scope is None:
                 raw_scope = _ev.payload.get("scope")
@@ -435,7 +498,6 @@ class RecoveryEngine:
         if not admissibility.admissible:
             has_action_ref = any(d["consumed_inputs"]["action_ids"] for d in admissibility.details)
             status = StateStatus.REQUIRES_REVIEW if has_action_ref else StateStatus.STALE
-            from continuum.models import Component, ComponentValidationEntry
 
             entries = list(validation.report.statuses)
             entries.append(
@@ -446,7 +508,6 @@ class RecoveryEngine:
                     detail=admissibility.reason,
                 )
             )
-            from continuum.models import StateValidationResult
 
             new_report = StateValidationResult(
                 run_id=validation.report.run_id,
@@ -503,8 +564,6 @@ class RecoveryEngine:
                 if scope is not None:
                     candidate_deps.update(scope)
                 else:
-                    from continuum.models import Component
-
                     for entry in validation.report.statuses:
                         if entry.component == Component.EXTERNAL_DEPENDENCY and entry.component_id:
                             candidate_deps.add(entry.component_id)
@@ -524,40 +583,15 @@ class RecoveryEngine:
                 run_budget_exhausted = False
                 exhausted_dependencies.clear()
 
-        plan = plan_repairs(
-            validation.report.statuses,
-            uncertain_actions=uncertain,
-            strict_unknown=self.validator.strict_unknown,
-            unprojectable=unprojectable,
-            exhausted_dependencies=exhausted_dependencies,
-            run_budget_exhausted=run_budget_exhausted,
-        )
-        liveness_advisory = None
-        liveness_breaches = 0
-        try:
-            from continuum.recovery.health import advisory_for_storage
-
-            liveness_advisory = advisory_for_storage(self.storage, run_id)
-            # Count prior breaches as DETECTED events. The archived prefix
-            # folds in via the shared fetch, so a silence detected before a
-            # compaction still counts: the live tail alone would reset the
-            # breach count to zero (same archive-blindness family as #553).
-            try:
-                liveness_breaches = sum(
-                    1 for e in archive_aware_events if e.type == EventType.LIVENESS_SILENCE_DETECTED
-                )
-            except Exception:
-                liveness_breaches = 0
-        except Exception:
-            liveness_advisory = None
         # Risk evaluation (issue #303): map triggers to modes, collect ids.
         # Runs before the decision so the worst trigger proposes alongside the
         # other signals; the most cautious proposal wins regardless of order.
         triggering_risks: list[str] = []
         risk_mode = None
         risk_rationale = None
+        winning_risk_events: list[Any] = []
         try:
-            from continuum.recovery.risk import evaluate_risk, load_risk_policy
+            from continuum.recovery.risk import evaluate_risk, load_risk_policy, signals_from_events
 
             policy = load_risk_policy()
             # Archive-aware: the shared fetch walks the archived prefix too, so
@@ -591,10 +625,12 @@ class RecoveryEngine:
                     triggering = [risk_ev.event_id]
                     triggers = [trig]
                     repeating_steps = []
+                    winning_risk_events = [risk_ev]
                 elif SEVERITY[candidate] == SEVERITY[best_mode]:
                     triggering.append(risk_ev.event_id)
                     if trig not in triggers:
                         triggers.append(trig)
+                    winning_risk_events.append(risk_ev)
                 else:
                     continue
                 _collect_repeating_step(repeating_steps, risk_ev)
@@ -618,6 +654,39 @@ class RecoveryEngine:
             triggering_risks = []
             risk_mode = None
             risk_rationale = None
+            winning_risk_events = []
+
+        plan = plan_repairs(
+            validation.report.statuses,
+            uncertain_actions=uncertain,
+            strict_unknown=self.validator.strict_unknown,
+            unprojectable=unprojectable,
+            exhausted_dependencies=exhausted_dependencies,
+            run_budget_exhausted=run_budget_exhausted,
+            # Typed projections, never raw events: the planner stays a pure
+            # projection over RiskSignal rather than duck-typing payloads
+            # (issue #1423 review).
+            risk_events=signals_from_events(winning_risk_events),
+            state=validation.state,
+        )
+        liveness_advisory = None
+        liveness_breaches = 0
+        try:
+            from continuum.recovery.health import advisory_for_storage
+
+            liveness_advisory = advisory_for_storage(self.storage, run_id)
+            # Count prior breaches as DETECTED events. The archived prefix
+            # folds in via the shared fetch, so a silence detected before a
+            # compaction still counts: the live tail alone would reset the
+            # breach count to zero (same archive-blindness family as #553).
+            try:
+                liveness_breaches = sum(
+                    1 for e in archive_aware_events if e.type == EventType.LIVENESS_SILENCE_DETECTED
+                )
+            except Exception:
+                liveness_breaches = 0
+        except Exception:
+            liveness_advisory = None
         mode, rationale = self._decide(
             validation,
             uncertain,
@@ -770,7 +839,15 @@ class RecoveryEngine:
         if self._ledger is None:
             return None
         try:
-            return self._ledger.budget(run_id, scope=resolve_scope(scope, *plan.scopes))
+            # The budgets the engine was built with name the ceilings the
+            # contract asserts: without them the ledger reports its default of
+            # three attempts and the sealed evidence line claims room remains
+            # for a dependency budget that is already spent (#1846).
+            return self._ledger.budget(
+                run_id,
+                scope=resolve_scope(scope, *plan.scopes),
+                dependency_budgets=self.dependency_budgets,
+            )
         except Exception:
             return None
 
@@ -948,6 +1025,21 @@ class RecoveryEngine:
 
         if plan.requires_human:
             proposals.append((RecoveryMode.REQUEST_HUMAN, "at least one repair needs a person"))
+
+        # Hard constraint pins (issue #1414): dropped, unanchored, or violated hard pins must escalate
+        dropped_pins = [
+            e.component_id
+            for e in validation.report.statuses
+            if e.component is Component.PIN and e.status is not StateStatus.VALID
+        ]
+        if dropped_pins:
+            pins_str = ", ".join(filter(None, dropped_pins))
+            proposals.append(
+                (
+                    RecoveryMode.REQUEST_HUMAN,
+                    f"hard constraint pin(s) unanchored or violated: {pins_str}; operator confirmation required",
+                )
+            )
 
         if exhausted_dependencies:
             deps_str = ", ".join(sorted(exhausted_dependencies))

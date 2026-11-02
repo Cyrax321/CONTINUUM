@@ -22,7 +22,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from continuum.models import Component, RecoveryMode, StateStatus
+from continuum.models import (
+    Component,
+    ComponentValidationEntry,
+    RecoveryMode,
+    StateStatus,
+)
 from continuum.recovery.engine import RecoveryDecision
 from continuum.recovery.planner import RepairKind
 
@@ -125,7 +130,30 @@ def human_steps_for(
                     + (f"  (no probe registered in {reconcilers_path})")
                 )
         elif step.kind is RepairKind.HUMAN_REVIEW:
-            steps.append(f"verify {step.target} yourself, then run `continuum confirm {run_id}`")
+            statuses: list[ComponentValidationEntry] = []
+            if hasattr(decision, "validation") and hasattr(
+                getattr(decision, "validation", None), "report"
+            ):
+                statuses = decision.validation.report.statuses
+            # An unreadable registry cannot be cleared by a pin confirmation:
+            # the only remedy is repairing the file and reassessing.
+            if step.target.startswith("registry"):
+                steps.append(
+                    f"repair unreadable constraints registry file (.continuum/constraints.json), "
+                    f"then rerun `continuum assess {run_id}`"
+                )
+            elif step.target.startswith("pin:") or any(
+                e.component is Component.PIN and e.component_id == step.target for e in statuses
+            ):
+                cid = step.target.removeprefix("pin:")
+                steps.append(
+                    f"operator confirmation required for missing or unverified constraint pin {cid!r}: "
+                    f"inspect compliance, then run `continuum confirm {run_id} --scope pin`"
+                )
+            else:
+                steps.append(
+                    f"verify {step.target} yourself, then run `continuum confirm {run_id}`"
+                )
         elif step.kind is RepairKind.REPAIR_LOG:
             # No automated surface can settle a refused event yet (that is the
             # repair/amend command, deliberately unbuilt), so name where to
@@ -147,6 +175,11 @@ def human_steps_for(
             steps.append(f"re-derive {step.target} from its source, then re-validate")
         elif step.kind is RepairKind.REVIEW_DECISION:
             steps.append(f"review decision {step.target}: confirm it still holds, then re-validate")
+        elif step.kind is RepairKind.REPLAN_EXCLUDING:
+            steps.append(
+                f"replan excluding the repeating trajectory at {step.target}: "
+                f"re-plan without it, then re-validate before continuing"
+            )
         elif step.kind is RepairKind.RENEW_APPROVAL:
             steps.append(f"obtain a fresh approval for {step.target}, then record it via MCP")
         elif step.kind is RepairKind.REVALIDATE_MODEL_STATE:
