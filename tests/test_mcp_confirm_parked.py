@@ -15,9 +15,10 @@ from typing import Any
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
+from continuum.events import EventType
 from continuum.mcp.authz import AuthorizationPolicy, AuthPolicy, ConfirmPolicy
 from continuum.mcp.server import build_server
-from continuum.models import Run
+from continuum.models import Origin, Run
 from continuum.recovery.review_queue import ReviewQueue
 from continuum.storage import SQLiteStorage
 from tests.mcp_helpers import fake_context
@@ -79,6 +80,38 @@ async def test_low_risk_action_buffers_as_parked_without_confirm_token(
     assert len(pending) == 1
     assert pending[0].action_type == "read_query"
     assert pending[0].parked is True
+
+
+@pytest.mark.asyncio
+async def test_buffered_action_request_records_agent_provenance(
+    server_no_token: tuple[Any, Any],
+) -> None:
+    """The buffered request is unverified agent input, so it is EXTERNAL_AGENT.
+
+    continuum_confirm takes action_type and arguments straight from the remote
+    agent, and the low-risk path skips the confirmation secret. Recording the
+    request as deterministic provenance would launder self-reported agent input
+    into a trusted origin, which is why every other write in this server
+    records AGENT_SOURCE (issue #1410 review).
+    """
+    server, ctx = server_no_token
+    result = await server.call_tool(
+        "continuum_confirm",
+        {
+            "run_id": "run_1",
+            "action_type": "read_query",
+            "arguments": {"sql": "SELECT 1"},
+        },
+        context=fake_context(ALLOWED_CLIENT),
+    )
+
+    assert json.loads(result.content[0].text)["status"] == "parked"
+
+    requested = [
+        e for e in ctx.storage.read_all_events("run_1") if e.type is EventType.APPROVAL_REQUESTED
+    ]
+    assert len(requested) == 1
+    assert requested[0].source is Origin.EXTERNAL_AGENT
 
 
 @pytest.mark.asyncio

@@ -377,3 +377,111 @@ def test_approve_retries_on_concurrent_write_conflict(
     approved = queue.approve("run_1", item.review_id, reviewer="operator_race")
     assert approved.status == "approved"
     assert calls == 2
+
+
+def test_enqueue_records_the_callers_provenance(queue: ReviewQueue) -> None:
+    """enqueue defaults to deterministic but must honour an agent source.
+
+    The MCP confirm path feeds an unverified agent's action_type and arguments
+    into the queue; recording those events as deterministic would launder
+    self-reported agent input into a trusted origin (issue #1410 review).
+    """
+    from continuum.models import Origin
+
+    local = queue.enqueue("run_1", "read_query")
+    agent_item = queue.enqueue("run_1", "read_query", source=Origin.EXTERNAL_AGENT)
+
+    events = {e.sequence: e for e in queue.storage.read_all_events("run_1")}
+    requested = [e for e in events.values() if e.type is EventType.APPROVAL_REQUESTED]
+    by_review = {e.payload["review_id"]: e for e in requested}
+
+    assert by_review[local.review_id].source is Origin.DETERMINISTIC
+    assert by_review[agent_item.review_id].source is Origin.EXTERNAL_AGENT
+
+
+def test_approve_loses_to_a_revocation_written_between_read_and_write(
+    queue: ReviewQueue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A revocation landing between the status read and the grant must win.
+
+    The expected sequence has to be captured before the item is read. Reading
+    it afterwards makes last_sequence() account for the racing revoke, so the
+    grant appends cleanly at the new head and silently replaces an operator's
+    decision. The window is simulated by revoking the item while approve asks
+    for the sequence it will append after.
+    """
+    original_last_sequence = queue.storage.last_sequence
+    item = queue.enqueue("run_1", "read_query")
+    injected = False
+
+    def racing_last_sequence(run_id: str) -> int:
+        nonlocal injected
+        if not injected:
+            injected = True
+            queue.storage.append_event(
+                run_id,
+                EventType.APPROVAL_REVOKED,
+                {
+                    "approval_id": item.review_id,
+                    "review_id": item.review_id,
+                    "revoked_by": "operator_b",
+                    "reason": "racing revocation",
+                },
+            )
+        return original_last_sequence(run_id)
+
+    monkeypatch.setattr(queue.storage, "last_sequence", racing_last_sequence)
+
+    with pytest.raises(ValueError, match="already revoked"):
+        queue.approve("run_1", item.review_id, reviewer="operator_a")
+
+    # The racing revocation survives: the grant never landed.
+    final = ReviewQueue(queue.storage, policy=queue.policy).get_item("run_1", item.review_id)
+    assert final is not None
+    assert final.status == "revoked"
+    granted = [
+        e for e in queue.storage.read_all_events("run_1") if e.type is EventType.APPROVAL_GRANTED
+    ]
+    assert granted == []
+
+
+def test_approve_low_risk_never_grants_a_racing_revocation(
+    queue: ReviewQueue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same window as individual approval, one item in a bulk batch.
+
+    approve_low_risk re-checks each candidate, so a revoke that lands after the
+    batch was listed must fail that item's write rather than approve it anyway.
+    """
+    original_last_sequence = queue.storage.last_sequence
+    item = queue.enqueue("run_1", "read_query")
+    injected = False
+
+    def racing_last_sequence(run_id: str) -> int:
+        nonlocal injected
+        if not injected:
+            injected = True
+            queue.storage.append_event(
+                run_id,
+                EventType.APPROVAL_REVOKED,
+                {
+                    "approval_id": item.review_id,
+                    "review_id": item.review_id,
+                    "revoked_by": "operator_b",
+                    "reason": "racing revocation",
+                },
+            )
+        return original_last_sequence(run_id)
+
+    monkeypatch.setattr(queue.storage, "last_sequence", racing_last_sequence)
+
+    approved = queue.approve_low_risk("run_1", reviewer="operator_a")
+    assert approved == []
+
+    final = ReviewQueue(queue.storage, policy=queue.policy).get_item("run_1", item.review_id)
+    assert final is not None
+    assert final.status == "revoked"
+    granted = [
+        e for e in queue.storage.read_all_events("run_1") if e.type is EventType.APPROVAL_GRANTED
+    ]
+    assert granted == []

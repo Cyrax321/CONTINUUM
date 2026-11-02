@@ -1299,6 +1299,7 @@ def build_server(
                 dependency=dependency,
                 dependency_depth=dependency_depth,
                 batch_id=batch_id,
+                source=AGENT_SOURCE,
             )
             if item.parked:
                 return _json(
