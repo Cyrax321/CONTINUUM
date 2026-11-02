@@ -76,7 +76,7 @@ from continuum.concurrency.lease import LeaseCoordinator
 from continuum.events import Event, EventType
 from continuum.models import Action, ActionStatus, ConsumedInputs, Origin, UnknownSideEffect, utcnow
 from continuum.security.hashing import canonical_sanitize, stable_hash
-from continuum.storage.base import CorruptedRecord, Storage
+from continuum.storage.base import ConcurrentWriteError, CorruptedRecord, Storage
 
 _ACTION_EVENT_TYPES = (
     EventType.ACTION_RECORDED,
@@ -132,6 +132,12 @@ class ClaimResolution(NamedTuple):
     key: IdempotencyKey
     existing: Action | None
     foreign: Action | None
+    # The log head observed during resolution. ``claim`` records with it as
+    # ``expected_sequence`` so a writer that advanced the log between the fold
+    # and the append is rejected instead of silently opening a second slot
+    # (issue #1889). Zero only when a resolution was built without observing
+    # the head, which no write path does.
+    head_sequence: int = 0
 
     @property
     def opens_slot(self) -> bool:
@@ -846,6 +852,7 @@ class ActionLedger:
             volatile=volatile,
             key=key,
         )
+        head_sequence = self.storage.last_sequence(self.run_id)
         existing = self.get(resolved)
         foreign: Action | None = None
         if existing is None and not scoped_to_run:
@@ -864,8 +871,8 @@ class ActionLedger:
                 # The caller reports completion or failure against the key in
                 # the outcome, so it must be the stored key of the record being
                 # deferred to, not the freshly-derived one.
-                return ClaimResolution(matched[0], matched[1], foreign)
-        return ClaimResolution(resolved, existing, foreign)
+                return ClaimResolution(matched[0], matched[1], foreign, head_sequence=head_sequence)
+        return ClaimResolution(resolved, existing, foreign, head_sequence=head_sequence)
 
     def resolve_prior(
         self,
@@ -1070,6 +1077,7 @@ class ActionLedger:
         origin_digest: str | None = None,
         origin_observation_digest: str | None = None,
         rendered_key: str | None = None,
+        expected_sequence: int | None = None,
     ) -> Action:
         payload: dict[str, Any] = {
             "key": key,
@@ -1109,7 +1117,13 @@ class ActionLedger:
             # rather than explicit key; keep forensic searchable.
             with suppress(Exception):
                 payload["rendered_key"] = str(action.arguments.get("record_key"))
-        evt = self.storage.append_event(self.run_id, event_type, payload, source=self._source)
+        evt = self.storage.append_event(
+            self.run_id,
+            event_type,
+            payload,
+            expected_sequence=expected_sequence,
+            source=self._source,
+        )
         if self._folded_cache is not None and evt.sequence == self._cache_head + 1:
             self._folded_cache[key] = action
             self._cache_head = evt.sequence
@@ -1117,6 +1131,71 @@ class ActionLedger:
             self._folded_cache = None
             self._cache_head = evt.sequence
         return action
+
+    def _handle_claim_conflict(
+        self,
+        action_type: str,
+        arguments: Mapping[str, Any] | None,
+        *,
+        volatile: Sequence[str],
+        scoped_to_run: bool,
+        key: str | None,
+        on_unknown: Callable[[Action], ActionOutcome | None] | None,
+    ) -> ActionOutcome | None:
+        """Handle a ConcurrentWriteError during claim by re-folding against the new head.
+
+        ``key`` is the *caller's* raw key, not the resolved one: an explicit key
+        is re-hashed with its scope and action type, so passing a resolved key
+        here would derive a different identity and the re-fold would look past
+        the winning claim entirely (issue #1889).
+
+        If another worker claimed the action, discover it, mark UNKNOWN, and raise
+        UnknownSideEffect (or return fresh=False if already completed).
+        If the concurrent write was unrelated, return None so the caller can retry.
+        """
+        refolded = self.resolve_claim(
+            action_type,
+            arguments,
+            volatile=volatile,
+            scoped_to_run=scoped_to_run,
+            key=key,
+        )
+        if refolded.existing is None and refolded.foreign is not None:
+            foreign = refolded.foreign
+            if foreign.status is ActionStatus.COMPLETED:
+                return ActionOutcome(key=refolded.key, action=foreign, fresh=False)
+            if foreign.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
+                raise UnknownSideEffect(
+                    f"action {foreign.action_type!r} (key {refolded.key[:12]}...) has an "
+                    f"unresolved attempt recorded by another run; reconcile "
+                    f"that run before claiming the same unscoped identity."
+                )
+
+        if refolded.existing is not None:
+            winning = refolded.existing
+            if winning.status is ActionStatus.COMPLETED:
+                return ActionOutcome(key=refolded.key, action=winning, fresh=False)
+            if winning.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN):
+                if on_unknown is not None:
+                    resolved_outcome = on_unknown(winning)
+                    if resolved_outcome is not None:
+                        self._record(
+                            resolved_outcome.key,
+                            resolved_outcome.action,
+                            EventType.ACTION_RECONCILED,
+                        )
+                        return resolved_outcome
+                uncertain = winning.model_copy(
+                    update={"status": ActionStatus.UNKNOWN, "side_effect_uncertain": True}
+                )
+                with suppress(ConcurrentWriteError):
+                    self._record(refolded.key, uncertain)
+                raise UnknownSideEffect(
+                    f"action {winning.action_type!r} (key {refolded.key[:12]}...) was interrupted before its "
+                    f"outcome was recorded; the side effect may or may not have occurred. "
+                    f"Reconcile it before retrying."
+                )
+        return None
 
     @staticmethod
     def _count_claim() -> None:
@@ -1178,6 +1257,16 @@ class ActionLedger:
         claim, and an unresolved attempt in another run raises
         ``UnknownSideEffect`` rather than opening a parallel slot (issue 34).
 
+        Race semantics (issue #1889): the resolution captures the log's head
+        sequence and the record appends with it as ``expected_sequence``. A
+        claim that folded a free slot and then lost the race to another writer
+        is rejected by the storage compare-and-set, re-folds against the new
+        head, and defers to the winning claim, raising ``UnknownSideEffect`` when
+        the winner is still in flight, rather than opening a second slot. A
+        concurrent event unrelated to this identity is absorbed by a retry;
+        only a claim that keeps losing across five attempts surfaces the
+        ``ConcurrentWriteError``.
+
         Raises ``UnknownSideEffect`` when a previous attempt was interrupted and
         its real-world outcome cannot be determined, unless ``on_unknown``
         resolves it.
@@ -1193,18 +1282,23 @@ class ActionLedger:
                 key=key,
             )
 
-        with self.storage.atomic_claim(self.run_id, key=target_key):
-            # The resolution is shared with the retry-budget gate in the MCP
-            # intercept handler, which has to decide *before* a slot is opened
-            # whether to allow it. Doing the lookup twice in two places let the two
-            # readers disagree about what a claim would find (issue #1080).
-            resolved = self.resolve_claim(
-                action_type,
-                arguments,
-                volatile=volatile,
-                scoped_to_run=scoped_to_run,
-                key=key,
-            )
+        caller_key = key
+        max_attempts = 5
+        for attempt in range(max_attempts):
+            retry = False
+            key = caller_key
+            with self.storage.atomic_claim(self.run_id, key=target_key):
+                # The resolution is shared with the retry-budget gate in the MCP
+                # intercept handler, which has to decide *before* a slot is opened
+                # whether to allow it. Doing the lookup twice in two places let the two
+                # readers disagree about what a claim would find (issue #1080).
+                resolved = self.resolve_claim(
+                    action_type,
+                    arguments,
+                    volatile=volatile,
+                    scoped_to_run=scoped_to_run,
+                    key=key,
+                )
             key = resolved.key
             rendered_key = _explicit_rendered
             existing = resolved.existing
@@ -1388,24 +1482,41 @@ class ActionLedger:
                     origin_observation_digest=origin_digest,
                     budget_authorization_id=budget_auth_id,
                 )
-                self._record(
-                    key,
-                    action,
-                    pinning=pinning,
-                    grant=grant_clean,
-                    origin_digest=origin_digest,
-                    origin_observation_digest=origin_digest,
-                    rendered_key=rendered_key,
-                )
-                if budget_auth_id is not None:
-                    self._budget_commit_claim(action_type, budget_auth_id)
-                self._count_claim()
-                return ActionOutcome(key=key, action=action, fresh=True)
+                try:
+                    self._record(
+                        key,
+                        action,
+                        pinning=pinning,
+                        grant=grant_clean,
+                        origin_digest=origin_digest,
+                        origin_observation_digest=origin_digest,
+                        rendered_key=rendered_key,
+                        expected_sequence=resolved.head_sequence,
+                    )
+                except ConcurrentWriteError:
+                    conflict_outcome = self._handle_claim_conflict(
+                        action_type,
+                        arguments,
+                        volatile=volatile,
+                        scoped_to_run=scoped_to_run,
+                        key=caller_key,
+                        on_unknown=on_unknown,
+                    )
+                    if conflict_outcome is not None:
+                        return conflict_outcome
+                    if attempt == max_attempts - 1:
+                        raise
+                    retry = True
+                else:
+                    if budget_auth_id is not None:
+                        self._budget_commit_claim(action_type, budget_auth_id)
+                    self._count_claim()
+                    return ActionOutcome(key=key, action=action, fresh=True)
 
-            if existing.status is ActionStatus.COMPLETED:
+            elif existing.status is ActionStatus.COMPLETED:
                 return ActionOutcome(key=key, action=existing, fresh=False)
 
-            if existing.status is ActionStatus.COMPENSATED:
+            elif existing.status is ActionStatus.COMPENSATED:
                 # The effect was undone, so performing it again is legitimate.
                 # Same ordering as a fresh claim: refuse first, count once the
                 # record is durable (issue #1168).
@@ -1421,13 +1532,29 @@ class ActionLedger:
                         "budget_authorization_id": budget_auth_id,
                     }
                 )
-                self._record(key, action)
-                if budget_auth_id is not None:
-                    self._budget_commit_claim(action_type, budget_auth_id)
-                self._count_claim()
-                return ActionOutcome(key=key, action=action, fresh=True)
+                try:
+                    self._record(key, action, expected_sequence=resolved.head_sequence)
+                except ConcurrentWriteError:
+                    conflict_outcome = self._handle_claim_conflict(
+                        action_type,
+                        arguments,
+                        volatile=volatile,
+                        scoped_to_run=scoped_to_run,
+                        key=caller_key,
+                        on_unknown=on_unknown,
+                    )
+                    if conflict_outcome is not None:
+                        return conflict_outcome
+                    if attempt == max_attempts - 1:
+                        raise
+                    retry = True
+                else:
+                    if budget_auth_id is not None:
+                        self._budget_commit_claim(action_type, budget_auth_id)
+                    self._count_claim()
+                    return ActionOutcome(key=key, action=action, fresh=True)
 
-            if existing.status is ActionStatus.FAILED:
+            elif existing.status is ActionStatus.FAILED:
                 if budget_auth_id is not None:
                     self._budget_refuse_if_exhausted(action_type, budget_auth_id)
                 action = existing.model_copy(
@@ -1437,39 +1564,66 @@ class ActionLedger:
                         "budget_authorization_id": budget_auth_id,
                     }
                 )
-                self._record(key, action)
-                if budget_auth_id is not None:
-                    self._budget_commit_claim(action_type, budget_auth_id)
-                self._count_claim()
-                return ActionOutcome(key=key, action=action, fresh=True)
-
-            # STARTED or UNKNOWN: a previous attempt was interrupted.
-            if on_unknown is not None:
-                resolved_outcome = on_unknown(existing)
-                if resolved_outcome is not None:
-                    # The resolution is a real decision and must outlive this call:
-                    # persist it so the next claim (or intercept_action) and
-                    # ledger.pending() reflect it instead of re-raising UnknownSideEffect.
-                    self._record(
-                        resolved_outcome.key, resolved_outcome.action, EventType.ACTION_RECONCILED
+                try:
+                    self._record(key, action, expected_sequence=resolved.head_sequence)
+                except ConcurrentWriteError:
+                    conflict_outcome = self._handle_claim_conflict(
+                        action_type,
+                        arguments,
+                        volatile=volatile,
+                        scoped_to_run=scoped_to_run,
+                        key=caller_key,
+                        on_unknown=on_unknown,
                     )
-                    return resolved_outcome
+                    if conflict_outcome is not None:
+                        return conflict_outcome
+                    if attempt == max_attempts - 1:
+                        raise
+                    retry = True
+                else:
+                    if budget_auth_id is not None:
+                        self._budget_commit_claim(action_type, budget_auth_id)
+                    self._count_claim()
+                    return ActionOutcome(key=key, action=action, fresh=True)
 
-            uncertain = existing.model_copy(
-                update={"status": ActionStatus.UNKNOWN, "side_effect_uncertain": True}
-            )
-            self._record(key, uncertain)
-            raise UnknownSideEffect(
-                f"action {existing.action_type!r} (key {key[:12]}...) was interrupted before its "
-                f"outcome was recorded; the side effect may or may not have occurred. "
-                f"Reconcile it before retrying.",
-                # The caller is being told to reconcile, so it needs the identity to
-                # reconcile *with*. Truncating it into the message was the only place
-                # it appeared, which left a recovering session unable to act on its
-                # own instruction (issue #367).
-                action_key=str(key),
-                action_id=uncertain.action_id,
-            )
+            else:
+                # STARTED or UNKNOWN: a previous attempt was interrupted.
+                if on_unknown is not None:
+                    resolved_outcome = on_unknown(existing)
+                    if resolved_outcome is not None:
+                        # The resolution is a real decision and must outlive this call:
+                        # persist it so the next claim (or intercept_action) and
+                        # ledger.pending() reflect it instead of re-raising UnknownSideEffect.
+                        self._record(
+                            resolved_outcome.key,
+                            resolved_outcome.action,
+                            EventType.ACTION_RECONCILED,
+                        )
+                        return resolved_outcome
+
+                uncertain = existing.model_copy(
+                    update={"status": ActionStatus.UNKNOWN, "side_effect_uncertain": True}
+                )
+                with suppress(ConcurrentWriteError):
+                    self._record(key, uncertain)
+                raise UnknownSideEffect(
+                    f"action {existing.action_type!r} (key {key[:12]}...) was interrupted before its "
+                    f"outcome was recorded; the side effect may or may not have occurred. "
+                    f"Reconcile it before retrying.",
+                    # The caller is being told to reconcile, so it needs the identity to
+                    # reconcile *with*. Truncating it into the message was the only place
+                    # it appeared, which left a recovering session unable to act on its
+                    # own instruction (issue #367).
+                    action_key=str(key),
+                    action_id=uncertain.action_id,
+                )
+
+            if retry:
+                continue
+
+        raise ConcurrentWriteError(
+            f"run {self.run_id!r} claim lost concurrency race {max_attempts} times"
+        )
 
     @_single_writer
     def complete(
