@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -226,7 +226,7 @@ def test_http_call_returns_the_raw_body_when_an_error_is_not_json(
             req.full_url,
             500,
             "Internal Server Error",
-            {"Content-Type": "text/html"},
+            cast(Any, {"Content-Type": "text/html"}),
             io.BytesIO(b"<html>gateway error</html>"),
         )
 
@@ -247,7 +247,7 @@ def test_http_call_parses_a_json_error_body(monkeypatch: pytest.MonkeyPatch) -> 
             req.full_url,
             409,
             "Conflict",
-            {"Content-Type": "application/json"},
+            cast(Any, {"Content-Type": "application/json"}),
             io.BytesIO(b'{"error": "duplicate claim", "code": 409}'),
         )
 
