@@ -366,7 +366,14 @@ def max_attempts_for_dependency(
     """
     cfg = raw or {}
     section = cfg.get(DEPENDENCY_BUDGETS_KEY)
-    limit = section.get(dependency) if isinstance(section, dict) else cfg.get(dependency)
+    mapping = section if isinstance(section, dict) else (cfg if isinstance(cfg, Mapping) else {})
+    limit = mapping.get(dependency)
+    if limit is None and isinstance(mapping, Mapping):
+        norm = dependency.strip().lower()
+        for k, v in mapping.items():
+            if str(k).strip().lower() == norm:
+                limit = v
+                break
     if _is_int(limit):
         # int(), not the value itself: :func:`load_budgets` refuses booleans,
         # but a hand-built mapping reaches here too, and a bool leaking out
