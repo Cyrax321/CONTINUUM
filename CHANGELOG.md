@@ -10,6 +10,12 @@ Test counts: ~3950 collected on a minimal env.
 
 ### Added
 
+- **Plan step locations on trajectory stall sites.**
+  `TrajectoryReport.stall_sites` (`continuum report --trajectory`) now names
+  the plan step enclosing repeated retries or failures as `action_type@step`,
+  derived by joining action event sequences against `PLAN_UPSERT` step spans.
+  Falls back to the bare action type when no plan is recorded (#1463).
+
 - **Risk-informed recovery assessment emits located repair guidance (#1423).**
   `RecoveryEngine.assess()` already mapped `RISK_OBSERVED` triggers to recovery
   modes (#303); the winning risk events now also shape the repair plan through
