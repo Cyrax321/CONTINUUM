@@ -133,13 +133,28 @@ def dependencies_for_contract(contract: RecoveryContract) -> list[str]:
     return deps
 
 
+_DEP_PREFIXES: tuple[str, ...] = ("ext:", "service:")
+
+
 def dependencies_for_action(action: Any) -> list[str]:
     """Derive external dependency names from an action or action-like object."""
     if action is None:
         return []
+    if isinstance(action, str):
+        if action.startswith(_DEP_PREFIXES):
+            return [action.strip()]
+        return []
     dep = getattr(action, "dep_scope", None)
     if isinstance(action, dict):
         dep = action.get("dep_scope") or action.get("dependency")
+        if not dep and isinstance(action.get("action_type"), str):
+            act_type = action["action_type"]
+            if act_type.startswith(_DEP_PREFIXES):
+                return [act_type.strip()]
+    elif dep is None:
+        act_type = getattr(action, "action_type", None)
+        if isinstance(act_type, str) and act_type.startswith(_DEP_PREFIXES):
+            return [act_type.strip()]
     if not dep or not isinstance(dep, str):
         return []
     if "," in dep:
@@ -153,6 +168,7 @@ def derive_recovery_dependencies(
     dependencies: Iterable[str] | None = None,
     contract: RecoveryContract | None = None,
     action: Any | None = None,
+    action_type: str | None = None,
     scope: Iterable[str] | None = None,
 ) -> list[str]:
     """Derive external dependency names from explicit inputs, contract, action, or scope."""
@@ -173,6 +189,10 @@ def derive_recovery_dependencies(
                 out.append(d)
     if action is not None:
         for d in dependencies_for_action(action):
+            if d not in out:
+                out.append(d)
+    if action_type is not None and not out and scope is None:
+        for d in dependencies_for_action(action_type):
             if d not in out:
                 out.append(d)
     return out
@@ -638,6 +658,7 @@ class RecoveryLedger:
     def record_attempt(
         self,
         run_id: str,
+        action_type: str | None = None,
         *,
         scope: object = None,
         note: str = "",
@@ -668,9 +689,9 @@ class RecoveryLedger:
         was ever allowed (issue #744).
 
         The older ``dependency``, ``dependencies``, ``contract``, ``action``,
-        and ``dependency_budgets`` spelling is accepted: every derived
-        dependency gets its own scoped attempt entry, and its own ceiling from
-        ``dependency_budgets`` when present.
+        ``action_type``, and ``dependency_budgets`` spelling is accepted: every
+        derived dependency gets its own scoped attempt entry, and its own ceiling
+        from ``dependency_budgets`` when present.
         """
         deps = (
             derive_recovery_dependencies(
@@ -678,12 +699,14 @@ class RecoveryLedger:
                 dependencies=dependencies,
                 contract=contract,
                 action=action,
+                action_type=action_type if scope is None else None,
             )
             if (
                 dependency is not None
                 or dependencies is not None
                 or contract is not None
                 or action is not None
+                or (action_type is not None and scope is None)
             )
             else []
         )
@@ -776,6 +799,7 @@ class RecoveryLedger:
     def attempts(
         self,
         run_id: str,
+        action_type: str | None = None,
         *,
         scope: object = None,
         dependency: str | None = None,
@@ -797,12 +821,14 @@ class RecoveryLedger:
                 dependencies=dependencies,
                 contract=contract,
                 action=action,
+                action_type=action_type if scope is None else None,
             )
             if (
                 dependency is not None
                 or dependencies is not None
                 or contract is not None
                 or action is not None
+                or (action_type is not None and scope is None)
             )
             else []
         )
@@ -823,6 +849,7 @@ class RecoveryLedger:
     def requires_human(
         self,
         run_id: str,
+        action_type: str | None = None,
         *,
         scope: object = None,
         max_attempts: int = 3,
@@ -847,12 +874,14 @@ class RecoveryLedger:
                 dependencies=dependencies,
                 contract=contract,
                 action=action,
+                action_type=action_type if scope is None else None,
             )
             if (
                 dependency is not None
                 or dependencies is not None
                 or contract is not None
                 or action is not None
+                or (action_type is not None and scope is None)
             )
             else []
         )
@@ -904,6 +933,7 @@ class RecoveryLedger:
         run_id: str,
         *,
         scope: object = None,
+        dependency: str | None = None,
         max_attempts: int = 3,
         global_max_attempts: int | None = None,
         dependency_budgets: Mapping[str, Any] | None = None,
@@ -922,7 +952,14 @@ class RecoveryLedger:
         attempt must be reported as such, or the sealed contract asserts
         attempts remain for a budget that is already spent (#1846).
         """
-        resolved = resolve_scope(scope)
+        if dependency is not None and not scope and dependency_budgets is None:
+            try:
+                from continuum.budgets import DEFAULT_BUDGETS_PATH, load_budgets
+
+                dependency_budgets = load_budgets(Path(DEFAULT_BUDGETS_PATH))
+            except Exception:
+                dependency_budgets = None
+        resolved = resolve_scope(scope or dependency)
         entries = self.entries(run_id)
         limit = _ceiling(
             _scoped_limit(resolved, max_attempts, dependency_budgets), global_max_attempts

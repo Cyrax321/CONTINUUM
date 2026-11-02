@@ -886,9 +886,11 @@ class RecoveryEngine:
     def record_attempt(
         self,
         run_id: str,
+        action_type: str | None = None,
         *,
         note: str = "",
         max_attempts: int | None = None,
+        global_max_attempts: int | None = None,
         dependency: str | None = None,
         dependencies: Iterable[str] | None = None,
         contract: RecoveryContract | None = None,
@@ -902,8 +904,10 @@ class RecoveryEngine:
         budgets = dependency_budgets if dependency_budgets is not None else self.dependency_budgets
         return self.ledger.record_attempt(
             run_id,
+            action_type=action_type,
             note=note,
             max_attempts=max_attempts,
+            global_max_attempts=global_max_attempts,
             dependency=dependency,
             dependencies=dependencies,
             contract=contract,
@@ -915,8 +919,10 @@ class RecoveryEngine:
     def requires_human(
         self,
         run_id: str,
+        action_type: str | None = None,
         *,
         max_attempts: int = 3,
+        global_max_attempts: int | None = None,
         dependency: str | None = None,
         dependencies: Iterable[str] | None = None,
         contract: RecoveryContract | None = None,
@@ -930,7 +936,9 @@ class RecoveryEngine:
         budgets = dependency_budgets if dependency_budgets is not None else self.dependency_budgets
         return self.ledger.requires_human(
             run_id,
+            action_type=action_type,
             max_attempts=max_attempts,
+            global_max_attempts=global_max_attempts,
             dependency=dependency,
             dependencies=dependencies,
             contract=contract,
