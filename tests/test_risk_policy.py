@@ -8,14 +8,18 @@ from pathlib import Path
 import pytest
 
 from continuum.events import EventType
-from continuum.models import Origin, Run
+from continuum.models import Origin, RecoveryMode, Run
 from continuum.recovery.risk import (
+    RiskPolicy,
+    RiskPolicyError,
     evaluate_risk,
+    evaluate_risk_action,
     ingest_risk,
     ingest_risk_json_line,
     is_more_conservative,
     load_risk_policy,
 )
+from continuum.recovery.risk_policy import RISK_POLICY_SCHEMA
 from continuum.storage import SQLiteStorage
 
 
@@ -355,3 +359,183 @@ def test_engine_falls_back_to_defaults_on_an_invalid_policy(
     # fallback is visible as a counter rather than silent.
     assert decision.mode.value == "abort"
     assert get_metrics().snapshot()["counters"].get(RISK_POLICY_LOAD_FALLBACK) == 1
+
+
+# --- Parser fail-closed edge cases (review of #1422) ---
+
+
+def test_load_risk_policy_fail_closed_on_an_unreadable_file(tmp_path: Path) -> None:
+    # A file that cannot even be decoded as text is the same kind of invalid as
+    # one whose JSON is broken: the loader rejects it rather than guessing.
+    p = tmp_path / "undecodable.json"
+    p.write_bytes(b'{"loop": "replan"}\n\xff\xfe not utf-8')
+    with pytest.raises(RiskPolicyError, match="invalid risk policy"):
+        load_risk_policy(p)
+
+
+def test_load_risk_policy_rejects_empty_and_blank_keys(tmp_path: Path) -> None:
+    # A blank key names no trigger, so it cannot be checked against the
+    # baseline; the parser fails closed instead of silently dropping it.
+    p = tmp_path / "blank_key.json"
+    p.write_text(json.dumps({"": "wait"}), encoding="utf-8")
+    with pytest.raises(RiskPolicyError, match="risk policy keys must be non-empty strings"):
+        load_risk_policy(p)
+
+    p.write_text(json.dumps({"   ": "wait"}), encoding="utf-8")
+    with pytest.raises(RiskPolicyError, match="risk policy keys must be non-empty strings"):
+        load_risk_policy(p)
+
+
+# --- Policy object surface (review of #1422) ---
+
+
+def test_risk_policy_accepts_the_threshold_as_a_plain_keyword() -> None:
+    # The keyword and the **kwargs spellings must land in the same slot: an
+    # operator passing the threshold through a mapping built at runtime gets
+    # the same validation and the same value.
+    policy = RiskPolicy(**{"token_runaway_threshold": 0.5})  # type: ignore[arg-type]
+    assert policy.token_runaway_threshold == 0.5
+    assert policy["token_runaway"] == "wait"
+    assert policy["meltdown"] == "rollback"
+
+
+def test_risk_policy_json_schema_matches_the_generated_one() -> None:
+    # The classmethod is the public way to fetch the schema a validator
+    # downloads, so it must return exactly the generated model schema.
+    assert RiskPolicy.json_schema() == RISK_POLICY_SCHEMA
+
+
+def test_risk_policy_to_dict_exposes_the_mapping_and_threshold() -> None:
+    # Serialising must carry the threshold alongside the trigger mapping,
+    # because the threshold is part of the policy a consumer reloads.
+    policy = RiskPolicy({"meltdown": "abort"})
+    as_dict = policy.to_dict()
+    assert isinstance(as_dict, dict)
+    assert as_dict["meltdown"] == "abort"
+    assert as_dict["loop"] == "replan"
+    assert as_dict["token_runaway_threshold"] == 0.8
+
+
+def test_is_more_conservative_falls_back_for_unknown_modes() -> None:
+    # Both orderings of a mode the severity table does not know end up False:
+    # an unknown mode is never quietly accepted as more conservative, and the
+    # engine-SEVERITY fallback keeps failures rather than guessing.
+    assert is_more_conservative("rollback", "not_a_mode") is False
+    assert is_more_conservative("not_a_mode", "wait") is False
+
+
+# --- Score-aware evaluator edge cases (review of #1422) ---
+
+
+def test_evaluate_risk_action_ignores_a_non_string_trigger() -> None:
+    # The feed is fail-open, so a trigger that is not text proposes nothing
+    # rather than being looked up as a mode.
+    assert evaluate_risk_action(None) is None  # type: ignore[arg-type]
+    assert evaluate_risk_action(42) is None  # type: ignore[arg-type]
+
+
+def test_evaluate_risk_action_reads_the_threshold_from_a_plain_dict() -> None:
+    # A policy passed as a plain mapping carries its threshold as a key the
+    # evaluator has to read, not only as a typed RiskPolicy attribute.
+    policy = {"token_runaway": "wait", "token_runaway_threshold": 0.5}
+    assert evaluate_risk_action("token_runaway", 0.49, policy) is RecoveryMode.WAIT
+    assert evaluate_risk_action("token_runaway", 0.50, policy) is RecoveryMode.ABORT
+
+
+def test_evaluate_risk_action_falls_back_to_the_default_threshold_when_unparseable() -> None:
+    # A threshold the evaluator cannot parse is not a free pass to escalate on
+    # every score: evaluation falls back to the 0.8 baseline, so 0.79 stays
+    # WAIT and 0.9 still escalates.
+    policy = {"token_runaway": "wait", "token_runaway_threshold": "not-a-number"}
+    assert evaluate_risk_action("token_runaway", 0.79, policy) is RecoveryMode.WAIT
+    assert evaluate_risk_action("token_runaway", 0.90, policy) is RecoveryMode.ABORT
+
+
+def test_evaluate_risk_action_returns_none_for_an_unmapped_mode() -> None:
+    # A plain mapping can hold a mode string the RecoveryMode enum rejects;
+    # the evaluator then proposes nothing instead of raising or coercing.
+    assert evaluate_risk_action("loop", 0.5, {"loop": "replanish"}) is None
+
+
+# --- Engine risk evaluation edge cases (review of #1422) ---
+
+
+def test_a_trigger_proposing_a_weaker_mode_after_the_winner_is_ignored(tmp_path: Path) -> None:
+    # Severity decides, not arrival order: a signal that arrives after a more
+    # severe winner and maps below it contributes nothing, keeping the winning
+    # verdict's event ids and reason unpolluted.
+    from continuum.recovery import RecoveryEngine
+
+    db = str(tmp_path / "risk_weaker.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_weaker"
+        store.create_run_started(Run(run_id=run_id, goal="weaker late signal"))
+        ingest_risk(store, run_id, {"trigger": "meltdown", "score": 0.9})
+        ingest_risk(store, run_id, {"trigger": "error_cascade", "score": 0.9})
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    assert decision.mode.value == "rollback"
+    assert decision.contract.reason == "risk meltdown triggers rollback"
+    assert len(decision.contract.triggering_risks) == 1
+
+
+def test_a_risk_event_with_a_non_string_trigger_contributes_nothing(tmp_path: Path) -> None:
+    # ingest_risk normalises the trigger through the payload schema, but an
+    # event written by another path can still carry a non-text trigger; the
+    # evaluation must skip it rather than raise or mistake it for a mode.
+    from continuum.recovery import RecoveryEngine
+
+    db = str(tmp_path / "risk_raw.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_risk_raw"
+        store.create_run_started(Run(run_id=run_id, goal="raw event"))
+        store.append_event(
+            run_id,
+            EventType.RISK_OBSERVED,
+            {"trigger": 42, "score": 0.9},
+            source=Origin.EXTERNAL_MONITOR,
+        )
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    assert decision.contract.triggering_risks == []
+    # The malformed event drove no risk verdict: no trigger-shaped rationale
+    # sentence was produced for it (the unrelated projection prose may still
+    # mention the word "risk" for other reasons).
+    assert "triggers" not in (decision.contract.reason or "")
+
+
+def test_engine_survives_when_the_fallback_counter_cannot_be_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fallback counter is observability, not control flow: even when the
+    # metrics call itself fails, the rejected policy still fails over to the
+    # conservative defaults and the severe-trigger protections survive.
+    import continuum.observability as observability
+    from continuum.recovery import RecoveryEngine
+
+    attempts: list[str] = []
+
+    def broken_get_metrics() -> None:
+        attempts.append("called")
+        raise RuntimeError("metrics unavailable")
+
+    policy_dir = tmp_path / "policy-cwd"
+    (policy_dir / ".continuum").mkdir(parents=True)
+    (policy_dir / ".continuum" / "risk-policy.json").write_text(
+        json.dumps({"typo_trigger": "wait"}),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(policy_dir)
+    monkeypatch.setattr(observability, "get_metrics", broken_get_metrics)
+
+    db = str(tmp_path / "metrics_broken.db")
+    with SQLiteStorage(db) as store:
+        run_id = "run_metrics_broken"
+        store.create_run_started(Run(run_id=run_id, goal="metrics broken"))
+        ingest_risk(store, run_id, {"trigger": "side_effect_duplicate", "score": 0.9})
+        decision = RecoveryEngine(store).assess(run_id, replay=False)
+
+    assert decision.mode.value == "abort"
+    # The increment was attempted and every attempt raised, yet the severe
+    # trigger's protection survived: the counter is observability only.
+    assert attempts
