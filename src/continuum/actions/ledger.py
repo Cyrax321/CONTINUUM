@@ -74,7 +74,15 @@ from continuum.budgets import (
 )
 from continuum.concurrency.lease import LeaseCoordinator
 from continuum.events import Event, EventType
-from continuum.models import Action, ActionStatus, ConsumedInputs, Origin, UnknownSideEffect, utcnow
+from continuum.models import (
+    Action,
+    ActionStatus,
+    ConsumedInputs,
+    Origin,
+    UnknownSideEffect,
+    utcnow,
+    validate_correlation_id,
+)
 from continuum.security.hashing import canonical_sanitize, stable_hash
 from continuum.storage.base import ConcurrentWriteError, CorruptedRecord, Storage
 
@@ -105,7 +113,14 @@ def fold_action_events(events: Any) -> dict[str, Action]:
         key = str(payload.get("key", ""))
         if not key:
             continue
-        actions[key] = Action.model_validate(payload["action"])
+        raw_action = payload.get("action")
+        if isinstance(raw_action, dict):
+            act_dict = dict(raw_action)
+            if "correlation_id" not in act_dict and "correlation_id" in payload:
+                act_dict["correlation_id"] = payload["correlation_id"]
+            actions[key] = Action.model_validate(act_dict)
+        elif isinstance(raw_action, Action):
+            actions[key] = raw_action
     return actions
 
 
@@ -1077,6 +1092,7 @@ class ActionLedger:
         origin_digest: str | None = None,
         origin_observation_digest: str | None = None,
         rendered_key: str | None = None,
+        correlation_id: str | None = None,
         expected_sequence: int | None = None,
     ) -> Action:
         payload: dict[str, Any] = {
@@ -1087,6 +1103,9 @@ class ActionLedger:
             "external_id": action.external_id,
             "action": action.model_dump(mode="json"),
         }
+        cid = correlation_id if correlation_id is not None else action.correlation_id
+        if cid is not None:
+            payload["correlation_id"] = cid
         if pinning:
             # Issue #241: caller-asserted environment hashes ride on the
             # STARTED record so drift is diffable per attempt. Settlements
@@ -1233,6 +1252,7 @@ class ActionLedger:
         grant: Mapping[str, str] | None = None,
         origin_digest: str | None = None,
         origin_observation_digest: str | None = None,
+        correlation_id: str | None = None,
     ) -> ActionOutcome:
         """Register intent to perform an action, or report it already happened.
 
@@ -1442,6 +1462,14 @@ class ActionLedger:
                     action_type, None, budget_arguments, volatile
                 )
 
+            # A correlation ID must pass the contract checks before any attempt,
+            # retry or not: the FAILED and COMPENSATED branches below settle it via
+            # model_copy, which skips field validators, so an unvalidated value
+            # ("  " or 129 chars) would survive into the hash-chained event and
+            # break every later replay of the run (review of #1680).
+            if correlation_id is not None:
+                correlation_id = validate_correlation_id(correlation_id)
+
             if existing is None:
                 # Refuse an over-cap attempt before anything is recorded, then
                 # count it only once the record is durable: a claim rejected by
@@ -1481,6 +1509,7 @@ class ActionLedger:
                     origin_digest=origin_digest,
                     origin_observation_digest=origin_digest,
                     budget_authorization_id=budget_auth_id,
+                    correlation_id=correlation_id,
                 )
                 try:
                     self._record(
@@ -1491,6 +1520,7 @@ class ActionLedger:
                         origin_digest=origin_digest,
                         origin_observation_digest=origin_digest,
                         rendered_key=rendered_key,
+                        correlation_id=correlation_id,
                         expected_sequence=resolved.head_sequence,
                     )
                 except ConcurrentWriteError:
@@ -1522,6 +1552,9 @@ class ActionLedger:
                 # record is durable (issue #1168).
                 if budget_auth_id is not None:
                     self._budget_refuse_if_exhausted(action_type, budget_auth_id)
+                settled_cid = (
+                    correlation_id if correlation_id is not None else existing.correlation_id
+                )
                 action = existing.model_copy(
                     update={
                         "status": ActionStatus.STARTED,
@@ -1530,10 +1563,16 @@ class ActionLedger:
                         "result_hash": None,
                         "external_id": None,
                         "budget_authorization_id": budget_auth_id,
+                        "correlation_id": settled_cid,
                     }
                 )
                 try:
-                    self._record(key, action, expected_sequence=resolved.head_sequence)
+                    self._record(
+                        key,
+                        action,
+                        correlation_id=settled_cid,
+                        expected_sequence=resolved.head_sequence,
+                    )
                 except ConcurrentWriteError:
                     conflict_outcome = self._handle_claim_conflict(
                         action_type,
@@ -1557,15 +1596,24 @@ class ActionLedger:
             elif existing.status is ActionStatus.FAILED:
                 if budget_auth_id is not None:
                     self._budget_refuse_if_exhausted(action_type, budget_auth_id)
+                settled_cid = (
+                    correlation_id if correlation_id is not None else existing.correlation_id
+                )
                 action = existing.model_copy(
                     update={
                         "status": ActionStatus.STARTED,
                         "started_at": utcnow(),
                         "budget_authorization_id": budget_auth_id,
+                        "correlation_id": settled_cid,
                     }
                 )
                 try:
-                    self._record(key, action, expected_sequence=resolved.head_sequence)
+                    self._record(
+                        key,
+                        action,
+                        correlation_id=settled_cid,
+                        expected_sequence=resolved.head_sequence,
+                    )
                 except ConcurrentWriteError:
                     conflict_outcome = self._handle_claim_conflict(
                         action_type,
@@ -1633,6 +1681,7 @@ class ActionLedger:
         external_id: str | None = None,
         result: Mapping[str, Any] | None = None,
         consumed_inputs: ConsumedInputs | Mapping[str, Any] | None = None,
+        correlation_id: str | None = None,
     ) -> Action:
         """Record that the effect succeeded.
 
@@ -1670,6 +1719,14 @@ class ActionLedger:
                 f"(continuum_reconcile_action over MCP), which records the evidence "
                 f"and the note alongside the correction."
             )
+        if correlation_id is not None:
+            correlation_id = validate_correlation_id(correlation_id)
+            if existing.correlation_id is not None and existing.correlation_id != correlation_id:
+                raise LedgerError(
+                    f"correlation_id mismatch: attempt was claimed with {existing.correlation_id!r}, "
+                    f"completion provided {correlation_id!r}"
+                )
+        settled_cid = correlation_id if correlation_id is not None else existing.correlation_id
         settled_external = external_id if external_id is not None else existing.external_id
         settled_result = dict(result) if result is not None else existing.result
         normalized = _normalize_consumed_inputs(consumed_inputs)
@@ -1689,9 +1746,10 @@ class ActionLedger:
                 "completed_at": utcnow(),
                 "side_effect_uncertain": False,
                 "consumed_inputs": settled_consumed,
+                "correlation_id": settled_cid,
             }
         )
-        recorded = self._record(key, action)
+        recorded = self._record(key, action, correlation_id=settled_cid)
         # Both the completion counter and the settlement drawdown belong to a
         # genuine settlement of an in-flight claim, so both are gated on the
         # pre-call status being STARTED. Re-reporting an already ``COMPLETED``
@@ -1768,6 +1826,7 @@ class ActionLedger:
         result: Mapping[str, Any] | None = None,
         note: str = "",
         consumed_inputs: ConsumedInputs | Mapping[str, Any] | None = None,
+        correlation_id: str | None = None,
     ) -> Action:
         """Resolve an uncertain action using evidence from the outside world.
 
@@ -1790,6 +1849,14 @@ class ActionLedger:
         never erase the receipt proving it did.
         """
         key, existing = self._require(key)
+        if correlation_id is not None:
+            correlation_id = validate_correlation_id(correlation_id)
+            if existing.correlation_id is not None and existing.correlation_id != correlation_id:
+                raise LedgerError(
+                    f"correlation_id mismatch: attempt was claimed with {existing.correlation_id!r}, "
+                    f"reconcile provided {correlation_id!r}"
+                )
+        settled_cid = correlation_id if correlation_id is not None else existing.correlation_id
         if occurred:
             # Fall back to what is already recorded rather than overwriting with
             # None. Confirming an effect occurred must never be the reason its
@@ -1815,6 +1882,7 @@ class ActionLedger:
                     "side_effect_uncertain": False,
                     "last_error": note or existing.last_error,
                     "consumed_inputs": settled_consumed,
+                    "correlation_id": settled_cid,
                 }
             )
         else:
@@ -1827,9 +1895,12 @@ class ActionLedger:
                     "side_effect_uncertain": False,
                     "last_error": note or "reconciliation found no external effect",
                     "consumed_inputs": ConsumedInputs(),
+                    "correlation_id": settled_cid,
                 }
             )
-        recorded = self._record(key, action, EventType.ACTION_RECONCILED)
+        recorded = self._record(
+            key, action, EventType.ACTION_RECONCILED, correlation_id=settled_cid
+        )
         # Settlement drawdown (issue #413): the claim pinned the bucket onto
         # this record, so settle against the same one (issue #1052). Two guards
         # narrow it to the one case that actually settles a landed effect:
