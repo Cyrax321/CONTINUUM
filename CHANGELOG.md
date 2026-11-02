@@ -163,6 +163,27 @@ Test counts: ~3950 collected on a minimal env.
 
 ### Fixed
 
+- **The OpenAPI 3.1 document now describes the wire the sidecar actually
+  speaks (#1894).** The spec served at `GET /openapi.json` claimed a contract
+  the reference server kept in neither direction, so a client generated from it
+  was refused and then saw responses that failed its own validation:
+  `record_progress` and `fail_action` demand `completed` and `error` that the
+  document left optional, `complete_action` and `fail_action` return `action_id`
+  where the document required `action_key`, and `CheckpointResponse` documented
+  `sequence` and `hash` while the server answers `version`, `trigger`,
+  `integrity_hash`, `completed`, and `source_sequence`. The document was
+  corrected to the implementation, not the implementation to the document: the
+  wire is the shipped, behaviour-tested surface. `resume`'s `run_id` is now
+  documented as the optional field it always was (the `no_active_run` mode
+  answers `run_id: null`), `CompleteActionRequest` documents the `external_id`
+  the server reads, the request field the server never reads (`notes`) and the
+  response fields it never sends (`reusable_result`, `reconciliation_required`)
+  are gone, and `reconcile_action`, `compensate_action`, `/readyz`, and `/spec`
+  are documented at last. `tests/test_openapi_wire_drift.py` drives every
+  endpoint with exactly the request schema's `required` list and checks every
+  200 body against the document's required fields, types, and observed
+  properties, so the document and the handlers cannot drift apart again.
+
 - **A damaged event log yields an advisory verdict instead of a traceback
   (#1907).** `RecoveryEngine.assess` asks for `restore(...,
   on_unprojectable="degrade")` on purpose, but the degrade contract only

@@ -14,10 +14,12 @@ and health):
 - **API Version Header**: All HTTP responses include `Continuum-Version: 1.0`.
 - **Health and Discovery**:
   - `GET /healthz` - Service health and liveness probe.
-  - `GET /openapi.json` - Canonical OpenAPI 3.1.0 document.
+  - `GET /readyz` - Readiness probe, answered identically to `/healthz`.
+  - `GET /openapi.json` - Canonical OpenAPI 3.1.0 document (also served at
+    `GET /spec`).
 - **Action Lifecycle**:
   - `POST /intercept_action` - Atomically claim execution grant and check deduplication.
-  - `POST /complete_action` - Record successful result and compute result hash.
+  - `POST /complete_action` - Record a successful action outcome and its external id.
   - `POST /fail_action` - Record action failure.
   - `POST /reconcile_action` - Reconcile uncertain or interrupted action from external evidence.
   - `POST /compensate_action` - Register compensating rollback action.
