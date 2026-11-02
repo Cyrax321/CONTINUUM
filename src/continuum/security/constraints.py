@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel
 
 from continuum.models import Frozen, Origin
-from continuum.security.hashing import stable_hash
+from continuum.security.hashing import hash_content, stable_hash
 
 if TYPE_CHECKING:
     from continuum.events import Event
@@ -47,6 +47,7 @@ __all__ = [
     "load_constraints",
     "load_constraints_or_none",
     "constraints_digest",
+    "predicate_digest",
     "ConstraintRegistryError",
     "reinject_constraint_pins",
     "re_inject_constraint_pins",
@@ -127,6 +128,17 @@ class ConstraintSpec(BaseModel):
             if entry.endswith(".") and (name.startswith(entry) or name == entry[:-1]):
                 return True
         return False
+
+    @property
+    def digest(self) -> str:
+        """Deterministic digest of this constraint's predicate, matching ConstraintPinned.sha256."""
+        return predicate_digest(self.predicate)
+
+    def to_pin(self) -> Any:
+        """Create a ConstraintPinned payload matching this specification."""
+        from continuum.models import ConstraintPinned
+
+        return ConstraintPinned(constraint_id=self.id, sha256=self.digest)
 
 
 class ConstraintRegistry:
@@ -218,6 +230,15 @@ def _canonical(constraints: list[ConstraintSpec]) -> list[dict[str, Any]]:
         }
         for c in sorted(constraints, key=lambda c: c.id)
     ]
+
+
+def predicate_digest(predicate: str) -> str:
+    """Deterministic lowercase hex SHA-256 digest of a single constraint predicate.
+
+    Matches the digest carried by ``ConstraintPinned.sha256`` and verifies
+    against the operator's predicate text.
+    """
+    return hash_content(predicate.encode("utf-8"))
 
 
 def constraints_digest(constraints: list[ConstraintSpec]) -> str:

@@ -134,6 +134,33 @@ Test counts: ~3950 collected on a minimal env.
   status) and `CONSTRAINT_PIN_DROPPED` (emitted when an active pin fails verification
   or cannot be re-anchored). A public `reinject_constraint_pins` helper in
   `continuum.security.constraints` is exposed for hooks and curation workflows.
+- **Recovery escalates to REQUIRES_REVIEW on dropped or violated hard constraint pins (#1414).**
+  If an operator enforces hard constraints via `.continuum/constraints.json` or
+  event logs, but an active or resuming run drops a hard pin or violates a
+  constraint predicate digest, resuming without review risks executing unauthorized
+  side effects. `StateValidator` now inspects active constraint pins against current
+  state and the event log, emitting `ComponentValidationEntry` with status
+  `REQUIRES_REVIEW` on dropped or unverified hard pins (while soft pins remain
+  advisory). `RecoveryEngine.assess()` escalates recovery proposals to `REQUEST_HUMAN`,
+  recording the violated pin in sealed `RecoveryContract.invalidated` and
+  `RecoveryContract.evidence` lists, alongside actionable human guidance and repair
+  steps. Operator confirmation is supported via `continuum confirm <run_id> --scope pin`
+  or `--scope constraints`, both accepted by the CLI argument parser. The pin audit
+  also runs on scoped (`assess_scoped`) recoveries, since a dropped hard pin is a
+  governance violation independent of the dependency scope, and a registry on disk
+  alone no longer escalates every run: only constraints the run pinned, dropped,
+  retracted, or scoped to an action it actually took are audited. A failed
+  `CONSTRAINT_PINS_VERIFIED` audit invalidates earlier pin confirmations, and
+  confirmations record the registry digests they cover, so a later predicate edit
+  cannot be masked by an old confirmation. Verification events from untrusted
+  origins (agent, LLM, imported) cannot clear a failed audit, and a re-pinned pin
+  keeps its review status when the new predicate digest differs from the dropped
+  one. `ConstraintPinDropped` gained an optional `level` field so soft drops stay
+  advisory, and a hard drop stays sticky against a later soft drop for the same
+  pin. An unreadable `.continuum/constraints.json` now produces guidance that names
+  repairing the registry file and reassessing, rather than an unactionable
+  `--scope pin` confirmation.
+
 ### Fixed
 
 - **Compaction anchors no longer shadow the true rollback point (#1852).**

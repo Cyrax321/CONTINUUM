@@ -1746,15 +1746,28 @@ def cmd_confirm(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     scope = getattr(args, "scope", None)
     components = [c.lower() for c in scope] if scope else ["goal", "progress"]
     # Validate scope explicitly so a typo fails closed rather than being ignored.
-    allowed = {"goal", "progress"}
+    allowed = {"goal", "progress", "pin", "constraints"}
     for _c in components:
         if _c not in allowed:
             print(f"error: --scope must be one of {sorted(allowed)}; got {scope!r}", file=err)
             return ExitCode.ERROR
+    confirm_payload: dict[str, Any] = {"components": components}
+    # Stamp the registry digests the confirmation covers, so a later predicate
+    # edit cannot be masked by this confirmation. Unreadable or missing
+    # registry: stamp nothing and confirm as before.
+    try:
+        from continuum.security.constraints import load_constraints_or_none
+
+        _reg = load_constraints_or_none(asserted_by=Origin.DETERMINISTIC)
+        if _reg is not None:
+            confirm_payload["registry_digest"] = _reg.digest
+            confirm_payload["predicate_digests"] = {s.id: s.digest for s in _reg.hard()}
+    except Exception:
+        pass
     storage.append_event(
         args.run_id,
         EventType.REVIEW_CONFIRMED,
-        {"components": components},
+        confirm_payload,
         source=Origin.HUMAN,
     )
 
@@ -1774,7 +1787,7 @@ def cmd_confirm(args: argparse.Namespace, storage: Storage, out: Any, err: Any) 
     _emit(
         payload,
         decision.render(),
-        as_json=args.json,
+        as_json=getattr(args, "json", False),
         stream=out,
         palette=getattr(args, "_palette", None),
     )
@@ -5316,7 +5329,7 @@ def build_parser() -> argparse.ArgumentParser:
     confirm.add_argument(
         "--scope",
         nargs="+",
-        choices=["goal", "progress"],
+        choices=["goal", "progress", "pin", "constraints"],
         default=None,
         help="confirm only these components (default: goal and progress).",
     )
