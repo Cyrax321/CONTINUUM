@@ -166,7 +166,7 @@ CONTINUUM separates **LLM context** (temporary) from **durable task state** (per
 
 ![CONTINUUM how it works](docs/assets/architecture.svg)
 
-The detailed explanation, the projection model, and the recovery context are in [references/architecture.md](references/architecture.md).
+The detailed explanation, the projection model, and the recovery context are in [references/architecture.md](references/architecture.md). The full-system Mermaid view, from the five integration seams through the enforcement boundary and storage backends to the surfaces, is in [docs/diagrams/architecture.md](docs/diagrams/architecture.md).
 
 ## Where CONTINUUM sits
 
@@ -209,7 +209,7 @@ Full walkthrough with code is in `docs/recovery_walkthrough.md` (`examples/recov
 | Framework adapters | Generic Python, OpenAI Agents SDK, LangGraph, and LangChain integrations |
 | Secure planning loop | Two-signal observation verification escalates high-risk branches to REQUIRES_REVIEW |
 | Periodic revalidation | Environment re-checked on a schedule, catching mid-run drift within one cycle |
-| Tamper-evident log | Hash-chained event log (55 event types) with integrity verification |
+| Tamper-evident log | Hash-chained event log (57 event types) with integrity verification |
 | Enforcing gate | Unclaimed side-effect calls are refused before they fire; deny messages teach the claim protocol |
 | Observation hooks | Every file a coding CLI writes becomes digest-verified evidence, outside model control |
 | Session briefing | Fresh sessions learn run state deterministically at start, including the last session's reasoning summary |
@@ -434,7 +434,7 @@ Schema v6. SQLite is primary, Postgres is CI verified. One log, many projections
 
 | Table | Purpose |
 |:--|:--|
-| `events` | Hash chained append only log (55 event types in v0.2) |
+| `events` | Hash chained append only log (57 event types in v0.2) |
 | `runs` | Run metadata with `parent_run_id` for multi agent |
 | `versions` | SemanticState snapshots per checkpoint |
 | `checkpoints` | Sealed checkpoint records with `RECOVERY` anchors |
@@ -444,7 +444,7 @@ Schema v6. SQLite is primary, Postgres is CI verified. One log, many projections
 
 ### Module map: one library, many surfaces
 
-CONTINUUM is one library (`src/continuum`, 148 modules) plus a large test suite (223 test files, ~3950 tests). All modules append to and replay one hash chained event log:
+CONTINUUM is one library (`src/continuum`, 150 modules) plus a large test suite (230 test files, ~3950 tests). All modules append to and replay one hash chained event log:
 
 | Module | Role |
 |:--|:--|
@@ -508,7 +508,7 @@ All wiring is host-side; the model's cooperation is optional:
 continuum hooks install claude-code --with-gate   # coding CLIs: evidence, briefing, gate
 continuum gateway --port 8765                     # enforcing HTTP proxy for everything else
 provider.add_span_processor(continuum.otel.make_span_processor(storage))  # OTel to evidence
-continuum-mcp                                     # anything MCP-capable: the twelve-tool server
+continuum-mcp                                     # anything MCP-capable: the thirteen-tool server
 continuum briefing                                # session-start context injection
 continuum budget <run_id>                         # retry-budget usage report
 continuum tree <parent_run_id>                    # multi-agent hierarchy view

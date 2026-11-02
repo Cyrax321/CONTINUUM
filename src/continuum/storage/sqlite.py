@@ -578,7 +578,8 @@ class SQLiteStorage(Storage):
         *,
         through_sequence: int | None = None,
         environment: EnvironmentSnapshot | None = None,
-    ) -> dict[str, int]:
+        constraints_path: Path | None = None,
+    ) -> dict[str, Any]:
         """Archive the pre-anchor prefix of a run's log (issue #239).
 
         A forced anchor checkpoint first records state at the boundary (its
@@ -625,7 +626,11 @@ class SQLiteStorage(Storage):
                 manager.checkpoint(
                     run_id,
                     state=state,
-                    trigger=CheckpointTrigger.RECOVERY,
+                    # The anchor seals the compacted run, not a recovery
+                    # decision: it carries no trigger=RECOVERY because
+                    # last_recovery_anchor must keep returning the true
+                    # rollback point (#1852).
+                    trigger=CheckpointTrigger.COMPACTION,
                     reason="compaction anchor",
                     force_version=True,
                     # The anchor carries the environment the run's newest
@@ -679,7 +684,14 @@ class SQLiteStorage(Storage):
                 (run_id, through),
             )
 
-        return {"archived": max(archived, 0)}
+        warnings: list[str] = []
+        try:
+            manager = CheckpointManager(self)
+            manager.reinject_constraints(run_id, constraints_path=constraints_path)
+        except Exception as exc:  # compaction already committed
+            warnings.append(f"constraint re-injection: {exc}")
+
+        return {"archived": max(archived, 0), **({"warnings": warnings} if warnings else {})}
 
     def read_archived_events(
         self,

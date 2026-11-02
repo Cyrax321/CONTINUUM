@@ -489,3 +489,40 @@ def test_adapter_reads_the_action_from_stdin(tmp_path: Path) -> None:
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip().splitlines()[-1] == "occurred=true"
+
+
+def test_stat_mtime_is_utc_aware(tmp_path: Path) -> None:
+    """_stat records mtime as an explicit UTC ISO-8601 timestamp with timezone (#1930)."""
+    import os
+    import time
+    from datetime import UTC, datetime
+
+    from continuum.evidence import _stat
+
+    target = tmp_path / "test_artifact.txt"
+    target.write_text("content", encoding="utf-8")
+    os.utime(target, (1767225600, 1767225600))
+
+    if hasattr(time, "tzset"):
+        original_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "EST+05EDT,M3.2.0,M11.1.0"
+        time.tzset()
+        try:
+            stat_result = _stat(str(target))
+        finally:
+            if original_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = original_tz
+            time.tzset()
+    else:
+        stat_result = _stat(str(target))
+
+    assert stat_result is not None
+    assert stat_result["bytes"] == len("content")
+    mtime_str = stat_result["mtime"]
+    assert "+00:00" in mtime_str or mtime_str.endswith("Z")
+
+    parsed_dt = datetime.fromisoformat(mtime_str)
+    assert parsed_dt.tzinfo is not None
+    assert parsed_dt == datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)

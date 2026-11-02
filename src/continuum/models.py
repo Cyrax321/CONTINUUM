@@ -22,7 +22,7 @@ import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -63,6 +63,8 @@ __all__ = [
     "ConstraintPinned",
     "ConstraintRetracted",
     "ConstraintPin",
+    "ConstraintPinsVerified",
+    "ConstraintPinDropped",
     "AttemptLesson",
     "AuthorityConsumed",
     "AuthorityReconciled",
@@ -594,6 +596,40 @@ class ConstraintPin(BaseModel):
         if not _SHA256_PATTERN.fullmatch(value):
             raise ValueError("sha256 must be exactly 64 lowercase hex characters")
         return value
+
+
+class ConstraintPinsVerified(BaseModel):
+    """Payload of ``CONSTRAINT_PINS_VERIFIED`` (issue #1413).
+
+    Records active constraint pin digest, count, and verification status
+    across log compaction and pre-compaction hooks.
+    """
+
+    model_config = Frozen
+
+    digest: str | None = None
+    count: int = 0
+    verified: bool = True
+    pins: tuple[dict[str, Any], ...] = ()
+
+
+class ConstraintPinDropped(BaseModel):
+    """Payload of ``CONSTRAINT_PIN_DROPPED`` (issue #1413).
+
+    Emitted when an active constraint fails verification or cannot be re-anchored.
+    """
+
+    model_config = Frozen
+
+    constraint_id: str = Field(strict=True)
+    sha256: str = Field(strict=True)
+    reason: str = "failed_verification"
+    level: Literal["hard", "soft"] = "hard"
+
+    @field_validator("constraint_id")
+    @classmethod
+    def _constraint_id_is_a_label(cls, value: str) -> str:
+        return _validated_constraint_id(value)
 
 
 class AttemptLesson(BaseModel):
@@ -1335,6 +1371,8 @@ class Action(BaseModel):
     contaminated origin can be enumerated. Round-tripped via the ledger
     payload and ``Action`` so the chain keeps the attribution.
     """
+    origin_observation_digest: str | None = None
+    """Alias for ``origin_digest`` (issue #1416)."""
     created_at: datetime = Field(default_factory=utcnow)
     started_at: datetime | None = None
     completed_at: datetime | None = None
@@ -1354,7 +1392,25 @@ class Action(BaseModel):
     claim.
     """
 
-    @field_validator("origin_digest")
+    @model_validator(mode="before")
+    @classmethod
+    def _sync_origin_observation_digest(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # Pydantic hands the validator the caller's own mapping, so write
+            # to a copy: mutating it in place leaks the alias back into the
+            # stored event payload the caller passed to model_validate.
+            data = dict(data)
+            ood = data.get("origin_observation_digest")
+            od = data.get("origin_digest")
+            if ood is not None and od is None:
+                data["origin_digest"] = ood
+            elif od is not None and ood is None:
+                data["origin_observation_digest"] = od
+            elif od is not None and ood is not None and od != ood:
+                raise ValueError("origin_digest and origin_observation_digest disagree")
+        return data
+
+    @field_validator("origin_digest", "origin_observation_digest")
     @classmethod
     def _origin_digest_is_sha256(cls, value: str | None) -> str | None:
         if value is None:

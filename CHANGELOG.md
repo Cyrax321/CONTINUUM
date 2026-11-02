@@ -10,6 +10,23 @@ Test counts: ~3950 collected on a minimal env.
 
 ### Added
 
+- **Risk-informed recovery assessment emits located repair guidance (#1423).**
+  `RecoveryEngine.assess()` already mapped `RISK_OBSERVED` triggers to recovery
+  modes (#303); the winning risk events now also shape the repair plan through
+  a typed `RiskSignal` projection (`continuum/recovery/risk.py`), so the
+  planner stays a pure projection over typed inputs instead of duck-typing
+  over free-form events. A `loop` signal yields `replan_excluding:<step or
+  signature>` steps naming the repeating trajectory to avoid, plus a fallback
+  step naming the trigger and episode when the monitor names nothing, where
+  the previous plan was empty under a replan verdict. A `meltdown` signal
+  yields a `human_review` step targeting the last verified fact-gathering
+  step before the cascade, located by whole-token matching over plan steps
+  and ranked by evidence, verification and proximity to the cascade; an
+  explicit `last_verified_step`, `fact_gathering_step` or `rollback_target`
+  in the risk detail always wins. When no honest anchor exists the step says
+  so, rather than back-filling the step that was melting down and presenting
+  it as the verified fact-gathering rollback point.
+
 - **Wire specification and automated wire conformance suite.**
   Published OpenAPI 3.1 specification for the CONTINUUM sidecar wire protocol
   covering action interception and idempotency leases, completion, progress tracking,
@@ -45,6 +62,18 @@ Test counts: ~3950 collected on a minimal env.
   Added an on-ramp section pointing to tracking issue #1661, ground rules for
   first pull requests, a Table of Contents, and a reference table for issue
   labels (including hacktoberfest, help wanted, and good first issue).
+
+- **Observation provenance linkage and memory forensic lookup (#1416, #1407, #304).**
+  Link motivating observation digests to external memory mutation claims in `ActionLedger`.
+  The `Action` model and `ActionLedger.claim()` accept `origin_observation_digest` as an alias
+  for `origin_digest`, persisting the linkage on ledger events and `action_index` projections
+  so attribution survives event-log compaction. Added `get_memory_provenance()` to walk backward
+  from a memory record key to its initiating observation event in the hash-chained log and
+  enumerate sibling records originating from the same contaminated observation. The lookup
+  resolves a short key by rank (exact key or action id, then a namespace suffix, then a
+  substring) and raises `LedgerError` when two candidates tie, rather than blaming one of them
+  by insertion order. Runs it cannot read are listed in the result's `skipped_runs` so a
+  forensic answer never passes as complete when a log was unreadable.
 
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a
@@ -87,7 +116,66 @@ Test counts: ~3950 collected on a minimal env.
   and the reviewer fatigue telemetry (#1411) are its wired consumers, so the
   scorer is shipped and tested on its own rather than arriving with a heuristic
   that moves while the queue is built.
+
+- **Scalability stress harness, fault injection resilience suite, and action ledger caching (#1583).**
+  Adds reproducible interleaved stress test workloads across 1,000 and 10,000 steps in
+  `benchmarks/scalability/stress_workload.py`, comprehensive fault injection tests covering 7 failure
+  scenarios in `tests/test_scalability_fault_injection.py`, and in-memory folded action caching
+  with storage head invalidation in `ActionLedger` to avoid quadratic scan overhead during action claims.
+
+- **Post-compaction constraint re-injection and verification hook (#1413).**
+  When log compaction or harness pre-compaction executes (`continuum compact-run`
+  or `continuum precompact`), early event history is archived and context pressure
+  is reduced. Active constraint pins are now verified against the operator registry
+  at `.continuum/constraints.json` and re-injected into the live anchor so that
+  resuming agent sessions continue operating under governing invariants without
+  governance decay. Two new event types record the audit fact in the hash-chained log:
+  `CONSTRAINT_PINS_VERIFIED` (recording active constraint digest, count, and verification
+  status) and `CONSTRAINT_PIN_DROPPED` (emitted when an active pin fails verification
+  or cannot be re-anchored). A public `reinject_constraint_pins` helper in
+  `continuum.security.constraints` is exposed for hooks and curation workflows.
+- **Recovery escalates to REQUIRES_REVIEW on dropped or violated hard constraint pins (#1414).**
+  If an operator enforces hard constraints via `.continuum/constraints.json` or
+  event logs, but an active or resuming run drops a hard pin or violates a
+  constraint predicate digest, resuming without review risks executing unauthorized
+  side effects. `StateValidator` now inspects active constraint pins against current
+  state and the event log, emitting `ComponentValidationEntry` with status
+  `REQUIRES_REVIEW` on dropped or unverified hard pins (while soft pins remain
+  advisory). `RecoveryEngine.assess()` escalates recovery proposals to `REQUEST_HUMAN`,
+  recording the violated pin in sealed `RecoveryContract.invalidated` and
+  `RecoveryContract.evidence` lists, alongside actionable human guidance and repair
+  steps. Operator confirmation is supported via `continuum confirm <run_id> --scope pin`
+  or `--scope constraints`, both accepted by the CLI argument parser. The pin audit
+  also runs on scoped (`assess_scoped`) recoveries, since a dropped hard pin is a
+  governance violation independent of the dependency scope, and a registry on disk
+  alone no longer escalates every run: only constraints the run pinned, dropped,
+  retracted, or scoped to an action it actually took are audited. A failed
+  `CONSTRAINT_PINS_VERIFIED` audit invalidates earlier pin confirmations, and
+  confirmations record the registry digests they cover, so a later predicate edit
+  cannot be masked by an old confirmation. Verification events from untrusted
+  origins (agent, LLM, imported) cannot clear a failed audit, and a re-pinned pin
+  keeps its review status when the new predicate digest differs from the dropped
+  one. `ConstraintPinDropped` gained an optional `level` field so soft drops stay
+  advisory, and a hard drop stays sticky against a later soft drop for the same
+  pin. An unreadable `.continuum/constraints.json` now produces guidance that names
+  repairing the registry file and reassessing, rather than an unactionable
+  `--scope pin` confirmation.
+
 ### Fixed
+
+- **Compaction anchors no longer shadow the true rollback point (#1852).**
+  `compact_run` stamped its anchor checkpoint `trigger=RECOVERY`, but it is
+  written *after* the unsafe event at a higher version, so after a run was
+  compacted `last_recovery_anchor` -- and `continuum restore
+  --to-recovery-anchor` -- selected the compaction anchor and rolled back to
+  a state the unsafe event had already happened in, skipping the real
+  rollback point entirely. Compaction anchors now carry their own
+  `CheckpointTrigger.COMPACTION`, so `last_recovery_anchor` keeps returning
+  only true recovery anchors, and it reports `None` for a run that has only
+  ever been compacted. The anchor-keeping rules -- `CheckpointManager.prune`
+  and `cleanup_ephemeral_artifacts` -- use a shared `ANCHOR_TRIGGERS` set, so
+  a compaction seal still survives cleanup and pruning as the live tail's
+  starting state.
 
 - **Benchmark report timestamps are timezone-aware UTC (#1823).** The Phase 6,
   fault-injection, and horizon benchmark runners now use the shared `utcnow()`
@@ -266,6 +354,14 @@ Test counts: ~3950 collected on a minimal env.
   command resolved on one machine, which is why `install.py` resolves paths on
   the target machine in the first place. A test pins this per host, so a
   committed project registration fails CI instead of failing a clone.
+
+- **PR Status Labels Apply no longer fails on comment reviews.** The workflow
+  recorded no intent artifact on non-approval reviews (e.g. comment reviews),
+  causing `actions/download-artifact` to exit with an error on every review
+  comment across the repository. `pr-status-labels.yml` now records an explicit
+  skip intent on non-approval reviews, and `pr-status-labels-apply.yml`'s download
+  step is marked fault-tolerant with `continue-on-error: true` while the apply
+  script cleanly skips non-actionable intents.
 
 - **The documented test count is re-synced, so `main` builds again.** The
   collected total had drifted to 3,680 against a documented 3,636, past the

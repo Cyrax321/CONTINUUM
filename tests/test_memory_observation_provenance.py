@@ -1,0 +1,523 @@
+"""Tests for observation provenance linkage and memory forensics (issue #1416).
+
+Covers:
+- Action model accepts and synchronizes origin_observation_digest and origin_digest
+- ActionLedger.claim accepts origin_observation_digest and stores it in event payload
+- get_memory_provenance walks backward to initiating observation event
+- get_memory_provenance enumerates sibling records sharing the same origin digest
+- get_memory_provenance survives event-log compaction
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from continuum.actions.ledger import ActionLedger, LedgerError, get_memory_provenance
+from continuum.events import EventType
+from continuum.models import Action, ActionStatus, Run
+from continuum.security.hashing import stable_hash
+from continuum.storage import SQLiteStorage
+from continuum.storage.base import CorruptedRecord
+
+
+def test_action_model_origin_observation_digest_validation() -> None:
+    """Action model accepts and synchronizes origin_observation_digest with origin_digest."""
+    digest = "c" * 64
+
+    # Supplying origin_observation_digest sets both fields
+    act1 = Action(
+        run_id="run_1",
+        action_type="mem_write",
+        origin_observation_digest=digest,
+    )
+    assert act1.origin_observation_digest == digest
+    assert act1.origin_digest == digest
+
+    # Supplying origin_digest sets both fields
+    act2 = Action(
+        run_id="run_1",
+        action_type="mem_write",
+        origin_digest=digest,
+    )
+    assert act2.origin_observation_digest == digest
+    assert act2.origin_digest == digest
+
+    # Mismatched digests raise ValueError
+    with pytest.raises(ValueError, match="disagree"):
+        Action(
+            run_id="run_1",
+            action_type="mem_write",
+            origin_digest=digest,
+            origin_observation_digest="d" * 64,
+        )
+
+    # Invalid hex string raises ValueError
+    with pytest.raises(ValueError, match="64 lowercase hex"):
+        Action(
+            run_id="run_1",
+            action_type="mem_write",
+            origin_observation_digest="not-a-valid-hex",
+        )
+
+
+def test_claim_with_origin_observation_digest() -> None:
+    """ActionLedger.claim accepts origin_observation_digest and records it on ledger rows."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="test"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "test"})
+
+    ledger = ActionLedger(storage, "run_1")
+    digest = "a" * 64
+
+    outcome = ledger.claim(
+        "mem_write",
+        {"data": "content"},
+        key="mem:tenant:k1",
+        origin_observation_digest=digest,
+    )
+    assert outcome.fresh is True
+    assert outcome.action.origin_observation_digest == digest
+    assert outcome.action.origin_digest == digest
+
+    # Stored event payload carries the digest
+    events = list(storage.read_events("run_1"))
+    action_events = [e for e in events if e.type == EventType.ACTION_RECORDED]
+    assert len(action_events) == 1
+    assert action_events[0].payload.get("origin_observation_digest") == digest
+    assert action_events[0].payload.get("origin_digest") == digest
+
+    # Disagreeing parameters raise LedgerError
+    with pytest.raises(LedgerError, match="disagree"):
+        ledger.claim(
+            "mem_write",
+            {"data": "other"},
+            key="mem:tenant:k2",
+            origin_digest=digest,
+            origin_observation_digest="b" * 64,
+        )
+
+
+def test_get_memory_provenance_walks_to_initiating_observation() -> None:
+    """get_memory_provenance finds the originating observation event in the hash chain."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="test"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "test"})
+
+    # Record perception observation
+    obs_payload = {"source": "web_search", "snippet": "target finding"}
+    digest = stable_hash(obs_payload)
+    storage.append_event("run_1", EventType.PERCEPTION_OBSERVED, obs_payload)
+
+    # Claim memory write citing that observation digest
+    ledger = ActionLedger(storage, "run_1")
+    key = "mem:tenant_a:record_100"
+    ledger.claim(
+        "mem_write",
+        {"fact": "derived"},
+        key=key,
+        origin_observation_digest=digest,
+    )
+
+    # Forensic lookup via module function and ledger method
+    prov = get_memory_provenance(storage, "record_100")
+    assert prov is not None
+    assert prov["record_key"] == "record_100"
+    assert prov["rendered_key"] == key
+    assert prov["origin_digest"] == digest
+    assert prov["origin_observation_digest"] == digest
+    assert prov["observation_event"] is not None
+    assert prov["observation_event"].payload == obs_payload
+    assert prov["sibling_records"] == []
+
+    # Method on ActionLedger returns equivalent result
+    prov_method = ledger.get_memory_provenance("record_100")
+    assert prov_method is not None
+    assert prov_method["origin_digest"] == digest
+    assert prov_method["observation_event"] is not None
+
+
+def test_get_memory_provenance_identifies_siblings() -> None:
+    """get_memory_provenance enumerates sibling records originating from the same observation."""
+    storage = SQLiteStorage(":memory:")
+    for rid in ("run_1", "run_2"):
+        storage.create_run(Run(run_id=rid, goal="test"))
+        storage.append_event(rid, EventType.RUN_STARTED, {"goal": "test"})
+
+    obs_payload = {"source": "tool_output", "text": "shared raw data"}
+    digest = stable_hash(obs_payload)
+    storage.append_event("run_1", EventType.PERCEPTION_OBSERVED, obs_payload)
+
+    ledger1 = ActionLedger(storage, "run_1")
+    ledger1.claim("mem_write", key="mem:store:item_alpha", origin_observation_digest=digest)
+    ledger1.claim("mem_write", key="mem:store:item_beta", origin_observation_digest=digest)
+
+    # Sibling in another run
+    ledger2 = ActionLedger(storage, "run_2")
+    ledger2.claim("mem_write", key="mem:store:item_gamma", origin_observation_digest=digest)
+
+    prov = get_memory_provenance(storage, "item_alpha")
+    assert prov is not None
+    assert prov["rendered_key"] == "mem:store:item_alpha"
+    assert prov["origin_digest"] == digest
+
+    # Both other records appear as siblings
+    assert "mem:store:item_beta" in prov["sibling_records"]
+    assert "mem:store:item_gamma" in prov["sibling_records"]
+    assert "mem:store:item_alpha" not in prov["sibling_records"]
+    assert len(prov["sibling_actions"]) == 2
+
+
+def test_get_memory_provenance_prefers_exact_key_over_substring() -> None:
+    """A short key does not resolve to a longer key that merely contains it.
+
+    ``record_1`` is a substring of ``record_10``; the first-hit scan used to
+    return whichever action it met first, blaming that record's observation and
+    siblings. Matching is now ranked, so the exact record wins.
+    """
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="test"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "test"})
+
+    # item_10 is claimed first, so a first-hit substring scan would find it
+    ledger = ActionLedger(storage, "run_1")
+    ledger.claim("mem_write", key="mem:s:item_10", origin_observation_digest="a" * 64)
+    ledger.claim("mem_write", key="mem:s:item_1", origin_observation_digest="b" * 64)
+
+    prov = get_memory_provenance(storage, "item_1")
+    assert prov is not None
+    assert prov["rendered_key"] == "mem:s:item_1"
+    assert prov["origin_digest"] == "b" * 64
+    assert prov["sibling_records"] == []
+
+
+def test_get_memory_provenance_rejects_ambiguous_substring_key() -> None:
+    """Two equal-rank matches raise instead of guessing one.
+
+    ``item`` is a substring of both ``item_1`` and ``item_10`` and matches
+    neither exactly, so nothing distinguishes them: blaming either would be a
+    silent guess in a forensic tool.
+    """
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="test"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "test"})
+
+    ledger = ActionLedger(storage, "run_1")
+    ledger.claim("mem_write", key="mem:s:item_1", origin_observation_digest="a" * 64)
+    ledger.claim("mem_write", key="mem:s:item_10", origin_observation_digest="b" * 64)
+
+    with pytest.raises(LedgerError, match="ambiguous"):
+        get_memory_provenance(storage, "item")
+
+
+def test_get_memory_provenance_reports_skipped_runs() -> None:
+    """A run that cannot be read is reported, not silently dropped."""
+    storage = SQLiteStorage(":memory:")
+    for rid in ("run_1", "run_2"):
+        storage.create_run(Run(run_id=rid, goal="test"))
+        storage.append_event(rid, EventType.RUN_STARTED, {"goal": "test"})
+
+    obs_payload = {"source": "tool", "text": "shared raw data"}
+    digest = stable_hash(obs_payload)
+    storage.append_event("run_1", EventType.PERCEPTION_OBSERVED, obs_payload)
+
+    ledger = ActionLedger(storage, "run_1")
+    ledger.claim("mem_write", key="mem:s:record_1", origin_observation_digest=digest)
+
+    # run_2's log becomes unreadable, as if tampered with. The lookup still
+    # answers for run_1, but the sibling scan of run_2 must surface the
+    # failure instead of presenting a complete-looking result.
+    real_read_all_events = storage.read_all_events
+
+    def _flaky_read(rid: str) -> Any:
+        if rid == "run_2":
+            raise CorruptedRecord("simulated tampering")
+        return real_read_all_events(rid)
+
+    storage.read_all_events = _flaky_read  # type: ignore[method-assign,assignment]
+    provenance = ledger.get_memory_provenance("record_1")
+    assert provenance is not None
+    assert provenance["rendered_key"] == "mem:s:record_1"
+    assert provenance["skipped_runs"] == ["run_2"]
+
+
+def test_action_validator_does_not_mutate_caller_payload() -> None:
+    """The before-validator must not add keys to the dict the caller passed."""
+    digest = "c" * 64
+    payload = {"run_id": "run_1", "action_type": "mem_write", "origin_observation_digest": digest}
+
+    Action.model_validate(payload)
+
+    # The alias was written into the model, not leaked back into the caller's
+    # mapping, which is also the stored event payload.
+    assert "origin_digest" not in payload
+    assert set(payload) == {
+        "run_id",
+        "action_type",
+        "origin_observation_digest",
+    }
+
+
+def test_get_memory_provenance_survives_compaction() -> None:
+    """Observation provenance lookup survives event-log compaction."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="long running task"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "long running task"})
+
+    obs_payload = {"prompt": "poisoned context injection"}
+    digest = stable_hash(obs_payload)
+    storage.append_event("run_1", EventType.PERCEPTION_OBSERVED, obs_payload)
+
+    ledger = ActionLedger(storage, "run_1")
+    key = "mem:global:persisted_key"
+    outcome = ledger.claim(
+        "mem_write",
+        {"value": "poisoned"},
+        key=key,
+        origin_observation_digest=digest,
+    )
+    ledger.complete(outcome.key, result={"written": True})
+
+    # Add further events and compact past the observation and action
+    storage.append_event("run_1", EventType.TASK_UPDATED, {"progress": 1.0})
+    last_seq = storage.last_sequence("run_1")
+    storage.compact_run("run_1", through_sequence=last_seq - 1)
+
+    # Verify events were moved to archive
+    live_events = list(storage.read_events("run_1"))
+    assert not any(e.type == EventType.PERCEPTION_OBSERVED for e in live_events)
+
+    # Forensic lookup still successfully recovers the archived observation and action
+    prov = get_memory_provenance(storage, "persisted_key")
+    assert prov is not None
+    assert prov["origin_digest"] == digest
+    assert prov["observation_event"] is not None
+    assert prov["observation_event"].payload == obs_payload
+    assert prov["action"].status == ActionStatus.COMPLETED
+
+
+def test_get_memory_provenance_missing_or_no_digest() -> None:
+    """Lookup handles nonexistent records and actions without observation digests."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="test"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "test"})
+
+    ledger = ActionLedger(storage, "run_1")
+    ledger.claim("compute", key="compute:k1")
+
+    # Nonexistent record returns None
+    assert get_memory_provenance(storage, "nonexistent") is None
+
+    # Record without digest returns empty provenance
+    prov = get_memory_provenance(storage, "compute:k1")
+    assert prov is not None
+    assert prov["origin_digest"] is None
+    assert prov["observation_event"] is None
+    assert prov["sibling_records"] == []
+
+
+def test_get_memory_provenance_raw_outcome_key() -> None:
+    """Lookup by raw outcome.key succeeds when claim used explicit rendered key."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="test"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "test"})
+
+    obs_payload = {"prompt": "poisoned context"}
+    digest = stable_hash(obs_payload)
+    storage.append_event("run_1", EventType.PERCEPTION_OBSERVED, obs_payload)
+
+    ledger = ActionLedger(storage, "run_1")
+    outcome = ledger.claim(
+        "mem_write",
+        {"data": "content"},
+        key="mem:tenant:record_abc",
+        origin_observation_digest=digest,
+    )
+
+    # Tracing by outcome.key (which is the stored key hash) finds the write
+    prov = get_memory_provenance(storage, outcome.key, run_id="run_1")
+    assert prov is not None
+    assert prov["rendered_key"] == "mem:tenant:record_abc"
+    assert prov["origin_digest"] == digest
+    assert prov["observation_event"] is not None
+    assert prov["observation_event"].payload == obs_payload
+
+
+def test_get_memory_provenance_cross_run_observation_priority() -> None:
+    """Target run's observation is prioritized over identical digests in later runs."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="run 1"))
+    storage.create_run(Run(run_id="run_2", goal="run 2"))
+
+    obs_content = {"content_hash": "a" * 64, "source": "run_1_source"}
+    storage.append_event("run_1", EventType.PERCEPTION_OBSERVED, obs_content)
+
+    obs_content_2 = {"content_hash": "a" * 64, "source": "run_2_source"}
+    storage.append_event("run_2", EventType.PERCEPTION_OBSERVED, obs_content_2)
+
+    ledger = ActionLedger(storage, "run_1")
+    ledger.claim(
+        "mem_write",
+        {"data": "v"},
+        key="mem:item",
+        origin_observation_digest="a" * 64,
+    )
+
+    prov = get_memory_provenance(storage, "mem:item", run_id="run_1")
+    assert prov is not None
+    assert prov["observation_event"] is not None
+    assert prov["observation_event"].payload.get("source") == "run_1_source"
+
+
+def test_get_memory_provenance_cross_run_key_collision_disambiguation() -> None:
+    """Exact key claimed in multiple runs prompts caller to disambiguate with run_id."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="run 1"))
+    storage.create_run(Run(run_id="run_2", goal="run 2"))
+
+    ledger1 = ActionLedger(storage, "run_1")
+    ledger1.claim("mem_write", key="mem:colliding_key", origin_observation_digest="a" * 64)
+
+    ledger2 = ActionLedger(storage, "run_2")
+    ledger2.claim("mem_write", key="mem:colliding_key", origin_observation_digest="b" * 64)
+
+    with pytest.raises(LedgerError) as exc_info:
+        get_memory_provenance(storage, "mem:colliding_key")
+
+    err_msg = str(exc_info.value)
+    assert "the key exists in runs ['run_1', 'run_2']; pass run_id" in err_msg
+    assert "run_1:mem:colliding_key" in err_msg
+    assert "run_2:mem:colliding_key" in err_msg
+
+    # Supplying run_id disambiguates the lookup cleanly
+    prov1 = get_memory_provenance(storage, "mem:colliding_key", run_id="run_1")
+    assert prov1 is not None
+    assert prov1["run_id"] == "run_1"
+    assert prov1["origin_digest"] == "a" * 64
+
+    prov2 = get_memory_provenance(storage, "mem:colliding_key", run_id="run_2")
+    assert prov2 is not None
+    assert prov2["run_id"] == "run_2"
+    assert prov2["origin_digest"] == "b" * 64
+
+
+def test_get_memory_provenance_unreadable_run_on_miss_raises_error() -> None:
+    """When a record misses and an inspected run is corrupted, raise LedgerError."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_corrupt", goal="corrupted"))
+
+    real_read_all_events = storage.read_all_events
+
+    def _flaky_read(rid: str) -> Any:
+        if rid == "run_corrupt":
+            raise CorruptedRecord("corrupted log record")
+        return real_read_all_events(rid)
+
+    storage.read_all_events = _flaky_read  # type: ignore[method-assign,assignment]
+
+    with pytest.raises(LedgerError, match="could not read runs.*run_corrupt"):
+        get_memory_provenance(storage, "nonexistent_key")
+
+
+def test_get_memory_provenance_arguments_record_key_match() -> None:
+    """Matches candidate via action.arguments['record_key']."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="test"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "test"})
+
+    ledger = ActionLedger(storage, "run_1")
+    ledger.claim(
+        "custom_op",
+        {"record_key": "special_key_in_args"},
+        key="mem:other_name",
+        origin_observation_digest="f" * 64,
+    )
+
+    prov = get_memory_provenance(storage, "special_key_in_args")
+    assert prov is not None
+    assert prov["origin_digest"] == "f" * 64
+
+
+def test_get_memory_provenance_foreign_action_index_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Action index fallback locates external action by idempotency key."""
+    storage = SQLiteStorage(":memory:")
+    monkeypatch.setattr(storage, "supports_action_index", True)
+
+    idem_key = "e" * 64
+    act = Action(
+        action_id="act_ext_1",
+        run_id="run_external",
+        action_type="mem_write",
+        origin_observation_digest="d" * 64,
+    )
+
+    def _mock_foreign(k: str, exclude_run: str = "") -> Action | None:
+        return act if k == idem_key else None
+
+    monkeypatch.setattr(storage, "foreign_action", _mock_foreign)
+
+    prov = get_memory_provenance(storage, idem_key)
+    assert prov is not None
+    assert prov["run_id"] == "run_external"
+    assert prov["action"].action_id == "act_ext_1"
+    assert prov["origin_digest"] == "d" * 64
+
+
+def test_get_memory_provenance_foreign_action_index_corrupted_raises_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A corrupted record encountered during action index fallback raises LedgerError."""
+    storage = SQLiteStorage(":memory:")
+    monkeypatch.setattr(storage, "supports_action_index", True)
+
+    def _bad_foreign(k: str, exclude_run: str = "") -> Any:
+        raise CorruptedRecord("corrupted index row")
+
+    monkeypatch.setattr(storage, "foreign_action", _bad_foreign)
+
+    with pytest.raises(LedgerError, match="could not read runs"):
+        get_memory_provenance(storage, "a" * 64)
+
+
+def test_get_memory_provenance_cross_run_observation_fallback_resolution() -> None:
+    """Observation located in another run resolves when target run does not have it."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_act", goal="action run"))
+    storage.create_run(Run(run_id="run_obs", goal="observation run"))
+
+    digest = "7" * 64
+    storage.append_event(
+        "run_obs",
+        EventType.PERCEPTION_OBSERVED,
+        {"content_hash": digest, "source": "remote_obs"},
+    )
+
+    ledger = ActionLedger(storage, "run_act")
+    ledger.claim("mem_write", key="mem:cross_obs", origin_observation_digest=digest)
+
+    prov = get_memory_provenance(storage, "mem:cross_obs", run_id="run_act")
+    assert prov is not None
+    assert prov["observation_event"] is not None
+    assert prov["observation_event"].payload.get("source") == "remote_obs"
+
+
+def test_get_memory_provenance_handles_corrupt_action_payload() -> None:
+    """Events with malformed action payloads are skipped without breaking lookup."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_1", goal="test"))
+
+    ledger = ActionLedger(storage, "run_1")
+    ledger.claim("mem_write", key="mem:valid_key", origin_observation_digest="3" * 64)
+
+    storage.append_event(
+        "run_1",
+        EventType.ACTION_RECORDED,
+        {"action": "not-a-valid-action-dict", "key": "invalid_key"},
+    )
+
+    prov = get_memory_provenance(storage, "mem:valid_key")
+    assert prov is not None
+    assert prov["rendered_key"] == "mem:valid_key"

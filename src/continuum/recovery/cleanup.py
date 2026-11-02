@@ -12,7 +12,7 @@ marked as a recovery anchor.
 
 from __future__ import annotations
 
-from continuum.checkpoint.policy import CheckpointTrigger
+from continuum.checkpoint.policy import ANCHOR_TRIGGERS
 from continuum.recovery.ledger import RecoveryLedger
 from continuum.storage.base import Storage
 
@@ -50,7 +50,7 @@ def cleanup_ephemeral_artifacts(
     deleted: list[str] = []
     for checkpoint in checkpoints:
         is_referenced = checkpoint.version in referenced_versions
-        is_anchor = checkpoint.trigger == CheckpointTrigger.RECOVERY
+        is_anchor = checkpoint.trigger in ANCHOR_TRIGGERS
         if is_referenced:
             continue
         if keep_anchors and is_anchor:
