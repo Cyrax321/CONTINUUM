@@ -10,6 +10,13 @@ Test counts: ~4400 collected on a minimal env.
 
 ### Added
 
+- **Per-dependency human gate budget in RecoveryLedger (#1428).**
+  `RecoveryLedger.record_attempt`, `RecoveryLedger.attempts`, and
+  `RecoveryLedger.requires_human` now support deriving recovery dependencies
+  directly from action strings and action objects, forwarding `action_type`
+  through `RecoveryEngine` and `GenericAgentAdapter`. Scoped budgets prevent noisy
+  external dependencies from exhausting the run-wide recovery ceiling.
+
 - **Risk-informed recovery assessment emits located repair guidance (#1423).**
   `RecoveryEngine.assess()` already mapped `RISK_OBSERVED` triggers to recovery
   modes (#303); the winning risk events now also shape the repair plan through

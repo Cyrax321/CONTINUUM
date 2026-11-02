@@ -577,3 +577,187 @@ def test_deriving_dependencies_from_contract_and_scope(ledger: RecoveryLedger) -
     assert ledger.requires_human("run_1", contract=contract, dependency_budgets=budgets) is True
     # But a scoped check on dataset alone is not exhausted.
     assert ledger.requires_human("run_1", scope=["dataset"], dependency_budgets=budgets) is False
+
+
+def test_requires_human_with_action_type_and_dependency(ledger: RecoveryLedger) -> None:
+    """Evaluating human gate with action_type and dependency enforces per-dependency ceilings (#1428)."""
+    budgets = {"dependency_budgets": {"ext:weather-api": 2, "ext:payments": 5}}
+
+    # Record first attempt for send_invoice targeting ext:weather-api
+    assert (
+        ledger.record_attempt(
+            "run_1",
+            action_type="send_invoice",
+            dependency="ext:weather-api",
+            dependency_budgets=budgets,
+        )
+        == 1
+    )
+    assert (
+        ledger.requires_human(
+            "run_1",
+            action_type="send_invoice",
+            dependency="ext:weather-api",
+            dependency_budgets=budgets,
+        )
+        is False
+    )
+
+    # Record second attempt, reaching the limit of 2 for ext:weather-api
+    assert (
+        ledger.record_attempt(
+            "run_1",
+            "send_invoice",
+            dependency="ext:weather-api",
+            dependency_budgets=budgets,
+        )
+        == 2
+    )
+    # Both keyword and positional action_type work
+    assert (
+        ledger.requires_human(
+            "run_1",
+            action_type="send_invoice",
+            dependency="ext:weather-api",
+            dependency_budgets=budgets,
+        )
+        is True
+    )
+    assert (
+        ledger.requires_human(
+            "run_1",
+            "send_invoice",
+            dependency="ext:weather-api",
+            dependency_budgets=budgets,
+        )
+        is True
+    )
+
+    # Attempts count for this action_type and dependency
+    assert (
+        ledger.attempts(
+            "run_1",
+            action_type="send_invoice",
+            dependency="ext:weather-api",
+        )
+        == 2
+    )
+
+    # Other dependencies remain unaffected and unblocked
+    assert (
+        ledger.requires_human(
+            "run_1",
+            action_type="process_refund",
+            dependency="ext:payments",
+            dependency_budgets=budgets,
+        )
+        is False
+    )
+
+
+def test_dependencies_for_action_handles_strings_and_action_types() -> None:
+    """Action strings and action objects with ext: or colon resolve dependencies (#1428)."""
+    from continuum.models import Action
+    from continuum.recovery.ledger import (
+        dependencies_for_action,
+        derive_recovery_dependencies,
+    )
+
+    assert dependencies_for_action("ext:weather-api") == ["ext:weather-api"]
+    assert dependencies_for_action("service:auth") == ["service:auth"]
+    assert dependencies_for_action("plain_action") == []
+    assert dependencies_for_action("tool:search") == []
+    assert dependencies_for_action("http:post") == []
+    assert dependencies_for_action({"action_type": "ext:weather-api"}) == ["ext:weather-api"]
+    assert dependencies_for_action({"action_type": "tool:search"}) == []
+    action_obj = Action(run_id="run_1", action_type="ext:sandbox")
+    assert dependencies_for_action(action_obj) == ["ext:sandbox"]
+    action_tool = Action(run_id="run_1", action_type="tool:search")
+    assert dependencies_for_action(action_tool) == []
+
+    derived = derive_recovery_dependencies(action_type="ext:weather-api")
+    assert derived == ["ext:weather-api"]
+
+    derived_kw = derive_recovery_dependencies(
+        action_type="send_invoice", dependency="ext:weather-api"
+    )
+    assert derived_kw == ["ext:weather-api"]
+
+    # When explicit dependency is present, action_type is ignored and not duplicated.
+    derived_dup = derive_recovery_dependencies(dependency="payments", action_type="ext:payments")
+    assert derived_dup == ["payments"]
+
+
+def test_budget_with_dependency_enforces_ceiling(ledger: RecoveryLedger) -> None:
+    """RecoveryLedger.budget(dependency=) resolves per-dependency ceilings."""
+    budgets = {"dependency_budgets": {"ext:weather-api": 2}}
+
+    ledger.record_attempt(
+        "run_1",
+        dependency="ext:weather-api",
+        dependency_budgets=budgets,
+    )
+    status1 = ledger.budget(
+        "run_1",
+        dependency="ext:weather-api",
+        dependency_budgets=budgets,
+    )
+    assert status1.max_attempts == 2
+    assert status1.attempts == 1
+    assert status1.remaining == 1
+    assert status1.escalated is False
+
+    ledger.record_attempt(
+        "run_1",
+        dependency="ext:weather-api",
+        dependency_budgets=budgets,
+    )
+    status2 = ledger.budget(
+        "run_1",
+        dependency="ext:weather-api",
+        dependency_budgets=budgets,
+    )
+    assert status2.max_attempts == 2
+    assert status2.attempts == 2
+    assert status2.remaining == 0
+    assert status2.escalated is True
+    assert (
+        ledger.requires_human("run_1", dependency="ext:weather-api", dependency_budgets=budgets)
+        is True
+    )
+
+
+def test_explicit_scope_precedence_over_action_type(ledger: RecoveryLedger) -> None:
+    """An explicit scope is not overridden by a prefixed action_type."""
+    budgets = {"dependency_budgets": {"ext:payments": 1, "ext:weather-api": 5}}
+
+    # Record attempt explicitly scoped to ext:payments, with action_type ext:weather-api
+    count = ledger.record_attempt(
+        "run_1",
+        action_type="ext:weather-api",
+        scope="ext:payments",
+        dependency_budgets=budgets,
+    )
+    assert count == 1
+    assert ledger.attempts("run_1", scope="ext:payments") == 1
+    assert ledger.attempts("run_1", scope="ext:weather-api") == 0
+
+    # ext:payments reached its threshold of 1
+    assert (
+        ledger.requires_human(
+            "run_1",
+            action_type="ext:weather-api",
+            scope="ext:payments",
+            dependency_budgets=budgets,
+        )
+        is True
+    )
+    # ext:weather-api has 0 attempts and is not escalated
+    assert (
+        ledger.requires_human(
+            "run_1",
+            dependency="ext:weather-api",
+            dependency_budgets=budgets,
+        )
+        is False
+    )
