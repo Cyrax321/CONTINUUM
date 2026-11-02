@@ -58,7 +58,7 @@ flowchart TB
     %% ---------- storage ----------
     subgraph storage["Storage backends"]
         direction LR
-        sql[("SQLite, the primary backend<br/>schema v6, WAL, synchronous FULL")]
+        sql[("SQLite, the primary backend<br/>schema v7, WAL, synchronous FULL")]
         pg[("Postgres<br/>storage/postgres.py and migrations.py")]
         blob[("Blob store<br/>storage/blob.py, payload rehydration")]
     end
@@ -159,7 +159,7 @@ environment resumes cleanly, and its exit code is 0.
 
 | Figure | Value | Where it is asserted |
 |:--|:--|:--|
-| Schema version | 6 | `SCHEMA_VERSION` in `src/continuum/storage/migrations.py` |
+| Schema version | 7 | `SCHEMA_VERSION` in `src/continuum/storage/migrations.py` |
 | Event types | 55 | `EventType` in `src/continuum/events.py` |
 | MCP tools | 13 total, 3 read-only (`validate`, `resume`, `list_actions`) and 10 mutating | `@server.tool(...)` decorators in `src/continuum/mcp/server.py` |
 | CLI commands | 56 | `add(...)` registrations in `src/continuum/cli/main.py` |

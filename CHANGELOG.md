@@ -10,6 +10,14 @@ Test counts: ~4400 collected on a minimal env.
 
 ### Added
 
+- **Tenant memory enumeration and logical tombstoning via continuum forget (#1417).**
+  `continuum forget` now queries the `action_index` projection for memory writes
+  belonging to a specified tenant, extracts machine-readable external keys to
+  purge from target vector databases, and appends `MEMORY_TOMBSTONED` events to
+  seal the audit trail while keeping cryptographic hash chain verification
+  green. Schema version 7 adds the `rendered_key` column and index to
+  `action_index`, backfilling from live logs and archive.
+
 - **Plan step locations on trajectory stall sites (#1463).**
   `TrajectoryReport.stall_sites` (`continuum report --trajectory`) now names
   the plan step enclosing repeated retries or failures as `action_type@step`,

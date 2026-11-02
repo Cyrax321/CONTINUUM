@@ -42,7 +42,7 @@ __all__ = [
 ]
 
 #: The schema version this build produces and understands.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 #: The full, current schema applied to a brand-new database.
 BASELINE_SCHEMA = """
@@ -158,7 +158,8 @@ CREATE TABLE IF NOT EXISTS action_index (
     action_id   TEXT NOT NULL,
     status      TEXT NOT NULL,
     updated_seq INTEGER NOT NULL,
-    action_json TEXT NOT NULL
+    action_json TEXT NOT NULL,
+    rendered_key TEXT
 );
 
 CREATE INDEX IF NOT EXISTS action_index_run ON action_index(run_id);
@@ -271,11 +272,19 @@ def _backfill_action_index_v3(conn: sqlite3.Connection) -> None:
         entry = index_entry_from_payload(EventType(row["type"]), payload)
         if entry is None:
             continue
-        key, run_id, action_id, status, action_json = entry
+        key, run_id, action_id, status, action_json, rendered_key = entry
         conn.execute(
             "INSERT OR REPLACE INTO action_index(key, run_id, action_id, status, "
-            "updated_seq, action_json) VALUES (?, ?, ?, ?, ?, ?)",
-            (key, run_id, action_id, status, index_order_for(row["timestamp"]), action_json),
+            "updated_seq, action_json, rendered_key) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                key,
+                run_id,
+                action_id,
+                status,
+                index_order_for(row["timestamp"]),
+                action_json,
+                rendered_key,
+            ),
         )
 
 
@@ -352,6 +361,66 @@ def _up_v6() -> str:
 """
 
 
+def _up_v7_apply(conn: sqlite3.Connection) -> None:
+    """Carry the plaintext ``rendered_key`` in the action index (issue #1417).
+
+    Memory writes claim under an explicit key, so the projection's ``key`` is a
+    digest and the tenant namespace survives only in the event payload's
+    ``rendered_key``. Tenant-level enumeration (``continuum forget``) is then an
+    indexed read instead of a fold over every run's full log. The column is
+    nullable because only memory writes carry one; every other row stays NULL
+    and the drift comparison is untouched, since it only ever looks at
+    ``(updated_seq, status)``.
+
+    Existing rows are backfilled from the log so an upgraded store answers the
+    same query a fresh one does. ``rendered_key`` is the last segment of the
+    entry tuple and is None when the payload carries no plaintext identity.
+    """
+    # SQLite has no ADD COLUMN IF NOT EXISTS; a v6 database is missing the
+    # column and a partially-upgraded one may already have it.
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(action_index)")}
+    if "rendered_key" not in columns:
+        conn.execute("ALTER TABLE action_index ADD COLUMN rendered_key TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS action_index_rendered_key "
+        "ON action_index(rendered_key) WHERE rendered_key IS NOT NULL"
+    )
+    _backfill_rendered_key_v7(conn)
+
+
+def _backfill_rendered_key_v7(conn: sqlite3.Connection) -> None:
+    """Fill ``rendered_key`` for existing index rows from the log.
+
+    The archive and the live log are one stream (compaction moves rows between
+    them), so both are read: a store compacted before upgrade still has its
+    oldest memory writes only in ``events_archive``, and skipping them would
+    leave the tenant enumeration blind to exactly the records an erasure order
+    is most likely to name.
+    """
+    rows = conn.execute(
+        "SELECT timestamp, type, payload FROM ("
+        "SELECT timestamp, type, payload FROM events_archive "
+        "UNION ALL "
+        "SELECT timestamp, type, payload FROM events) "
+        "WHERE type IN ('ACTION_RECORDED', 'ACTION_RECONCILED', 'ACTION_COMPENSATED')"
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except json.JSONDecodeError:
+            continue
+        entry = index_entry_from_payload(EventType(row["type"]), payload)
+        if entry is None:
+            continue
+        key, rendered_key = entry[0], entry[5]
+        if rendered_key is None:
+            continue
+        conn.execute(
+            "UPDATE action_index SET rendered_key = ? WHERE key = ? AND rendered_key IS NULL",
+            (rendered_key, key),
+        )
+
+
 #: Forward migrations, keyed by the version they *produce*.
 MIGRATIONS: dict[int, Migration] = {
     2: Migration(version=2, name="add_versions_table_and_event_provenance", up=_up_v2()),
@@ -359,6 +428,7 @@ MIGRATIONS: dict[int, Migration] = {
     4: Migration(version=4, name="add_langgraph_checkpoint_tables", up=_up_v4()),
     5: Migration(version=5, name="add_events_archive", up=_up_v5()),
     6: Migration(version=6, name="add_runs_parent_column", up=_up_v6()),
+    7: Migration(version=7, name="add_action_index_rendered_key", up=_up_v7_apply),
 }
 
 
@@ -405,6 +475,7 @@ def migrate_schema(conn: sqlite3.Connection) -> int:
     if found is None:
         # Greenfield: seed with the current schema and record the baseline.
         conn.executescript(BASELINE_SCHEMA)
+        _up_v7_apply(conn)
         _stamp_version(conn, SCHEMA_VERSION)
         _record_migration(conn, SCHEMA_VERSION, "baseline")
         return SCHEMA_VERSION
