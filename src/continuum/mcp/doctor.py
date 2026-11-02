@@ -690,6 +690,7 @@ def _registration_sites(
     the same scope to land on the same spot in the document.
     """
     for host, profile in HOST_PROFILES.items():
+        order: tuple[tuple[str, str], ...]
         if profile["nested_by_project"]:
             order = (
                 ("local", "local_settings"),
