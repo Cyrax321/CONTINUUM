@@ -202,6 +202,22 @@ Test counts: ~4400 collected on a minimal env.
   scorer is shipped and tested on its own rather than arriving with a heuristic
   that moves while the queue is built.
 
+- **Declarative risk policy schema and parser (#1422).**
+  CONTINUUM now provides a declarative schema and validator in
+  `src/continuum/recovery/risk_policy.py` for `.continuum/risk-policy.json`.
+  The policy maps failure triggers (`loop`, `loop_persisting`, `error_cascade`,
+  `latency_anomaly`, `token_runaway`, `silent_abort`, `meltdown`,
+  `side_effect_duplicate`, `governance_decay`) to recovery actions with safe,
+  conservative defaults when the configuration file is absent. Validation fails
+  closed against invalid JSON, unknown triggers, and attempts to downgrade severe
+  triggers below baseline safe thresholds. The `evaluate_risk_action` helper
+  resolves triggers and confidence scores into recovery modes, including
+  threshold-based escalations for token runaway. Assessment reads the event's
+  score, so a token runaway at or above the configured threshold escalates to
+  abort in the decision itself, and a policy file that fails validation falls
+  back to the conservative defaults and counts a `risk_policy.load_fallback`
+  marker rather than dropping every recorded risk.
+
 - **Scalability stress harness, fault injection resilience suite, and action ledger caching (#1583).**
   Adds reproducible interleaved stress test workloads across 1,000 and 10,000 steps in
   `benchmarks/scalability/stress_workload.py`, comprehensive fault injection tests covering 7 failure

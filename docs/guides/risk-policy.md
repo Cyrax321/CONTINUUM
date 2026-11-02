@@ -65,22 +65,24 @@ returned `False` and changed nothing.
 
 ## Writing policy
 
-Copy the example and edit the mapping; unknown trigger names are ignored until
-a signal arrives bearing them, so extra keys are harmless but dead:
+Copy the example and edit the mapping. Unknown trigger names and downgrade
+attempts below safe baseline defaults fail closed at load time:
 
 ```json
 {
   "loop": "replan",
+  "loop_persisting": "rollback",
   "error_cascade": "wait",
   "meltdown": "rollback",
   "governance_decay": "request_human"
 }
 ```
 
-A file that is not a JSON object, or a value outside the mode set plus
-`annotate`, fails validation at load. To preview a custom file without
-installing it, load it explicitly (`load_risk_policy(path)`) or point the
-working directory at it; assessment reads `.continuum/risk-policy.json` and
+A file that is not a JSON object, contains unknown trigger keys, specifies a
+value outside the mode set plus `annotate`, or attempts to downgrade a severe
+trigger below its baseline default, fails validation at load. To preview a custom
+file without installing it, load it explicitly (`load_risk_policy(path)`) or point
+the working directory at it; assessment reads `.continuum/risk-policy.json` and
 falls back to the built-in default when absent.
 
 ## Rules worth knowing
@@ -89,6 +91,17 @@ falls back to the built-in default when absent.
   mapping to the most severe mode wins, and ties accumulate event ids.
 - `annotate` is deliberately silent: it records interest without proposing a
   mode, for signals you want visible in history but not yet acting.
+- `token_runaway` escalates on confidence, not just on its mapped mode: at or
+  above `token_runaway_threshold` (default `0.8`) the trigger proposes `abort`
+  whatever the mapping says, because a runaway the monitor is that sure about
+  is past waiting. Assessment reads the event's `score`, so the threshold you
+  configure is the threshold a decision uses.
+- A policy file that fails validation does not silence the run: assessment
+  falls back to the built-in conservative defaults and counts a
+  `risk_policy.load_fallback` marker, so a misconfigured file costs the
+  customization but never the `meltdown` and `side_effect_duplicate`
+  protections. The file itself still fails closed when you load it directly
+  through `load_risk_policy`.
 - Risk never certifies: a signal can only escalate toward caution, and
   `EXTERNAL_MONITOR` provenance keeps it from counting as verification.
 - An observation is knowledge, not a change (issue #1421): every recorded
@@ -105,7 +118,7 @@ reaches the log, so what is on the wire is always what the schema describes:
 
 | Field | Meaning |
 | --- | --- |
-| `trigger` | Risk class, normalised to lowercase. Not restricted to the eight the default policy knows: a monitor may name a class policy has not mapped yet, and the signal is recorded and ignored until it does. |
+| `trigger` | Risk class, normalised to lowercase. Not restricted to the nine the default policy knows: a monitor may name a class policy has not mapped yet, and the signal is recorded and ignored until it does. |
 | `score` | Confidence in `[0.0, 1.0]`, clamped rather than rejected. |
 | `episode_id`, `step_id` | Where the risk was seen, when the monitor reports them. |
 | `detail` | Structured diagnostics, free-form but bounded (32 keys, 512 chars per string). A plain string is accepted and wrapped as `{"message": ...}`, because ingestion predating the schema truncated detail to text. |
