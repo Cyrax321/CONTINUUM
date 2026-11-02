@@ -63,6 +63,17 @@ Test counts: ~3950 collected on a minimal env.
   first pull requests, a Table of Contents, and a reference table for issue
   labels (including hacktoberfest, help wanted, and good first issue).
 
+- **Event-chain attestations can bind verifiable SPIFFE workload identities (#745).**
+  `WorkloadIdentity` protocol and provider adapters allow attestation signatures
+  to cryptographically bind workload identity claims (SPIFFE IDs) to an event chain.
+  `continuum attest` accepts `--workload-identity` (a claim signed by the same
+  key) and `--spiffe` (bind the SVID the Workload API issues to this workload),
+  `continuum attest-verify` enforces identity constraints without silent downgrade, and
+  `continuum resume --attest` verifies both chain integrity and any requested identity
+  constraint before resuming, exiting non-zero on mismatch or unavailable provider.
+  `--spiffe` pins the SPIFFE provider, so `CONTINUUM_WORKLOAD_PROVIDER` cannot
+  silently downgrade it to the fake provider.
+
 - **Correlate observed tool events with ledger action attempts (#785).** An
   optional bounded correlation identifier (`correlation_id`, 1-128 chars)
   is now shared between ledger action attempts (`claim()`, `complete()`,

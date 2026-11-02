@@ -16,7 +16,7 @@ Deep install and dependency material. The [README Quick Start](../README.md#quic
 
 ## Install levels
 
-The core library has **one** runtime dependency (`pydantic>=2.7`). Everything else is an optional extra (see `pyproject.toml:30` and `pyproject.toml:32-84`).
+The core library has **one** runtime dependency (`pydantic>=2.7`). Everything else is an optional extra (see `pyproject.toml:30` and `pyproject.toml:32-87`).
 
 ```bash
 # Contributors (recommended): everything needed to run tests, lint, type-check
@@ -34,6 +34,7 @@ uv pip install -e ".[langgraph]"     # LangGraph adapter
 uv pip install -e ".[openai]"        # OpenAI Agents SDK adapter (also pulls mcp transitively)
 uv pip install -e ".[langchain]"     # LangChain adapter
 uv pip install -e ".[attest]"        # Ed25519 attestation (continuum attest)
+uv pip install -e ".[spiffe]"        # SPIFFE workload identity binding for attestations (issue #745)
 uv pip install -e ".[postgres]"      # PostgreSQL backend, psycopg>=3.2
 uv pip install -e ".[dev,postgres]"  # full dev + live Postgres contract tests
 ```
@@ -52,7 +53,8 @@ Combine freely: `[dev]` already includes `mcp`, `langgraph`, `langchain`, `opena
 | `playwright>=1.40` | `pyproject.toml:61` (`[browser]`) | Browser automation through `BrowserAdapter`; install Chromium separately | Only for `BrowserAdapter` |
 | `kubernetes>=29` | `pyproject.toml:65` (`[kubernetes]`) | Kubernetes availability check for `KubernetesAdapter`; `kubectl` and a configured cluster remain external | Only for `KubernetesAdapter` |
 | `cryptography>=45.0` | `pyproject.toml:81` (`[attest]`), also in `[dev]` | Ed25519 event-chain attestation | Only for `continuum attest` |
-| `psycopg>=3.2` | `pyproject.toml:84` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
+| `spiffe>=0.3.0` | `pyproject.toml:84` (`[spiffe]`) | SPIFFE Workload API client (py-spiffe) for binding workload identities to attestations (issue #745) | Only for SPIFFE Workload API use in `continuum attest`, `continuum attest-verify`, and `continuum resume` (`--spiffe`, `--workload-provider spiffe`, or the default provider); without it those checks fail closed |
+| `psycopg>=3.2` | `pyproject.toml:87` (`[postgres]`) | PostgreSQL storage backend | Only for Postgres |
 | `langgraph>=0.2` | `pyproject.toml:70` (`[langgraph]`) | LangGraph adapter | Only for LangGraph (also pulled transitively by `langchain`) |
 | `openai-agents>=0.2` | `pyproject.toml:73` (`[openai]`) | OpenAI Agents SDK adapter | Only for OpenAI |
 | `langchain>=0.3` | `pyproject.toml:76` (`[langchain]`) | LangChain adapter | Only for LangChain |

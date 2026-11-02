@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from continuum.security.hashing import to_json
+from continuum.security.workload_identity import WorkloadIdentity
 
 __all__ = [
     "ATTESTATION_ALGORITHM",
@@ -71,9 +72,10 @@ class Attestation:
     public_key: str
     signature: str
     algorithm: str = ATTESTATION_ALGORITHM
+    workload_identity: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        doc: dict[str, Any] = {
             "run_id": self.run_id,
             "trusted_through_seq": self.trusted_through_seq,
             "chain_hash": self.chain_hash,
@@ -81,8 +83,11 @@ class Attestation:
             "timestamp": self.timestamp,
             "public_key": self.public_key,
             "algorithm": self.algorithm,
-            "signature": self.signature,
         }
+        if self.workload_identity is not None:
+            doc["workload_identity"] = self.workload_identity
+        doc["signature"] = self.signature
+        return doc
 
 
 def generate_keypair() -> tuple[str, str]:
@@ -116,8 +121,14 @@ def sign_chain(
     *,
     signer: str | None = None,
     timestamp: str | None = None,
+    workload_identity: Any | None = None,
 ) -> Attestation:
-    """Sign a claim that ``run_id`` is intact through ``trusted_through_seq``."""
+    """Sign a claim that ``run_id`` is intact through ``trusted_through_seq``.
+
+    When ``workload_identity`` is provided, its claims (such as a SPIFFE ID)
+    are embedded in the draft before signing, binding the workload identity to
+    the attestation (issue #745).
+    """
     Ed25519PrivateKey, _Ed25519PublicKey, serialization = _require_crypto()
     priv = serialization.load_pem_private_key(private_pem.encode("ascii"), password=None)
     if not isinstance(priv, Ed25519PrivateKey):
@@ -143,6 +154,15 @@ def sign_chain(
         "public_key": pub_pem,
         "algorithm": ATTESTATION_ALGORITHM,
     }
+    wid_dict: dict[str, Any] | None = None
+    if workload_identity is not None:
+        wid_dict = (
+            workload_identity.to_dict()
+            if hasattr(workload_identity, "to_dict")
+            else dict(workload_identity)
+        )
+        draft["workload_identity"] = wid_dict
+
     signature = priv.sign(_payload_bytes(draft))
     draft["signature"] = base64.b64encode(signature).decode("ascii")
     return Attestation(
@@ -154,6 +174,7 @@ def sign_chain(
         public_key=pub_pem,
         signature=draft["signature"],
         algorithm=ATTESTATION_ALGORITHM,
+        workload_identity=wid_dict,
     )
 
 
@@ -161,13 +182,21 @@ def verify_attestation(
     attestation: Attestation | Mapping[str, Any],
     *,
     expected_chain_hash: str | None = None,
+    expected_workload_identity: str | Any | None = None,
+    identity_provider: Any | None = None,
+    require_workload_identity: bool = False,
 ) -> bool:
-    """Return ``True`` iff the signature is valid and (optionally) the hash matches.
+    """Return ``True`` iff the signature is valid and constraints match.
 
-    Verification only proves the signature was made by the embedded public key;
-    it does not by itself prove the chain is *currently* trusted. Callers should
-    also compare ``chain_hash`` against the run's live head and, for a third
-    party, check ``public_key`` against a known signer.
+    Verification proves the signature was made by the embedded public key and
+    covers all claims including any bound workload identity.
+
+    When ``require_workload_identity`` is True, an attestation lacking a
+    workload identity is rejected with no silent downgrade.
+
+    When ``expected_workload_identity`` is passed, the bound SPIFFE ID must
+    match. When ``identity_provider`` is passed, it validates the claim against
+    the provider.
     """
     _Ed25519PrivateKey, Ed25519PublicKey, serialization = _require_crypto()
     data = attestation.to_dict() if isinstance(attestation, Attestation) else dict(attestation)
@@ -181,4 +210,39 @@ def verify_attestation(
         pub.verify(signature, _payload_bytes(data))
     except Exception:
         return False
-    return expected_chain_hash is None or data.get("chain_hash") == expected_chain_hash
+
+    if expected_chain_hash is not None and data.get("chain_hash") != expected_chain_hash:
+        return False
+
+    wid = data.get("workload_identity")
+    # ``sign_chain`` accepts arbitrary mappings, so parse the binding into a
+    # validated ``WorkloadIdentity`` once: every constraint below then acts on
+    # a real identity claim rather than any non-empty dictionary.
+    bound: WorkloadIdentity | None = None
+    if isinstance(wid, Mapping):
+        try:
+            bound = WorkloadIdentity.from_dict(wid)
+        except ValueError:
+            bound = None
+
+    if require_workload_identity and bound is None:
+        # A binding that is missing, or present but not a valid identity
+        # ({"unrelated": true}), must not satisfy the requirement.
+        return False
+
+    if expected_workload_identity is not None:
+        expected_spiffe_id = (
+            expected_workload_identity.spiffe_id
+            if hasattr(expected_workload_identity, "spiffe_id")
+            else str(expected_workload_identity)
+        )
+        if bound is None or bound.spiffe_id != expected_spiffe_id:
+            return False
+
+    if identity_provider is not None:
+        if bound is None:
+            return False
+        if not identity_provider.verify_identity(bound):
+            return False
+
+    return True
