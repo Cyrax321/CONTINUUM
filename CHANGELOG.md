@@ -173,7 +173,12 @@ Test counts: ~4400 collected on a minimal env.
   (`--approve-low-risk`) approvals. The MCP `continuum_confirm` tool buffers
   low-risk items returning a parked batch status (`actionable=False`) without
   requiring an operator secret, while strictly refusing immediate high-risk
-  confirmations without credentials.
+  confirmations without credentials. Action requests buffered through MCP are
+  recorded with `EXTERNAL_AGENT` provenance, queue decisions capture
+  `expected_sequence` before reading the item so a racing revocation cannot be
+  overwritten by a later grant, and `Approval.parked` is only sealed into
+  checkpoint and version bodies when it is set, so databases written before
+  this entry still verify their integrity hashes.
 
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a

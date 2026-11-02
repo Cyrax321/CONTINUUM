@@ -296,7 +296,7 @@ gap.
 
 ---
 
-## 15. CLI commands (56) `src/continuum/cli/main.py`
+## 15. CLI commands (57) `src/continuum/cli/main.py`
 
 Every subcommand is registered in `build_parser()` (`cli/main.py:5140`), which
 is the single registry, a verb that is not there is not a command. The full
