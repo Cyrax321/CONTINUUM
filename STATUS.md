@@ -95,10 +95,10 @@ notices.
   integration, optional `langgraph` dependency.
 - **`OpenAIAgentAdapter`** (`adapters/openai.py`), OpenAI Agents SDK
   integration, optional `openai-agents` dependency.
-- **MCP server** (`mcp/server.py`), 12 tools over stdio: 3 read-only by
+- **MCP server** (`mcp/server.py`), 13 tools over stdio: 3 read-only by
   `read_only_hint` annotation (`continuum_validate`, `continuum_resume`,
-  `continuum_list_actions`) and 9 mutating, recounted at `cef019d` on
-  2026-09-16 from the `@server.tool(` registrations. `continuum_confirm` was
+  `continuum_list_actions`) and 10 mutating, recounted at `111afcb3` on
+  2026-10-28 from the `@server.tool(` registrations. `continuum_confirm` was
   added alongside the `REVIEW_CONFIRMED` event in the launch fixes.
 
 ### MCP two-phase action interception
