@@ -125,11 +125,18 @@ class ReviewQueue:
         dependency: str | None = None,
         dependency_depth: int = 0,
         batch_id: str | None = None,
+        source: Origin = Origin.DETERMINISTIC,
     ) -> ReviewItem:
         """Score an action and enqueue it for human confirmation.
 
         Actions clearing the policy blast radius threshold are flagged
         immediate blockers. All other actions are parked for deferred review.
+
+        ``source`` records who asserted the request, and callers routing
+        unverified agent input into the queue (the MCP confirm path) must pass
+        ``Origin.EXTERNAL_AGENT``: an agent reporting on itself is not a
+        trusted writer, and recording it as deterministic would launder that
+        input into a trusted origin.
         """
         args_dict = dict(arguments or {})
         risk: ActionRisk = evaluate_action_risk(action_type, args_dict, self.policy)
@@ -158,7 +165,7 @@ class ReviewQueue:
             run_id,
             EventType.APPROVAL_REQUESTED,
             payload,
-            source=Origin.DETERMINISTIC,
+            source=source,
         )
 
         return ReviewItem(
@@ -273,13 +280,18 @@ class ReviewQueue:
     ) -> ReviewItem:
         """Approve an individual review item and record the durable event."""
         while True:
+            # Capture the head sequence BEFORE reading the item: this is the
+            # sequence the grant will be appended after. Reading it afterwards
+            # would already account for a write that raced between the status
+            # check and the append, letting the grant overwrite a revocation
+            # the CAS guard exists to prevent.
+            expected_seq = self.storage.last_sequence(run_id)
             item = self.get_item(run_id, review_id)
             if item is None:
                 raise KeyError(f"no review item with id {review_id!r} in run {run_id!r}")
             if not item.is_pending:
                 raise ValueError(f"review item {review_id!r} is already {item.status}")
 
-            expected_seq = self.storage.last_sequence(run_id)
             payload: dict[str, Any] = {
                 "approval_id": review_id,
                 "review_id": review_id,
@@ -337,11 +349,13 @@ class ReviewQueue:
 
             conflict = False
             for item in candidates:
+                # Read the head before the item for the same reason approve
+                # does: a revoke that lands between the status read and the
+                # append must fail this write, not be overwritten by it.
+                expected_seq = self.storage.last_sequence(run_id)
                 fresh = self.get_item(run_id, item.review_id)
                 if fresh is None or not fresh.is_pending:
                     continue
-
-                expected_seq = self.storage.last_sequence(run_id)
                 payload: dict[str, Any] = {
                     "approval_id": item.review_id,
                     "review_id": item.review_id,
@@ -379,13 +393,16 @@ class ReviewQueue:
     ) -> ReviewItem:
         """Revoke a review item and record the durable APPROVAL_REVOKED event."""
         while True:
+            # Same ordering contract as approve: capture the head sequence
+            # before reading the item so a concurrent grant cannot be silently
+            # replaced by this revocation.
+            expected_seq = self.storage.last_sequence(run_id)
             item = self.get_item(run_id, review_id)
             if item is None:
                 raise KeyError(f"no review item with id {review_id!r} in run {run_id!r}")
             if item.status == "revoked":
                 raise ValueError(f"review item {review_id!r} is already revoked")
 
-            expected_seq = self.storage.last_sequence(run_id)
             payload: dict[str, Any] = {
                 "approval_id": review_id,
                 "review_id": review_id,
