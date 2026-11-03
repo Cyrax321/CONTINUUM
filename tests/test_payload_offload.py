@@ -345,6 +345,105 @@ def test_sqlite_action_index_with_offloaded_event(tmp_path: Path) -> None:
         assert corrections == 0
 
 
+def test_sqlite_action_index_with_offloaded_sealed_event(tmp_path: Path) -> None:
+    """An offloaded ACTION_* event keeps its index row through import (#1923).
+
+    ``extend_events`` replays events through ``append_sealed``, whose payload
+    on the export side is the blob descriptor. If the writer indexes the
+    descriptor instead of resolving it, the imported log silently loses the
+    completed action and ``action_index_drift()`` reports a gap on a log that
+    is byte-for-byte intact.
+    """
+    threshold = 50
+    store_dir = tmp_path / "blobs"
+
+    with SQLiteStorage(
+        f"sqlite:///{tmp_path / 'a.db'}",
+        storage_dir=store_dir,
+        payload_offload_bytes=threshold,
+    ) as store_a:
+        run = Run(run_id="run_act", goal="export an offloaded action")
+        store_a.create_run_started(run)
+
+        action = Action(
+            action_id="act_1",
+            run_id=run.run_id,
+            action_type="shell",
+            arguments={"cmd": "echo " + "z" * 100},  # Oversized payload
+            status=ActionStatus.STARTED,
+            created_at=utcnow(),
+        )
+        event = store_a.append_event(
+            run.run_id,
+            EventType.ACTION_RECORDED,
+            {"key": "action:id:123", "action": action.model_dump(mode="json")},
+        )
+        assert is_offload_descriptor(event.payload)
+
+        exported = list(store_a.read_events(run.run_id, rehydrate=False))
+
+    with SQLiteStorage(
+        f"sqlite:///{tmp_path / 'b.db'}",
+        storage_dir=store_dir,  # same blob store, as on a shared host
+        payload_offload_bytes=threshold,
+    ) as store_b:
+        store_b.create_run(Run(run_id="run_act", goal="import"))
+        store_b.extend_events(exported)
+
+        found = store_b.foreign_action("action:id:123", exclude_run="other_run")
+        assert found is not None
+        assert found.action_id == "act_1"
+        assert store_b.action_index_drift() == 0
+        assert store_b.rebuild_action_index() == 0
+
+
+def test_sqlite_action_index_offloaded_sealed_event_without_blob_degrades(tmp_path: Path) -> None:
+    """Importing an offloaded action whose blob is absent degrades, not drifts.
+
+    The fold cannot resolve the descriptor either, so writer and fold agree on
+    "no index row" and ``action_index_drift()`` stays clean (#1923).
+    """
+    threshold = 50
+
+    with SQLiteStorage(
+        f"sqlite:///{tmp_path / 'a.db'}",
+        storage_dir=tmp_path / "blobs_a",
+        payload_offload_bytes=threshold,
+    ) as store_a:
+        run = Run(run_id="run_act", goal="export an offloaded action")
+        store_a.create_run_started(run)
+        event = store_a.append_event(
+            run.run_id,
+            EventType.ACTION_RECORDED,
+            {
+                "key": "action:id:456",
+                "action": Action(
+                    action_id="act_2",
+                    run_id=run.run_id,
+                    action_type="shell",
+                    arguments={"cmd": "echo " + "z" * 100},
+                    status=ActionStatus.STARTED,
+                    created_at=utcnow(),
+                ).model_dump(mode="json"),
+            },
+        )
+        assert is_offload_descriptor(event.payload)
+        exported = list(store_a.read_events(run.run_id, rehydrate=False))
+
+    with SQLiteStorage(
+        f"sqlite:///{tmp_path / 'b.db'}",
+        storage_dir=tmp_path / "blobs_b",  # different blob store: blob is absent
+        payload_offload_bytes=threshold,
+    ) as store_b:
+        store_b.create_run(Run(run_id="run_act", goal="import without blob"))
+        store_b.extend_events(exported)
+
+        # No row can be built, but the fold agrees, so there is no drift.
+        assert store_b.foreign_action("action:id:456", exclude_run="other_run") is None
+        assert store_b.action_index_drift() == 0
+        assert store_b.rebuild_action_index() == 0
+
+
 def test_postgres_append_event_offload_mock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -51,6 +51,7 @@ from continuum.storage.blob import (
     is_offload_descriptor,
     load_blob_payload,
     maybe_offload_payload,
+    rehydrate_for_index,
 )
 from continuum.storage.migrations import SCHEMA_VERSION, migrate_schema
 
@@ -539,7 +540,11 @@ class SQLiteStorage(Storage):
                 raise CorruptedRecord(
                     f"run {event.run_id!r} seq {event.sequence}: hash does not match content"
                 )
-            self._insert_event(conn, event)
+            self._insert_event(
+                conn,
+                event,
+                raw_payload=rehydrate_for_index(event.payload, storage_dir=self.storage_dir),
+            )
         return event
 
     @staticmethod
@@ -812,9 +817,7 @@ class SQLiteStorage(Storage):
                 payload = json.loads(row["payload"])
             except json.JSONDecodeError:
                 continue
-            if is_offload_descriptor(payload):
-                with suppress(Exception):
-                    payload = load_blob_payload(self.storage_dir, payload)
+            payload = rehydrate_for_index(payload, storage_dir=self.storage_dir)
             entry = index_entry_from_payload(EventType(row["type"]), payload)
             if entry is not None:
                 canonical[entry[0]] = (entry, index_order_for(row["timestamp"]))

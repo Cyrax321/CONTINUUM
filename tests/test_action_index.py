@@ -501,7 +501,7 @@ def test_sqlite_action_index_drift_skips_malformed_json_payload(tmp_path: Path) 
         assert isinstance(rebuilt, int)
 
 
-def test_postgres_canonical_index_rows_skips_malformed_json() -> None:
+def test_postgres_canonical_index_rows_skips_malformed_json(tmp_path: Path) -> None:
     """The Postgres action-index fold must skip malformed JSON payloads rather
     than raising JSONDecodeError (issue #1386, parity with SQLite)."""
     from unittest.mock import MagicMock
@@ -509,6 +509,9 @@ def test_postgres_canonical_index_rows_skips_malformed_json() -> None:
     from continuum.storage.postgres import PostgresStorage
 
     store = object.__new__(PostgresStorage)
+    # The fold resolves offload descriptors through ``storage_dir`` (#1923),
+    # so the bare instance needs a place to look.
+    store._storage_dir = tmp_path
     mock_read = MagicMock()
     mock_read.__enter__ = MagicMock(return_value=None)
     mock_read.__exit__ = MagicMock(return_value=None)

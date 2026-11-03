@@ -11,14 +11,16 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from itertools import count
+from pathlib import Path
 
 import pytest
 
 from continuum.actions import ActionLedger
 from continuum.checkpoint import CheckpointManager
 from continuum.events import EventType
-from continuum.models import Action, ActionStatus, Origin, Run, RunStatus
+from continuum.models import Action, ActionStatus, Origin, Run, RunStatus, utcnow
 from continuum.storage.base import ConcurrentWriteError, RunNotFound
+from continuum.storage.blob import is_offload_descriptor
 from continuum.storage.postgres import PostgresStorage
 
 DSN = os.environ.get("CONTINUUM_TEST_POSTGRES_DSN")
@@ -488,6 +490,77 @@ def test_pg_action_index_drift_stays_zero_with_non_action_events_between_actions
         for r in storage._connection.execute("SELECT key, updated_seq FROM action_index")
     }
     assert {k: v for k, (_, v) in canonical.items()} == stored
+
+
+def test_pg_action_index_covers_an_offloaded_sealed_event(tmp_path: Path) -> None:
+    """An offloaded ACTION_* event keeps its index row through import (#1923).
+
+    ``append_sealed`` used to index the blob descriptor instead of the action
+    it describes, so a run exported through ``extend_events`` lost the
+    cross-run idempotency row for any action oversized enough to offload -- the
+    sibling of the SQLite gap, in the second engine.
+    """
+    import psycopg
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    blobs = tmp_path / "blobs"
+    stores: list[tuple[PostgresStorage, str]] = []
+
+    def throwaway() -> PostgresStorage:
+        name = f"iso_{os.getpid()}_{next(_iso_counter)}"
+        admin = psycopg.connect(DSN, autocommit=True)
+        try:
+            admin.execute(f'CREATE DATABASE "{name}"')
+        finally:
+            admin.close()
+        params = conninfo_to_dict(DSN)
+        params["dbname"] = name
+        store = PostgresStorage(
+            make_conninfo(**params),
+            storage_dir=blobs,
+            payload_offload_bytes=50,
+        )
+        stores.append((store, name))
+        return store
+
+    try:
+        store_a = throwaway()
+        make_run(store_a, "pg_sealed", "export an offloaded action")
+        event = store_a.append_event(
+            "pg_sealed",
+            EventType.ACTION_RECORDED,
+            {
+                "key": "action:id:pg77",
+                "action": Action(
+                    action_id="act_pg",
+                    run_id="pg_sealed",
+                    action_type="shell",
+                    arguments={"cmd": "echo " + "z" * 200},
+                    status=ActionStatus.STARTED,
+                    created_at=utcnow(),
+                ).model_dump(mode="json"),
+            },
+        )
+        assert is_offload_descriptor(event.payload)
+        exported = list(store_a.read_events("pg_sealed", rehydrate=False))
+
+        store_b = throwaway()  # same blob dir, as on a shared host
+        store_b.create_run(Run(run_id="pg_sealed", goal="import"))
+        store_b.extend_events(exported)
+
+        found = store_b.foreign_action("action:id:pg77", exclude_run="other_run")
+        assert found is not None
+        assert found.action_id == "act_pg"
+        assert store_b.action_index_drift() == 0
+        assert store_b.rebuild_action_index() == 0
+    finally:
+        for store, name in stores:
+            store.close()
+            admin = psycopg.connect(DSN, autocommit=True)
+            try:
+                admin.execute(f'DROP DATABASE IF EXISTS "{name}"')
+            finally:
+                admin.close()
 
 
 def test_pg_action_index_stays_clean_after_a_rebuild_and_further_appends(
