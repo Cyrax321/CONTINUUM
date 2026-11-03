@@ -105,24 +105,6 @@ def _numeric_anchor(
     return None
 
 
-def restore_to_anchor(
-    storage: Storage,
-    run_id: str,
-    anchor: int,
-    *,
-    reason: str,
-    carry_forward: Collection[str] | None = None,
-) -> tuple[Any, set[str], dict[str, Any]]:
-    """Check preconditions for restoring ``run_id`` to ``anchor``."""
-    return check_preconditions(
-        storage,
-        run_id,
-        anchor,
-        edit_type="restore",
-        carry_forward=carry_forward,
-    )
-
-
 def approve_restore(
     storage: Storage,
     run_id: str,
