@@ -4571,14 +4571,19 @@ def cmd_replay(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
             # reaches this branch too (#1172): the tail below is already cut by
             # the window, so --upto narrows what is folded without shutting the
             # anchored path out.
-            from continuum.state.semantic import project_incremental
+            from continuum.state.semantic import project_incremental, weakest_origin_over
 
             # The anchor event sits exactly at the base boundary; folding it
             # would trip the monotonic-sequence check. Everything the archive
             # holds is at or before that boundary, so this also drops the
             # archived prefix.
             tail = [e for e in events if e.sequence > base.source_sequence]
-            state, _report = project_incremental(args.run_id, tail, base=base)
+            # The base state cannot reconstruct the trust watermark its own
+            # fold held (#1933): seed from the sources of the events it
+            # folded (still readable here, archived or not) so this replay
+            # stamps derived trust exactly like a fresh read of the same log.
+            weakest = weakest_origin_over([e for e in events if e.sequence <= base.source_sequence])
+            state, _report = project_incremental(args.run_id, tail, base=base, weakest_seed=weakest)
             # Verify for real: re-fold only the stored version's own prefix and
             # compare fingerprints, exactly as the plain path's
             # _verify_against_stored does. A hardcoded pass here silently
@@ -4587,6 +4592,7 @@ def cmd_replay(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
                 args.run_id,
                 [e for e in tail if e.sequence <= stored.source_sequence],
                 base=base,
+                weakest_seed=weakest,
                 on_unprojectable="degrade",
             )
             matches = state_fingerprint(at_stored) == state_fingerprint(stored)

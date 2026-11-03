@@ -60,6 +60,7 @@ __all__ = [
     "first_unprojectable_event",
     "project",
     "project_incremental",
+    "weakest_origin_over",
     "account_pins_in_context",
     "pin_markers_for_state",
     "check_pin_accounting",
@@ -163,7 +164,16 @@ def _provenance_clamped(event: Event, weakest_seen: Any | None) -> Provenance:
 
 
 def _weakest_from_state(state: SemanticState | None) -> Any | None:
-    """Weakest origin among a state's per-fact provenances, for seeding."""
+    """Weakest origin among a state's per-fact provenances, for seeding.
+
+    An approximation, kept as the fallback for callers that hold a base state
+    but no log: half the projecting components carry no provenance at all
+    (approvals, attempt lessons, trajectory reports, model) and non-projecting
+    events leave no state trace either, so this seed can only ever be as weak
+    as the components that do carry one (#1933). Callers with access to the
+    log should pass :func:`weakest_origin_over` the events the base folded
+    instead, which is exact.
+    """
     if state is None:
         return None
     from continuum.models import Origin
@@ -190,6 +200,30 @@ def _weakest_from_state(state: SemanticState | None) -> Any | None:
     from continuum.provenance_map import derived_origin
 
     return derived_origin(candidates)
+
+
+def weakest_origin_over(events: Iterable[Event]) -> Any | None:
+    """The watermark a full fold of ``events`` holds, for seeding a resume.
+
+    ``_track_weakest`` weakens ``_weakest_seen`` from *every* consumed event,
+    the non-projecting ones included, so the watermark over a prefix is the
+    derived origin of the events' sources. A checkpoint's base state cannot
+    reconstruct that (see ``_weakest_from_state``), so a resume that seeds
+    from the state alone launders derived trust upward versus a fresh
+    projection of the same log (#1933). Resumes with log access seed from
+    the events the base folded, which is exact: ``derived_origin`` is a
+    minimum over the authority ranking, so its result over the sources is
+    order-independent and equals what the live fold accumulated.
+
+    Returns ``None`` for an empty stream, letting the caller fall back to
+    ``_weakest_from_state``.
+    """
+    origins = [event.source for event in events]
+    if not origins:
+        return None
+    from continuum.provenance_map import derived_origin
+
+    return derived_origin(origins)
 
 
 def _as_str_list(value: Any) -> list[str]:
@@ -225,7 +259,9 @@ def _replace(items: list[Any], key: str, identifier: str, updated: Any) -> bool:
 class _Accumulator:
     """Mutable working set for the fold; converted to a frozen state at the end."""
 
-    def __init__(self, run_id: str, base: SemanticState | None) -> None:
+    def __init__(
+        self, run_id: str, base: SemanticState | None, *, weakest_seed: Any | None = None
+    ) -> None:
         self.run_id = run_id
         self.goal: Goal | None = base.goal if base else None
         self.progress: Progress = base.progress if base else Progress()
@@ -256,7 +292,7 @@ class _Accumulator:
         self.updated_at: datetime | None = base.updated_at if base else None
         self.source_sequence: int = base.source_sequence if base else 0
         self.version: int = base.version if base else 0
-        self._weakest_seen = _weakest_from_state(base)
+        self._weakest_seen = weakest_seed if weakest_seed is not None else _weakest_from_state(base)
 
     def _track_weakest(self, event: Event) -> None:
 
@@ -862,12 +898,23 @@ def project_incremental(
     events: Iterable[Event],
     *,
     base: SemanticState | None = None,
+    weakest_seed: Any | None = None,
     on_unprojectable: Literal["raise", "degrade"] = "raise",
 ) -> tuple[SemanticState, ProjectionReport]:
     """Fold ``events`` onto ``base`` and report what was consumed.
 
     Passing a ``base`` lets a long run advance its state without re-reading the
     whole log; the result must equal a full re-projection of the same prefix.
+    Meeting that for derived trust needs ``weakest_seed``: the fold clamps
+    every derived fact's origin by the live watermark, which a live fold
+    weakens from *every* consumed event (the non-projecting ones included).
+    A base state cannot reconstruct that watermark, because half its
+    components carry no provenance and non-projecting events leave no state
+    trace at all, so a resume that seeds from the state alone stamps derived
+    facts at higher trust than the same log read fresh (#1933). Callers with
+    log access should pass :func:`weakest_origin_over` the events the base
+    folded, which reproduces the live watermark exactly; the seed falls back
+    to the per-fact approximation when it is None.
 
     ``on_unprojectable="degrade"`` (issue #383) stops at the earliest event the
     fold refuses and returns the last-good prefix marked ``INVALID``, naming the
@@ -885,7 +932,7 @@ def project_incremental(
     """
     if on_unprojectable not in ("raise", "degrade"):
         raise ValueError(f"on_unprojectable must be 'raise' or 'degrade', got {on_unprojectable!r}")
-    acc = _Accumulator(run_id, base)
+    acc = _Accumulator(run_id, base, weakest_seed=weakest_seed)
     report = ProjectionReport()
     previous_sequence = base.source_sequence if base else 0
 

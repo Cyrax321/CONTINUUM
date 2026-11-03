@@ -490,6 +490,21 @@ Test counts: ~4290 collected on a minimal env.
   exits `REQUIRES_REPAIR`, and still prints the re-bake remedy. The hook
   surface is untouched: it bakes absolute paths and has no expression form.
 
+- **Resumes no longer launder derived trust upward (#1933).** The incremental
+  fold clamps every derived fact's origin by a watermark that a live fold
+  weakens from *every* consumed event, the non-projecting ones included, but a
+  checkpoint's base state could not reconstruct it: approvals, attempt
+  lessons, trajectory reports and model state carry no per-fact provenance,
+  and non-projecting events leave no state trace at all. A run that filed one
+  of those from a weak source before a checkpoint, then appended derived
+  evidence after it, had that evidence stamped `deterministic` on every resume
+  while a full projection of the same log stamped it `external_agent`, so
+  after compaction the laundering was permanent. The resume paths
+  (`CheckpointManager.restore` and `continuum replay` on an anchored run) now
+  seed the watermark from the sources of the events the checkpoint folded,
+  which reproduces the live fold exactly, and still fall back to the per-fact
+  approximation when no log is at hand.
+
 ### Changed
 
 - **The authority-resurrection check now goes through its own exported helper
