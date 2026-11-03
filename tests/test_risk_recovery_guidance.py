@@ -104,7 +104,7 @@ def test_deterministic_mode_selection_across_all_triggers(
     with SQLiteStorage(db) as store:
         run_id = f"run_{trigger}"
         _make_run(store, run_id=run_id)
-        ingest_risk(store, run_id, {"trigger": trigger, "score": 0.95})
+        ingest_risk(store, run_id, {"trigger": trigger, "score": 0.5})
 
         decision = RecoveryEngine(store).assess(run_id, replay=False)
         assert decision.mode is expected_mode
