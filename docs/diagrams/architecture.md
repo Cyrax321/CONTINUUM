@@ -49,7 +49,7 @@ flowchart TB
     %% ---------- durable core ----------
     subgraph core["Durable core: one hash-chained log"]
         direction LR
-        elog[("Event log<br/>events.py, 55 event types")]
+        elog[("Event log<br/>events.py, 57 event types")]
         state["State engine<br/>state/, project and staleness validation"]
         ckpt["Checkpoint manager<br/>checkpoint/, 6 policies, RECOVERY anchors"]
         rec["Recovery engine<br/>recovery/, 7 modes, sealed contract"]
@@ -160,7 +160,7 @@ environment resumes cleanly, and its exit code is 0.
 | Figure | Value | Where it is asserted |
 |:--|:--|:--|
 | Schema version | 6 | `SCHEMA_VERSION` in `src/continuum/storage/migrations.py` |
-| Event types | 55 | `EventType` in `src/continuum/events.py` |
+| Event types | 57 | `EventType` in `src/continuum/events.py` |
 | MCP tools | 13 total, 3 read-only (`validate`, `resume`, `list_actions`) and 10 mutating | `@server.tool(...)` decorators in `src/continuum/mcp/server.py` |
 | CLI commands | 55 | `add(...)` registrations in `src/continuum/cli/main.py` |
 | Recovery modes | 7, max severity wins, `RESUME` safest through `ABORT` most severe | `RecoveryMode` in `src/continuum/recovery/engine.py` |

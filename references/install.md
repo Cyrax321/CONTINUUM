@@ -59,7 +59,7 @@ Combine freely: `[dev]` already includes `mcp`, `langgraph`, `langchain`, `opena
 | **Dev / test tooling** (all in `pyproject.toml:33-50` `[dev]`) | | | Only for contributors |
 | `pytest>=8.0`, `pytest-cov>=5.0`, `pytest-asyncio>=0.23` |  | Test runner + coverage + async MCP tests | Dev |
 | `hypothesis>=6.0` |  | Property-based tests (hashing, models) | Dev |
-| `ruff==0.16.10` |  | Lint + format (CI enforces `ruff check` + `ruff format --check`) | Dev |
+| `ruff==0.17.3` |  | Lint + format (CI enforces `ruff check` + `ruff format --check`) | Dev |
 | `mypy>=1.13` + `pydantic.mypy` |  | Strict type-check (CI runs `mypy src/continuum`) | Dev |
 
 No other runtime dependencies. The CLI, storage, recovery engine, and checkpointing use only the Python standard library.
@@ -101,7 +101,7 @@ continuum-mcp --help             # needs [mcp] or [dev]
 # powershell -ExecutionPolicy Bypass -File .\try-it.ps1
 # powershell -ExecutionPolicy Bypass -File .\try-it.ps1 cli --help
 
-# Full test suite (~3950 tests; exact skips vary by environment)
+# Full test suite (~4290 tests; exact skips vary by environment)
 pytest -q                        # or: ./try-it.sh test
 pytest --no-cov --tb=short -q    # faster, no coverage
 pytest tests/test_events.py -v   # single file
