@@ -63,6 +63,7 @@ from continuum.storage.blob import (
     is_offload_descriptor,
     load_blob_payload,
     maybe_offload_payload,
+    rehydrate_for_index,
 )
 from continuum.storage.compaction import resolve_compaction_bound
 
@@ -696,7 +697,10 @@ class PostgresStorage(Storage):
                 raise CorruptedRecord(
                     f"run {event.run_id!r} seq {event.sequence}: hash does not match content"
                 )
-            self._insert_event(event)
+            self._insert_event(
+                event,
+                raw_payload=rehydrate_for_index(event.payload, storage_dir=self.storage_dir),
+            )
         return event
 
     def _insert_event(self, event: Event, raw_payload: Mapping[str, Any] | None = None) -> None:
@@ -1012,10 +1016,7 @@ class PostgresStorage(Storage):
                     raw = json.loads(raw)
                 except (json.JSONDecodeError, TypeError):
                     continue
-            payload = raw
-            if is_offload_descriptor(payload):
-                with suppress(Exception):
-                    payload = load_blob_payload(self.storage_dir, payload)
+            payload = rehydrate_for_index(raw, storage_dir=self.storage_dir)
             entry = index_entry_from_payload(EventType(row["type"]), payload)
             if entry is None:
                 continue  # not an action event, so it stores no index row

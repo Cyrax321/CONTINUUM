@@ -39,6 +39,7 @@ __all__ = [
     "maybe_offload_payload",
     "maybe_rehydrate_payload",
     "read_blob",
+    "rehydrate_for_index",
     "write_blob",
 ]
 
@@ -201,6 +202,27 @@ def maybe_rehydrate_payload(
 ) -> Mapping[str, Any]:
     """Rehydrate payload if it is an offload descriptor, otherwise return as-is."""
     if is_offload_descriptor(payload):
+        return load_blob_payload(storage_dir, payload)
+    return payload
+
+
+def rehydrate_for_index(
+    payload: Mapping[str, Any],
+    *,
+    storage_dir: str | Path,
+) -> Mapping[str, Any]:
+    """Resolve an offload descriptor for action-index maintenance.
+
+    Unlike :func:`maybe_rehydrate_payload` an unreadable blob is suppressed:
+    the descriptor is returned unchanged, which yields no index row. Both index
+    writers (``append_sealed``) and the canonical fold
+    (``_canonical_index_rows``) must degrade the same way, or the two disagree
+    and ``action_index_drift()`` reports a gap -- or loses a completed action
+    altogether -- on a log that is intact (#1923).
+    """
+    if not is_offload_descriptor(payload):
+        return payload
+    with suppress(Exception):
         return load_blob_payload(storage_dir, payload)
     return payload
 
