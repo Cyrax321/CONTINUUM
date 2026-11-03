@@ -231,13 +231,13 @@ root.
 
 ```bash
 # Lint with ruff
-ruff check src/ tests/ examples/ scripts/ demo-run/
+ruff check src/ tests/ examples/ scripts/ demo-run/ benchmarks/
 
 # Auto-fix safe issues
-ruff check --fix src/ tests/ examples/ scripts/ demo-run/
+ruff check --fix src/ tests/ examples/ scripts/ demo-run/ benchmarks/
 
 # Format check
-ruff format --check src/ tests/ examples/ scripts/ demo-run/
+ruff format --check src/ tests/ examples/ scripts/ demo-run/ benchmarks/
 
 # Type-check with mypy (strict mode)
 mypy src/continuum
@@ -258,8 +258,8 @@ pre-commit install
 `.pre-commit-config.yaml` is committed at the repo root, so there is nothing to
 write yourself. It runs the same two ruff steps as the CI `Lint & Type-check`
 job, pinned to the same ruff version as the `dev` extra in `pyproject.toml` and
-scoped to the same five directories CI lints (`src/`, `tests/`, `examples/`,
-`scripts/`, `demo-run/`):
+scoped to the same six directories CI lints (`src/`, `tests/`, `examples/`,
+`scripts/`, `demo-run/`, `benchmarks/`):
 
 ```yaml
 repos:
@@ -268,9 +268,9 @@ repos:
     hooks:
       - id: ruff-check
         args: [--fix]
-        files: ^(src|tests|examples|scripts|demo-run)/
+        files: ^(src|tests|examples|scripts|demo-run|benchmarks)/
       - id: ruff-format
-        files: ^(src|tests|examples|scripts|demo-run)/
+        files: ^(src|tests|examples|scripts|demo-run|benchmarks)/
 ```
 
 Now `ruff check --fix` and `ruff format` run automatically on every `git commit`.
