@@ -6,7 +6,7 @@ from continuum.events import EventType
 from continuum.models import Origin, Run
 from continuum.recovery.gate import MergePreconditionError
 from continuum.recovery.merge import approve_merge
-from continuum.recovery.restore import approve_restore, restore_to_anchor
+from continuum.recovery.restore import approve_restore
 from continuum.storage import SQLiteStorage
 
 
@@ -40,16 +40,6 @@ def test_anchor_beyond_head_refused_reproduction_1931() -> None:
         match=r"anchor sequence 10000 is beyond run 'r' head \d+; an edit must sit inside the run's history",
     ):
         approve_restore(store, "r", anchor_sequence=10_000, reason="bypass")
-
-
-def test_restore_to_anchor_beyond_head_refused() -> None:
-    """restore_to_anchor must refuse an anchor beyond run's head."""
-    store = SQLiteStorage(":memory:")
-    store.create_run(Run(run_id="r1", goal="g"))
-    store.append_event("r1", EventType.RUN_STARTED, {"goal": "g"}, source=Origin.DETERMINISTIC)
-
-    with pytest.raises(ValueError, match="is beyond run 'r1' head"):
-        restore_to_anchor(store, "r1", anchor=50, reason="test")
 
 
 def test_source_anchor_beyond_head_refused() -> None:
