@@ -532,3 +532,75 @@ curl -X POST http://127.0.0.1:8765/list_actions \
   "unresolved": 0
 }
 ```
+
+### `ingest_risks`
+
+Ingest a batch of risk-signal records from an external monitoring feed (issue
+#1425): a SNAGLINE sidecar, a webhook stream, or a background watchdog. The feed
+is an external witness, not a gatekeeper, so ingestion is **strict fail-open** --
+a feed that crashes, drops its connection, emits torn lines, or sends malformed
+JSON or undecodable bytes can never crash the server, hold the run's
+transaction, or halt the active run. Corrupt records are dropped, classified and
+counted; the well-formed records around them still land.
+
+- **Endpoint**: `POST /ingest_risks`
+- **Parameters**:
+  - `run_id` (string, required): Run the observations describe. The run must
+    already exist: a risk stream cannot create one, and recording against an
+    unknown run would leave an event log no projecting surface can read.
+  - `risks` (array, optional): Records as objects the caller already parsed, as
+    raw JSONL strings, or as raw bytes.
+  - `stream` (string, optional): The same content as one newline-delimited
+    string, which is what a feed speaking the wire directly sends. May appear
+    alongside `risks`.
+  - `limit` (integer, optional): Cap on records taken from the batch (default:
+    10000). Bounds memory for a feed that batches faster than it folds; the
+    response reports `truncated` when more remain.
+  - `auth_token` (string, optional): Shared secret token.
+
+```bash
+curl -X POST http://127.0.0.1:8765/ingest_risks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "run_id": "run-001",
+    "stream": "{\"trigger\": \"loop\", \"score\": 0.9}\nthis line is torn\n{\"trigger\": \"meltdown\"}\n"
+  }'
+```
+
+The answer is always the accounting, never an error for a stream fault:
+
+```json
+{
+  "run_id": "run-001",
+  "accepted": 2,
+  "dropped": 1,
+  "skipped": 0,
+  "truncated": false,
+  "limit": 10000,
+  "last_sequence": 14,
+  "dropped_by_reason": {
+    "invalid_json": 1
+  },
+  "dropped_samples": [
+    {
+      "reason": "invalid_json",
+      "message": "Expecting value: line 1 column 1 (char 0)"
+    }
+  ]
+}
+```
+
+Every record is decoded, parsed, schema-validated and written on its own, so
+each of those four can fail without affecting the others, and a crash mid-batch
+leaves the records already written durable rather than rolling the whole
+observation back. `dropped_by_reason` names what the feed did wrong --
+`invalid_json`, `not_an_object`, `undecodable_utf8`, `oversized_record`,
+`schema_validation`, `write_failed` -- because a feed sending garbage and a feed
+sending well-formed records the schema refuses need different repairs. Risk
+events never project (#303) and are stamped `EXTERNAL_MONITOR` at write time, so
+no volume of them can leave the run unprojectable or count as verification.
+
+A body that is not UTF-8, or a caller that declares a body it stops writing, is
+answered and closed rather than waited on: the first is a 400, the second a 408
+with `Connection: close`, and neither holds its handler thread or the write
+transaction it opened.
