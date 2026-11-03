@@ -114,6 +114,12 @@ def restore_to_anchor(
     carry_forward: Collection[str] | None = None,
 ) -> tuple[Any, set[str], dict[str, Any]]:
     """Check preconditions for restoring ``run_id`` to ``anchor``."""
+    run_head = storage.last_sequence(run_id)
+    if anchor > run_head:
+        raise ValueError(
+            f"anchor sequence {anchor} is beyond run {run_id!r} head {run_head}; "
+            "an edit must sit inside the run's history"
+        )
     return check_preconditions(
         storage,
         run_id,
@@ -143,6 +149,12 @@ def approve_restore(
         anchor = int(anchor_sequence)
         if anchor < 0:
             raise ValueError(f"anchor_sequence must be non-negative, got {anchor}")
+        run_head = storage.last_sequence(run_id)
+        if anchor > run_head:
+            raise ValueError(
+                f"anchor sequence {anchor} is beyond run {run_id!r} head {run_head}; "
+                "an edit must sit inside the run's history"
+            )
     else:
         anchor = _anchor_for(storage, run_id, target)
 

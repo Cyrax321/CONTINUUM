@@ -74,12 +74,25 @@ def approve_merge(
         anchor = int(anchor_sequence)
         if anchor < 0:
             raise ValueError(f"anchor_sequence must be non-negative, got {anchor}")
+        target_head = storage.last_sequence(run_id)
+        if anchor > target_head:
+            raise ValueError(
+                f"anchor sequence {anchor} is beyond run {run_id!r} head {target_head}; "
+                "an edit must sit inside the run's history"
+            )
 
     source_anchor: int | None = None
     if source_anchor_sequence is not None:
         source_anchor = int(source_anchor_sequence)
         if source_anchor < 0:
             raise ValueError(f"source_anchor_sequence must be non-negative, got {source_anchor}")
+        if source_run_id is not None:
+            source_head = storage.last_sequence(source_run_id)
+            if source_anchor > source_head:
+                raise ValueError(
+                    f"anchor sequence {source_anchor} is beyond run {source_run_id!r} head {source_head}; "
+                    "an edit must sit inside the run's history"
+                )
 
     if source_run_id is None:
         derivation, carry_set, summary = check_preconditions(
@@ -110,9 +123,6 @@ def approve_merge(
         )
         return run
 
-    source_anchor: int | None = None
-    if source_anchor_sequence is not None:
-        source_anchor = int(source_anchor_sequence)
     derivation, carry_set, summary, target_summary, source_summary = check_merge_preconditions(
         storage,
         target_run_id=run_id,
