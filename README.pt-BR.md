@@ -397,7 +397,7 @@ Esquema v6. SQLite é primário, Postgres verificado por CI. Um log, muitas proj
 
 ### Mapa de módulos, uma biblioteca, muitas superfícies
 
-O CONTINUUM é uma biblioteca (`src/continuum`, 152 módulos) mais uma suíte de testes grande (236 arquivos de teste, ~4400 testes). Todos os módulos acrescentam e reproduzem um log de eventos encadeado:
+O CONTINUUM é uma biblioteca (`src/continuum`, 153 módulos) mais uma suíte de testes grande (242 arquivos de teste, ~4400 testes). Todos os módulos acrescentam e reproduzem um log de eventos encadeado:
 
 | Módulo | Papel |
 |:--|:--|

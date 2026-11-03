@@ -70,3 +70,4 @@ benchmarks/out/
 # registers as a gitlink with no .gitmodules entry, which breaks
 # any `git submodule` walk for every consumer of this repo.
 .worktrees/
+.commandcode/
