@@ -15,6 +15,7 @@ import pytest
 
 from continuum.agents import diagnose
 from continuum.cli.exitcodes import ExitCode
+from continuum.clienthooks import _join_command
 from continuum.mcp.authz import POLICY_ENV_VAR_ALIAS, UNKNOWN_CALLER
 from continuum.mcp.install import HOST_PROFILES, SERVER_NAME, host_shape
 
@@ -641,10 +642,25 @@ def test_hook_client_wired_in_the_interpreter_fallback_form(env: tuple[Path, Pat
     used to recognise only a first token that is a continuum executable, so it
     reported that hook as nothing configured while it was firing on every
     tool call, and the doctor said the machine was healthy-but-unconfigured.
+
+    The command is built with the installer's own joiner, not assembled by
+    hand: an interpreter under a spaced path (``~/Desktop/Open source/``) is
+    quoted by ``_join_command`` on the way out and unquoted by
+    ``_split_command`` on the way back, while a hand-written unquoted form is
+    a shape the installer never produces. The guard baked that shape, so it
+    failed on every checkout whose interpreter path contains a space while
+    passing everywhere else (#1962).
     """
     import sys
 
     root, _ = env
+    # A spaced interpreter path, as any checkout under "~/Desktop/Open
+    # source/" or "C:/Program Files/" has. It has to exist: the doctor reads
+    # the baked first token back and checks it resolves.
+    interpreter = root / "open source" / "bin" / Path(sys.executable).name
+    interpreter.parent.mkdir(parents=True, exist_ok=True)
+    interpreter.write_bytes(b"")
+    command = _join_command([str(interpreter), "-m", "continuum.cli", "observe"])
     settings = root / ".claude" / "settings.json"
     settings.parent.mkdir(parents=True, exist_ok=True)
     settings.write_text(
@@ -657,7 +673,7 @@ def test_hook_client_wired_in_the_interpreter_fallback_form(env: tuple[Path, Pat
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": f"{sys.executable} -m continuum.cli observe",
+                                    "command": command,
                                 }
                             ],
                         }
