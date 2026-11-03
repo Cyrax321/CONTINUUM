@@ -396,10 +396,23 @@ class CheckpointManager:
                 replayed=False,
             )
 
-        from continuum.state.semantic import project_incremental
+        from continuum.state.semantic import project_incremental, weakest_origin_over
 
+        # The base state cannot reconstruct the trust watermark its own fold
+        # held (issue #1933): half the projecting components carry no
+        # provenance and non-projecting events leave no state trace, so
+        # seeding from the state alone would stamp later derived facts at
+        # higher trust than a fresh read of the same log. The events the
+        # checkpoint folded are still in storage (live, or archived once the
+        # run is compacted), so seed from their sources, which is exact.
+        prefix = self.storage.read_all_events(run_id, upto=checkpoint.state.source_sequence)
+        weakest = weakest_origin_over(prefix)
         state, _ = project_incremental(
-            run_id, pending, base=checkpoint.state, on_unprojectable=on_unprojectable
+            run_id,
+            pending,
+            base=checkpoint.state,
+            weakest_seed=weakest,
+            on_unprojectable=on_unprojectable,
         )
         if refusal is not None:
             state = _mark_corruption_refusal(state, refusal)

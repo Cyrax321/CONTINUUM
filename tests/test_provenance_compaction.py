@@ -9,12 +9,19 @@ checkpoint and compaction, with resolvable links to original chain entries.
 
 from __future__ import annotations
 
+import pytest
+
 from continuum.checkpoint import CheckpointManager
 from continuum.events import EventType
-from continuum.models import Origin, Run, StateStatus
+from continuum.models import Origin, Run, SemanticState, StateStatus
 from continuum.provenance_map import provenance_for_run
 from continuum.recovery.summary import build_informed_retry
-from continuum.state.semantic import _weakest_from_state, project, project_incremental
+from continuum.state.semantic import (
+    _weakest_from_state,
+    project,
+    project_incremental,
+    weakest_origin_over,
+)
 from continuum.state.validator import validate_state
 from continuum.storage import SQLiteStorage
 
@@ -266,3 +273,111 @@ def test_hash_chained_provenance_survives_checkpoint_and_compaction() -> None:
         )
     assert not storage.verify_events("r").ok
     storage.close()
+
+
+#: Each row of the #1933 table: a middle event whose source weakens trust but
+#: whose written component carries no provenance the per-fact seed could read
+#: (or which carries no state trace at all, being non-projecting).
+_MIDDLE_EVENTS: list[tuple[EventType, dict[str, object]]] = [
+    (EventType.APPROVAL_REQUESTED, {"approval_id": "a1", "subject": "deploy"}),
+    (EventType.APPROVAL_GRANTED, {"approval_id": "a1"}),
+    (EventType.ATTEMPT_LESSON, {"attempt_id": "att1"}),
+    (
+        EventType.TRAJECTORY_REPORT,
+        {
+            "report_id": "rep1",
+            "window_start": 0,
+            "window_end": 1,
+            "compaction_seq": 1,
+            "attempts": 1,
+            "scar_rate": 0.0,
+        },
+    ),
+    (EventType.MODEL_CHANGED, {"model": "gpt-5", "provider": "openai"}),
+    (EventType.MODEL_ASSUMPTION_RECORDED, {"item_id": "i1", "description": "d"}),
+    (EventType.REASONING_SUMMARY, {"summary": "s"}),
+]
+
+
+def _evidence_origin(state: SemanticState) -> Origin:
+    """The origin the appended derived evidence was stamped with."""
+    return state.evidence[0].provenance.origin
+
+
+@pytest.mark.parametrize("middle_type, middle_payload", _MIDDLE_EVENTS)
+def test_resume_clamps_derived_trust_like_a_full_read(
+    middle_type: EventType, middle_payload: dict[str, object]
+) -> None:
+    """Resume must stamp derived trust exactly like a fresh read (#1933).
+
+    ``_weakest_from_state`` seeds the watermark from the base state's per-fact
+    provenances, but only some components carry provenance (approvals,
+    attempt lessons, trajectory reports and model state carry none) and
+    non-projecting events leave no state trace at all. A run that filed one
+    of these from a weak source before a checkpoint, then appended derived
+    evidence after it, had that evidence stamped DETERMINISTIC on every
+    resume while a fresh read of the same log stamped it EXTERNAL_AGENT. The
+    resume path now seeds the watermark from the sources of the events the
+    checkpoint folded, which reproduces the live fold exactly.
+    """
+    storage = SQLiteStorage(":memory:")
+    try:
+        storage.create_run(Run(run_id="r", goal="g"))
+        storage.append_event("r", EventType.RUN_STARTED, {"goal": "g", "total": 1})
+        storage.append_event("r", middle_type, middle_payload, source=Origin.EXTERNAL_AGENT)
+        CheckpointManager(storage).checkpoint("r", trigger="MANUAL", reason="mid-run")
+        storage.append_event(
+            "r",
+            EventType.EVIDENCE_ADDED,
+            {
+                "evidence_id": "ev1",
+                "content": "c",
+                "derived_origin": Origin.DETERMINISTIC.value,
+            },
+        )
+
+        restored = CheckpointManager(storage).restore("r", replay=True)
+        fresh = project("r", list(storage.read_all_events("r")))
+
+        assert _evidence_origin(fresh) is Origin.EXTERNAL_AGENT
+        assert _evidence_origin(restored.state) is _evidence_origin(fresh)
+    finally:
+        storage.close()
+
+
+def test_weakest_origin_over_seeds_the_incremental_fold_exactly() -> None:
+    """A seed folded from the prefix events matches the live watermark (#1933).
+
+    ``weakest_origin_over`` is the exact seed ``project_incremental`` needs to
+    honour its "same prefix, same trust" contract, where seeding from the base
+    state alone is only an approximation.
+    """
+    storage = SQLiteStorage(":memory:")
+    try:
+        storage.create_run(Run(run_id="r", goal="g"))
+        storage.append_event("r", EventType.RUN_STARTED, {"goal": "g", "total": 1})
+        storage.append_event(
+            "r", EventType.REASONING_SUMMARY, {"summary": "s"}, source=Origin.EXTERNAL_AGENT
+        )
+        prefix = list(storage.read_all_events("r"))
+        base = project("r", prefix)
+
+        storage.append_event(
+            "r",
+            EventType.EVIDENCE_ADDED,
+            {
+                "evidence_id": "ev1",
+                "content": "c",
+                "derived_origin": Origin.DETERMINISTIC.value,
+            },
+        )
+        tail = [e for e in storage.read_all_events("r") if e.sequence > base.source_sequence]
+
+        seeded, _ = project_incremental(
+            "r", tail, base=base, weakest_seed=weakest_origin_over(prefix)
+        )
+        state_full = project("r", list(storage.read_all_events("r")))
+
+        assert _evidence_origin(seeded) is _evidence_origin(state_full)
+    finally:
+        storage.close()
