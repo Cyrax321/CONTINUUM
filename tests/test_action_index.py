@@ -23,6 +23,7 @@ from continuum.cli import ExitCode
 from continuum.events import EventType
 from continuum.models import Action, ActionStatus, Run, UnknownSideEffect
 from continuum.storage import SQLiteStorage
+from continuum.storage.blob import is_offload_descriptor
 from continuum.storage.migrations import SCHEMA_VERSION
 from continuum.storage.postgres import PostgresStorage
 
@@ -499,6 +500,88 @@ def test_sqlite_action_index_drift_skips_malformed_json_payload(tmp_path: Path) 
         assert isinstance(drift, int)
         rebuilt = store.rebuild_action_index()
         assert isinstance(rebuilt, int)
+
+
+def test_sqlite_append_sealed_indexes_offloaded_payload(tmp_path: Path) -> None:
+    """append_sealed must index an offloaded payload, not silently drop it (#1923).
+
+    append_event hands the index writer the pre-offload payload, so the row
+    lands. append_sealed receives the event already sealed, so its payload is
+    the blob descriptor; falling back to the descriptor found no ledger key
+    and the row was lost on the import path (extend_events) while the fold
+    rehydrated and rebuilt it, so an imported store read dirty.
+    """
+    with (
+        SQLiteStorage(
+            f"sqlite:///{tmp_path}/a.db", storage_dir=tmp_path, payload_offload_bytes=50
+        ) as store_a,
+        SQLiteStorage(
+            f"sqlite:///{tmp_path}/b.db", storage_dir=tmp_path, payload_offload_bytes=50
+        ) as store_b,
+    ):
+        run = Run(run_id="run_offload", goal="g")
+        store_a.create_run_started(run)
+        action = Action(
+            run_id=run.run_id,
+            action_type="send_invoice",
+            arguments={"note": "n" * 200},
+        )
+        event = store_a.append_event(
+            run.run_id,
+            EventType.ACTION_RECORDED,
+            {"key": "action:offload:1", "action": action.model_dump(mode="json")},
+        )
+        assert is_offload_descriptor(event.payload)
+
+        # The export side keeps the descriptor (and its hash) intact; the
+        # import side is append_sealed through extend_events.
+        store_b.create_run(run)
+        assert store_b.extend_events(store_a.read_events(run.run_id, rehydrate=False)) == 2
+
+        found = store_b.foreign_action("action:offload:1", exclude_run="nobody")
+        assert found is not None
+        assert found.run_id == run.run_id
+        assert found.action_id == action.action_id
+        # The incremental writer and the fold agree, so no rebuild is owed.
+        assert store_a.action_index_drift() == 0
+        assert store_b.action_index_drift() == 0
+
+
+def test_sqlite_append_sealed_skips_index_row_when_blob_is_missing(tmp_path: Path) -> None:
+    """An offloaded event whose blob is unavailable stores no index row (#1923).
+
+    The fold skips the row when the blob cannot be rehydrated, so the
+    incremental writer must skip it too; indexing it would leave a row the
+    fold cannot reproduce and the imported store would read dirty.
+    """
+    other_dir = tmp_path / "no_blobs"
+    other_dir.mkdir()
+    with (
+        SQLiteStorage(
+            f"sqlite:///{tmp_path}/a.db", storage_dir=tmp_path, payload_offload_bytes=50
+        ) as store_a,
+        SQLiteStorage(f"sqlite:///{tmp_path}/c.db", storage_dir=other_dir) as store_c,
+    ):
+        run = Run(run_id="run_missing", goal="g")
+        store_a.create_run_started(run)
+        action = Action(
+            run_id=run.run_id,
+            action_type="send_invoice",
+            arguments={"note": "n" * 200},
+        )
+        event = store_a.append_event(
+            run.run_id,
+            EventType.ACTION_RECORDED,
+            {"key": "action:offload:2", "action": action.model_dump(mode="json")},
+        )
+        assert is_offload_descriptor(event.payload)
+
+        # The blob never reaches the importing store's blob directory.
+        store_c.create_run(run)
+        store_c.extend_events(store_a.read_events(run.run_id, rehydrate=False))
+
+        assert store_c.foreign_action("action:offload:2", exclude_run="nobody") is None
+        assert store_c.action_index_drift() == 0
 
 
 def test_postgres_canonical_index_rows_skips_malformed_json() -> None:

@@ -163,6 +163,22 @@ Test counts: ~4290 collected on a minimal env.
 
 ### Fixed
 
+- **Offloaded action payloads keep their index row through the import path
+  (#1923).** `append_event` hands the index writer the pre-offload payload,
+  so a large `ACTION_*` event still lands its row in `action_index`.
+  `append_sealed` received the event already sealed and passed nothing, so
+  the upsert fell back to the event's payload, which for an offloaded event
+  is the blob descriptor: `index_entry_from_payload` found no ledger key and
+  the row was skipped silently, with no error and no index entry. The only
+  production caller is `Storage.extend_events`, the documented import/export
+  path, so an offloaded `ACTION_*` event lost its row on the way through an
+  import, while the fold (`_canonical_index_rows`) rehydrated the same
+  descriptor and rebuilt it, leaving the imported store reading dirty until a
+  rebuild. Both engines' `append_sealed` now rehydrate the descriptor through
+  the same blob read the fold uses, and skip the row when the blob is missing
+  or corrupt, exactly as the fold does, so the incremental writer and the
+  rebuild cannot drift apart.
+
 - **Compaction anchors no longer shadow the true rollback point (#1852).**
   `compact_run` stamped its anchor checkpoint `trigger=RECOVERY`, but it is
   written *after* the unsafe event at a higher version, so after a run was

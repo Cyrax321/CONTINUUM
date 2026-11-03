@@ -539,7 +539,19 @@ class SQLiteStorage(Storage):
                 raise CorruptedRecord(
                     f"run {event.run_id!r} seq {event.sequence}: hash does not match content"
                 )
-            self._insert_event(conn, event)
+            # An offloaded event carries the blob descriptor as its payload,
+            # not the action record (#1923). append_event hands the index
+            # writer the pre-offload payload; append_sealed receives the
+            # event already sealed, so rehydrate here or the upsert falls
+            # back to the descriptor, finds no ledger key, and the row is
+            # silently lost on the import path. A missing or corrupt blob
+            # skips the row, exactly as the fold does, so the incremental
+            # writer and rebuild cannot drift apart.
+            raw_payload: Mapping[str, Any] | None = None
+            if is_offload_descriptor(event.payload):
+                with suppress(CorruptedRecord):
+                    raw_payload = load_blob_payload(self.storage_dir, event.payload)
+            self._insert_event(conn, event, raw_payload=raw_payload)
         return event
 
     @staticmethod

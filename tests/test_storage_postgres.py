@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from itertools import count
+from pathlib import Path
 
 import pytest
 
@@ -657,6 +658,74 @@ def test_pg_backfill_seeds_an_emptied_index_on_the_folds_own_scale(
         assert reopened.action_index_drift() == 0
     finally:
         reopened.close()
+
+
+def test_pg_append_sealed_indexes_offloaded_payload(tmp_path: Path) -> None:
+    """Importing an offloaded ACTION_* event keeps its index row (#1923).
+
+    ``extend_events`` is the documented import path and funnels through
+    ``append_sealed``, which receives the event already sealed: its payload is
+    the blob descriptor, not the action record. Unless the index writer is
+    handed the rehydrated payload the upsert finds no ledger key and the row
+    is lost silently, so the imported store reads dirty against its own fold.
+    Parity with the SQLite twin in tests/test_action_index.py.
+    """
+    import psycopg
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    from continuum.models import Action
+    from continuum.storage.blob import is_offload_descriptor
+
+    names: list[str] = []
+
+    def isolated_store(storage_dir: Path, threshold: int) -> PostgresStorage:
+        name = f"iso_{os.getpid()}_{next(_iso_counter)}"
+        names.append(name)
+        admin = psycopg.connect(DSN, autocommit=True)
+        try:
+            admin.execute(f'CREATE DATABASE "{name}"')
+        finally:
+            admin.close()
+        params = conninfo_to_dict(DSN)
+        params["dbname"] = name
+        return PostgresStorage(
+            make_conninfo(**params),
+            storage_dir=storage_dir,
+            payload_offload_bytes=threshold,
+        )
+
+    run_id = "pg_offload"
+    source = isolated_store(tmp_path, 50)
+    destination = isolated_store(tmp_path, 50)
+    try:
+        make_run(source, run_id, "import an offloaded action")
+        action = Action(run_id=run_id, action_type="send_invoice", arguments={"note": "n" * 200})
+        event = source.append_event(
+            run_id,
+            EventType.ACTION_RECORDED,
+            {"key": "action:pg:offload:1", "action": action.model_dump(mode="json")},
+        )
+        assert is_offload_descriptor(event.payload)
+
+        # The export side keeps the descriptor (and its hash) intact; the
+        # import side is append_sealed through extend_events.
+        destination.create_run(Run(run_id=run_id, goal="import an offloaded action"))
+        assert destination.extend_events(source.read_events(run_id, rehydrate=False)) == 2
+
+        found = destination.foreign_action("action:pg:offload:1", exclude_run="nobody")
+        assert found is not None
+        assert found.action_id == action.action_id
+        # The incremental writer and the fold agree, so no rebuild is owed.
+        assert destination.action_index_drift() == 0
+    finally:
+        source.close()
+        destination.close()
+        admin = psycopg.connect(DSN, autocommit=True)
+        try:
+            for name in names:
+                admin.execute(f'DROP DATABASE IF EXISTS "{name}"')
+        finally:
+            admin.close()
 
 
 def test_pg_action_index_drift_skips_malformed_json_payload(
