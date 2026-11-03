@@ -249,6 +249,14 @@ def test_the_run_id_is_not_part_of_the_anchored_id() -> None:
     assert resolve(ledger) == expected_id(INVOICE)
 
 
+def test_the_run_id_is_stripped_from_the_incoming_arguments_too() -> None:
+    ledger = ReplayLedger({"a1": stored({"invoice": INVOICE})}, run_id="run-abc123")
+
+    anchored = resolve(ledger, {"invoice": INVOICE, "run": "run-abc123"})
+
+    assert anchored == expected_id(INVOICE)
+
+
 def test_ledgers_with_different_run_ids_anchor_to_the_same_id() -> None:
     first = ReplayLedger({"a1": stored({"invoice": INVOICE, "run": "run-abc123"})}, "run-abc123")
     second = ReplayLedger({"a1": stored({"invoice": INVOICE, "run": "run-xyz789"})}, "run-xyz789")
@@ -347,9 +355,12 @@ def test_every_completed_form_classifies_the_same(status: Any) -> None:
     ],
 )
 def test_every_uncertain_form_classifies_the_same(status: Any) -> None:
-    ledger = ReplayLedger({"a1": stored({"invoice": INVOICE}, status)})
+    other = stored({"document": INVOICE}, ActionStatus.STARTED)
+    ledger = ReplayLedger({"a1": stored({"invoice": INVOICE}, status), "a2": other})
 
-    assert resolve(ledger) == expected_id(INVOICE)
+    # Two uncertain matches are ambiguous. A lone match would anchor whether or not
+    # ``status`` was classified, so None is what proves it counted as uncertain.
+    assert resolve(ledger) is None
 
 
 def test_a_missing_status_is_ignored() -> None:
@@ -377,13 +388,15 @@ def test_a_status_object_is_classified_by_its_value_attribute(
     value: str, counts_as_completed: bool
 ) -> None:
     """An enum-like object that is not an ``ActionStatus`` is read through ``.value``."""
-    other = stored({"document": INVOICE}, ActionStatus.COMPLETED)
+    partner_status = ActionStatus.COMPLETED if counts_as_completed else ActionStatus.STARTED
+    other = stored({"document": INVOICE}, partner_status)
     ledger = ReplayLedger(
         {"a1": stored({"invoice": INVOICE}, SimpleNamespace(value=value)), "a2": other}
     )
 
-    # A second completed match is ambiguous (None); an uncertain one never outranks it.
-    assert resolve(ledger) == (None if counts_as_completed else expected_id(INVOICE))
+    # Paired with a match of the same kind the result is ambiguous (None). Were the
+    # status misclassified or dropped, the other match would anchor on its own.
+    assert resolve(ledger) is None
 
 
 class UnprintableRunId:
