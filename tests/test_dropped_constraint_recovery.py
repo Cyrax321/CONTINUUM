@@ -712,7 +712,47 @@ def test_guidance_for_unreadable_registry_advises_repair(tmp_path: Path, monkeyp
     assert decision.mode is RecoveryMode.REQUEST_HUMAN
     guidance = human_steps_for(decision, run_id=run_id)
     assert any("repair unreadable constraints registry file" in g for g in guidance)
+    assert any(f"continuum validate {run_id}" in g for g in guidance)
+    assert not any("continuum assess" in g for g in guidance)
     assert not any("--scope pin" in g for g in guidance)
+
+
+def test_guidance_for_pin_starting_with_registry_prefix_renders_pin_confirmation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A constraint pin whose id starts with 'registry' must not be hijacked
+    by the unreadable-registry guidance branch (issues #1970, #1969)."""
+    constraints_path = tmp_path / ".continuum" / "constraints.json"
+    constraints_path.parent.mkdir(parents=True, exist_ok=True)
+    spec_data = [
+        {
+            "id": "registry_write_guard",
+            "level": "hard",
+            "predicate": "writes to registry must be audited",
+            "scope": ["*"],
+        }
+    ]
+    constraints_path.write_text(json.dumps({"constraints": spec_data}), encoding="utf-8")
+    monkeypatch.setattr("continuum.security.constraints.DEFAULT_CONSTRAINTS_PATH", constraints_path)
+
+    db = str(tmp_path / "guidance_prefix.db")
+    storage = SQLiteStorage(db)
+    run_id = "run_reg_prefix"
+    storage.create_run(Run(run_id=run_id, goal="test registry prefix pin"))
+    storage.append_event(run_id, EventType.RUN_STARTED, {"goal": "test"})
+
+    engine = RecoveryEngine(storage)
+    decision = engine.assess(run_id)
+    assert decision.mode is RecoveryMode.REQUEST_HUMAN
+    guidance = human_steps_for(decision, run_id=run_id)
+
+    assert not any("repair unreadable constraints registry file" in g for g in guidance)
+    assert any(
+        "operator confirmation required for missing or unverified constraint pin 'registry_write_guard'"
+        in g
+        for g in guidance
+    )
+    assert any(f"continuum confirm {run_id} --scope pin" in g for g in guidance)
 
 
 def test_failed_verification_invalidates_earlier_pin_confirmation(
