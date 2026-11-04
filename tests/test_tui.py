@@ -412,6 +412,336 @@ def test_a_cancelled_action_writes_nothing(db: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# the detail view's keyboard control surface (issue #1927)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_detail_view_degrades_without_a_database(db: str, store: SQLiteStorage) -> None:
+    """A store that drops out behind the detail view: a message, never a raise.
+
+    ``refresh`` short-circuits when there is no storage at all, so this branch
+    is only reachable from a session that *had* a store and lost it between
+    two keypresses.
+    """
+    run("--db", db, "start", "r1", "--goal", "g")
+    app = TuiApp(store)
+    _enter_dashboard(app)
+    app.handle_key("enter")
+    app.storage = None  # the store dies out of band
+    app.database_error = "schema v6 from a newer CONTINUUM"
+
+    app.handle_key("2")  # a tab switch re-renders through the dead store
+
+    body = "\n".join(app.body_lines())
+    assert "Database unavailable; run data cannot be opened." in body
+    assert "schema v6 from a newer CONTINUUM" in body
+    assert app.cursor == -1
+
+
+def test_the_detail_view_names_a_missing_selection(db: str) -> None:
+    """Detail with no run to open reads as a prompt, not an empty screen."""
+    app = TuiApp(SQLiteStorage(db))  # a store with no runs
+    app.view = "detail"
+    app.refresh()
+
+    assert app.body_lines() == ["No run selected. Press esc to go back to the runs list."]
+    assert app.cursor == -1
+
+
+def test_the_runs_view_degrades_without_a_database() -> None:
+    app = TuiApp(None, database_error="schema v6 from a newer CONTINUUM")
+    app.view = "runs"
+    body = "\n".join(app.body_lines())
+    assert "Database unavailable; no runs can be displayed." in body
+    assert "Use --db with a compatible database" in body
+
+
+def test_a_resize_keeps_the_splash(db: str) -> None:
+    """A resize is not a keystroke: the splash waits for a real key."""
+    app = TuiApp(SQLiteStorage(db))
+    assert app.handle_key("resize") is True
+    assert app.view == "landing"
+
+
+def test_help_stays_up_for_any_other_key(db: str) -> None:
+    """Only ? toggles help off; other keys wait behind it and do not act."""
+    run("--db", db, "start", "r1", "--goal", "g")
+    app = TuiApp(SQLiteStorage(db))
+    _enter_dashboard(app)
+    app.handle_key("?")
+    assert app.show_help is True
+
+    app.handle_key("j")  # would move a selection if help were not up
+    assert app.show_help is True
+    assert app.footer() == "? hides help"
+
+    app.handle_key("?")
+    assert app.show_help is False
+
+
+def test_the_footer_ranks_a_pending_write_above_everything(db: str, store: SQLiteStorage) -> None:
+    """Pending outranks a stale message, and both outrank the key hints."""
+    run("--db", db, "start", "r1", "--goal", "g")
+    app = TuiApp(store)
+    _enter_dashboard(app)
+    app.handle_key("enter")
+
+    app.handle_key("c")
+    assert app.pending is not None
+    assert "force a checkpoint" in app.footer()
+    assert "[y = do it, anything else = cancel]" in app.footer()
+
+    app.message = "reconciled something earlier"
+    assert "force a checkpoint" in app.footer()  # the pending write still wins
+
+    app.handle_key("x")  # not y: cancels, and names what was cancelled
+    assert app.pending is None
+    assert app.message == "cancelled: force a checkpoint on run r1 now"
+    assert app.footer() == "cancelled: force a checkpoint on run r1 now"
+
+
+def test_a_failing_write_becomes_a_message_not_a_crash(
+    db: str, store: SQLiteStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mutating verb whose write fails must say so, not raise past the TUI."""
+
+    def boom(storage: Any, run_id: str) -> str:
+        raise RuntimeError("checkpoint store is read-only")
+
+    monkeypatch.setattr(tui_model, "force_checkpoint", boom)
+    run("--db", db, "start", "r1", "--goal", "g")
+    app = TuiApp(store)
+    _enter_dashboard(app)
+    app.handle_key("c")
+    app.handle_key("y")  # confirm the write that fails
+
+    assert app.pending is None
+    assert app.message == "error: checkpoint store is read-only"
+
+
+def test_the_runs_list_moves_and_wraps(db: str, store: SQLiteStorage) -> None:
+    run("--db", db, "start", "r1", "--goal", "one")
+    run("--db", db, "start", "r2", "--goal", "two")
+    app = TuiApp(store)
+    _enter_dashboard(app)
+    assert app.index == 0
+
+    app.handle_key("down")
+    assert app.index == 1
+    app.handle_key("up")
+    assert app.index == 0
+    app.handle_key("j")
+    assert app.index == 1
+    app.handle_key("k")
+    assert app.index == 0
+    app.handle_key("k")  # wraps from the first row to the last
+    assert app.index == 1
+    app.handle_key("j")  # and back
+    assert app.index == 0
+
+
+def test_the_runs_list_ignores_keys_when_it_is_empty(db: str) -> None:
+    """An empty index keeps its selection in range and opens nothing."""
+    app = TuiApp(SQLiteStorage(db))  # no runs
+    _enter_dashboard(app)
+
+    app.handle_key("down")
+    app.handle_key("enter")
+    assert app.view == "runs"
+    assert app.index == 0
+
+
+def test_every_tab_renders_its_own_content(db: str, store: SQLiteStorage) -> None:
+    """Each of the seven tabs draws different lines under the same run."""
+    run("--db", db, "start", "r1", "--goal", "g")
+    ActionLedger(SQLiteStorage(db), "r1").claim("send_invoice", {}, key="invoice:I-1")
+
+    app = TuiApp(store)
+    _enter_dashboard(app)
+    app.handle_key("enter")
+
+    rendered = {}
+    for digit in "1234567":
+        app.handle_key(digit)
+        assert 0 <= app.tab < len(app.TABS)
+        rendered[app.TABS[app.tab]] = "\n".join(app.body_lines())
+
+    assert "run:         r1" in rendered["overview"]
+    assert "CONTINUUM RECOVERY" in rendered["recovery"]
+    assert "CHECKPOINT" in rendered["checkpoints"]
+    assert "send_invoice" in rendered["actions"]
+    assert "RUN_STARTED" in rendered["events"]
+    assert "r1  [started]  g" in rendered["family"]
+    assert "ACTION TYPE" in rendered["budget"]
+
+
+def test_detail_tabs_switch_with_the_arrow_keys_and_wrap(db: str, store: SQLiteStorage) -> None:
+    """left/right/h/l walk the tab ring in both directions, and wrap."""
+    run("--db", db, "start", "r1", "--goal", "g")
+    app = TuiApp(store)
+    _enter_dashboard(app)
+    app.handle_key("enter")
+    assert app.tab == 0
+
+    app.handle_key("right")
+    assert app.TABS[app.tab] == "recovery"
+    app.handle_key("l")  # the vi alias
+    assert app.TABS[app.tab] == "checkpoints"
+    app.handle_key("left")
+    assert app.TABS[app.tab] == "recovery"
+    app.handle_key("h")
+    assert app.TABS[app.tab] == "overview"
+
+    app.handle_key("left")  # left on the first tab leaves the detail view
+    assert app.view == "runs"
+    assert app.cursor == -1
+
+    app.handle_key("enter")  # back in
+    app.handle_key("h")  # wraps from the first tab to the last
+    assert app.tab == len(app.TABS) - 1
+    app.handle_key("l")  # and right wraps back
+    assert app.tab == 0
+
+
+def test_selection_moves_and_clamps_in_a_table_tab(db: str, store: SQLiteStorage) -> None:
+    run("--db", db, "start", "r1", "--goal", "g")
+    ledger = ActionLedger(SQLiteStorage(db), "r1")
+    ledger.claim("send_invoice", {}, key="invoice:AAA")
+    ledger.claim("send_email", {}, key="email:BBB")
+    ledger.claim("send_fax", {}, key="fax:CCC")
+
+    app = TuiApp(store)
+    _enter_dashboard(app)
+    app.handle_key("enter")
+    app.handle_key("4")  # the actions tab: a table tab, cursor on the first row
+    assert app.cursor == 1
+    assert app._selected_action() is not None
+
+    app.handle_key("down")
+    assert app.cursor == 2
+    app.handle_key("down")
+    assert app.cursor == 3
+    app.handle_key("down")  # clamps at the last row
+    assert app.cursor == 3
+    app.handle_key("up")
+    assert app.cursor == 2
+    app.handle_key("k")  # the vi alias
+    assert app.cursor == 1
+    app.handle_key("up")
+    assert app.cursor == 1  # clamps at the first row
+
+
+def test_a_text_tab_scrolls_instead_of_selecting(db: str, store: SQLiteStorage) -> None:
+    """Text tabs own the scroll, never a table cursor (issue #1927)."""
+    run("--db", db, "start", "r1", "--goal", "g")
+    app = TuiApp(store)
+    _enter_dashboard(app)
+    app.handle_key("enter")
+    app.handle_key("2")  # the recovery tab: a text tab
+    assert app.cursor == -1
+    assert app.scroll == 0
+
+    app.handle_key("down")
+    assert app.scroll == 1
+    app.handle_key("down")
+    app.handle_key("up")
+    assert app.scroll == 1
+    app.handle_key("up")
+    assert app.scroll == 0
+    app.handle_key("up")  # clamps at the top
+    assert app.scroll == 0
+    assert app.cursor == -1  # scrolling never selects
+
+    for _ in range(100):  # and clamps at the bottom of the tab
+        app.handle_key("down")
+    assert app.scroll == len(app.lines) - 1
+    assert app.cursor == -1
+
+
+def test_mutating_keys_act_on_the_detail_view_too(db: str, store: SQLiteStorage) -> None:
+    """c/x/y landed through the detail view, not only the runs list."""
+    run("--db", db, "start", "r1", "--goal", "g")
+    app = TuiApp(store)
+    _enter_dashboard(app)
+    app.handle_key("enter")
+
+    app.handle_key("n")  # off the actions tab, n is a deliberate no-op
+    app.handle_key("z")  # and an unbound key is a no-op too
+    assert app.pending is None
+    assert app.message == ""
+
+    app.handle_key("c")
+    assert app.pending is not None and "force a checkpoint" in app.pending[0]
+    app.handle_key("y")
+    with SQLiteStorage(db) as s:
+        assert len(s.list_checkpoints("r1")) == 1
+
+    app.handle_key("x")
+    assert "RUN_COMPLETED" in app.pending[0]
+    app.handle_key("y")
+    assert store.get_run("r1").status is RunStatus.COMPLETED
+
+    app.handle_key("y")  # off the actions tab, y confirms the self-report
+    assert "REVIEW_CONFIRMED" in app.pending[0]
+    app.handle_key("y")
+    with SQLiteStorage(db) as s:
+        assert any(e.type is EventType.REVIEW_CONFIRMED for e in s.read_events("r1"))
+
+
+def test_n_settles_the_selected_action_as_not_occurred(db: str, store: SQLiteStorage) -> None:
+    run("--db", db, "start", "r1", "--goal", "g")
+    ActionLedger(SQLiteStorage(db), "r1").claim("send_invoice", {}, key="invoice:I-1")
+
+    app = TuiApp(store)
+    _enter_dashboard(app)
+    app.handle_key("enter")
+    app.handle_key("4")  # actions tab, cursor on the one uncertain action
+    app.handle_key("n")  # settle as NOT occurred
+    assert app.pending is not None
+    assert "NOT OCCURRED" in app.pending[0]
+
+    app.handle_key("y")
+    assert ActionLedger(SQLiteStorage(db), "r1").all()[0].status is ActionStatus.FAILED
+    with SQLiteStorage(db) as s:
+        assert any(e.type is EventType.ACTION_RECONCILED for e in s.read_events("r1"))
+
+
+def test_mutating_keys_name_a_missing_selection(db: str, store: SQLiteStorage) -> None:
+    """No run under the cursor: the keys say so, they neither write nor raise.
+
+    The runs list cannot land here, but a pending write whose run vanishes out
+    of band between two keypresses can.
+    """
+    app = TuiApp(store)  # a store with no runs
+    _enter_dashboard(app)
+    app.view = "detail"
+    app.refresh()
+    assert "No run selected" in "\n".join(app.body_lines())
+
+    for key in ("c", "x", "y"):
+        app.handle_key(key)
+        assert app.message == "no run selected", key
+
+    app.handle_key("4")  # the actions tab
+    app.handle_key("y")  # nothing is selected to settle
+    assert app.message == "select an action row first (cursor is on the actions list)"
+    app.handle_key("n")  # and n reads the same
+    assert app.message == "select an action row first (cursor is on the actions list)"
+
+
+def test_a_refresh_retires_a_stray_scroll(db: str, store: SQLiteStorage) -> None:
+    """A scroll left over from a longer tab must not outlive that tab."""
+    run("--db", db, "start", "r1", "--goal", "g")
+    app = TuiApp(store)
+    _enter_dashboard(app)
+    app.handle_key("enter")
+
+    app.scroll = 10_000
+    app.handle_key("r")
+    assert app.scroll == 0
+
+
+# --------------------------------------------------------------------------- #
 # the curses driver and the refusal paths
 # --------------------------------------------------------------------------- #
 
