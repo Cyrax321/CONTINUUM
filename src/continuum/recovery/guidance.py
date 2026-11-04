@@ -137,10 +137,10 @@ def human_steps_for(
                 statuses = decision.validation.report.statuses
             # An unreadable registry cannot be cleared by a pin confirmation:
             # the only remedy is repairing the file and reassessing.
-            if step.target.startswith("registry"):
+            if step.target == "registry":
                 steps.append(
                     f"repair unreadable constraints registry file (.continuum/constraints.json), "
-                    f"then rerun `continuum assess {run_id}`"
+                    f"then rerun `continuum validate {run_id}`"
                 )
             elif step.target.startswith("pin:") or any(
                 e.component is Component.PIN and e.component_id == step.target for e in statuses
