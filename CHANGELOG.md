@@ -10,6 +10,13 @@ Test counts: ~4400 collected on a minimal env.
 
 ### Added
 
+- **Unit coverage for the ledger-anchored authorization id (#1951).**
+  `tests/test_idempotency_ledger_resolution.py` drives
+  `resolve_authorization_id(..., ledger=...)` with in-memory ledger stand-ins and
+  asserts the duck-typed ledger shapes, the run id and volatile strips, the
+  containment and location verdicts, and the unique-match rule. Tests only, no
+  runtime change.
+
 - **Tenant memory enumeration and logical tombstoning via continuum forget (#1417).**
   `continuum forget` now queries the `action_index` projection for memory writes
   belonging to a specified tenant, extracts machine-readable external keys to
