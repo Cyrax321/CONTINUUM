@@ -291,4 +291,67 @@ def test_mcp_resume_includes_human_steps(db: str, tmp_path: Path) -> None:
     assert isinstance(payload.get("human_steps"), list)
 
 
+def test_unreadable_registry_guidance_suggests_continuum_validate() -> None:
+    """An unreadable registry guidance step must name `continuum validate`, not assess (#1969)."""
+    from types import SimpleNamespace
+
+    from continuum.models import RecoveryMode
+    from continuum.recovery.planner import RepairKind, RepairPlan, RepairStep
+
+    plan = RepairPlan(
+        steps=[
+            RepairStep(
+                kind=RepairKind.HUMAN_REVIEW,
+                target="registry",
+                reason="unreadable constraints registry file",
+                requires_human=True,
+            )
+        ]
+    )
+    decision = SimpleNamespace(mode=RecoveryMode.REQUEST_HUMAN, plan=plan, uncertain_actions=())
+    steps = human_steps_for(decision, run_id="run_test")
+    assert any("continuum validate run_test" in s for s in steps)
+    assert not any("continuum assess" in s for s in steps)
+
+
+def test_registry_prefixed_constraint_pin_not_captured_by_registry_file_branch() -> None:
+    """A constraint pin starting with 'registry' must not be captured as the registry file (#1970)."""
+    from types import SimpleNamespace
+
+    from continuum.models import Component, ComponentValidationEntry, RecoveryMode, StateStatus
+    from continuum.recovery.planner import RepairKind, RepairPlan, RepairStep
+
+    pin_id = "registry_signing_v1"
+    plan = RepairPlan(
+        steps=[
+            RepairStep(
+                kind=RepairKind.HUMAN_REVIEW,
+                target=pin_id,
+                reason="constraint pin requires operator confirmation",
+                requires_human=True,
+            )
+        ]
+    )
+    report = SimpleNamespace(
+        statuses=[
+            ComponentValidationEntry(
+                component=Component.PIN,
+                component_id=pin_id,
+                status=StateStatus.REQUIRES_REVIEW,
+                detail="missing pin",
+            )
+        ]
+    )
+    decision = SimpleNamespace(
+        mode=RecoveryMode.REQUEST_HUMAN,
+        plan=plan,
+        uncertain_actions=(),
+        validation=SimpleNamespace(report=report),
+    )
+    steps = human_steps_for(decision, run_id="run_test")
+    assert any("missing or unverified constraint pin 'registry_signing_v1'" in s for s in steps)
+    assert any("--scope pin" in s for s in steps)
+    assert not any("repair unreadable constraints registry file" in s for s in steps)
+
+
 import os  # noqa: E402

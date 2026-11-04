@@ -416,19 +416,44 @@ class RecoveryEngine:
                     _ev.payload.get("predicate_digests") if isinstance(_ev.payload, dict) else None
                 )
                 if curr_reg is not None and curr_reg.digest != conf_reg_digest:
-                    # The registry changed after this confirmation, so it only
-                    # covers components whose predicate digest still matches.
-                    raw_scope = _ev.payload.get("components") or _ev.payload.get("scope")
-                    if isinstance(raw_scope, (list, tuple, set)):
-                        for _c in raw_scope:
-                            if isinstance(_c, str) and _c.lower() not in ("pin", "constraints"):
-                                spec = curr_reg.get(_c)
+                    # The registry changed after this confirmation: drop blanket
+                    # pin/constraints confirmation, and for individual constraint
+                    # ids only re-confirm if their predicate digest is unchanged.
+                    # Non-pin components (goal, progress, dependencies, etc.)
+                    # are unaffected by constraints registry edits and remain confirmed.
+                    raw_scope = _ev.payload.get("components")
+                    if raw_scope is None:
+                        raw_scope = _ev.payload.get("scope")
+                    if not raw_scope:
+                        confirmed_components.update(["goal", "progress"])
+                    elif isinstance(raw_scope, str):
+                        c_norm = raw_scope.strip().lower()
+                        if c_norm not in ("pin", "constraints"):
+                            spec = curr_reg.get(c_norm)
+                            if spec is not None:
                                 if (
-                                    spec
-                                    and conf_pred_digests
-                                    and conf_pred_digests.get(_c) == spec.digest
+                                    conf_pred_digests
+                                    and conf_pred_digests.get(c_norm) == spec.digest
                                 ):
-                                    confirmed_components.add(_c.strip().lower())
+                                    confirmed_components.add(c_norm)
+                            else:
+                                confirmed_components.add(c_norm)
+                    elif isinstance(raw_scope, (list, tuple, set)):
+                        for _c in raw_scope:
+                            if isinstance(_c, str) and _c.strip():
+                                c_norm = _c.strip().lower()
+                                if c_norm not in ("pin", "constraints"):
+                                    spec = curr_reg.get(c_norm)
+                                    if spec is not None:
+                                        if (
+                                            conf_pred_digests
+                                            and conf_pred_digests.get(c_norm) == spec.digest
+                                        ):
+                                            confirmed_components.add(c_norm)
+                                    else:
+                                        confirmed_components.add(c_norm)
+                            elif _c is not None and not isinstance(_c, str):
+                                confirmed_components.add(_c)
                     continue
 
             raw_scope = _ev.payload.get("components")

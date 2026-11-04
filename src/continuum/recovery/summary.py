@@ -277,7 +277,7 @@ def build_attempt_lesson(
                 env_delta = _truncate(detail, ATTEMPT_LESSON_FIELD_CAP)
                 break
     scar_ids = [str(getattr(action, "action_id", "") or "") for action in scars]
-    scar_ids = [sid for sid in scar_ids if sid]
+    scar_ids = [_truncate(str(sid), ATTEMPT_LESSON_FIELD_CAP) for sid in scar_ids if sid]
     from continuum.recovery.summary import _avoid_rules
 
     avoid_rules = _avoid_rules(statuses, scars)
@@ -314,19 +314,34 @@ def build_attempt_lesson(
         if not current:
             if lesson.source_evidence:
                 trimmed = list(lesson.source_evidence)
-                trimmed = (
-                    trimmed[:-1]
-                    if len(trimmed) > 1
-                    else [trimmed[0][: max(len(trimmed[0]) // 2, 0)]]
-                )
+                if len(trimmed) > 1:
+                    trimmed = trimmed[:-1]
+                else:
+                    first = trimmed[0]
+                    half = len(first) // 2
+                    trimmed = [first[:half]] if half > 0 else []
                 lesson = lesson.model_copy(update={"source_evidence": trimmed})
+                continue
+            if lesson.scar_action_ids:
+                scars = list(lesson.scar_action_ids)
+                if len(scars) > 1:
+                    scars = scars[:-1]
+                else:
+                    first = scars[0]
+                    half = len(first) // 2
+                    scars = [first[:half]] if half > 0 else []
+                lesson = lesson.model_copy(update={"scar_action_ids": scars})
                 continue
             break
         truncated = current[: max(len(current) // 2, 0)]
         lesson = lesson.model_copy(update={largest: truncated})
         if _lesson_total_bytes(lesson) <= 2048:
             break
-        if all(len(getattr(lesson, name)) == 0 for name in fields) and not lesson.source_evidence:
+        if (
+            all(len(getattr(lesson, name)) == 0 for name in fields)
+            and not lesson.source_evidence
+            and not lesson.scar_action_ids
+        ):
             break
     return lesson
 
