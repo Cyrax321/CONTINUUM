@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
 from continuum import reconcilers
 from continuum.actions import ActionLedger
+from continuum.actions.authority import record_authority_consumed
 from continuum.cli import ExitCode, main
 from continuum.events import EventType
 from continuum.models import Action, ActionStatus, Origin, Run
@@ -23,6 +25,7 @@ from continuum.reconcilers import (
     _AUTHORITY_VERDICT_CONTRACT,
     _DEFAULT_TIMEOUT,
     _VERDICT_CONTRACT,
+    AuthoritySettleReport,
     ReconcilerConfigError,
     _parse_authority_verdict,
     _parse_verdict,
@@ -30,6 +33,7 @@ from continuum.reconcilers import (
     load_reconcilers,
     probe_authority_verdict,
     probe_verdict,
+    settle_authority,
     settle_run,
 )
 from continuum.storage import SQLiteStorage
@@ -434,6 +438,255 @@ def test_settle_run_settles_archived_actions_after_compaction(db: str, tmp_path:
         folded = fold_action_events(store.read_all_events("run_1"))
     action = next(a for a in folded.values() if a.action_id == action_id)
     assert action.status is ActionStatus.COMPLETED
+
+
+# --- authority probes (issue #1994) ------------------------------------------------- #
+
+
+def python_probe(code: str) -> str:
+    """A probe command running *code* in this interpreter, on any shell.
+
+    ``code`` sticks to single quotes, which survive both sh grouping and the C
+    runtime unescaping behind cmd. stderr and exit codes cannot be scripted
+    with an ``echo`` that behaves the same on both.
+    """
+    return f'"{sys.executable}" -c "{code}"'
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"valid": tru',
+        '{"other": true}',
+        '{"valid": "true"}',
+        "true",
+        "valid=true\nnot a verdict",
+    ],
+)
+def test_authority_verdict_is_unknown_for_anything_short_of_a_verdict(text: str) -> None:
+    """Settling clears a consumed authority, so a near miss has to stay blocked.
+
+    The bare ``true`` is the one the action parser accepts and this one does not,
+    and an earlier ``valid=true`` line does not survive later noise.
+    """
+    assert _parse_authority_verdict(text) == "unknown"
+
+
+def test_authority_probe_past_its_timeout_is_an_error() -> None:
+    verdict, detail = probe_authority_verdict(
+        {"command": python_probe("import time; time.sleep(1)"), "timeout": 0.1},
+        {"authority_id": "approval-7"},
+    )
+    assert verdict == "error"
+    assert detail == "authority probe timed out after 0.1s"
+
+
+def test_authority_probe_that_cannot_start_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patched because a shell launch only raises OSError when the shell itself is gone."""
+
+    def cannot_start(*args: object, **kwargs: object) -> None:
+        raise OSError("no shell")
+
+    monkeypatch.setattr(reconcilers.subprocess, "run", cannot_start)
+    verdict, detail = probe_authority_verdict(
+        {"command": "anything", "timeout": 5}, {"authority_id": "approval-7"}
+    )
+    assert verdict == "error"
+    assert detail == "authority probe failed to run: no shell"
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("import sys; sys.stderr.write('denied'); sys.exit(3)", "exited 3: denied"),
+        ("import sys; print('out'); sys.stderr.write('denied'); sys.exit(4)", "exited 4: denied"),
+        ("import sys; print('valid=true'); sys.exit(5)", "exited 5: valid=true"),
+        ("import sys; sys.exit(6)", "exited 6:"),
+        ("import sys; sys.stderr.write('x' * 500); sys.exit(7)", f"exited 7: {'x' * 200}"),
+    ],
+)
+def test_authority_probe_nonzero_exit_is_an_error_whatever_it_printed(
+    code: str, expected: str
+) -> None:
+    """A failed probe cannot vouch for an authority, even by printing ``valid=true``."""
+    verdict, detail = probe_authority_verdict(
+        {"command": python_probe(code), "timeout": 5}, {"authority_id": "approval-7"}
+    )
+    assert verdict == "error"
+    assert detail.rstrip() == f"authority probe {expected}"
+
+
+@pytest.mark.parametrize(
+    ("command", "shown"),
+    [
+        ("echo not a verdict", "not a verdict"),
+        ("echo valid=unknown", "valid=unknown"),
+        (python_probe("pass"), ""),
+        (python_probe("print('x' * 500)"), "x" * 120),
+    ],
+)
+def test_authority_probe_miss_quotes_the_output_it_could_not_read(command: str, shown: str) -> None:
+    verdict, detail = probe_authority_verdict(
+        {"command": command, "timeout": 5}, {"authority_id": "approval-7"}
+    )
+    assert verdict is None
+    assert detail == f"authority probe could not determine validity from output {shown!r}"
+
+
+def test_authority_probe_hint_quotes_the_output_and_the_line_it_blames() -> None:
+    verdict, detail = probe_authority_verdict(
+        {"command": python_probe("print('checking'); print('valid:true')"), "timeout": 5},
+        {"authority_id": "approval-7"},
+    )
+    assert verdict is None
+    assert detail.startswith("authority probe printed 'checking\\nvalid:true'; ")
+    assert "rather than 'valid:true'" in detail
+    assert _AUTHORITY_VERDICT_CONTRACT in detail
+
+
+def test_authority_probe_reports_a_none_verdict_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Patched because the real parser returns ``"unknown"``, never the ``None`` it is typed for."""
+    monkeypatch.setattr(reconcilers, "_parse_authority_verdict", lambda text: None)
+    verdict, detail = probe_authority_verdict(
+        {"command": "echo anything", "timeout": 5}, {"authority_id": "approval-7"}
+    )
+    assert verdict is None
+    assert detail == "authority probe returned unknown"
+
+
+def test_authority_probe_gets_its_payload_on_stdin() -> None:
+    spec = {
+        "command": python_probe(
+            "import json, sys; "
+            "print('valid=' + str(json.load(sys.stdin)['authority_id'] == 'approval-7').lower())"
+        ),
+        "timeout": 5,
+    }
+    assert probe_authority_verdict(spec, {"authority_id": "approval-7"})[0] is True
+    assert probe_authority_verdict(spec, {"authority_id": "approval-8"})[0] is False
+
+
+def test_authority_report_as_dict() -> None:
+    assert AuthoritySettleReport("approval-7", True, "ok", settled=True).as_dict() == {
+        "authority_id": "approval-7",
+        "valid": True,
+        "detail": "ok",
+        "settled": True,
+    }
+
+
+def test_settle_authority_without_a_matching_probe_appends_nothing(db: str) -> None:
+    probes = {"approval-8": {"command": "echo valid=true", "timeout": 5}}
+    with SQLiteStorage(db) as store:
+        record_authority_consumed(store, "run_1", "approval-7")
+        head = store.last_sequence("run_1")
+        report = settle_authority(store, "run_1", "approval-7", probes)
+        assert store.last_sequence("run_1") == head
+    assert report == AuthoritySettleReport(
+        "approval-7", None, "no probe registered for authority", settled=False
+    )
+
+
+@pytest.mark.parametrize(
+    ("command", "detail"),
+    [
+        ("exit 3", "authority probe exited 3"),
+        ("echo not a verdict", "could not determine validity"),
+    ],
+)
+def test_settle_authority_leaves_it_unsettled_without_a_definitive_verdict(
+    db: str, command: str, detail: str
+) -> None:
+    probes = {"approval-7": {"command": command, "timeout": 5}}
+    with SQLiteStorage(db) as store:
+        record_authority_consumed(store, "run_1", "approval-7")
+        head = store.last_sequence("run_1")
+        report = settle_authority(store, "run_1", "approval-7", probes)
+        assert store.last_sequence("run_1") == head
+    assert report.valid is None
+    assert report.settled is False
+    assert detail in report.detail
+
+
+@pytest.mark.parametrize(("line", "valid"), [("valid=true", True), ("valid=false", False)])
+def test_settle_authority_dry_run_reports_the_verdict_without_writing(
+    db: str, line: str, valid: bool
+) -> None:
+    probes = {"approval-7": {"command": f"echo {line}", "timeout": 5}}
+    with SQLiteStorage(db) as store:
+        record_authority_consumed(store, "run_1", "approval-7")
+        head = store.last_sequence("run_1")
+        report = settle_authority(store, "run_1", "approval-7", probes, dry_run=True)
+        assert store.last_sequence("run_1") == head
+    assert report.valid is valid
+    assert report.settled is False
+
+
+@pytest.mark.parametrize(("line", "valid"), [("valid=true", True), ("valid=false", False)])
+def test_settle_authority_appends_a_deterministic_reconciled_event(
+    db: str, line: str, valid: bool
+) -> None:
+    code = f"import sys; sys.stderr.write('checked upstream'); print('{line}')"
+    probes = {"approval-7": {"command": python_probe(code), "timeout": 5}}
+    with SQLiteStorage(db) as store:
+        consumed = record_authority_consumed(store, "run_1", "approval-7", via_action_id="act-1")
+        report = settle_authority(store, "run_1", "approval-7", probes)
+        events = store.read_events("run_1")
+    assert report == AuthoritySettleReport("approval-7", valid, "checked upstream", settled=True)
+    (reconciled,) = [e for e in events if e.type is EventType.AUTHORITY_RECONCILED]
+    assert reconciled.source is Origin.DETERMINISTIC
+    assert reconciled.payload == {
+        "authority_id": "approval-7",
+        "valid": valid,
+        "reason": "checked upstream",
+        "probed_payload": {
+            "authority_id": "approval-7",
+            "consumer_run_id": "run_1",
+            "via_action_id": "act-1",
+            "consumed_at": consumed.payload["consumed_at"],
+            "sequence": consumed.sequence,
+        },
+    }
+
+
+def test_settle_authority_probes_with_its_latest_consumption(db: str) -> None:
+    """Duplicate consumptions are kept for audit, and another authority's row is not this one's."""
+    probes = {"approval-7": {"command": "echo valid=true", "timeout": 5}}
+    with SQLiteStorage(db) as store:
+        record_authority_consumed(store, "run_1", "approval-7", via_action_id="act-1")
+        latest = record_authority_consumed(store, "run_1", "approval-7", via_action_id="act-2")
+        record_authority_consumed(store, "run_1", "approval-8", via_action_id="act-3")
+        settle_authority(store, "run_1", "approval-7", probes)
+        (reconciled,) = [
+            e for e in store.read_events("run_1") if e.type is EventType.AUTHORITY_RECONCILED
+        ]
+    assert reconciled.payload["probed_payload"]["via_action_id"] == "act-2"
+    assert reconciled.payload["probed_payload"]["sequence"] == latest.sequence
+
+
+def test_settle_authority_prefers_its_own_probe_over_the_generic_one(db: str) -> None:
+    generic = {"command": "echo valid=true", "timeout": 5}
+    own = {"command": "echo valid=false", "timeout": 5}
+    with SQLiteStorage(db) as store:
+        report = settle_authority(
+            store, "run_1", "approval-7", {"approval-7": own, "authority": generic}
+        )
+    assert report.valid is False
+
+
+def test_settle_authority_falls_back_to_the_generic_probe_with_a_bare_id(db: str) -> None:
+    """No consumption row to report, so the probe sees only the id it was asked about."""
+    probes = {"authority": {"command": "echo valid=true", "timeout": 5}}
+    with SQLiteStorage(db) as store:
+        report = settle_authority(store, "run_1", "approval-7", probes)
+        (reconciled,) = [
+            e for e in store.read_events("run_1") if e.type is EventType.AUTHORITY_RECONCILED
+        ]
+    assert report.valid is True
+    assert report.settled is True
+    assert reconciled.payload["probed_payload"] == {"authority_id": "approval-7"}
 
 
 # --- CLI ------------------------------------------------------------------------------ #
