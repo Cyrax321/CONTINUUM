@@ -9,10 +9,19 @@ import pathlib
 import tempfile
 from typing import Any
 
+import pytest
+
 from continuum.analysis.trajectory_report import (
     TRAJECTORY_REPORT_CAP_BYTES,
+    _attempts_in_window,
+    _history_window,
+    _last_compaction_window,
+    _latest_actions,
     _locate_action_type_step,
     _plan_step_spans,
+    _stall_sites,
+    _top_failure_types,
+    _total_attempts,
     analyze_trajectory,
     build_trajectory_report,
     health_maybe_generate_trajectory_report,
@@ -1377,6 +1386,403 @@ def test_plan_step_spans_and_locate_coverage() -> None:
     ev_no_key = [
         Event(run_id="r1", sequence=1, type=EventType.ACTION_RECORDED, payload={}),
     ]
-    from continuum.analysis.trajectory_report import _stall_sites
-
     assert _stall_sites(ev_no_key) == []
+
+
+def test_last_compaction_window_anchor_fallbacks_and_refusals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _make_storage(run_id="run_anchor")
+    try:
+        # Fallback when read_archived_events raises (lines 494-495)
+        monkeypatch.setattr(
+            storage,
+            "read_archived_events",
+            lambda run_id: (_ for _ in ()).throw(RuntimeError("archive read failure")),
+        )
+        # Event with invalid anchor_sequence falling back to ev.sequence (lines 504-505)
+        storage.append_event(
+            "run_anchor",
+            EventType.EVENT_LOG_ANCHORED,
+            {"anchor_sequence": "corrupt_not_an_int"},
+            source=Origin.DETERMINISTIC,
+        )
+        ev_anchored = list(storage.read_events("run_anchor"))[-1]
+        assert _last_compaction_window(storage, "run_anchor") == (0, ev_anchored.sequence)
+
+        # Event with None anchor_sequence and unparseable sequence field falling back to ev.sequence
+        storage2 = _make_storage(run_id="run_anchor_seq")
+        try:
+            storage2.append_event(
+                "run_anchor_seq",
+                EventType.EVENT_LOG_ANCHORED,
+                {"anchor_sequence": None, "sequence": "also_corrupt"},
+                source=Origin.DETERMINISTIC,
+            )
+            ev2 = list(storage2.read_events("run_anchor_seq"))[-1]
+            assert _last_compaction_window(storage2, "run_anchor_seq") == (0, ev2.sequence)
+        finally:
+            storage2.close()
+
+        # Multi-anchor window: anchors [3, 7] -> (3, 7)
+        storage3 = _make_storage(run_id="run_multi")
+        try:
+            storage3.append_event(
+                "run_multi",
+                EventType.EVENT_LOG_ANCHORED,
+                {"anchor_sequence": 3},
+                source=Origin.DETERMINISTIC,
+            )
+            storage3.append_event(
+                "run_multi",
+                EventType.EVENT_LOG_ANCHORED,
+                {"anchor_sequence": 7},
+                source=Origin.DETERMINISTIC,
+            )
+            assert _last_compaction_window(storage3, "run_multi") == (3, 7)
+        finally:
+            storage3.close()
+
+        # Refusal when window_end <= window_start (anchor <= 0)
+        storage4 = _make_storage(run_id="run_nonpos")
+        try:
+            storage4.append_event(
+                "run_nonpos",
+                EventType.EVENT_LOG_ANCHORED,
+                {"anchor_sequence": 0},
+                source=Origin.DETERMINISTIC,
+            )
+            assert _last_compaction_window(storage4, "run_nonpos") is None
+        finally:
+            storage4.close()
+
+        # No anchors: require_anchor=True returns None (line 508)
+        storage5 = _make_storage(run_id="run_no_anchors")
+        try:
+            assert _last_compaction_window(storage5, "run_no_anchors", require_anchor=True) is None
+
+            # No anchors: require_anchor=False with events present returns (0, window_end) (branch 514->520)
+            assert _last_compaction_window(storage5, "run_no_anchors", require_anchor=False) == (
+                0,
+                1,
+            )
+
+            # health_maybe_generate_trajectory_report delegates with require_anchor=True (line 568)
+            assert health_maybe_generate_trajectory_report(storage5, "run_no_anchors") is None
+
+            # No anchors: storage.last_sequence raises (lines 512-513)
+            monkeypatch.setattr(
+                storage5,
+                "last_sequence",
+                lambda run_id: (_ for _ in ()).throw(RuntimeError("last sequence failure")),
+            )
+            assert _last_compaction_window(storage5, "run_no_anchors") is None
+        finally:
+            storage5.close()
+
+        # No anchors: empty run with last_sequence == 0 (line 515)
+        storage_empty = SQLiteStorage(":memory:")
+        try:
+            storage_empty.create_run(Run(run_id="run_empty", goal="g"))
+            assert _last_compaction_window(storage_empty, "run_empty") is None
+        finally:
+            storage_empty.close()
+    finally:
+        storage.close()
+
+
+def test_record_trajectory_report_idempotency_and_malformed_prior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _make_storage(run_id="run_rec")
+    try:
+        report = TrajectoryReport(
+            report_id="test_id_12345678",
+            window_start=0,
+            window_end=10,
+            compaction_seq=10,
+            attempts=1,
+            total_attempts=1,
+            uncertain_count=0,
+            scar_rate=0.0,
+            stall_sites=[],
+            top_failure_action_types=[],
+            created_at="2026-01-01T00:00:00Z",
+            derived_origin=Origin.DETERMINISTIC.value,
+        )
+
+        # 1. Archive-merge fallback when read_archived_events raises (lines 471-472)
+        monkeypatch.setattr(
+            storage,
+            "read_archived_events",
+            lambda run_id: (_ for _ in ()).throw(RuntimeError("archive read failure")),
+        )
+        saved = record_trajectory_report(storage, "run_rec", report)
+        assert saved.report_id == report.report_id
+
+        # 2. Malformed prior report payload handling and short-circuit idempotent re-record (lines 478-482)
+        storage2 = _make_storage(run_id="run_idempotent")
+        try:
+            # Append a malformed TRAJECTORY_REPORT event (same window_end, but bad payload)
+            storage2.append_event(
+                "run_idempotent",
+                EventType.TRAJECTORY_REPORT,
+                {"window_end": 10, "report_id": 12345},
+                source=Origin.DETERMINISTIC,
+            )
+            # Append a valid TRAJECTORY_REPORT event with matching window_end
+            storage2.append_event(
+                "run_idempotent",
+                EventType.TRAJECTORY_REPORT,
+                report.model_dump(mode="json"),
+                source=Origin.DETERMINISTIC,
+            )
+
+            events_before = list(storage2.read_events("run_idempotent"))
+            res = record_trajectory_report(storage2, "run_idempotent", report)
+            assert res.report_id == report.report_id
+            events_after = list(storage2.read_events("run_idempotent"))
+            # Ensure no new event was appended (idempotent short-circuit after skipping malformed)
+            assert len(events_after) == len(events_before)
+        finally:
+            storage2.close()
+    finally:
+        storage.close()
+
+
+def test_trajectory_report_shrink_loop_and_digest_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from continuum.analysis import trajectory_report as tr_mod
+
+    storage = _make_storage(run_id="run_shrink")
+    try:
+        _add_failed_action(storage, "run_shrink", "action_a", "k1")
+        _add_failed_action(storage, "run_shrink", "action_a", "k2")
+        _add_failed_action(storage, "run_shrink", "action_b", "k3")
+        _add_failed_action(storage, "run_shrink", "action_b", "k4")
+        end = storage.last_sequence("run_shrink")
+
+        # Cap set to 320: candidate sheds 1 stall site (leaving ['action_a'])
+        monkeypatch.setattr(tr_mod, "TRAJECTORY_REPORT_CAP_BYTES", 320)
+        rep1 = build_trajectory_report(storage, "run_shrink", 0, end)
+        assert rep1.stall_sites == ["action_a"]
+        assert rep1.top_failure_action_types == ["action_a", "action_b"]
+        assert rep1.report_id == rep1.digest()[:16]
+
+        # Cap set to 300: candidate sheds all stall sites and 1 top failure action type
+        monkeypatch.setattr(tr_mod, "TRAJECTORY_REPORT_CAP_BYTES", 300)
+        rep2 = build_trajectory_report(storage, "run_shrink", 0, end)
+        assert rep2.stall_sites == []
+        assert rep2.top_failure_action_types == ["action_a"]
+        assert rep2.report_id == rep2.digest()[:16]
+
+        # Cap set to 10: sheds all stall sites and failure types, hits break (line 420)
+        monkeypatch.setattr(tr_mod, "TRAJECTORY_REPORT_CAP_BYTES", 10)
+        rep3 = build_trajectory_report(storage, "run_shrink", 0, end)
+        assert rep3.stall_sites == []
+        assert rep3.top_failure_action_types == []
+        assert rep3.report_id == rep3.digest()[:16]
+    finally:
+        storage.close()
+
+
+def test_maybe_generate_trajectory_report_refusal_paths_and_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 1. Derived window is None (line 536)
+    storage_empty = SQLiteStorage(":memory:")
+    try:
+        storage_empty.create_run(Run(run_id="r_empty", goal="g"))
+        assert maybe_generate_trajectory_report(storage_empty, "r_empty") is None
+    finally:
+        storage_empty.close()
+
+    # 2. Explicit window with window_end <= window_start (line 540)
+    storage = _make_storage(run_id="run_maybe")
+    try:
+        assert (
+            maybe_generate_trajectory_report(storage, "run_maybe", window_start=5, window_end=5)
+            is None
+        )
+        assert (
+            maybe_generate_trajectory_report(storage, "run_maybe", window_start=5, window_end=4)
+            is None
+        )
+
+        # 3. Window with no events in range (line 555)
+        assert (
+            maybe_generate_trajectory_report(storage, "run_maybe", window_start=50, window_end=60)
+            is None
+        )
+
+        # 4. Non-quiet window (line 557)
+        storage.append_event("run_maybe", EventType.WORK_COMPLETED, {"count": 1, "failed": False})
+        assert (
+            maybe_generate_trajectory_report(
+                storage, "run_maybe", window_start=0, window_end=storage.last_sequence("run_maybe")
+            )
+            is None
+        )
+
+        # 5. Archive-merge fallback when read_archived_events raises (lines 545-546)
+        storage2 = _make_storage(run_id="run_quiet")
+        try:
+            _add_quiet_window_events(storage2, "run_quiet", count=2)
+            end = storage2.last_sequence("run_quiet")
+            first = True
+
+            def fail_first(run_id: str) -> list[Event]:
+                nonlocal first
+                if first:
+                    first = False
+                    raise RuntimeError("archive read failure")
+                return []
+
+            monkeypatch.setattr(storage2, "read_archived_events", fail_first)
+            report = maybe_generate_trajectory_report(
+                storage2, "run_quiet", window_start=0, window_end=end
+            )
+            assert report is not None
+            assert report.window_end == end
+
+            # 6. Prior report with matching window_end fails validation (lines 551-552)
+            storage3 = _make_storage(run_id="run_malformed_prior")
+            try:
+                storage3.append_event(
+                    "run_malformed_prior",
+                    EventType.TRAJECTORY_REPORT,
+                    {"window_end": 10, "scar_rate": "invalid_value"},
+                    source=Origin.DETERMINISTIC,
+                )
+                assert (
+                    maybe_generate_trajectory_report(
+                        storage3, "run_malformed_prior", window_start=0, window_end=10
+                    )
+                    is None
+                )
+            finally:
+                storage3.close()
+        finally:
+            storage2.close()
+    finally:
+        storage.close()
+
+
+def test_scan_helpers_parse_and_validation_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 1. is_quiet_window WORK_COMPLETED unparseable count (lines 54-55)
+    ev_work_bad = Event(
+        run_id="r",
+        sequence=1,
+        type=EventType.WORK_COMPLETED,
+        payload={"count": "unparseable", "failed": False},
+    )
+    assert is_quiet_window([ev_work_bad]) is False
+
+    ev_work_bad_failed = Event(
+        run_id="r",
+        sequence=1,
+        type=EventType.WORK_COMPLETED,
+        payload={"count": "unparseable", "failed": True},
+    )
+    assert is_quiet_window([ev_work_bad_failed]) is True
+
+    # is_quiet_window TASK_UPDATED unparseable completed vs zero completed (lines 62-65)
+    ev_task_bad = Event(
+        run_id="r",
+        sequence=1,
+        type=EventType.TASK_UPDATED,
+        payload={"completed": "unparseable"},
+    )
+    assert is_quiet_window([ev_task_bad]) is False
+
+    ev_task_zero = Event(
+        run_id="r",
+        sequence=1,
+        type=EventType.TASK_UPDATED,
+        payload={"completed": 0},
+    )
+    assert is_quiet_window([ev_task_zero]) is True
+
+    # 2. _latest_actions payload validation fallback (lines 90-91)
+    ev_bad_action = Event(
+        run_id="r",
+        sequence=1,
+        type=EventType.ACTION_RECORDED,
+        payload={"key": "k1", "action": "not_a_dict"},
+    )
+    assert _latest_actions([ev_bad_action]) == {}
+
+    # 3. _total_attempts payload validation fallback (lines 140-141)
+    assert _total_attempts([ev_bad_action]) == 0
+
+    # 4. _top_failure_types validation and fallback branches (lines 322-323, 327-328, 334-335)
+    assert _top_failure_types([ev_bad_action]) == []
+
+    # TOOL_FAILED without tool_name falling back to action_type (lines 327-328)
+    ev_tool_action_type = Event(
+        run_id="r",
+        sequence=1,
+        type=EventType.TOOL_FAILED,
+        payload={"action_type": "fallback_tool_type"},
+    )
+    assert _top_failure_types([ev_tool_action_type]) == ["fallback_tool_type"]
+
+    # TOOL_FAILED without tool_name or action_type falling back to "unknown" (lines 327-328)
+    ev_tool_empty = Event(
+        run_id="r",
+        sequence=1,
+        type=EventType.TOOL_FAILED,
+        payload={},
+    )
+    assert _top_failure_types([ev_tool_empty]) == ["unknown"]
+
+    # Secondary loop validation failure and started/unknown fallback (lines 334-335, branch 331->330)
+    ev_other = Event(run_id="r", sequence=3, type=EventType.RUN_STARTED, payload={})
+    ev_started = Event(
+        run_id="r",
+        sequence=2,
+        type=EventType.ACTION_RECORDED,
+        payload={
+            "action": Action(
+                run_id="r",
+                action_id="a1",
+                action_type="started_op",
+                status=ActionStatus.STARTED,
+            ).model_dump(mode="json"),
+        },
+    )
+    assert _top_failure_types([ev_bad_action, ev_other, ev_started]) == ["started_op"]
+
+    # 5. _attempts_in_window recovery markers and keyless events (lines 348, 350-354)
+    ev_rec = Event(run_id="r", sequence=1, type=EventType.RECOVERY_STARTED, payload={})
+    ev_fork = Event(run_id="r", sequence=2, type=EventType.RUN_FORKED, payload={})
+    ev_lesson = Event(run_id="r", sequence=3, type=EventType.ATTEMPT_LESSON, payload={})
+    assert _attempts_in_window([ev_rec, ev_fork, ev_lesson]) == 3
+
+    ev_no_key = Event(run_id="r", sequence=1, type=EventType.ACTION_RECORDED, payload={})
+    assert _attempts_in_window([ev_no_key]) == 1
+
+    # 6. _history_window non-increasing sequence (branch 441->435) and analyze_trajectory empty (lines 458-459)
+    storage = _make_storage(run_id="r_hist")
+    try:
+        monkeypatch.setattr(
+            storage,
+            "read_events",
+            lambda run_id: [
+                Event(run_id="r_hist", sequence=5, type=EventType.RUN_STARTED, payload={}),
+                Event(run_id="r_hist", sequence=3, type=EventType.RUN_STARTED, payload={}),
+            ],
+        )
+        assert _history_window(storage, "r_hist") == (0, 5)
+
+        storage_empty = SQLiteStorage(":memory:")
+        try:
+            storage_empty.create_run(Run(run_id="r_empty", goal="g"))
+            assert analyze_trajectory(storage_empty, "r_empty") is None
+        finally:
+            storage_empty.close()
+    finally:
+        storage.close()
