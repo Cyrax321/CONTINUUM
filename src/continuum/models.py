@@ -19,12 +19,19 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from continuum.security.hashing import make_id, stable_hash
 
@@ -456,6 +463,27 @@ class Approval(BaseModel):
     granted_by: str | None = None
     expires_at: datetime | None = None
     reason: str | None = None
+    #: Parked for deferred review (issue #1410). Defaults to False because
+    #: every approval written before the review queue existed is unparked.
+    parked: bool = False
+
+    @model_serializer(mode="wrap")
+    def _omit_default_parked(self, handler: Callable[[Any], dict[str, Any]]) -> dict[str, Any]:
+        """Keep ``parked`` out of the serialised body while it is False.
+
+        Checkpoint integrity hashes, version fingerprints and canonical bodies
+        are all computed over the serialised state, so an unconditional field
+        would change every digest and report every checkpoint sealed by an
+        earlier build as tampered (the #383 precedent). Omitting the default
+        also keeps readers built before #1410, whose models validate with
+        ``extra="forbid"``, able to load bodies this build writes. A genuinely
+        parked approval still serialises the field so the state survives a
+        round trip.
+        """
+        data = dict(handler(self))
+        if not self.parked:
+            data.pop("parked", None)
+        return data
 
 
 class ExternalDependency(BaseModel):

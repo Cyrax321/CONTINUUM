@@ -167,6 +167,26 @@ Test counts: ~4400 collected on a minimal env.
   by insertion order. Runs it cannot read are listed in the result's `skipped_runs` so a
   forensic answer never passes as complete when a log was unreadable.
 
+- **Deferred review queue and priority batching for low-risk confirmations (#1410).**
+  Repeated confirmations for low-risk actions during long-running workflows can
+  interrupt agent progress unnecessarily. The recovery engine now provides a
+  durable `ReviewQueue` (`src/continuum/recovery/review_queue.py`) that prioritizes
+  review items by blocker status, consequence and risk score, dependency chain
+  depth, and pending age. Low-risk confirmations are parked without halting
+  execution, while high-risk actions remain immediate blockers. Durable events
+  (`APPROVAL_REQUESTED`, `APPROVAL_GRANTED`, `APPROVAL_REVOKED`) track reviewer
+  decisions in the event log. A new `continuum review <run_id>` CLI subcommand
+  inspects the queue and supports individual (`--approve`) or low-risk batch
+  (`--approve-low-risk`) approvals. The MCP `continuum_confirm` tool buffers
+  low-risk items returning a parked batch status (`actionable=False`) without
+  requiring an operator secret, while strictly refusing immediate high-risk
+  confirmations without credentials. Action requests buffered through MCP are
+  recorded with `EXTERNAL_AGENT` provenance, queue decisions capture
+  `expected_sequence` before reading the item so a racing revocation cannot be
+  overwritten by a later grant, and `Approval.parked` is only sealed into
+  checkpoint and version bodies when it is set, so databases written before
+  this entry still verify their integrity hashes.
+
 - **Recovery-attempt budgets are scoped to the dependency that owns them (#744).**
   `RecoveryLedger` records an optional dependency scope on each attempt, so a
   repeatedly failing integration spends its own allowance instead of the run's:

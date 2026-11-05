@@ -66,7 +66,7 @@ flowchart TB
     %% ---------- surfaces ----------
     subgraph surfaces["Surfaces that read state back"]
         direction LR
-        cli["CLI, 56 commands<br/>only a verified-safe run exits 0"]
+        cli["CLI, 57 commands<br/>only a verified-safe run exits 0"]
         dash["Web dashboard and human gate<br/>dashboard/ and serve/"]
         tui["Terminal UI<br/>tui/"]
         bench["Benchmark and fault injection<br/>benchmark/"]
@@ -162,7 +162,7 @@ environment resumes cleanly, and its exit code is 0.
 | Schema version | 7 | `SCHEMA_VERSION` in `src/continuum/storage/migrations.py` |
 | Event types | 57 | `EventType` in `src/continuum/events.py` |
 | MCP tools | 13 total, 3 read-only (`validate`, `resume`, `list_actions`) and 10 mutating | `@server.tool(...)` decorators in `src/continuum/mcp/server.py` |
-| CLI commands | 56 | `add(...)` registrations in `src/continuum/cli/main.py` |
+| CLI commands | 57 | `add(...)` registrations in `src/continuum/cli/main.py` |
 | Recovery modes | 7, max severity wins, `RESUME` safest through `ABORT` most severe | `RecoveryMode` in `src/continuum/recovery/engine.py` |
 | Checkpoint policies | 6 (`Manual`, `Interval`, `Event`, `Semantic`, `ContextPressure`, `Hybrid`) | `src/continuum/checkpoint/policy.py` |
 | Storage backends | SQLite (primary) and Postgres, plus an optional blob store | `src/continuum/storage/` |
