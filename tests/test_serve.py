@@ -40,7 +40,8 @@ def test_list_methods_covers_the_surface() -> None:
     assert "intercept_action" in methods
     assert "reconcile_action" in methods
     assert "compensate_action" in methods
-    assert len(methods) == 11
+    assert "ingest_risks" in methods
+    assert len(methods) == 12
 
 
 def test_record_progress_creates_the_run() -> None:

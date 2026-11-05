@@ -31,6 +31,8 @@ __all__ = [
     "RECOVERIES_RESUMED",
     "RECOVERIES_BLOCKED",
     "RISK_POLICY_LOAD_FALLBACK",
+    "RISKS_INGESTED",
+    "RISKS_DROPPED",
 ]
 
 
@@ -45,6 +47,11 @@ RECOVERIES_BLOCKED = "recoveries.blocked"
 #: A .continuum/risk-policy.json failed validation, so assessment fell back to
 #: the conservative built-in defaults instead of dropping risk signals.
 RISK_POLICY_LOAD_FALLBACK = "risk_policy.load_fallback"
+#: Risk-signal ingestion (issue #1425): what landed, and what a sick feed cost.
+#: The dropped counter is the one that moves when a monitoring stream goes bad,
+#: which is exactly when it must not take the run it is watching down with it.
+RISKS_INGESTED = "risks.ingested"
+RISKS_DROPPED = "risks.dropped"
 
 
 class _Timer:
