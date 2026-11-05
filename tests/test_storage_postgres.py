@@ -8,6 +8,7 @@ real via a Postgres 16 service container.
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator
 from itertools import count
@@ -143,6 +144,100 @@ def test_append_sealed_run_completed_also_flips_the_row(storage: PostgresStorage
     )
 
     assert storage.get_run("pg_sealed").status is RunStatus.COMPLETED
+
+
+@pytest.fixture
+def fail_run_update_at_commit(storage: PostgresStorage) -> Iterator[None]:
+    """Make every UPDATE of the runs row fail when the transaction commits.
+
+    A ``CONSTRAINT TRIGGER`` marked DEFERRABLE fires inside the COMMIT, not at
+    the UPDATE statement, so the append reaches a real commit-time failure: the
+    row update and the event insert must roll back together. The trigger and
+    its function are drop-in test scaffolding and come down again afterwards.
+    """
+    storage._connection.execute(
+        """
+        CREATE OR REPLACE FUNCTION continuum_fail_closure() RETURNS trigger AS
+        $fn$
+        BEGIN
+            RAISE EXCEPTION 'injected commit-time failure';
+        END;
+        $fn$
+        LANGUAGE plpgsql
+        """
+    )
+    storage._connection.execute(
+        """
+        CREATE CONSTRAINT TRIGGER continuum_fail_closure_trigger
+        AFTER UPDATE ON runs
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION continuum_fail_closure()
+        """
+    )
+    yield
+    storage._connection.execute("DROP TRIGGER IF EXISTS continuum_fail_closure_trigger ON runs")
+    storage._connection.execute("DROP FUNCTION IF EXISTS continuum_fail_closure()")
+
+
+def test_a_close_that_fails_to_commit_keeps_the_resume_banner(
+    storage: PostgresStorage,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fail_run_update_at_commit: None,
+) -> None:
+    # As on SQLite: the pointer unlinked before the COMMIT would vanish even
+    # when the close itself rolled back. The clear follows the commit, so a
+    # failed close leaves the still-active run's banner alone.
+    monkeypatch.chdir(tmp_path)
+    pointer = tmp_path / ".continuum" / "resume.json"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(json.dumps({"run_id": "pg_banner"}), encoding="utf-8")
+
+    make_run(storage, "pg_banner", "commit fails")
+    storage.append_event("pg_banner", EventType.RUN_STARTED, {"goal": "commit fails"})
+
+    with pytest.raises(Exception, match="injected commit-time failure"):
+        storage.append_event("pg_banner", EventType.RUN_COMPLETED, {"closed_by": "agent"})
+
+    assert json.loads(pointer.read_text(encoding="utf-8"))["run_id"] == "pg_banner"
+    # The commit rolled back, so the run it was closing is still open. The
+    # database is shared, so assert on this run rather than get_active_run.
+    assert storage.get_run("pg_banner").status is RunStatus.STARTED
+
+
+def test_a_sealed_close_that_fails_to_commit_keeps_the_resume_banner(
+    storage: PostgresStorage,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fail_run_update_at_commit: None,
+) -> None:
+    # The import/export and replay entry point holds the same invariant on
+    # Postgres: a closed log whose commit fails leaves the pointer intact.
+    monkeypatch.chdir(tmp_path)
+    pointer = tmp_path / ".continuum" / "resume.json"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(json.dumps({"run_id": "pg_sealed_banner"}), encoding="utf-8")
+
+    make_run(storage, "pg_sealed_banner", "commit fails")
+    before = storage.append_event(
+        "pg_sealed_banner", EventType.RUN_STARTED, {"goal": "commit fails"}
+    )
+
+    from continuum.events import Event
+
+    sealed = Event(
+        run_id="pg_sealed_banner",
+        sequence=before.sequence + 1,
+        type=EventType.RUN_COMPLETED,
+        payload={"closed_by": "replay"},
+        prev_hash=before.hash,
+    ).sealed()
+
+    with pytest.raises(Exception, match="injected commit-time failure"):
+        storage.append_sealed(sealed)
+
+    assert json.loads(pointer.read_text(encoding="utf-8"))["run_id"] == "pg_sealed_banner"
+    assert storage.get_run("pg_sealed_banner").status is RunStatus.STARTED
 
 
 def test_fork_lineage_survives_the_round_trip(storage: PostgresStorage) -> None:
