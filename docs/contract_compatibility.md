@@ -123,8 +123,9 @@ not an integration problem.
 
 ## Adding a field or a version
 
-* **Optional, non-covered field** (display or advisory only, like
-  `post_checkpoint_observations` and `liveness`): no version bump. An old
+* **Optional, non-covered field** (re-derived from the environment at assess
+  time rather than protected history, like `post_checkpoint_observations` and
+  `liveness`): no version bump. An old
   verifier ignores it and the digest is unchanged. This is why those fields can
   be added freely.
 * **Covered field** (a new term that the hash must protect): bump the version.

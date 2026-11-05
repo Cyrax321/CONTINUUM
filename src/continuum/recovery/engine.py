@@ -64,7 +64,7 @@ from continuum.models import (
 from continuum.plugins import Registry, ValidationRule
 from continuum.recovery.contract import build_contract
 from continuum.recovery.ledger import BudgetStatus, RecoveryLedger, resolve_scope
-from continuum.recovery.observations import collect_observations
+from continuum.recovery.observations import ObservationDrift, Observations, collect_observations
 from continuum.recovery.planner import RepairPlan, plan_repairs
 from continuum.recovery.rules import active_rules, apply_rule_findings, run_validation_rules
 from continuum.recovery.summary import build_informed_retry
@@ -702,6 +702,25 @@ class RecoveryEngine:
             risk_rationale = None
             winning_risk_events = []
 
+        # Post-checkpoint file observations (#208): every file a hooked tool
+        # wrote after the checkpoint, re-checked against disk right now, in the
+        # single pass that feeds both the plan/verdict below and the contract
+        # further down. A row that no longer matches is a file that moved after
+        # the recorded write by something the event log does not describe --
+        # exactly the tamper the hooks run outside model control to catch
+        # (#210) -- so it escalates instead of decorating the contract.
+        after_sequence = 0
+        latest_version = self.storage.latest_version(run_id)
+        if latest_version is not None:
+            after_sequence = latest_version.source_sequence
+        try:
+            observations = collect_observations(self.storage, run_id, after_sequence=after_sequence)
+        except CorruptedRecord:
+            # A log that cannot be read costs the section, not the verdict
+            # (#1907): drift is unknowable rather than assumed clean, and the
+            # corrupted record has already escalated through the ledger branch.
+            observations = Observations()
+
         plan = plan_repairs(
             validation.report.statuses,
             uncertain_actions=uncertain,
@@ -714,6 +733,7 @@ class RecoveryEngine:
             # (issue #1423 review).
             risk_events=signals_from_events(winning_risk_events),
             state=validation.state,
+            observation_drift=observations.drift,
         )
         liveness_advisory = None
         liveness_breaches = 0
@@ -745,6 +765,7 @@ class RecoveryEngine:
             risk_rationale=risk_rationale,
             exhausted_dependencies=exhausted_dependencies,
             run_budget_exhausted=run_budget_exhausted,
+            observation_drift=observations.drift,
         )
 
         if unreadable_ledger is not None:
@@ -805,17 +826,10 @@ class RecoveryEngine:
 
         reason = "; ".join(rationale) if rationale else validation.report.reason
 
-        # Post-checkpoint file observations (#208): informational evidence for
-        # the resuming agent, never a factor in the decision itself -- so a log
-        # that cannot be read costs the section, not the verdict (#1907).
-        after_sequence = 0
-        latest_version = self.storage.latest_version(run_id)
-        if latest_version is not None:
-            after_sequence = latest_version.source_sequence
-        try:
-            observations = collect_observations(self.storage, run_id, after_sequence=after_sequence)
-        except CorruptedRecord:
-            observations = []
+        # Post-checkpoint file observations were collected once, above the plan,
+        # so the rows the contract renders are the same rows the verdict was
+        # computed from: two collections would re-read the files and could each
+        # see a different disk (PR #1551 review).
 
         # Build liveness section for contract
         liveness_section = None
@@ -836,7 +850,7 @@ class RecoveryEngine:
             reason=reason,
             scope=scope,
             budget=self._budget_for(run_id, scope, plan),
-            post_checkpoint_observations=observations,
+            post_checkpoint_observations=observations.rows,
             liveness=liveness_section,
             triggering_risks=triggering_risks,
             admissibility=admissibility,
@@ -1048,6 +1062,7 @@ class RecoveryEngine:
         risk_rationale: str | None = None,
         exhausted_dependencies: Collection[str] = (),
         run_budget_exhausted: bool = False,
+        observation_drift: Sequence[ObservationDrift] = (),
     ) -> tuple[RecoveryMode, tuple[str, ...]]:
         """Collect a proposal per signal and return the most cautious."""
         proposals: list[tuple[RecoveryMode, str]] = []
@@ -1116,6 +1131,30 @@ class RecoveryEngine:
                 (
                     RecoveryMode.REPAIR_AND_RESUME,
                     f"{len(needs_repair)} component(s) need repair before continuing",
+                )
+            )
+
+        # A file the hooks recorded no longer matches disk (#208): something
+        # changed it after the recorded write and outside the event log, so
+        # content whose provenance the log cannot explain would underlie any
+        # further work. REPAIR_AND_RESUME, not REQUEST_HUMAN: unlike an external
+        # side effect, the file is right here and can be re-read and
+        # re-checkpointed locally, so an automatic step is an honest offer
+        # rather than a human gate that noise from unhooked tools would trip
+        # constantly.
+        if observation_drift:
+            changed = sum(1 for d in observation_drift if d.status == "changed")
+            missing = len(observation_drift) - changed
+            tally = ", ".join(
+                f"{count} {label}"
+                for count, label in ((changed, "changed"), (missing, "missing"))
+                if count
+            )
+            proposals.append(
+                (
+                    RecoveryMode.REPAIR_AND_RESUME,
+                    f"{len(observation_drift)} observed file(s) drifted since the "
+                    f"checkpoint ({tally})",
                 )
             )
 
