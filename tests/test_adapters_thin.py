@@ -8,6 +8,7 @@ the seam, not the framework package.
 
 from __future__ import annotations
 
+import importlib.util
 import inspect
 import sys
 import types
@@ -18,7 +19,10 @@ import pytest
 
 from continuum.adapters.thin import (
     ContinuumToolGuard,
+    autogen_available,
+    crewai_available,
     install_crewai_hooks,
+    pydantic_ai_available,
     wrap_autogen_tool,
     wrap_pydantic_ai_hooks,
 )
@@ -81,6 +85,88 @@ def test_fail_marks_not_occurred_when_certain(db: str) -> None:
     assert last_action(db).status is ActionStatus.FAILED
 
 
+def test_args_dict_normalizes_every_framework_shape(db: str) -> None:
+    """The derived key must be stable across framework argument shapes (#1925)."""
+    with SQLiteStorage(db) as store:
+        guard = ContinuumToolGuard(store, "run_1")
+
+        assert guard._args_dict({"customer": "c1"}) == {"customer": "c1"}
+
+        class Model:
+            """Duck-typed pydantic model: the seam needs only ``model_dump``."""
+
+            def model_dump(self) -> dict[str, Any]:
+                return {"customer": "c1"}
+
+        assert guard._args_dict(Model()) == {"customer": "c1"}
+        assert guard._args_dict("a bare string") == {"input": "a bare string"}
+        assert guard._args_dict(42) == {"value": 42}
+
+
+def test_settling_twice_or_with_an_unknown_token_is_a_no_op(db: str) -> None:
+    """A framework that fires its after-hook twice cannot double-settle (#1925).
+
+    Complete/fail on an already-settled or never-claimed token must be silent:
+    the ledger keeps the first settlement and raises nothing, which is what
+    keeps duplicate after-hooks exactly-once instead of exactly-erroring.
+    """
+    with SQLiteStorage(db) as store:
+        guard = ContinuumToolGuard(store, "run_1")
+        token = guard.claim("send_invoice", {"id": "I-7"})
+        guard.complete(token, result="sent")
+        assert last_action(db).status is ActionStatus.COMPLETED
+
+        guard.complete(token, result="sent again")  # already settled
+        guard.fail(token, "late failure")  # and not failed by the second hook
+        guard.complete(999, result="never claimed")  # unknown token
+        guard.fail(999, "never claimed")
+
+    assert len(statuses(db)) == 1
+    assert last_action(db).status is ActionStatus.COMPLETED
+
+
+# --- availability probes -------------------------------------------------------- #
+
+
+def test_probes_answer_a_bool_without_importing_the_framework() -> None:
+    """Import probing, never importing: a bool either way, and never a raise."""
+    assert isinstance(crewai_available(), bool)
+    assert isinstance(pydantic_ai_available(), bool)
+
+
+def test_probes_follow_find_spec_for_present_and_absent_modules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probes answer whatever ``find_spec`` says, for both answers."""
+
+    def fake_find_spec(name: str, *rest: Any, **kwargs: Any) -> Any:
+        return object() if name == "crewai" else None
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+    assert crewai_available() is True
+    assert pydantic_ai_available() is False
+
+
+def test_autogen_probe_raises_when_the_dotted_parent_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``find_spec`` on a dotted name imports the parent; an absent one raises.
+
+    ``autogen_available`` documents ``ModuleNotFoundError`` on a machine without
+    ``autogen_core``, so the probe is pinned to raise there rather than quietly
+    answer False — a caller probing on a bare machine must be ready to catch it.
+    """
+
+    def fake_find_spec(name: str, *rest: Any, **kwargs: Any) -> Any:
+        if "." in name:
+            raise ModuleNotFoundError(f"No module named {name.rsplit('.', 1)[0]!r}")
+        return None
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+    with pytest.raises(ModuleNotFoundError, match="autogen_core"):
+        autogen_available()
+
+
 # --- CrewAI --------------------------------------------------------------------- #
 
 
@@ -102,7 +188,7 @@ class Context:
         self.tool_name = tool_name
         self.tool_input = tool_input
         self.result = result
-        self.error = None
+        self.error: str | None = None
 
 
 def test_crewai_hooks_route_claims_and_completions(
@@ -141,6 +227,58 @@ def test_crewai_action_type_filter_passes_untracked_tools(
     fake.before[0](Context("read_file", {}))
     fake.after[0](Context("read_file", {}, result="ok"))
     assert not statuses(db)
+
+
+def test_crewai_after_hook_settles_an_error_as_failed(
+    db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An error attribute on the context fails the claim, and keeps the result."""
+    fake = FakeCrewAIHooks()
+    monkeypatch.setitem(sys.modules, "crewai", types.ModuleType("crewai"))
+    monkeypatch.setitem(sys.modules, "crewai.hooks", fake)
+    monkeypatch.setattr("continuum.adapters.thin.crewai_available", lambda: True)
+
+    install_crewai_hooks(SQLiteStorage(db), "run_1")
+    ctx = Context("send_invoice", {"id": "X"})
+    fake.before[0](ctx)
+    ctx.error = "smtp refused the connection"
+    assert fake.after[0](ctx) is None  # the framework's own result stands
+    assert last_action(db).status is ActionStatus.FAILED
+
+
+class LegacyCrewAIHooks(types.ModuleType):
+    """Stand-in for older crewai registries: clear-all, but no per-hook unregister.
+
+    The uninstaller must degrade to ``clear_all_tool_call_hooks`` on these,
+    otherwise it would leak every hook it registered (issue #1925).
+    """
+
+    def __init__(self) -> None:
+        super().__init__("crewai.hooks")
+        self.cleared = 0
+        self.before: list[Any] = []
+        self.after: list[Any] = []
+        self.register_before_tool_call_hook = self.before.append
+        self.register_after_tool_call_hook = self.after.append
+        self.clear_all_tool_call_hooks = self._clear_all
+
+    def _clear_all(self) -> None:
+        self.cleared += 1
+
+
+def test_crewai_uninstall_falls_back_to_clear_all_on_old_registries(
+    db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = LegacyCrewAIHooks()
+    monkeypatch.setitem(sys.modules, "crewai", types.ModuleType("crewai"))
+    monkeypatch.setitem(sys.modules, "crewai.hooks", fake)
+    monkeypatch.setattr("continuum.adapters.thin.crewai_available", lambda: True)
+
+    uninstall = install_crewai_hooks(SQLiteStorage(db), "run_1")
+    assert len(fake.before) == 1 and len(fake.after) == 1
+
+    uninstall()
+    assert fake.cleared == 1, "old registries expose clear-all only"
 
 
 def test_crewai_install_requires_the_package() -> None:
@@ -220,6 +358,21 @@ async def test_autogen_failure_is_recorded_then_reraised(db: str) -> None:
     assert last_action(db).status is ActionStatus.FAILED
 
 
+@pytest.mark.asyncio
+async def test_autogen_wrapper_normalizes_non_dict_args(db: str) -> None:
+    """A tool invoked with a bare value still claims under a dict argument shape."""
+
+    class StringTool:
+        name = "create_ticket"
+
+        async def run_json(self, args: Any, cancellation_token: Any = None) -> str:
+            return f"ticket:{args}"
+
+    wrapped = wrap_autogen_tool(StringTool(), SQLiteStorage(db), "run_1")
+    assert await wrapped.run_json("Fix login") == "ticket:Fix login"
+    assert last_action(db).arguments == {"value": "Fix login"}
+
+
 # --- Pydantic AI ------------------------------------------------------------------- #
 
 
@@ -249,6 +402,21 @@ async def test_pydantic_error_path_fails_the_action(db: str) -> None:
         ctx, "charge_card", {"customer": "c2"}, result=None, error="card declined"
     )
     assert last_action(db).status is ActionStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_pydantic_after_hook_without_a_stashed_token_is_passthrough(
+    db: str,
+) -> None:
+    """A context with no stashed token is ignored, the result returned untouched."""
+    hooks = wrap_pydantic_ai_hooks(SQLiteStorage(db), "run_1")
+
+    class Ctx:
+        pass
+
+    out = await hooks.after_tool_call(Ctx(), "charge_card", {}, result="unchanged")
+    assert out == "unchanged"
+    assert not statuses(db), "an unmatched after-hook must do no ledger work"
 
 
 # --- provenance -------------------------------------------------------------------- #
