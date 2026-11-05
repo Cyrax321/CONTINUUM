@@ -10,6 +10,12 @@ Test counts: ~4400 collected on a minimal env.
 
 ### Added
 
+- **Unit coverage for wire-conformance exception arms and schema-probe internals (#1976).**
+  `tests/test_wire_conformance.py` exercises the exception-handling and mismatch
+  failure paths across all twelve wire conformance checks, tests schema-probe
+  key steering and fallback arms, and covers `_WireSpec` and `_example_value`
+  defensive helpers directly. Tests only, no runtime change.
+
 - **Unit coverage for the ledger-anchored authorization id (#1951).**
   `tests/test_idempotency_ledger_resolution.py` drives
   `resolve_authorization_id(..., ledger=...)` with in-memory ledger stand-ins and
