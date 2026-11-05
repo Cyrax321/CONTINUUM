@@ -10,6 +10,16 @@ Test counts: ~4400 collected on a minimal env.
 
 ### Added
 
+- **Unit coverage for precondition gate merged scans and refusal rendering (#1979).**
+  `tests/test_restore_merge_gate.py` covers merged archive and live stream scans,
+  event type and key filtering, validation fallbacks, and status flipping in
+  `_filtered_depended_for_edit` and `_collect_completions`, cross-run transfer
+  matching by `action_id` in `_cross_depended_for_merge`, human-readable
+  refusal rendering across all three item blocks and empty audit rationales in
+  `render_refusal_text`, preserved summary variants in `render_preserved_summary`
+  and `render_precondition_text`, and internal assertions and anchor conversions in
+  `check_merge_preconditions`. Brings `src/continuum/recovery/gate.py` to 100% coverage.
+
 - **Unit coverage for the ledger-anchored authorization id (#1951).**
   `tests/test_idempotency_ledger_resolution.py` drives
   `resolve_authorization_id(..., ledger=...)` with in-memory ledger stand-ins and
