@@ -12,16 +12,22 @@ Verifies the #413 acceptance criteria:
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from continuum.actions import ActionLedger
+from continuum.actions import ledger as ledger_module
 from continuum.actions.idempotency import resolve_authorization_id
 from continuum.actions.ledger import LedgerError
-from continuum.budgets import get_remaining, load_budgets
+from continuum.budgets import (
+    get_remaining,
+    load_budgets,
+)
 from continuum.events import EventType
-from continuum.models import Run
+from continuum.models import Action, ActionStatus, Run
 from continuum.storage import SQLiteStorage
 
 
@@ -505,3 +511,209 @@ def test_budget_file_absent_is_unbound(tmp_path: Path, monkeypatch: pytest.Monke
         ledger.fail(outcome.key, "boom", certain=True)
     # No exception, and no file was created
     assert not budgets_path.exists()
+
+
+# --- budget accounting error and refusal paths (issue #1977) ------------------ #
+
+
+class _BadMapping(Mapping):
+    """A mapping shape that raises TypeError when iterated."""
+
+    def __getitem__(self, key: str) -> Any:
+        raise KeyError(key)
+
+    def __iter__(self) -> Any:
+        raise TypeError("unhashable argument shape")
+
+    def __len__(self) -> int:
+        return 1
+
+
+def test_unreadable_registry_swallowed_on_claim_commit_and_settlement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Commit and settlement swallow unreadable or unwritable registries."""
+    budgets_path = _budgets_path()
+    budgets_path.parent.mkdir(parents=True, exist_ok=True)
+    budgets_path.write_text(json.dumps({"default_max_attempts": 5}))
+
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_unreadable", goal="g"))
+    storage.append_event("run_unreadable", EventType.RUN_STARTED, {"goal": "g"})
+    ledger = ActionLedger(storage, "run_unreadable")
+
+    # 1. Commit helper swallows save failure during claim
+    def boom_save(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("disk write protected")
+
+    real_save = ledger_module.save_budgets
+    ledger_module.save_budgets = boom_save
+    try:
+        outcome = ledger.claim("send_invoice", {"invoice": "INV-001"}, key="k1")
+    finally:
+        ledger_module.save_budgets = real_save
+    assert outcome.fresh
+    events = storage.read_events("run_unreadable")
+    assert any(e.type is EventType.ACTION_RECORDED for e in events)
+
+    # 2. Make registry a directory so it is present but unreadable
+    budgets_path.unlink()
+    budgets_path.mkdir()
+
+    # Direct helper calls succeed without escaping exceptions
+    ledger._budget_commit_claim("send_invoice", "auth_001")
+    ledger._budget_consume_settlement("send_invoice", "auth_001")
+
+    # 3. Settlement complete succeeds and lands event
+    ledger.complete(outcome.key, external_id="ext-001")
+    events = storage.read_events("run_unreadable")
+    completed = [
+        e
+        for e in events
+        if e.type is EventType.ACTION_RECORDED
+        and e.payload.get("action", {}).get("status") == "completed"
+    ]
+    assert completed
+
+
+@pytest.mark.parametrize(
+    "step_name",
+    ["load_budgets", "ensure_authorization_entry", "increment", "save_budgets"],
+)
+def test_settlement_consume_four_failure_arms_individually(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step_name: str
+) -> None:
+    """Each step of _budget_consume_settlement swallows exceptions independently."""
+    budgets_path = _budgets_path()
+    budgets_path.parent.mkdir(parents=True, exist_ok=True)
+    budgets_path.write_text(json.dumps({"default_max_attempts": 5}))
+
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_settle_arms", goal="g"))
+    storage.append_event("run_settle_arms", EventType.RUN_STARTED, {"goal": "g"})
+    ledger = ActionLedger(storage, "run_settle_arms")
+
+    outcome = ledger.claim("deploy", {"target": "host-1"}, key="deploy-k1")
+    assert outcome.fresh
+
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError(f"synthetic error in {step_name}")
+
+    monkeypatch.setattr(ledger_module, step_name, boom)
+    # Settlement must land even when this accounting step blows up
+    ledger.complete(outcome.key, external_id="ext-1")
+
+    action = ledger.get(outcome.key)
+    assert action is not None
+    assert action.status is ActionStatus.COMPLETED
+
+
+def test_budget_exhaust_refusal_when_get_remaining_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When get_remaining raises during an exhaustion refusal, remaining falls back to 0."""
+    budgets_path = _budgets_path()
+    budgets_path.parent.mkdir(parents=True, exist_ok=True)
+    budgets_path.write_text(json.dumps({"action_types": {"send_invoice": {"max_attempts": 1}}}))
+
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_exhaust_fallback", goal="g"))
+    storage.append_event("run_exhaust_fallback", EventType.RUN_STARTED, {"goal": "g"})
+    ledger = ActionLedger(storage, "run_exhaust_fallback")
+
+    # Claim once to exhaust
+    outcome = ledger.claim("send_invoice", {"invoice": "INV-001"}, key="k1")
+    assert outcome.fresh
+
+    # Now get_remaining raises when computing remaining for the error message
+    import continuum.budgets as budgets_module
+
+    def boom_remaining(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("cannot read remaining")
+
+    monkeypatch.setattr(budgets_module, "get_remaining", boom_remaining)
+
+    with pytest.raises(LedgerError) as exc_info:
+        ledger.claim("send_invoice", {"invoice": "INV-001"}, key="k2")
+
+    msg = str(exc_info.value)
+    assert "budget exhausted" in msg
+    assert "send_invoice" in msg
+    assert "0 remaining" in msg
+
+
+def test_budget_invalid_registry_raises_ledger_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A corrupt budget registry raises LedgerError naming the registry error."""
+    budgets_path = _budgets_path()
+    budgets_path.parent.mkdir(parents=True, exist_ok=True)
+    budgets_path.write_text("{invalid json syntax")
+
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_invalid_reg", goal="g"))
+    storage.append_event("run_invalid_reg", EventType.RUN_STARTED, {"goal": "g"})
+    ledger = ActionLedger(storage, "run_invalid_reg")
+
+    with pytest.raises(LedgerError) as exc_info:
+        ledger.claim("send_invoice", {"invoice": "INV-001"}, key="k1")
+
+    msg = str(exc_info.value)
+    assert "budget registry invalid:" in msg
+    assert "not valid JSON" in msg
+
+
+def test_unhashable_argument_shape_yields_unbounded_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unhashable argument shape produces authorization_id=None and proceeds unbounded."""
+    budgets_path = _budgets_path()
+    budgets_path.parent.mkdir(parents=True, exist_ok=True)
+    budgets_path.write_text(json.dumps({"action_types": {"send_invoice": {"max_attempts": 1}}}))
+
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_unhashable", goal="g"))
+    storage.append_event("run_unhashable", EventType.RUN_STARTED, {"goal": "g"})
+    ledger = ActionLedger(storage, "run_unhashable")
+
+    # Direct call to _budget_authorization_id with _BadMapping
+    assert ledger._budget_authorization_id("send_invoice", None, _BadMapping(), ()) is None
+
+    # In claim, resolve_authorization_id raising makes the claim unbounded
+    def boom_resolve(*args: Any, **kwargs: Any) -> Any:
+        raise TypeError("unhashable argument shape")
+
+    monkeypatch.setattr(ledger_module, "resolve_authorization_id", boom_resolve)
+
+    # Claim multiple times beyond max_attempts=1; because it is unbound, none is refused
+    for i in range(3):
+        outcome = ledger.claim("send_invoice", {"invoice": "INV-001"}, key=f"k{i}")
+        assert outcome.fresh
+        assert outcome.action.budget_authorization_id is None
+
+
+def test_settlement_rederives_authorization_id_when_record_carries_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When a record lacks budget_authorization_id, settlement re-derives it."""
+    storage = SQLiteStorage(":memory:")
+    storage.create_run(Run(run_id="run_rederive", goal="g"))
+    ledger = ActionLedger(storage, "run_rederive")
+
+    action = Action(
+        action_id="act-001",
+        run_id="run_rederive",
+        action_type="deploy",
+        arguments={"target": "prod-1"},
+        status=ActionStatus.STARTED,
+        budget_authorization_id=None,
+    )
+    auth_id = ledger._settlement_authorization_id(action)
+    assert auth_id is not None
+
+    # Also verify _budget_consume_settlement when file is absent
+    budgets_path = _budgets_path()
+    if budgets_path.exists():
+        budgets_path.unlink()
+    # Does not raise
+    ledger._budget_consume_settlement("deploy", auth_id)

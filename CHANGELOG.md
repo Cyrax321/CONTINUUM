@@ -10,6 +10,14 @@ Test counts: ~4400 collected on a minimal env.
 
 ### Added
 
+- **Unit coverage for ActionLedger budget error and refusal paths (#1977).**
+  `tests/test_budget_drawdown.py` exercises the budget accounting error arms in
+  `ActionLedger`: unreadable or unwritable registries during claim commit and
+  settlement, each step of `_budget_consume_settlement`, `BudgetConfigError`
+  mapping to `LedgerError`, `get_remaining` failure fallback during refusal,
+  and unbounded claims on unhashable argument shapes. Tests only, no runtime
+  change.
+
 - **Unit coverage for the ledger-anchored authorization id (#1951).**
   `tests/test_idempotency_ledger_resolution.py` drives
   `resolve_authorization_id(..., ledger=...)` with in-memory ledger stand-ins and
