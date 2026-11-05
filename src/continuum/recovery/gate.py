@@ -59,6 +59,7 @@ __all__ = [
     "check_preconditions",
     "check_merge_preconditions",
     "enforce",
+    "render_precondition_text",
     "render_preserved_summary",
     "render_refusal_text",
     "stamp_lineage",
@@ -786,6 +787,9 @@ def render_preserved_summary(
     elif anchor is not None:
         base = f"{base} at anchor {anchor}"
     return base
+
+
+render_precondition_text = render_preserved_summary
 
 
 def render_refusal_text(

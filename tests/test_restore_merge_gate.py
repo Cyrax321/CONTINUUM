@@ -13,7 +13,7 @@ import pytest
 
 from continuum.actions import ActionLedger
 from continuum.checkpoint import CheckpointManager
-from continuum.events import EventType
+from continuum.events import Event, EventType
 from continuum.models import Run
 from continuum.recovery.fork import ForkPreconditionError, approve_fork
 from continuum.recovery.gate import EditPreconditionError, check_preconditions
@@ -446,5 +446,384 @@ def test_refusal_raises_edit_type_specific_subclass(edit_type: str) -> None:
         assert err.edit_type == edit_type
         # ...while remaining a base-class instance for callers that catch broadly.
         assert isinstance(err, EditPreconditionError)
+    finally:
+        storage.close()
+
+
+def test_merged_stream_completion_scan_and_validation_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise merged archive and live stream scans, filter branches, and malformed skips."""
+    from continuum.models import Action, ActionStatus
+    from continuum.recovery.gate import (
+        _all_strings_up_to,
+        _collect_completions,
+        _filtered_depended_for_edit,
+    )
+    from continuum.recovery.preconditions import DerivationResult
+
+    storage = _make_storage(run_id="run_stream")
+    try:
+        # Prefix event containing surviving string and non-string payload fields (branch 244->238)
+        storage.append_event(
+            "run_stream",
+            EventType.RUN_STARTED,
+            {"goal": "g", "ref": "surviving_key", "flag": True, "count": 1},
+        )
+        storage.append_event("run_stream", EventType.RUN_STARTED, {"note": "anchor_point"})
+
+        # Archived events:
+        # Seq 1: <= anchor (continue, line 293 / 398)
+        # Seq 2: <= anchor
+        # Seq 3: type not in ACTION_* (continue, line 301 / 406)
+        # Seq 4: payload has no key (continue, line 304 / 409)
+        # Seq 5: payload action fails validation (except Exception, lines 308 / 413)
+        ev_archived = [
+            Event(
+                run_id="run_stream",
+                sequence=1,
+                type=EventType.RUN_STARTED,
+                payload={"ref": "surviving_key", "count": 10},
+            ),
+            Event(run_id="run_stream", sequence=2, type=EventType.RUN_STARTED, payload={}),
+            Event(run_id="run_stream", sequence=3, type=EventType.WORK_COMPLETED, payload={}),
+            Event(run_id="run_stream", sequence=4, type=EventType.ACTION_RECORDED, payload={}),
+            Event(
+                run_id="run_stream",
+                sequence=5,
+                type=EventType.ACTION_RECORDED,
+                payload={"key": "k_bad", "action": "malformed_not_dict"},
+            ),
+        ]
+
+        # Live events:
+        # Seq 6: ACTION_RECORDED status COMPLETED
+        # Seq 7: ACTION_COMPENSATED status COMPENSATED (flips out of completed, pops k_flip at lines 315 / 420)
+        # Seq 8: ACTION_RECORDED status COMPLETED with key matching surviving prefix
+        # Seq 9: sequence > head (breaks at lines 295 / 378 / 400)
+        action_flip_completed = Action(
+            run_id="run_stream",
+            action_id="act_flip",
+            action_type="op_flip",
+            status=ActionStatus.COMPLETED,
+        ).model_dump(mode="json")
+        action_flip_compensated = Action(
+            run_id="run_stream",
+            action_id="act_flip",
+            action_type="op_flip",
+            status=ActionStatus.COMPENSATED,
+        ).model_dump(mode="json")
+        action_surviving = Action(
+            run_id="run_stream",
+            action_id="act_surv",
+            action_type="op_surv",
+            status=ActionStatus.COMPLETED,
+        ).model_dump(mode="json")
+        action_past = Action(
+            run_id="run_stream",
+            action_id="act_past",
+            action_type="op_past",
+            status=ActionStatus.COMPLETED,
+        ).model_dump(mode="json")
+
+        ev_live = [
+            Event(
+                run_id="run_stream",
+                sequence=6,
+                type=EventType.ACTION_RECORDED,
+                payload={"key": "k_flip", "action": action_flip_completed},
+            ),
+            Event(
+                run_id="run_stream",
+                sequence=7,
+                type=EventType.ACTION_COMPENSATED,
+                payload={"key": "k_flip", "action": action_flip_compensated},
+            ),
+            Event(
+                run_id="run_stream",
+                sequence=8,
+                type=EventType.ACTION_RECORDED,
+                payload={"key": "surviving_key", "action": action_surviving},
+            ),
+            Event(
+                run_id="run_stream",
+                sequence=9,
+                type=EventType.ACTION_RECORDED,
+                payload={"key": "k_past", "action": action_past},
+            ),
+        ]
+
+        monkeypatch.setattr(storage, "read_archived_events", lambda run_id: ev_archived)
+        monkeypatch.setattr(storage, "read_events", lambda run_id: ev_live)
+        monkeypatch.setattr(storage, "last_sequence", lambda run_id: 8)
+
+        raw_derivation = DerivationResult(
+            unsettled_authorizations=frozenset(),
+            depended_results=frozenset(),
+            uncertain_slots=frozenset(),
+        )
+
+        # 1. _filtered_depended_for_edit across the archive boundary
+        filtered = _filtered_depended_for_edit(
+            raw_derivation, storage, "run_stream", anchor=2, edit_type="restore"
+        )
+        assert len(filtered) == 1
+        dep_item = next(iter(filtered))
+        assert dep_item.key == "surviving_key"
+        assert dep_item.action_id == "act_surv"
+        assert dep_item.sequence == 8
+
+        # 2. _collect_completions across the archive boundary
+        completions = _collect_completions(storage, "run_stream", anchor=2, head=8)
+        assert "surviving_key" in completions
+        assert "k_flip" not in completions
+        assert "k_bad" not in completions
+        assert "k_past" not in completions
+
+        # 3. _all_strings_up_to breaking past head (line 378)
+        strings = _all_strings_up_to(storage, "run_stream", head=8)
+        assert "surviving_key" in strings
+        assert "k_past" not in strings
+    finally:
+        storage.close()
+
+
+def test_cross_run_precondition_transfer_action_id_match() -> None:
+    """Drive cross-run transfer where a completion matches by action_id, not key (lines 454-455)."""
+    from continuum.models import Action, ActionStatus
+    from continuum.recovery.gate import _cross_depended_for_merge
+
+    storage = _make_storage(run_id="run_target")
+    try:
+        storage.create_run(Run(run_id="run_source", goal="g"))
+        storage.append_event("run_source", EventType.RUN_STARTED, {"goal": "g"})
+
+        # Source run references target's action_id, but NOT target's key
+        storage.append_event(
+            "run_source",
+            EventType.TOOL_COMPLETED,
+            {"external_ref": "target_act_uuid_456"},
+        )
+        source_head = storage.last_sequence("run_source")
+
+        # Target run has completed action inside (target_anchor, target_head]
+        storage.append_event(
+            "run_target",
+            EventType.ACTION_RECORDED,
+            {
+                "key": "unique_target_key_never_in_source",
+                "action": Action(
+                    run_id="run_target",
+                    action_id="target_act_uuid_456",
+                    action_type="export_result",
+                    status=ActionStatus.COMPLETED,
+                ).model_dump(mode="json"),
+            },
+        )
+        # Second target completion whose key and action_id are NOT in source (branch 455->454)
+        storage.append_event(
+            "run_target",
+            EventType.ACTION_RECORDED,
+            {
+                "key": "unrelated_target_key",
+                "action": Action(
+                    run_id="run_target",
+                    action_id="unrelated_act_id",
+                    action_type="export_result",
+                    status=ActionStatus.COMPLETED,
+                ).model_dump(mode="json"),
+            },
+        )
+        target_head = storage.last_sequence("run_target")
+
+        cross = _cross_depended_for_merge(
+            storage,
+            target_run_id="run_target",
+            target_anchor=1,
+            target_head=target_head,
+            source_run_id="run_source",
+            source_anchor=0,
+            source_head=source_head,
+        )
+
+        assert len(cross) == 1
+        item = next(iter(cross))
+        assert item.action_id == "target_act_uuid_456"
+        assert item.key == "unique_target_key_never_in_source"
+    finally:
+        storage.close()
+
+
+def test_render_refusal_text_all_blocks_empty_and_idempotency() -> None:
+    """Render refusal text with all item types, empty rationale, and verify byte-identical output."""
+    from continuum.recovery.gate import render_refusal_text
+
+    full_rationale = {
+        "edit_type": "restore",
+        "anchor_sequence": 2,
+        "candidate_sequence": 10,
+        "unsettled_authorizations": [
+            {"approval_id": "app_99", "sequence": 4, "subject": "admin_deploy"}
+        ],
+        "depended_results": [
+            {
+                "key": "k_depended",
+                "action_id": "act_depended_123",
+                "action_type": "storage_write",
+                "sequence": 5,
+            }
+        ],
+        "uncertain_slots": [
+            {
+                "key": "k_uncertain",
+                "action_id": "act_uncertain_789",
+                "action_type": "api_call",
+                "status": "started",
+                "sequence": 6,
+            }
+        ],
+        "carry_forward": ["k_depended", "app_99"],
+    }
+
+    # 1. Output with run_id
+    text_run = render_refusal_text(full_rationale, run_id="run_refusal_1")
+    # Verify byte-identical between calls
+    assert text_run == render_refusal_text(full_rationale, run_id="run_refusal_1")
+
+    # Assert header and all three blocks
+    assert "for run run_refusal_1" in text_run
+    assert "1 unsettled authorization(s):" in text_run
+    assert "- app_99 at sequence 4 subject 'admin_deploy'" in text_run
+    assert "revoke with APPROVAL_REVOKED or carry with --carry-forward" in text_run
+
+    assert "1 depended result(s) would be stranded:" in text_run
+    assert "- act_depended_123 (key k_depended, type storage_write) at sequence 5" in text_run
+    assert "carry with --carry-forward <key|action_id|sequence>" in text_run
+
+    assert "1 uncertain slot(s) still open:" in text_run
+    assert (
+        "- act_uncertain_789 (key k_uncertain, type api_call, status started) at sequence 6"
+        in text_run
+    )
+    assert "reconcile with `continuum reconcile run_refusal_1`" in text_run
+    assert "carried forward so far: k_depended, app_99" in text_run
+
+    # 2. Output without run_id
+    text_no_run = render_refusal_text(full_rationale)
+    assert "for run" not in text_no_run
+    assert "reconcile with `continuum reconcile` or carry" in text_no_run
+
+    # 3. Empty rationale (line 854)
+    empty_rationale = {
+        "edit_type": "fork",
+        "anchor_sequence": 1,
+        "candidate_sequence": 1,
+    }
+    empty_text = render_refusal_text(empty_rationale)
+    assert "(no unaccounted items, rationale present for audit)" in empty_text
+    assert (
+        "[!!] fork refused: preconditions in (anchor 1, head 1] are unaccounted for" in empty_text
+    )
+
+
+def test_render_preserved_and_precondition_text_variants() -> None:
+    """Exercise render_preserved_summary and render_precondition_text anchor and edit_type branches."""
+    from continuum.recovery.gate import render_precondition_text, render_preserved_summary
+
+    summary = {
+        "unsettled_authorizations": ["a1"],
+        "depended_results": ["d1", "d2"],
+        "uncertain_slots": [],
+    }
+
+    # 1. Anchor and edit_type provided (line 785)
+    t1 = render_preserved_summary(summary, anchor=5, edit_type="fork", carry_set={"c1", "c2"})
+    assert (
+        t1
+        == "fork preserved preconditions: 1 unsettled, 2 depended, 0 uncertain; carried forward: c1, c2 at anchor 5"
+    )
+
+    # 2. Anchor provided without edit_type (lines 786-787)
+    t2 = render_preserved_summary(summary, anchor=5, edit_type=None)
+    assert (
+        t2
+        == "preserved preconditions: 1 unsettled, 2 depended, 0 uncertain; carried forward: none at anchor 5"
+    )
+
+    # 3. Neither anchor nor edit_type provided (line 782)
+    t3 = render_preserved_summary(summary, anchor=None, edit_type=None)
+    assert (
+        t3 == "preserved preconditions: 1 unsettled, 2 depended, 0 uncertain; carried forward: none"
+    )
+
+    # 4. render_precondition_text alias points to the same implementation
+    t4 = render_precondition_text(summary, anchor=12, edit_type="restore")
+    assert t4 == render_preserved_summary(summary, anchor=12, edit_type="restore")
+
+
+def test_gate_internals_and_anchor_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise check_merge_preconditions AssertionError guard, anchor conversion, and stamp_lineage extra."""
+    from continuum.actions import ActionLedger
+    from continuum.recovery import gate as gate_mod
+    from continuum.recovery.gate import (
+        _derive_single,
+        check_merge_preconditions,
+        check_preconditions,
+        stamp_lineage,
+    )
+
+    storage = _make_storage(run_id="run_merge_internals")
+    try:
+        ledger = ActionLedger(storage, "run_merge_internals")
+        ledger.claim("op.mutate", {"param": 1}, key="k_mutate")
+
+        # 1. Line 507: check_merge_preconditions AssertionError guard when check_preconditions does not raise
+        monkeypatch.setattr(gate_mod, "check_preconditions", lambda *args, **kwargs: None)
+        with pytest.raises(AssertionError, match="check_preconditions should have raised"):
+            check_merge_preconditions(
+                storage, "run_merge_internals", target_anchor=0, source_run_id=None
+            )
+
+        # 2. String source_anchor conversion (line 515), source_anchor > source_head (line 518),
+        # and target_anchor > target_head (line 485)
+        storage2 = _make_storage(run_id="run_t")
+        try:
+            storage2.create_run(Run(run_id="run_s", goal="g"))
+            storage2.append_event("run_s", EventType.RUN_STARTED, {"goal": "g"})
+
+            # target_anchor=20 > target_head=1, source_anchor="15" > source_head=1
+            res = check_merge_preconditions(
+                storage2, "run_t", target_anchor=20, source_run_id="run_s", source_anchor="15"
+            )
+            assert res[0].unsettled_authorizations == frozenset()
+
+            # 3. check_preconditions anchor > head (line 653) and _derive_single anchor > head (line 350)
+            res_fork = check_preconditions(storage2, "run_t", anchor=25, edit_type="fork")
+            assert res_fork[0].unsettled_authorizations == frozenset()
+            res_single = _derive_single(storage2, "run_t", anchor=25, candidate=5)
+            assert res_single.unsettled_authorizations == frozenset()
+
+            # 4. stamp_lineage with extra payload update (line 894) and without extra (branch 896->898)
+            stamp_lineage(
+                storage2,
+                "run_t",
+                edit_type="fork",
+                anchor=1,
+                summary={},
+                carry_set=set(),
+            )
+            stamp_lineage(
+                storage2,
+                "run_t",
+                edit_type="fork",
+                anchor=1,
+                summary={},
+                carry_set=set(),
+                extra={"audit_marker": "custom_audit_value"},
+            )
+            latest_ev = list(storage2.read_events("run_t"))[-1]
+            assert latest_ev.payload.get("audit_marker") == "custom_audit_value"
+        finally:
+            storage2.close()
     finally:
         storage.close()
