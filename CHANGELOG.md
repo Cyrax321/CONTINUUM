@@ -10,6 +10,13 @@ Test counts: ~4400 collected on a minimal env.
 
 ### Added
 
+- **Unit coverage for authority reconciliation (#1994).**
+  `tests/test_reconcilers.py` now drives the `probe_authority_verdict` timeout,
+  launch failure, non-zero exit, and unreadable output arms, and `settle_authority`
+  across missing probes, unsettled verdicts, dry runs, and the
+  `AUTHORITY_RECONCILED` event a definitive verdict appends. Tests only, no runtime
+  change.
+
 - **Unit coverage for the ledger-anchored authorization id (#1951).**
   `tests/test_idempotency_ledger_resolution.py` drives
   `resolve_authorization_id(..., ledger=...)` with in-memory ledger stand-ins and
