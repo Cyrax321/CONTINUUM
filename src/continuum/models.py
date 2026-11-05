@@ -1625,8 +1625,9 @@ class RecoveryContract(BaseModel):
     evidence: list[str] = Field(default_factory=list)
     reason: str = ""
     #: File observations recorded by host hooks (#210) after the latest
-    #: checkpoint, disk-checked at assess time (#208). Informational only:
-    #: never affects the recovery decision. Newest first; a trailing row with
+    #: checkpoint, disk-checked at assess time (#208). A ``changed`` or
+    #: ``missing`` row moves the verdict to ``REPAIR_AND_RESUME`` (issue #208);
+    #: ``verified`` rows stay inert. Newest first; a trailing row with
     #: ``truncated`` marks omitted older rows when the cap bites.
     post_checkpoint_observations: list[dict[str, Any]] = Field(default_factory=list)
     #: Liveness advisory (issue #302): last append age and breach count, informational only.

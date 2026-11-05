@@ -154,6 +154,15 @@ def human_steps_for(
                 steps.append(
                     f"verify {step.target} yourself, then run `continuum confirm {run_id}`"
                 )
+        elif step.kind is RepairKind.RECONCILE_FILE:
+            # No command re-checkpoints a file yet, so the guidance names the
+            # reconciliation itself rather than implying one exists: read the
+            # file, account for the change the log does not explain, then let a
+            # normal checkpoint pick the new digest up.
+            steps.append(
+                f"{step.target} no longer matches the digest recorded for it ({step.reason}); "
+                f"read it, account for the change, then re-checkpoint {run_id}"
+            )
         elif step.kind is RepairKind.REPAIR_LOG:
             # No automated surface can settle a refused event yet (that is the
             # repair/amend command, deliberately unbuilt), so name where to

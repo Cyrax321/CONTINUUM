@@ -281,6 +281,28 @@ Test counts: ~4400 collected on a minimal env.
   are configured.
 ### Fixed
 
+- **Drifted post-checkpoint observations now escalate the recovery verdict
+  (#208).** README guarantee #3 says resume "checks file digests, dependency
+  versions, and model identity before saying safe", but the engine's own
+  comment admitted the observation rows were "never a factor in the decision
+  itself": `collect_observations` computed `verified`/`changed`/`missing`
+  correctly and the contract surfaced them, yet a file observed and then
+  tampered with still read `RESUME` with "all state verified against the
+  environment". The hooks run outside model control precisely so a model
+  cannot hide a change to a file it wrote (#210), so a digest that is reported
+  but never enforced fails the one thing it exists to catch. `changed`/`missing`
+  rows now become an `ObservationDrift` the planner turns into an automatic
+  `reconcile_file:<path>` step (sorted after an uncertain external side effect,
+  the file being local and re-readable where an external effect is not) and the
+  engine escalates to `REPAIR_AND_RESUME`, counting changed and missing
+  separately. Each path is judged against its **newest** observation, so a file
+  the hooks recorded twice is not faulted for differing from the record the
+  next logged write replaced; and the 50-row contract cap bounds only what is
+  rendered, never what is compared, so drift cannot be hidden behind a large
+  enough backlog of writes. The engine collects once: the rows the contract
+  shows are the rows the verdict was computed from, instead of two independent
+  reads that could each see a different disk.
+
 - **The daemon's active-run probe and detached startup deadline work on
   server-backed storage (#1855).** The probe gated on `Path(db).exists()`,
   which is never true for a `postgresql://` URL, so the daemon silently bound
