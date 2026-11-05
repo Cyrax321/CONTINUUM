@@ -421,6 +421,7 @@ class SQLiteStorage(Storage):
         source: Origin = Origin.DETERMINISTIC,
     ) -> Event:
         """Append one chained event in a write transaction and return it."""
+        completed = type is EventType.RUN_COMPLETED
         with self._write() as conn:
             event = self._append_chained(
                 conn,
@@ -431,6 +432,8 @@ class SQLiteStorage(Storage):
                 expected_sequence=expected_sequence,
                 source=source,
             )
+        if completed:
+            self._clear_pointer(run_id)
         return event
 
     def _append_chained(
@@ -500,7 +503,54 @@ class SQLiteStorage(Storage):
             prev_hash=head["hash"] if head else None,
         ).sealed()
         self._insert_event(conn, event, raw_payload=raw_payload)
+        if type is EventType.RUN_COMPLETED:
+            # The log is the source of truth: a recorded RUN_COMPLETED *is* the
+            # run finishing, so the run row must flip in the same transaction.
+            # Appending the event and flipping the row were two separate steps
+            # every caller had to remember to pair, and the one caller that
+            # cannot - an adapter or an agent closing its own run over MCP, with
+            # no access to update_run - left the row on "started" forever. A
+            # finished run then stayed get_active_run()'s answer, and the
+            # SessionStart banner advertised it as interrupted and pending on
+            # every fresh session, which is the hijack cmd_complete exists to
+            # prevent.
+            self._complete_run(conn, run_id, event.timestamp.isoformat())
         return event
+
+    def _complete_run(self, conn: sqlite3.Connection, run_id: str, at: str) -> None:
+        """Flip a run to COMPLETED inside the append transaction.
+
+        Called only when the appended event is ``RUN_COMPLETED``, from both the
+        live and the sealed append paths, so the row and the log agree no matter
+        who appended it. ``at`` is the event's own timestamp, so the row's
+        ``updated_at`` names the moment the run finished rather than a clock
+        read a few microseconds later.
+
+        The resume pointer is deliberately NOT cleared here: the unlink runs
+        after the transaction has committed (see :meth:`_clear_pointer`), so a
+        close whose commit fails leaves the banner of the still-active run it
+        failed to finish.
+        """
+        conn.execute(
+            "UPDATE runs SET status = ?, updated_at = ? WHERE run_id = ?",
+            (RunStatus.COMPLETED.value, at, run_id),
+        )
+
+    def _clear_pointer(self, run_id: str) -> None:
+        """Clear the SessionStart resume pointer once a close has committed.
+
+        Runs only after the ``RUN_COMPLETED`` append committed successfully, so
+        a close that cannot commit cannot take the banner down with it: the run
+        it describes is still active and a fresh session must still be offered
+        it. Called outside any transaction, so the lazy import has the same
+        circular-import reason as ``compact``'s: the checkpoint layer imports
+        this one. A pointer naming another run is left alone, and missing,
+        unreadable, or unremovable files are not errors, so this cannot turn a
+        close that already committed into a reported failure.
+        """
+        from continuum.checkpoint.manager import clear_resume_pointer
+
+        clear_resume_pointer(run_id)
 
     def append_sealed(self, event: Event) -> Event:
         """Store a pre-sealed event as-is, preserving its chain."""
@@ -552,6 +602,15 @@ class SQLiteStorage(Storage):
                 event,
                 raw_payload=rehydrate_for_index(event.payload, storage_dir=self.storage_dir),
             )
+            if event.type is EventType.RUN_COMPLETED:
+                # Same invariant as _append_chained: a log that holds
+                # RUN_COMPLETED describes a finished run, and that must hold for
+                # a log copied in via append_sealed (import/export, replay) as
+                # much as for one appended live. The row flip belongs in the
+                # transaction; the pointer clear follows the commit below.
+                self._complete_run(conn, event.run_id, event.timestamp.isoformat())
+        if event.type is EventType.RUN_COMPLETED:
+            self._clear_pointer(event.run_id)
         return event
 
     @staticmethod

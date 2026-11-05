@@ -4,6 +4,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -138,6 +139,187 @@ def test_get_active_run_returns_the_most_recent_non_terminal_run(storage: SQLite
     storage.update_run(finished.model_copy(update={"goal": "done again"}))
     active = storage.create_run(Run(run_id="active", goal="g"))
     assert storage.get_active_run().run_id == active.run_id
+
+
+def test_run_completed_flips_the_run_row(storage: SQLiteStorage) -> None:
+    # ``append_event`` used to leave the run row alone, so a run closed by
+    # appending RUN_COMPLETED - the path adapters and the MCP tool take, with
+    # no access to ``update_run`` - stayed "started" forever and kept being
+    # returned as the active run. The log is the source of truth now: a
+    # recorded RUN_COMPLETED *is* the run finishing.
+    storage.create_run(Run(run_id="run_1", goal="g"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    assert storage.get_active_run() is not None
+
+    event = storage.append_event("run_1", EventType.RUN_COMPLETED, {"closed_by": "agent"})
+
+    row = storage.get_run("run_1")
+    assert row.status is RunStatus.COMPLETED
+    assert storage.get_active_run() is None
+    # The row names the moment the run finished, not a clock read later.
+    assert row.updated_at == event.timestamp
+
+
+def test_run_completed_is_idempotent_on_the_row(storage: SQLiteStorage) -> None:
+    # A second RUN_COMPLETED (a double-click, a retried tool call) must not
+    # un-finish the row, and must not raise: the run stays closed and stays out
+    # of get_active_run.
+    storage.create_run(Run(run_id="run_1", goal="g"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    storage.append_event("run_1", EventType.RUN_COMPLETED, {})
+
+    storage.append_event("run_1", EventType.RUN_COMPLETED, {})
+
+    again = storage.get_run("run_1")
+    assert again.status is RunStatus.COMPLETED
+    assert storage.get_active_run() is None
+
+
+def test_a_completed_run_does_not_clear_another_runs_pointer(
+    storage: SQLiteStorage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The pointer cleanup is scoped to the completing run: closing run B must
+    # not evict the pointer naming run A, which is the run a fresh session
+    # should actually be offered.
+    monkeypatch.chdir(tmp_path)
+    pointer = tmp_path / ".continuum" / "resume.json"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(json.dumps({"run_id": "other"}), encoding="utf-8")
+
+    storage.create_run(Run(run_id="run_1", goal="g"))
+    storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+    storage.append_event("run_1", EventType.RUN_COMPLETED, {})
+
+    assert json.loads(pointer.read_text(encoding="utf-8"))["run_id"] == "other"
+
+
+def test_append_sealed_run_completed_also_flips_the_row(storage: SQLiteStorage) -> None:
+    # ``append_sealed`` is the entry point for import/export and replay, and a
+    # log copied in through it holds the same truth: RUN_COMPLETED means
+    # finished, and the row must agree.
+    storage.create_run(Run(run_id="run_1", goal="g"))
+    before = storage.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+
+    from continuum.events import Event
+
+    storage.append_sealed(
+        Event(
+            run_id="run_1",
+            sequence=before.sequence + 1,
+            type=EventType.RUN_COMPLETED,
+            payload={"closed_by": "replay"},
+            prev_hash=before.hash,
+        ).sealed()
+    )
+
+    assert storage.get_run("run_1").status is RunStatus.COMPLETED
+
+
+class _CommitFails:
+    """A connection proxy whose COMMIT statement always fails."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._real = connection
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+    def execute(self, sql: str, *args: Any) -> Any:
+        if sql.strip().upper() == "COMMIT":
+            raise sqlite3.OperationalError("injected commit failure")
+        return self._real.execute(sql, *args)
+
+
+def _assert_pointer_and_row_survive_the_failed_close(
+    tmp_path: Path, failure: pytest.ExceptionInfo[sqlite3.OperationalError]
+) -> None:
+    """Shared tail of the failed-close tests: what must NOT change.
+
+    The resume pointer is the banner a fresh session is offered from, so the
+    failed close must leave it exactly where it was. A second connection reads
+    the committed state, which the first one cannot do for itself: a COMMIT
+    that raised leaves the writer's transaction open, so its own reads still
+    see the uncommitted row flip.
+    """
+    assert failure.type is sqlite3.OperationalError
+    assert failure.match("injected commit failure")
+    pointer = tmp_path / ".continuum" / "resume.json"
+    assert json.loads(pointer.read_text(encoding="utf-8"))["run_id"] == "run_1"
+    fresh = sqlite3.connect(next(tmp_path.glob("*.db")))
+    try:
+        assert (
+            fresh.execute("SELECT status FROM runs WHERE run_id = 'run_1'").fetchone()[0]
+            == RunStatus.STARTED.value
+        )
+        assert (
+            fresh.execute(
+                "SELECT count(*) FROM events WHERE run_id = 'run_1' AND type = 'RUN_COMPLETED'"
+            ).fetchone()[0]
+            == 0
+        )
+    finally:
+        fresh.close()
+
+
+def test_a_close_that_fails_to_commit_keeps_the_resume_banner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The pointer clear used to run inside the append transaction, before the
+    # COMMIT: a close whose commit failed still unlinked the file, erasing the
+    # banner of a run that was still active. The clear belongs after the
+    # commit, so the failed close leaves the pointer exactly as it found it.
+    monkeypatch.chdir(tmp_path)
+    pointer = tmp_path / ".continuum" / "resume.json"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(json.dumps({"run_id": "run_1"}), encoding="utf-8")
+
+    store = SQLiteStorage(tmp_path / "continuum.db")
+    try:
+        store.create_run(Run(run_id="run_1", goal="g"))
+        store.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+        real_connection = store._live_connection
+        monkeypatch.setattr(store, "_live_connection", lambda: _CommitFails(real_connection()))
+        with pytest.raises(sqlite3.OperationalError) as failure:
+            store.append_event("run_1", EventType.RUN_COMPLETED, {"closed_by": "agent"})
+    finally:
+        store.close()
+
+    _assert_pointer_and_row_survive_the_failed_close(tmp_path, failure)
+
+
+def test_a_sealed_close_that_fails_to_commit_keeps_the_resume_banner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # append_sealed is the import/export and replay entry point, and it holds
+    # the same invariant as the live append: a copy of the log whose commit
+    # fails leaves the resume pointer it describes untouched.
+    monkeypatch.chdir(tmp_path)
+    pointer = tmp_path / ".continuum" / "resume.json"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(json.dumps({"run_id": "run_1"}), encoding="utf-8")
+
+    store = SQLiteStorage(tmp_path / "replay.db")
+    try:
+        store.create_run(Run(run_id="run_1", goal="g"))
+        before = store.append_event("run_1", EventType.RUN_STARTED, {"goal": "g"})
+
+        from continuum.events import Event
+
+        sealed = Event(
+            run_id="run_1",
+            sequence=before.sequence + 1,
+            type=EventType.RUN_COMPLETED,
+            payload={"closed_by": "replay"},
+            prev_hash=before.hash,
+        ).sealed()
+        real_connection = store._live_connection
+        monkeypatch.setattr(store, "_live_connection", lambda: _CommitFails(real_connection()))
+        with pytest.raises(sqlite3.OperationalError) as failure:
+            store.append_sealed(sealed)
+    finally:
+        store.close()
+
+    _assert_pointer_and_row_survive_the_failed_close(tmp_path, failure)
 
 
 # --- events ---------------------------------------------------------------- #

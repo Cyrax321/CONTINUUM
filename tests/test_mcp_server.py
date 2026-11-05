@@ -39,9 +39,9 @@ from continuum.mcp.server import (
     main,
     resolve_database,
 )
-from continuum.models import ActionStatus, Origin, RecoveryMode, Run
+from continuum.models import ActionStatus, Origin, RecoveryMode, Run, RunStatus
 from continuum.state.semantic import project
-from continuum.storage import RunNotFound, SQLiteStorage
+from continuum.storage import ConcurrentWriteError, RunNotFound, SQLiteStorage
 from tests.mcp_helpers import fake_context as _ctx
 
 TEST_CLIENT = "pytest-client"
@@ -125,6 +125,7 @@ async def test_every_tool_is_registered(server_ctx: tuple[Any, Any]) -> None:
         "continuum_compensate_action",
         "continuum_list_actions",
         "continuum_confirm",
+        "continuum_complete_run",
         "continuum_record_summary",
         "continuum_record_plan",
     }
@@ -1648,6 +1649,176 @@ async def test_an_unmatched_identifier_says_which_spaces_were_tried(
             {"run_id": "run_1", "action_key": "not-an-identifier", "occurred": False},
             context=_ctx(TEST_CLIENT),
         )
+
+
+# --- closing a run from the agent that finished it --------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_complete_run_closes_the_run_and_stops_it_being_active(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """RUN_COMPLETED from an agent never flipped the run row (finding).
+
+    ``append_event`` left the row on "started", so a finished agent-driven run
+    stayed ``get_active_run``'s answer and every fresh session's briefing kept
+    advertising it as interrupted and pending - the exact session-hijack
+    ``continuum complete`` exists to prevent. Appending the event now flips the
+    row in the same write, so the tool that only appends closes the run.
+    """
+    server, ctx = server_ctx
+    await seed_run(server, completed=100)
+    assert ctx.storage.get_active_run() is not None
+
+    payload = await call(server, "continuum_complete_run", run_id="run_1")
+
+    assert payload["status"] == "completed"
+    assert ctx.storage.get_run("run_1").status is RunStatus.COMPLETED
+    assert ctx.storage.get_active_run() is None
+
+
+@pytest.mark.asyncio
+async def test_complete_run_is_agent_sourced_and_does_not_confirm(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """Closing a run is not the same as vouching for it (issue #201).
+
+    The agent may say its work is *done*; it must not clear its own
+    self-certification gates. So the completion lands as ``EXTERNAL_AGENT`` with
+    no REVIEW_CONFIRMED beside it - a human running ``continuum confirm`` is
+    still required before the run is trusted.
+    """
+    server, ctx = server_ctx
+    await seed_run(server, completed=100)
+
+    await call(server, "continuum_complete_run", run_id="run_1")
+
+    types = [e.type for e in ctx.storage.read_events("run_1")]
+    assert EventType.RUN_COMPLETED in types
+    assert EventType.REVIEW_CONFIRMED not in types
+    completed = next(
+        e for e in ctx.storage.read_events("run_1") if e.type is EventType.RUN_COMPLETED
+    )
+    assert completed.source is Origin.EXTERNAL_AGENT
+
+
+@pytest.mark.asyncio
+async def test_complete_run_carries_an_optional_summary(server_ctx: tuple[Any, Any]) -> None:
+    server, ctx = server_ctx
+    await seed_run(server, completed=100)
+
+    await call(
+        server,
+        "continuum_complete_run",
+        run_id="run_1",
+        summary="All 100 documents analyzed.",
+    )
+
+    event = next(e for e in ctx.storage.read_events("run_1") if e.type is EventType.RUN_COMPLETED)
+    assert event.payload["summary"] == "All 100 documents analyzed."
+    assert event.payload["closed_by"] == "agent"
+
+
+@pytest.mark.asyncio
+async def test_complete_run_on_a_finished_run_does_not_re_close(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """A double-click or a retried call must record one completion, not a chain."""
+    server, ctx = server_ctx
+    await seed_run(server, completed=100)
+
+    await call(server, "continuum_complete_run", run_id="run_1")
+    payload = await call(server, "continuum_complete_run", run_id="run_1")
+
+    assert payload["already_completed"] is True
+    completions = [e for e in ctx.storage.read_events("run_1") if e.type is EventType.RUN_COMPLETED]
+    assert len(completions) == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_run_losing_a_concurrent_close_does_not_double_close(
+    server_ctx: tuple[Any, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two authorized closes must record one completion, even interleaved.
+
+    The status check and the append are not one transaction, so a second server
+    can read the same unfinished run before the first commits. The append's
+    ``expected_sequence`` closes that window: the losing writer finds the chain
+    already advanced, re-reads the row, and reports the other writer's close
+    instead of recording a completion of its own.
+    """
+    server, ctx = server_ctx
+    await seed_run(server, completed=100)
+
+    real_append = ctx.storage.append_event
+
+    def racing_append(run_id: str, type: EventType, payload: Any = None, **kwargs: Any) -> Any:
+        if type is EventType.RUN_COMPLETED:
+            # The race winner: a concurrent server closed this run first.
+            real_append(run_id, EventType.RUN_COMPLETED, payload, source=Origin.EXTERNAL_AGENT)
+            raise ConcurrentWriteError("run is at sequence 1, caller expected 0")
+        return real_append(run_id, type, payload, **kwargs)
+
+    monkeypatch.setattr(ctx.storage, "append_event", racing_append)
+
+    payload = await call(server, "continuum_complete_run", run_id="run_1")
+
+    assert payload["already_completed"] is True
+    assert payload["status"] == "completed"
+    assert ctx.storage.get_run("run_1").status is RunStatus.COMPLETED
+    completions = [e for e in ctx.storage.read_events("run_1") if e.type is EventType.RUN_COMPLETED]
+    assert len(completions) == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_run_retries_past_an_unrelated_concurrent_write(
+    server_ctx: tuple[Any, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent writer that is not a closer must not cost the agent its close."""
+    server, ctx = server_ctx
+    await seed_run(server, completed=100)
+
+    real_append = ctx.storage.append_event
+    clashed = {"count": 0}
+
+    def clashing_append(run_id: str, type: EventType, payload: Any = None, **kwargs: Any) -> Any:
+        if type is EventType.RUN_COMPLETED and clashed["count"] == 0:
+            clashed["count"] += 1
+            real_append(
+                run_id,
+                EventType.EVIDENCE_ADDED,
+                {"note": "concurrent writer"},
+                source=Origin.EXTERNAL_AGENT,
+            )
+            raise ConcurrentWriteError("run is at sequence 1, caller expected 0")
+        return real_append(run_id, type, payload, **kwargs)
+
+    monkeypatch.setattr(ctx.storage, "append_event", clashing_append)
+
+    payload = await call(server, "continuum_complete_run", run_id="run_1")
+
+    assert payload["status"] == "completed"
+    assert payload.get("already_completed") is not True
+    completions = [e for e in ctx.storage.read_events("run_1") if e.type is EventType.RUN_COMPLETED]
+    assert len(completions) == 1
+    assert clashed["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_run_clears_the_resume_pointer(
+    server_ctx: tuple[Any, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finished run must not keep surfacing as the interrupted run to resume."""
+    server, _ = server_ctx
+    await seed_run(server, completed=100)
+    monkeypatch.chdir(tmp_path)
+    pointer = tmp_path / ".continuum" / "resume.json"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(json.dumps({"run_id": "run_1"}), encoding="utf-8")
+
+    await call(server, "continuum_complete_run", run_id="run_1")
+
+    assert not pointer.exists()
 
 
 # --- the model behind a run (issue #370) ------------------------------------ #

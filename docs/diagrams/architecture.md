@@ -32,7 +32,7 @@ flowchart TB
     subgraph seams["Five integration seams"]
         direction TB
         ad["1. In-process adapters<br/>adapters/, intercept_action and wrap_tool"]
-        mcp["2. MCP stdio server<br/>mcp/server.py, 13 tools, caller allowlist,<br/>deny by default"]
+        mcp["2. MCP stdio server<br/>mcp/server.py, 14 tools, caller allowlist,<br/>deny by default"]
         hooks["3. CLI lifecycle hooks<br/>hooks.py and clienthooks.py"]
         gw["4. HTTP gateway<br/>gateway.py, claim before fire over HTTP"]
         otel["5. OTel bridge<br/>otel.py, spans become evidence"]
@@ -161,7 +161,7 @@ environment resumes cleanly, and its exit code is 0.
 |:--|:--|:--|
 | Schema version | 7 | `SCHEMA_VERSION` in `src/continuum/storage/migrations.py` |
 | Event types | 57 | `EventType` in `src/continuum/events.py` |
-| MCP tools | 13 total, 3 read-only (`validate`, `resume`, `list_actions`) and 10 mutating | `@server.tool(...)` decorators in `src/continuum/mcp/server.py` |
+| MCP tools | 14 total, 3 read-only (`validate`, `resume`, `list_actions`) and 11 mutating | `@server.tool(...)` decorators in `src/continuum/mcp/server.py` |
 | CLI commands | 56 | `add(...)` registrations in `src/continuum/cli/main.py` |
 | Recovery modes | 7, max severity wins, `RESUME` safest through `ABORT` most severe | `RecoveryMode` in `src/continuum/recovery/engine.py` |
 | Checkpoint policies | 6 (`Manual`, `Interval`, `Event`, `Semantic`, `ContextPressure`, `Hybrid`) | `src/continuum/checkpoint/policy.py` |

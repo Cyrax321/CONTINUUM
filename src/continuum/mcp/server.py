@@ -81,6 +81,7 @@ from continuum.models import (
     EnvResource,
     Origin,
     Run,
+    RunStatus,
     SemanticState,
     UnknownSideEffect,
 )
@@ -652,7 +653,12 @@ def build_server(
             "clears it. Until then, treat a recorded progress count as a claim to "
             "sanity-check rather than a verified fact, and say so once instead of "
             "stopping work. This matters most before skipping completed units: "
-            "confirm the work really happened rather than trusting the counter."
+            "confirm the work really happened rather than trusting the counter.\n"
+            "\n"
+            "When the goal is met, call continuum_complete_run. That closes the run "
+            "so it stops surfacing as the active one, but it is not a confirmation: "
+            "it lands no REVIEW_CONFIRMED, so any request_human state stays open for "
+            "a human to clear."
         ),
     )
 
@@ -1287,6 +1293,77 @@ def build_server(
                 "report": decision.render(),
             }
         )
+
+    # -- completion ------------------------------------------------------- #
+
+    @server.tool(
+        name="continuum_complete_run",
+        description=(
+            "Close a run you have finished. Call this once the goal is met so the "
+            "run stops surfacing as the active one and stops being offered for "
+            "resume on every fresh session. Appends RUN_COMPLETED and flips the "
+            "run to COMPLETED in the same write, clearing the resume pointer.\n\n"
+            "This does NOT confirm your own self-reported state: it lands "
+            "RUN_COMPLETED as an agent-sourced event and emits no "
+            "REVIEW_CONFIRMED, so any self-certification request stays open for a "
+            "human to clear (issue #201). A run already COMPLETED is returned "
+            "unchanged rather than recording a second completion. Mutates the run."
+        ),
+        annotations=mutating,
+    )
+    @guard
+    def continuum_complete_run(run_id: str, summary: str = "") -> str:
+        """Close a run from the agent that finished it."""
+        from continuum.storage import ConcurrentWriteError
+
+        run = ctx.ensure_run(run_id)
+        note: dict[str, Any] = {"closed_by": "agent"}
+        if summary:
+            note["summary"] = summary
+        # The status check and the append must be closed against a concurrent
+        # closer, or two authorized calls can both read an unfinished run and
+        # each record a completion. expected_sequence is the closure: the
+        # second append finds the chain already advanced and raises, so we
+        # re-read the row instead of appending a second RUN_COMPLETED. Bounded,
+        # so a run with an unrelated writer in flight answers rather than spins.
+        for remaining in range(2, -1, -1):
+            if run.status is RunStatus.COMPLETED:
+                return _json(
+                    {
+                        "run_id": run_id,
+                        "status": run.status.value,
+                        "summary": summary,
+                        "already_completed": True,
+                    }
+                )
+            # Agent-sourced on purpose (AGENT_SOURCE, not Origin.HUMAN) and with
+            # no REVIEW_CONFIRMED: an agent may say its work is *done* (a fact
+            # about the world it just finished), but must not vouch for its own
+            # self-reported goal or progress (issue #201). The append flips the
+            # run row and clears the resume pointer itself
+            # (SQLiteStorage._complete_run), so this single write is the whole
+            # close.
+            try:
+                ctx.storage.append_event(
+                    run_id,
+                    EventType.RUN_COMPLETED,
+                    note,
+                    expected_sequence=ctx.storage.last_sequence(run_id),
+                    source=AGENT_SOURCE,
+                )
+            except ConcurrentWriteError:
+                run = ctx.storage.get_run(run_id)
+                if not remaining:
+                    raise
+                continue
+            return _json(
+                {
+                    "run_id": run_id,
+                    "status": ctx.storage.get_run(run_id).status.value,
+                    "summary": summary,
+                }
+            )
+        raise AssertionError("unreachable: the loop either returns or raises")
 
     # -- side effects ----------------------------------------------------- #
 

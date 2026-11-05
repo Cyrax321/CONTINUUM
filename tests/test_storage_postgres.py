@@ -8,6 +8,7 @@ real via a Postgres 16 service container.
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator
 from itertools import count
@@ -87,6 +88,156 @@ def test_active_run_resolution_skips_terminal(storage: PostgresStorage) -> None:
     active = storage.get_active_run()
     assert active is not None
     assert active.run_id == "pg_live"
+
+
+def test_run_completed_flips_the_run_row(storage: PostgresStorage) -> None:
+    """The log is the source of truth on this backend too.
+
+    ``append_event`` used to leave the run row alone on Postgres, so a run
+    closed by appending RUN_COMPLETED -- the path adapters and the MCP tool
+    take, with no access to ``update_run`` -- stayed "started" and kept being
+    returned as the active run. The shared-suite database already holds runs
+    from other tests, so the assert on ``get_active_run`` is scoped to this
+    run rather than to the whole store.
+    """
+    make_run(storage, "pg_complete", "close me")
+    storage.append_event("pg_complete", EventType.RUN_STARTED, {"goal": "close me"})
+    assert storage.get_run("pg_complete").status is RunStatus.STARTED
+
+    event = storage.append_event("pg_complete", EventType.RUN_COMPLETED, {"closed_by": "agent"})
+
+    row = storage.get_run("pg_complete")
+    assert row.status is RunStatus.COMPLETED
+    # The row names the moment the run finished, not a clock read later.
+    assert row.updated_at == event.timestamp
+
+
+def test_run_completed_is_idempotent_on_the_row(storage: PostgresStorage) -> None:
+    # A second RUN_COMPLETED (a double-click, a retried tool call) must not
+    # un-finish the row and must not raise: the run stays closed.
+    make_run(storage, "pg_twice", "close twice")
+    storage.append_event("pg_twice", EventType.RUN_STARTED, {"goal": "close twice"})
+    storage.append_event("pg_twice", EventType.RUN_COMPLETED, {})
+
+    storage.append_event("pg_twice", EventType.RUN_COMPLETED, {})
+
+    assert storage.get_run("pg_twice").status is RunStatus.COMPLETED
+
+
+def test_append_sealed_run_completed_also_flips_the_row(storage: PostgresStorage) -> None:
+    # ``append_sealed`` is the entry point for import/export and replay, and a
+    # log copied in through it holds the same truth on Postgres: RUN_COMPLETED
+    # means finished, and the row must agree.
+    make_run(storage, "pg_sealed", "replay me")
+    before = storage.append_event("pg_sealed", EventType.RUN_STARTED, {"goal": "replay me"})
+
+    from continuum.events import Event
+
+    storage.append_sealed(
+        Event(
+            run_id="pg_sealed",
+            sequence=before.sequence + 1,
+            type=EventType.RUN_COMPLETED,
+            payload={"closed_by": "replay"},
+            prev_hash=before.hash,
+        ).sealed()
+    )
+
+    assert storage.get_run("pg_sealed").status is RunStatus.COMPLETED
+
+
+@pytest.fixture
+def fail_run_update_at_commit(storage: PostgresStorage) -> Iterator[None]:
+    """Make every UPDATE of the runs row fail when the transaction commits.
+
+    A ``CONSTRAINT TRIGGER`` marked DEFERRABLE fires inside the COMMIT, not at
+    the UPDATE statement, so the append reaches a real commit-time failure: the
+    row update and the event insert must roll back together. The trigger and
+    its function are drop-in test scaffolding and come down again afterwards.
+    """
+    storage._connection.execute(
+        """
+        CREATE OR REPLACE FUNCTION continuum_fail_closure() RETURNS trigger AS
+        $fn$
+        BEGIN
+            RAISE EXCEPTION 'injected commit-time failure';
+        END;
+        $fn$
+        LANGUAGE plpgsql
+        """
+    )
+    storage._connection.execute(
+        """
+        CREATE CONSTRAINT TRIGGER continuum_fail_closure_trigger
+        AFTER UPDATE ON runs
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION continuum_fail_closure()
+        """
+    )
+    yield
+    storage._connection.execute("DROP TRIGGER IF EXISTS continuum_fail_closure_trigger ON runs")
+    storage._connection.execute("DROP FUNCTION IF EXISTS continuum_fail_closure()")
+
+
+def test_a_close_that_fails_to_commit_keeps_the_resume_banner(
+    storage: PostgresStorage,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fail_run_update_at_commit: None,
+) -> None:
+    # As on SQLite: the pointer unlinked before the COMMIT would vanish even
+    # when the close itself rolled back. The clear follows the commit, so a
+    # failed close leaves the still-active run's banner alone.
+    monkeypatch.chdir(tmp_path)
+    pointer = tmp_path / ".continuum" / "resume.json"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(json.dumps({"run_id": "pg_banner"}), encoding="utf-8")
+
+    make_run(storage, "pg_banner", "commit fails")
+    storage.append_event("pg_banner", EventType.RUN_STARTED, {"goal": "commit fails"})
+
+    with pytest.raises(Exception, match="injected commit-time failure"):
+        storage.append_event("pg_banner", EventType.RUN_COMPLETED, {"closed_by": "agent"})
+
+    assert json.loads(pointer.read_text(encoding="utf-8"))["run_id"] == "pg_banner"
+    # The commit rolled back, so the run it was closing is still open. The
+    # database is shared, so assert on this run rather than get_active_run.
+    assert storage.get_run("pg_banner").status is RunStatus.STARTED
+
+
+def test_a_sealed_close_that_fails_to_commit_keeps_the_resume_banner(
+    storage: PostgresStorage,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fail_run_update_at_commit: None,
+) -> None:
+    # The import/export and replay entry point holds the same invariant on
+    # Postgres: a closed log whose commit fails leaves the pointer intact.
+    monkeypatch.chdir(tmp_path)
+    pointer = tmp_path / ".continuum" / "resume.json"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(json.dumps({"run_id": "pg_sealed_banner"}), encoding="utf-8")
+
+    make_run(storage, "pg_sealed_banner", "commit fails")
+    before = storage.append_event(
+        "pg_sealed_banner", EventType.RUN_STARTED, {"goal": "commit fails"}
+    )
+
+    from continuum.events import Event
+
+    sealed = Event(
+        run_id="pg_sealed_banner",
+        sequence=before.sequence + 1,
+        type=EventType.RUN_COMPLETED,
+        payload={"closed_by": "replay"},
+        prev_hash=before.hash,
+    ).sealed()
+
+    with pytest.raises(Exception, match="injected commit-time failure"):
+        storage.append_sealed(sealed)
+
+    assert json.loads(pointer.read_text(encoding="utf-8"))["run_id"] == "pg_sealed_banner"
+    assert storage.get_run("pg_sealed_banner").status is RunStatus.STARTED
 
 
 def test_fork_lineage_survives_the_round_trip(storage: PostgresStorage) -> None:

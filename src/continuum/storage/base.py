@@ -466,6 +466,14 @@ class Storage(ABC):
         ``expected_sequence`` opts into optimistic concurrency: if the run has
         already advanced past it, ``ConcurrentWriteError`` is raised instead of
         appending.
+
+        Appending ``EventType.RUN_COMPLETED`` also finalizes the run: the row
+        is flipped to ``COMPLETED``, stamped with the event's own timestamp,
+        and, once the append has committed, that run's resume pointer is
+        cleared. The log is the source of truth, so recording the completion is
+        the run finishing -- an implementation must not leave the row active
+        afterwards, and must not clear the pointer before the commit, so a
+        failed close cannot erase the banner of the still-active run.
         """
 
     @abstractmethod
@@ -557,4 +565,11 @@ class Storage(ABC):
 
     @abstractmethod
     def append_sealed(self, event: Event) -> Event:
-        """Append an already-sealed event, verifying it continues the chain."""
+        """Append an already-sealed event, verifying it continues the chain.
+
+        Sealed or live, a log that holds ``EventType.RUN_COMPLETED`` describes
+        a finished run, so the append finalizes it exactly as ``append_event``
+        does: the row is flipped to ``COMPLETED`` and, once the append has
+        committed, that run's resume pointer is cleared. A log copied in via
+        import/export or replay cannot leave a completed run active.
+        """
