@@ -67,6 +67,7 @@ one per `@mcp.tool`-decorated function in `server.py`.
 | `continuum_record_summary` | mutating | `server.py:821` |
 | `continuum_record_plan` | mutating | `server.py:886` |
 | `continuum_confirm` | mutating | `server.py:1168` |
+| `continuum_complete_run` | mutating | `server.py:1315` |
 | `continuum_intercept_action` | mutating | `server.py:1238` |
 | `continuum_complete_action` | mutating | `server.py:1446` |
 | `continuum_fail_action` | mutating | `server.py:1479` |

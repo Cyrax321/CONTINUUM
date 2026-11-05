@@ -244,12 +244,13 @@ line (default `./continuum.db`).
 
 `CONTINUUM_MCP_SLIM`
 : Set to `1` to ship a read-only server. The tool table above lists fourteen
-  tools -- ten mutating, three read-only -- and slim removes the ten mutating
-  ones, leaving `continuum_resume`, `continuum_validate` and
-  `continuum_list_actions`.The variable is checked inside `build_server`, so every caller path that
-constructs a server honours it, not just the CLI entry point. It is off by
-default and is not a security boundary on its own: it shrinks what a caller can
-ask for, but the allowlist above is still what decides who may ask.
+  tools -- eleven mutating, three read-only -- and slim removes the eleven
+  mutating ones, leaving `continuum_resume`, `continuum_validate` and
+  `continuum_list_actions`. The variable is checked inside `build_server`, so
+  every caller path that constructs a server honours it, not just the CLI
+  entry point. It is off by default and is not a security boundary on its own:
+  it shrinks what a caller can ask for, but the allowlist above is still what
+  decides who may ask.
 
 ## build_server
 

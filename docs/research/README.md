@@ -41,6 +41,6 @@ Guides that show the shipped mechanism in use are in
 ## Cost
 
 - [Reduce per session token floor](token_floor.md) - why a short resume check pays for the
-  system prompt and all thirteen MCP tool schemas.
+  system prompt and all fourteen MCP tool schemas.
 - [Durable lossless task context](task_context.md) - why a free-text goal plus counters is
   lossy when a resumed session has to re-explore.

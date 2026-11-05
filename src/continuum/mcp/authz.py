@@ -49,8 +49,8 @@ project chooses. ``continuum mcp install --host cursor`` bakes
 ``CONTINUUM_MCP_MUTATING_CLIENTS=cursor``, and a live probe found the same
 host presenting ``cursor``, ``cursor-vscode`` or ``visual-studio-code``
 depending on the build. On an exact string match every one of those but the
-first connected successfully with 3 of the 13 tools and said nothing, so the
-loss surfaced at the first write the agent attempted.
+first connected successfully with 3 of the then-thirteen tools and said
+nothing, so the loss surfaced at the first write the agent attempted.
 
 Three rules close that without turning the allowlist into a shape an attacker
 can walk through:
