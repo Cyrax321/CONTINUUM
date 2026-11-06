@@ -77,6 +77,43 @@ def test_snapshot_file_without_digest_keys_by_content(tmp_path: Path, monkeypatc
     assert dst == snapshot_dir / hashlib.sha256(b"some content").hexdigest()
 
 
+def test_snapshot_file_returns_none_when_the_source_cannot_be_digested(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    # A source whose digest cannot be computed (it vanished, or the read fails)
+    # has no content address at all, so nothing is written and None comes back
+    # rather than a snapshot keyed under an empty digest.
+    snapshot_dir = tmp_path / "snapshots"
+    monkeypatch.setattr(file_snapshot, "_SNAPSHOT_DIR", snapshot_dir)
+    source = tmp_path / "f.txt"
+    source.write_bytes(b"unreadable")
+
+    monkeypatch.setattr(file_snapshot, "file_digest", lambda _path: None)
+
+    assert file_snapshot.snapshot_file(source) is None
+    assert not snapshot_dir.exists()
+
+
+def test_snapshot_file_returns_none_when_the_store_is_unwritable(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    # A file standing in for the snapshot directory's parent turns the mkdir
+    # into a real ENOTDIR OSError rather than a patched one, which is the same
+    # arm a read-only store or a permissions failure takes: the copy is refused
+    # with None instead of raising out to the caller.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    snapshot_dir = blocker / "snapshots"
+    monkeypatch.setattr(file_snapshot, "_SNAPSHOT_DIR", snapshot_dir)
+    source = tmp_path / "f.txt"
+    source.write_bytes(b"content")
+    digest = hashlib.sha256(b"content").hexdigest()
+
+    assert file_snapshot.snapshot_file(source, sha256=digest) is None
+    assert not snapshot_dir.exists()
+    assert source.read_bytes() == b"content"
+
+
 def test_restore_file_returns_false_for_absent_snapshot(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setattr(file_snapshot, "_SNAPSHOT_DIR", tmp_path / "snapshots")
     digest = hashlib.sha256(b"never snapshotted").hexdigest()

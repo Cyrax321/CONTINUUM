@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from continuum.environment import (
     UNKNOWN_VERSION,
     CallableProvider,
     FileProvider,
+    GitProvider,
     ResourceChange,
     StaticProvider,
     ValueProvider,
@@ -13,7 +19,12 @@ from continuum.environment import (
     diff_environments,
     process_fingerprint,
 )
+from continuum.environment import snapshot as snapshot_module
 from continuum.models import EnvResource, StateStatus
+
+# The git provider can only be exercised where a git executable exists; the
+# failure arms that replace subprocess.run need no git at all.
+requires_git = pytest.mark.skipif(shutil.which("git") is None, reason="no git executable")
 
 # --- capture --------------------------------------------------------------- #
 
@@ -216,6 +227,89 @@ def test_a_probe_can_return_a_value_or_a_resource() -> None:
 def test_the_process_fingerprint_is_portable() -> None:
     fingerprint = process_fingerprint()
     assert {"python", "platform", "cwd"} <= set(fingerprint)
+
+
+# --- git provider ---------------------------------------------------------- #
+
+
+def _git(repo: Path, *args: str) -> str:
+    """Run git inside ``repo`` and return stdout. A git error fails the test."""
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+
+@requires_git
+def test_git_provider_captures_the_current_commit(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(
+        repo,
+        "-c",
+        "user.email=tests@continuum.dev",
+        "-c",
+        "user.name=continuum tests",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "initial commit",
+    )
+    head = _git(repo, "rev-parse", "HEAD").strip()
+
+    resource = GitProvider(repo).capture()[f"git:{repo}"]
+
+    assert resource.kind == "git"
+    assert resource.version == head[:16]
+    assert len(resource.version) == 16
+    assert resource.metadata["commit"] == head
+
+
+@requires_git
+def test_git_provider_becomes_unknown_outside_a_repository(tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    resource = GitProvider(plain).capture()[f"git:{plain}"]
+
+    assert resource.kind == "git"
+    assert resource.version == UNKNOWN_VERSION
+    assert "not a git repository" in resource.metadata["error"]
+
+
+def test_git_provider_becomes_unknown_when_git_times_out(monkeypatch: Any) -> None:
+    def hang(*args: Any, **kwargs: Any) -> None:
+        raise subprocess.TimeoutExpired(cmd=["git", "rev-parse", "HEAD"], timeout=5)
+
+    # Patched on the subprocess module snapshot.py looks up, and only for the
+    # duration of this test: monkeypatch restores run, and nothing else in the
+    # test body spawns a process.
+    monkeypatch.setattr(snapshot_module.subprocess, "run", hang)
+
+    repo = Path("not-a-repo")
+    resource = GitProvider(repo).capture()[f"git:{repo}"]
+
+    assert resource.kind == "git"
+    assert resource.version == UNKNOWN_VERSION
+    assert "timed out" in resource.metadata["error"]
+
+
+def test_git_provider_becomes_unknown_when_git_cannot_be_spawned(monkeypatch: Any) -> None:
+    def missing(*args: Any, **kwargs: Any) -> None:
+        raise OSError("git: No such file or directory")
+
+    monkeypatch.setattr(snapshot_module.subprocess, "run", missing)
+
+    repo = Path("not-a-repo")
+    resource = GitProvider(repo).capture()[f"git:{repo}"]
+
+    assert resource.kind == "git"
+    assert resource.version == UNKNOWN_VERSION
+    assert resource.metadata["error"] == "git: No such file or directory"
 
 
 # --- diff ------------------------------------------------------------------ #
