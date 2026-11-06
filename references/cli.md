@@ -33,6 +33,7 @@ continuum conformance --url <endpoint>          # wire protocol conformance runn
 continuum precompact <run_id>                    # checkpoint before context compaction. mutates
 continuum rewind <run_id> --to <checkpoint>      # revert workspace and projection [--force] [--dry-run]
 continuum observe                                # record one tool completion (hook). mutates
+continuum import-risks <run_id> [--file <stream>] # ingest a newline-delimited risk-signal stream, fail-open. mutates
 continuum notify-test [run_id]                  # probe webhook wiring without a blockage
 continuum gate                                   # pre-tool-use verdict: allow or deny
 continuum briefing                               # session-start context injection
@@ -48,12 +49,12 @@ continuum mcp install [--scope project]          # register the MCP server, reso
 continuum mcp remove                             # remove the registration install wrote. mutates
 continuum mcp doctor --timeout 15                 # diagnose host connection failures. read-only
 continuum health <run_id>                        # advisory prefix-trust health check
-continuum policy-review [run_id]                 # advisory recovery-history report by action type
 continuum impact <run_id> --evidence <id>        # downstream impact of an evidence item
 continuum provenance <run_id>                    # show provenance DAG
 continuum evidence-chain <run_id>                # correlate actions with tool observations
       [--action-key <k>] [--correlation-id <id>] [--unmatched-only]
 continuum report --trajectory <run_id>           # claims, uncertain side effects, scar rate, stall sites
+continuum policy-review [run_id]                 # advisory report over recovery history. read-only
 continuum record-plan <run_id> --plan-id <id>    # record structured plan upsert. mutates
 continuum export-evidence <run_id>               # export evidence as JSON lines
 continuum forget --tenant <id> [--dry-run]       # tombstone memory records for a tenant. mutates
@@ -76,7 +77,7 @@ Most commands accept global `--json` **before** the subcommand (e.g. `continuum 
 `gate`, `briefing`, `health`, `impact`, `provenance`, `export-evidence`) never write, so
 they are safe against a live database while an agent is mid-run. Mutating commands (`start`,
 `checkpoint`, `confirm`, `complete`, `fork`, `merge`, `restore`, `compact`, `precompact`, `rewind`,
-`observe`, `reconcile`, `gateway`, `record-plan`, `forget`) say so in their help.
+`observe`, `import-risks`, `reconcile`, `gateway`, `record-plan`, `forget`) say so in their help.
 
 `resume` and `watch` are not in that list: they append to the event log when the run is
 already parked, never while an agent is mid-run and healthy. `resume` records its webhook

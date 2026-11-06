@@ -49,6 +49,7 @@ from continuum.models import (
 )
 from continuum.recovery.contract import render_contract
 from continuum.recovery.guidance import human_steps_for, self_report_guidance
+from continuum.recovery.risk import DEFAULT_RISK_BATCH_LIMIT, ingest_risk_stream
 from continuum.state.semantic import project
 from continuum.storage import RunNotFound, Storage, open_storage
 
@@ -74,6 +75,7 @@ MUTATING = {
     "fail_action",
     "reconcile_action",
     "compensate_action",
+    "ingest_risks",
 }
 
 #: HTTP requests longer than this are refused with 413 before the body is read.
@@ -91,6 +93,15 @@ SIDECAR_DRAIN_LIMIT_BYTES = 256 * 1024 * 1024
 #: Read granularity while draining, and the cap on one chunk-framing line.
 _DRAIN_READ_BYTES = 1024 * 1024
 _CHUNK_LINE_LIMIT = 65536
+
+#: How long one request body may stall before the read is abandoned. A caller
+#: that declared a body it stopped writing -- a monitoring feed whose process
+#: died mid-batch, a socket that lost its route -- would otherwise hold its
+#: handler thread, and the write transaction that thread opened, for as long as
+#: the socket stays half-open. That is the wedge a dead feed becomes against the
+#: durability plane, so the read is bounded, answered, and closed rather than
+#: waited on (issue #1425).
+SIDECAR_BODY_TIMEOUT_SECONDS = 30.0
 
 
 class MalformedRunLog(RuntimeError):
@@ -660,7 +671,42 @@ class SidecarHTTP:
 
                 An absent or zero-length body stays the empty JSON object, so a
                 method that needs no params is still callable with no body.
+
+                The read itself is bounded: a caller that declared a body it
+                stopped writing would hold this handler thread, and the write
+                transaction that thread opened, for as long as the socket stays
+                half-open. A monitoring feed that dies mid-batch is the expected
+                caller here, so the timeout is the difference between a dropped
+                connection and a wedged one (issue #1425).
                 """
+                old_timeout = self.connection.gettimeout()
+                self.connection.settimeout(SIDECAR_BODY_TIMEOUT_SECONDS)
+                try:
+                    return self._read_body_bounded()
+                except TimeoutError:
+                    # The client declared bytes it stopped sending. The rest may
+                    # still arrive, so where this body ends is unknown and the
+                    # socket cannot be kept alive for the next request.
+                    self.close_connection = True
+                    self._json(
+                        408,
+                        {"error": f"request body timed out after {SIDECAR_BODY_TIMEOUT_SECONDS}s"},
+                    )
+                    return None
+                except OSError:
+                    # The peer is gone: a feed that died mid-body. There is
+                    # nothing to deliver and nowhere to deliver it, so the
+                    # handler ends here instead of propagating a broken-pipe
+                    # traceback through the server. The thread is freed either
+                    # way; this is what keeps a dead feed off the durability
+                    # plane.
+                    self.close_connection = True
+                    return None
+                finally:
+                    self.connection.settimeout(old_timeout)
+
+            def _read_body_bounded(self) -> bytes | None:
+                """Read the body under the socket timeout :meth:`_read_body` sets."""
                 header = self.headers.get("Transfer-Encoding") or ""
                 encodings = {v.strip().lower() for v in header.split(",")}
                 if "chunked" in encodings:
@@ -725,7 +771,17 @@ class SidecarHTTP:
                         {"error": f"request body exceeds {MAX_SIDECAR_BODY_BYTES} bytes"},
                     )
                     return None
-                return self.rfile.read(length) if length else b"{}"
+                if not length:
+                    return b"{}"
+                body = self.rfile.read(length)
+                if len(body) != length:
+                    self.close_connection = True
+                    self._json(
+                        408,
+                        {"error": f"request body incomplete: {len(body)} of {length} bytes"},
+                    )
+                    return None
+                return body
 
             def do_POST(self) -> None:
                 """Route one POST body through the sidecar dispatch."""
@@ -735,6 +791,16 @@ class SidecarHTTP:
                     return  # the refusal is already on the wire
                 try:
                     params = _request_object(json.loads(raw))
+                except UnicodeDecodeError as exc:
+                    # A body that is not UTF-8 is not JSON, and decoding it is
+                    # what raises rather than the parser. Left alone it escapes
+                    # the handler and closes the connection with no answer at
+                    # all, which a monitoring feed reads as a sidecar that died
+                    # -- and it is the expected shape of a feed whose encoding
+                    # broke, so it is answered like any other unreadable body
+                    # (issue #1425).
+                    self._json(400, {"error": f"invalid JSON body: {exc}"})
+                    return
                 except json.JSONDecodeError as exc:
                     self._json(400, {"error": f"invalid JSON body: {exc}"})
                     return
@@ -1221,6 +1287,51 @@ def _h_list_actions(server: SidecarServer, params: dict[str, Any]) -> dict[str, 
     }
 
 
+def _h_ingest_risks(server: SidecarServer, params: dict[str, Any]) -> dict[str, Any]:
+    """Ingest a batch of external risk-signal records, fail-open (issue #1425).
+
+    ``risks`` is a list of records -- objects the caller already parsed, raw
+    JSONL lines, or raw bytes -- and ``stream`` is the same content as one
+    newline-delimited string, which is what a feed speaking the wire directly
+    sends. Either may be omitted, and both may appear together. ``limit``
+    overrides the batch cap.
+
+    Every record lands or is dropped on its own, so the answer is always the
+    accounting and never an error: a torn line in the middle of a batch costs
+    exactly that line, and the well-formed one after it still lands. Only the
+    addressing of the batch can be refused, because a risk stream for a run that
+    does not exist has nowhere to go -- recording it would leave an event log
+    with no RUN_STARTED, which every projecting surface for that run would then
+    refuse -- and a caller error is not a stream fault.
+    """
+    run_id = _require(params, "run_id")
+    try:
+        server.storage.get_run(run_id)
+    except RunNotFound as exc:
+        raise BadParams(
+            f"unknown run {run_id!r}; a risk stream cannot create one. "
+            f"Start the run with record_progress first."
+        ) from exc
+    records: list[Any] = []
+    risks = params.get("risks")
+    if risks is not None:
+        if not isinstance(risks, list):
+            raise BadParams("'risks' must be a list of risk records")
+        records.extend(risks)
+    stream = params.get("stream")
+    if stream is not None:
+        if not isinstance(stream, str):
+            raise BadParams("'stream' must be a newline-delimited JSON string")
+        records.extend([line.rstrip("\r") for line in stream.split("\n")])
+    limit = params.get("limit")
+    if limit is None:
+        limit = DEFAULT_RISK_BATCH_LIMIT
+    elif not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+        # bool is an int, and ``True`` as a limit would silently mean 1.
+        raise BadParams("'limit' must be a positive integer")
+    return ingest_risk_stream(server.storage, run_id, records, limit=limit)
+
+
 _HANDLERS: dict[str, Any] = {
     "record_progress": _h_record_progress,
     "checkpoint": _h_checkpoint,
@@ -1232,6 +1343,7 @@ _HANDLERS: dict[str, Any] = {
     "fail_action": _h_fail_action,
     "reconcile_action": _h_reconcile_action,
     "compensate_action": _h_compensate_action,
+    "ingest_risks": _h_ingest_risks,
     "list_actions": _h_list_actions,
 }
 
@@ -1255,5 +1367,6 @@ __all__ = [
     "MUTATING",
     "MAX_SIDECAR_BODY_BYTES",
     "SIDECAR_DRAIN_LIMIT_BYTES",
+    "SIDECAR_BODY_TIMEOUT_SECONDS",
     "list_methods",
 ]

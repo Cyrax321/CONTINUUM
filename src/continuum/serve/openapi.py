@@ -372,6 +372,37 @@ OPENAPI_SPEC: dict[str, Any] = {
                 },
             }
         },
+        "/ingest_risks": {
+            "post": {
+                "summary": "Ingest external risk-signal stream",
+                "description": (
+                    "Ingest a batch of external risk signals fail-open. Corrupt or unparseable "
+                    "records are counted and dropped without failing the active run."
+                ),
+                "operationId": "ingestRisks",
+                "security": [{"BearerAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/IngestRisksRequest"}
+                        }
+                    },
+                },
+                "responses": {
+                    "200": {
+                        "description": "Batch ingestion accounting and failure samples",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/IngestRisksResponse"}
+                            }
+                        },
+                    },
+                    "400": {"$ref": "#/components/responses/400BadRequest"},
+                    "403": {"$ref": "#/components/responses/403Forbidden"},
+                },
+            }
+        },
         "/healthz": {
             "get": {
                 "summary": "Health probe",
@@ -938,6 +969,61 @@ OPENAPI_SPEC: dict[str, Any] = {
                     "unresolved": {"type": "integer"},
                 },
                 "required": ["run_id", "actions", "unresolved"],
+            },
+            "IngestRisksRequest": {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string"},
+                    "risks": {
+                        "type": "array",
+                        "items": {},
+                        "description": "List of risk objects, JSON strings, or byte payloads.",
+                    },
+                    "stream": {
+                        "type": "string",
+                        "description": "Newline-delimited JSON risk stream string.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of records to ingest from this batch.",
+                    },
+                },
+                "required": ["run_id"],
+            },
+            "IngestRisksResponse": {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string"},
+                    "accepted": {"type": "integer"},
+                    "dropped": {"type": "integer"},
+                    "skipped": {"type": "integer"},
+                    "truncated": {"type": "boolean"},
+                    "limit": {"type": ["integer", "null"]},
+                    "last_sequence": {"type": ["integer", "null"]},
+                    "dropped_by_reason": {"type": "object"},
+                    "dropped_samples": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "reason": {"type": "string"},
+                                "message": {"type": "string"},
+                            },
+                            "required": ["reason", "message"],
+                        },
+                    },
+                },
+                "required": [
+                    "run_id",
+                    "accepted",
+                    "dropped",
+                    "skipped",
+                    "truncated",
+                    "limit",
+                    "last_sequence",
+                    "dropped_by_reason",
+                    "dropped_samples",
+                ],
             },
         },
     },
