@@ -15,6 +15,7 @@ from continuum.models import (
     ModelSpecificState,
     ModelState,
     Origin,
+    PlanStep,
     Progress,
     Provenance,
     SemanticState,
@@ -646,3 +647,132 @@ def test_scoped_revalidation_spares_an_out_of_scope_self_certified_finding() -> 
     )
     assert outcome.state.findings[0].status is StateStatus.VALID
     assert outcome.safe
+
+
+# --- plan component validation (issue #1973) ------------------------------- #
+
+
+def test_plan_validation_empty_step_id() -> None:
+    """Empty or blank plan step_ids must be flagged as CONFLICTED (#1973)."""
+    for empty_id in ("", "   "):
+        outcome = validate_state(state(plan=[PlanStep(step_id=empty_id, description="step empty")]))
+        plan_entries = [
+            e
+            for e in outcome.report.statuses
+            if e.component is Component.PLAN and e.status is StateStatus.CONFLICTED
+        ]
+        assert any(e.detail == "plan unit id must be non-empty" for e in plan_entries)
+
+
+def test_plan_validation_duplicate_step_id() -> None:
+    """Duplicate step_ids in a plan must be flagged as CONFLICTED (#1973)."""
+    outcome = validate_state(
+        state(
+            plan=[
+                PlanStep(step_id="u1", description="step 1"),
+                PlanStep(step_id="u1", description="step 1 duplicate"),
+            ]
+        )
+    )
+    plan_entries = [
+        e
+        for e in outcome.report.statuses
+        if e.component is Component.PLAN and e.status is StateStatus.CONFLICTED
+    ]
+    assert any(e.detail == "duplicate plan unit id 'u1'" for e in plan_entries)
+
+
+def test_plan_validation_dangling_depends_on() -> None:
+    """A step depending on an absent step_id must be flagged as CONFLICTED (#1973)."""
+    outcome = validate_state(
+        state(
+            plan=[
+                PlanStep(step_id="u1", description="step 1", depends_on=["u_missing"]),
+            ]
+        )
+    )
+    plan_entries = [
+        e
+        for e in outcome.report.statuses
+        if e.component is Component.PLAN and e.status is StateStatus.CONFLICTED
+    ]
+    assert any(
+        e.component_id == "u1" and e.detail == "depends_on 'u_missing' not in plan"
+        for e in plan_entries
+    )
+
+
+def test_plan_validation_dependency_cycles() -> None:
+    """Self-dependencies, two-node cycles, and multi-node cycles must be flagged (#1973)."""
+    # 1. Self dependency: u1 -> u1
+    outcome_self = validate_state(
+        state(plan=[PlanStep(step_id="u1", description="step 1", depends_on=["u1"])])
+    )
+    entries_self = [
+        e
+        for e in outcome_self.report.statuses
+        if e.component is Component.PLAN and e.status is StateStatus.CONFLICTED
+    ]
+    assert any("cycle detected: u1 -> u1" in e.detail for e in entries_self)
+
+    # 2. Two-node cycle: u1 -> u2 -> u1
+    outcome_two = validate_state(
+        state(
+            plan=[
+                PlanStep(step_id="u1", description="step 1", depends_on=["u2"]),
+                PlanStep(step_id="u2", description="step 2", depends_on=["u1"]),
+            ]
+        )
+    )
+    entries_two = [
+        e
+        for e in outcome_two.report.statuses
+        if e.component is Component.PLAN and e.status is StateStatus.CONFLICTED
+    ]
+    assert any("cycle detected:" in e.detail for e in entries_two)
+
+    # 3. Three-node cycle: u1 -> u2 -> u3 -> u1
+    outcome_three = validate_state(
+        state(
+            plan=[
+                PlanStep(step_id="u1", description="step 1", depends_on=["u2"]),
+                PlanStep(step_id="u2", description="step 2", depends_on=["u3"]),
+                PlanStep(step_id="u3", description="step 3", depends_on=["u1"]),
+            ]
+        )
+    )
+    entries_three = [
+        e
+        for e in outcome_three.report.statuses
+        if e.component is Component.PLAN and e.status is StateStatus.CONFLICTED
+    ]
+    assert any("cycle detected:" in e.detail for e in entries_three)
+
+
+def test_plan_validation_well_formed_plan_has_no_conflicts() -> None:
+    """A valid plan with unique ids and satisfiable dependencies produces no conflicts (#1973)."""
+    outcome = validate_state(
+        state(
+            plan=[
+                PlanStep(
+                    step_id="u1",
+                    description="step 1",
+                    provenance=Provenance(origin=Origin.DETERMINISTIC),
+                ),
+                PlanStep(
+                    step_id="u2",
+                    description="step 2",
+                    depends_on=["u1"],
+                    provenance=Provenance(origin=Origin.DETERMINISTIC),
+                ),
+            ]
+        ),
+        checkpoint_environment=capture("run_4821", StaticProvider()),
+        current_environment=capture("run_4821", StaticProvider()),
+    )
+    plan_conflicts = [
+        e
+        for e in outcome.report.statuses
+        if e.component is Component.PLAN and e.status is StateStatus.CONFLICTED
+    ]
+    assert not plan_conflicts
