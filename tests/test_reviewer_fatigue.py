@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from continuum.actions import ActionLedger
+from continuum.actions import ActionLedger, LedgerError
 from continuum.events import Event, EventType
 from continuum.models import ActionStatus, Run
 from continuum.recovery.fatigue import (
@@ -380,7 +380,9 @@ def test_action_ledger_reconcile_and_reconcile_batch(storage: SQLiteStorage) -> 
     assert open_parked_count(storage, "run_1") == 3
 
     # Reconcile single action
-    ledger.reconcile(outcomes[0].action.action_id, occurred=True, note="cleared 1")
+    ledger.reconcile(
+        outcomes[0].action.action_id, occurred=True, note="cleared 1", reviewer="operator"
+    )
     events = storage.read_all_events("run_1")
     batches = [e for e in events if e.type is EventType.REVIEW_BATCH_APPROVED]
     assert len(batches) == 1
@@ -537,7 +539,7 @@ def test_storage_failure_during_flag_and_reconcile_does_not_strand_action(
         raise RuntimeError("batch write failed")
 
     monkeypatch.setattr("continuum.recovery.fatigue.record_batch_approval", mock_batch)
-    reconciled = ledger.reconcile(outcome.action.action_id, occurred=True)
+    reconciled = ledger.reconcile(outcome.action.action_id, occurred=True, reviewer="operator")
     assert reconciled.status == ActionStatus.COMPLETED
 
 
@@ -608,3 +610,52 @@ def test_fatigue_edge_branches_and_coverage(
     dwell = open_dwell_seconds(mock_st, "run_1")
     assert dwell is not None
     assert dwell >= 0.0
+
+
+def test_action_ledger_reconcile_without_reviewer_omits_telemetry(storage: SQLiteStorage) -> None:
+    """Automated settlements (reviewer=None) do not emit review approval telemetry."""
+    ledger = ActionLedger(storage, "run_1")
+    o = ledger.claim("task_auto", {}, key="k_auto")
+    ledger.flag_for_review(o.action.action_id, reason="needs review")
+    assert open_parked_count(storage, "run_1") == 1
+
+    # Automated reconciliation without reviewer
+    ledger.reconcile(o.action.action_id, occurred=True, note="automated probe")
+    assert open_parked_count(storage, "run_1") == 0
+
+    events = storage.read_all_events("run_1")
+    batches = [e for e in events if e.type is EventType.REVIEW_BATCH_APPROVED]
+    assert len(batches) == 0
+
+
+def test_action_ledger_reconcile_batch_mid_batch_failure_preserves_telemetry(
+    storage: SQLiteStorage,
+) -> None:
+    """If reconcile_batch fails mid-batch, telemetry for earlier settled items is preserved."""
+    ledger = ActionLedger(storage, "run_1")
+    o1 = ledger.claim("task_batch_1", {}, key="kb_1")
+    o2 = ledger.claim("task_batch_2", {}, key="kb_2")
+    ledger.flag_for_review(o1.action.action_id, reason="needs review 1")
+    ledger.flag_for_review(o2.action.action_id, reason="needs review 2")
+    assert open_parked_count(storage, "run_1") == 2
+
+    with pytest.raises(LedgerError):
+        ledger.reconcile_batch(
+            [
+                (o1.action.action_id, True),
+                ("non_existent_key_raises_error", True),
+                (o2.action.action_id, True),
+            ],
+            reviewer="lead-reviewer",
+            complexity="high",
+        )
+
+    # First item was settled and recorded approval telemetry
+    assert open_parked_count(storage, "run_1") == 1
+    events = storage.read_all_events("run_1")
+    batches = [e for e in events if e.type is EventType.REVIEW_BATCH_APPROVED]
+    assert len(batches) == 1
+    assert batches[0].payload["item_count"] == 1
+    assert batches[0].payload["action_keys"] == [o1.key]
+    assert batches[0].payload["reviewer"] == "lead-reviewer"
+    assert batches[0].payload["dwell_seconds"] is not None

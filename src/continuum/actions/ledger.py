@@ -46,7 +46,7 @@ import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, timedelta
 from functools import wraps
 from heapq import merge
 from pathlib import Path
@@ -1827,7 +1827,7 @@ class ActionLedger:
         note: str = "",
         consumed_inputs: ConsumedInputs | Mapping[str, Any] | None = None,
         correlation_id: str | None = None,
-        reviewer: str = "operator",
+        reviewer: str | None = None,
         complexity: str = "high",
         record_telemetry: bool = True,
     ) -> Action:
@@ -1903,7 +1903,11 @@ class ActionLedger:
             )
         now_ts = utcnow()
         review_dwell: float | None = None
-        if existing.status == ActionStatus.REQUIRES_REVIEW and record_telemetry:
+        if (
+            existing.status == ActionStatus.REQUIRES_REVIEW
+            and record_telemetry
+            and reviewer is not None
+        ):
             try:
                 from continuum.recovery.fatigue import open_dwell_seconds
 
@@ -1945,9 +1949,15 @@ class ActionLedger:
                 self._budget_consume_settlement(existing.action_type, auth_settle)
 
         # Telemetry for human review settlement (issue #1411): if this action
-        # was parked in REQUIRES_REVIEW, record the settlement so dwell time and
-        # fatigue bounds are tracked where the human actually acts.
-        if existing.status == ActionStatus.REQUIRES_REVIEW and record_telemetry:
+        # was parked in REQUIRES_REVIEW and settled by a human reviewer, record
+        # the settlement so dwell time and fatigue bounds are tracked where the
+        # human actually acts. Automated agent settlements (reviewer=None) omit
+        # this audit event.
+        if (
+            existing.status == ActionStatus.REQUIRES_REVIEW
+            and record_telemetry
+            and reviewer is not None
+        ):
             try:
                 from continuum.recovery.fatigue import record_batch_approval
 
@@ -1955,7 +1965,7 @@ class ActionLedger:
                     self.storage,
                     self.run_id,
                     item_count=1,
-                    reviewer=reviewer or "operator",
+                    reviewer=reviewer,
                     complexity=complexity,
                     source=self._source,
                     action_keys=[key],
@@ -1976,7 +1986,7 @@ class ActionLedger:
         self,
         items: Sequence[tuple[str, bool] | Mapping[str, Any]],
         *,
-        reviewer: str = "operator",
+        reviewer: str | None = None,
         complexity: str = "high",
         note: str = "",
     ) -> list[Action]:
@@ -1986,8 +1996,9 @@ class ActionLedger:
         ``key``, ``occurred``, and optional ``external_id``, ``result``,
         ``consumed_inputs``, ``note``.
 
-        When settled items were in ``REQUIRES_REVIEW``, records a batch approval
-        telemetry event with the true count of cleared review items.
+        When settled items were in ``REQUIRES_REVIEW`` and a human ``reviewer``
+        is provided, records a batch approval telemetry event with the true
+        count of cleared review items.
         """
         now_ts = utcnow()
         review_keys: list[str] = []
@@ -2001,17 +2012,16 @@ class ActionLedger:
                 except Exception:
                     pass
 
-        batch_dwell: float | None = None
-        if review_keys:
+        parked_timestamps: dict[str, Any] = {}
+        if review_keys and reviewer:
             try:
-                from continuum.recovery.fatigue import open_dwell_seconds
+                from continuum.recovery.fatigue import _open_parked_events, _payload
 
-                batch_dwell = open_dwell_seconds(
-                    self.storage,
-                    self.run_id,
-                    action_keys=review_keys,
-                    now=now_ts,
-                )
+                all_events = list(self.storage.read_all_events(self.run_id))
+                for ev in _open_parked_events(all_events):
+                    pk = _payload(ev).get("key")
+                    if pk and pk in review_keys:
+                        parked_timestamps[pk] = ev.timestamp
             except Exception as exc:
                 import logging
 
@@ -2021,59 +2031,77 @@ class ActionLedger:
 
         results: list[Action] = []
         settled_review_keys: list[str] = []
-        for item in items:
-            if isinstance(item, tuple):
-                k, occ = item
-                ext_id = None
-                res = None
-                cons = None
-                n = note
-                cid = None
-            else:
-                k = item["key"]
-                occ = bool(item.get("occurred", True))
-                ext_id = item.get("external_id")
-                res = item.get("result")
-                cons = item.get("consumed_inputs")
-                n = item.get("note", note)
-                cid = item.get("correlation_id")
-            norm_key, existing = self._require(k)
-            was_review = existing.status == ActionStatus.REQUIRES_REVIEW
-            action = self.reconcile(
-                k,
-                occurred=occ,
-                external_id=ext_id,
-                result=res,
-                note=n,
-                consumed_inputs=cons,
-                correlation_id=cid,
-                record_telemetry=False,
-            )
-            results.append(action)
-            if was_review:
-                settled_review_keys.append(norm_key)
-
-        if settled_review_keys:
-            try:
-                from continuum.recovery.fatigue import record_batch_approval
-
-                record_batch_approval(
-                    self.storage,
-                    self.run_id,
-                    item_count=len(settled_review_keys),
-                    reviewer=reviewer or "operator",
-                    complexity=complexity,
-                    source=self._source,
-                    action_keys=settled_review_keys,
-                    dwell_seconds=batch_dwell,
-                    now=now_ts,
+        try:
+            for item in items:
+                if isinstance(item, tuple):
+                    k, occ = item
+                    ext_id = None
+                    res = None
+                    cons = None
+                    n = note
+                    cid = None
+                else:
+                    k = item["key"]
+                    occ = bool(item.get("occurred", True))
+                    ext_id = item.get("external_id")
+                    res = item.get("result")
+                    cons = item.get("consumed_inputs")
+                    n = item.get("note", note)
+                    cid = item.get("correlation_id")
+                norm_key, existing = self._require(k)
+                was_review = existing.status == ActionStatus.REQUIRES_REVIEW
+                action = self.reconcile(
+                    k,
+                    occurred=occ,
+                    external_id=ext_id,
+                    result=res,
+                    note=n,
+                    consumed_inputs=cons,
+                    correlation_id=cid,
+                    reviewer=reviewer,
+                    record_telemetry=False,
                 )
-            except Exception as exc:
-                import logging
+                results.append(action)
+                if was_review:
+                    settled_review_keys.append(norm_key)
+        finally:
+            if settled_review_keys and reviewer:
+                try:
+                    from continuum.recovery.fatigue import record_batch_approval
 
-                logging.getLogger(__name__).warning(
-                    "could not record batch approval telemetry: %s", exc
-                )
+                    settled_dwell: float | None = None
+                    settled_ts = [
+                        parked_timestamps[pk]
+                        for pk in settled_review_keys
+                        if pk in parked_timestamps
+                    ]
+                    if settled_ts:
+                        oldest = min(settled_ts)
+                        if oldest.tzinfo is None:
+                            oldest = oldest.replace(tzinfo=UTC)
+                        now_cmp = now_ts
+                        if now_cmp.tzinfo is None:
+                            now_cmp = now_cmp.replace(tzinfo=UTC)
+                        elapsed = (now_cmp - oldest).total_seconds()
+                        settled_dwell = float(elapsed) if elapsed >= 0 else 0.0
+
+                    record_batch_approval(
+                        self.storage,
+                        self.run_id,
+                        item_count=len(settled_review_keys),
+                        reviewer=reviewer,
+                        complexity=complexity,
+                        source=self._source,
+                        action_keys=settled_review_keys,
+                        dwell_seconds=settled_dwell,
+                        now=now_ts,
+                    )
+                except Exception as exc:
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "could not record batch approval telemetry: %s", exc
+                    )
         return results
 
     @_single_writer
