@@ -140,7 +140,7 @@ def human_steps_for(
             if step.target.startswith("registry"):
                 steps.append(
                     f"repair unreadable constraints registry file (.continuum/constraints.json), "
-                    f"then rerun `continuum assess {run_id}`"
+                    f"then rerun `continuum validate {run_id}`"
                 )
             elif step.target.startswith("pin:") or any(
                 e.component is Component.PIN and e.component_id == step.target for e in statuses
