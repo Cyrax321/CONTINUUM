@@ -390,3 +390,141 @@ def test_relation_endpoint_extraction_lives_on_the_model() -> None:
     # A payload that names no endpoint stays None rather than raising.
     bare = ev.model_copy(update={"payload": {"note": "no endpoints here"}})
     assert Relation.from_event(bare, **common).source_id is None
+
+
+# --- classification and verification edge cases (issue #1989) ------------------ #
+
+
+def test_observation_events_classify_to_the_observation_primitive() -> None:
+    """Observation event types map to ``Observation`` with ``observed_at`` set
+    (#1989): the classifier routes them off the event type, and the primitive
+    records the event timestamp in the field the kind exists to carry."""
+    with SQLiteStorage(":memory:") as store:
+        _make_run(store)
+        store.append_event("run_1", EventType.STATE_VALIDATED, {"checksum": "abc", "ok": True})
+        store.append_event("run_1", EventType.PERCEPTION_OBSERVED, {"note": "env stable"})
+        store.append_event("run_1", EventType.TOOL_COMPLETED, {"tool": "grep", "ok": True})
+        observed_types = {
+            EventType.STATE_VALIDATED,
+            EventType.PERCEPTION_OBSERVED,
+            EventType.TOOL_COMPLETED,
+        }
+        observed = [e for e in store.read_events("run_1") if e.type in observed_types]
+        assert len(observed) == 3
+        primitives = export_evidence(store, "run_1")
+
+    observations = [p for p in primitives if isinstance(p, Observation)]
+    assert {p.event_id for p in observations} == {e.event_id for e in observed}
+    for prim in observations:
+        ev = next(e for e in observed if e.event_id == prim.event_id)
+        assert prim.kind == "observation"
+        assert prim.event_type == ev.type.value
+        assert prim.observed_at == ev.timestamp.isoformat()
+        assert prim.payload == dict(ev.payload)
+        assert stable_hash(prim.signature_inputs) == prim.content_hash
+    # The observation events close the chain, which must still verify.
+    assert verify_export(primitives) is True
+
+
+def test_checkpoint_record_without_a_log_event_is_exported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkpoint record the event stream missed is exported anyway (#1989):
+    ``EvidencePrimitive.for_checkpoint`` builds a record-only primitive whose
+    sequence continues the event chain, so the export still covers every
+    stored object and the chain still verifies."""
+    from continuum.models import Goal, SemanticState, StateCheckpoint
+
+    with SQLiteStorage(":memory:") as store:
+        _make_run(store)
+        orphan = StateCheckpoint(
+            checkpoint_id="cp_orphan",
+            run_id="run_1",
+            version=1,
+            trigger="manual",
+            state=SemanticState(run_id="run_1", goal=Goal(description="g")),
+        ).sealed()
+        assert orphan.integrity_hash is not None
+        # put_checkpoint writes the record without the STATE_CHECKPOINTED event
+        # CheckpointManager would append, which is exactly the gap the
+        # record-only export branch exists for.
+        store.put_checkpoint(orphan)
+
+        # Spy on the constructor so the test proves the record-only path ran
+        # rather than inferring it from the emitted shape alone.
+        calls: list[str] = []
+        original = EvidencePrimitive.for_checkpoint
+
+        def spy(
+            _cls: type[EvidencePrimitive],
+            cp: StateCheckpoint,
+            *,
+            sequence: int,
+            prev_hash: str | None,
+        ) -> EvidencePrimitive:
+            calls.append(cp.checkpoint_id)
+            return original(cp, sequence=sequence, prev_hash=prev_hash)
+
+        monkeypatch.setattr(EvidencePrimitive, "for_checkpoint", classmethod(spy))
+        primitives = export_evidence(store, "run_1")
+
+    assert calls == ["cp_orphan"]
+    exported = [p for p in primitives if isinstance(p, Checkpoint)]
+    assert any(p.checkpoint_id == "cp_orphan" for p in exported)
+    prim = next(p for p in exported if p.checkpoint_id == "cp_orphan")
+    # With no event to name, the checkpoint's own id and the event type it
+    # would have had stand in.
+    assert prim.event_id == "cp_orphan"
+    assert prim.event_type == "STATE_CHECKPOINTED"
+    assert prim.integrity_hash == orphan.integrity_hash
+    assert prim.content_hash == orphan.integrity_hash
+    # The record-only primitive takes the next sequence number, so the stream
+    # stays contiguous and the chain still verifies end to end.
+    assert [p.sequence for p in primitives] == list(range(1, len(primitives) + 1))
+    assert verify_export(primitives) is True
+
+
+def test_verify_export_rejects_a_broken_prev_hash_link() -> None:
+    """A primitive whose ``prev_hash`` disagrees with the preceding primitive's
+    ``content_hash`` fails verification (#1989): the link is the whole point of
+    the chain, and a receiver must see the break rather than a clean stream."""
+    with SQLiteStorage(":memory:") as store:
+        _make_run(store)
+        primitives = export_evidence(store, "run_1")
+    assert verify_export(primitives) is True
+    tampered = [p.model_dump() for p in primitives]
+    tampered[1]["prev_hash"] = "f" * 64
+    assert verify_export(tampered) is False
+
+
+def test_verify_export_rejects_a_recomputed_hash_mismatch() -> None:
+    """When ``stable_hash(signature_inputs)`` disagrees with the recorded
+    ``content_hash`` the stream is tampered (#1989): the recomputation is the
+    receiver's check that the exported hash came from the exported content."""
+    with SQLiteStorage(":memory:") as store:
+        _make_run(store)
+        primitives = export_evidence(store, "run_1")
+    assert verify_export(primitives) is True
+    tampered = [p.model_dump() for p in primitives]
+    tampered[2]["signature_inputs"] = {"tampered": True}
+    assert stable_hash({"tampered": True}) != tampered[2]["content_hash"]
+    assert verify_export(tampered) is False
+    # The same check catches a content_hash that no longer matches the inputs.
+    retitled = [p.model_dump() for p in primitives]
+    retitled[2]["content_hash"] = "0" * 64
+    assert verify_export(retitled) is False
+
+
+def test_verify_export_treats_unhashable_signature_inputs_as_broken() -> None:
+    """A signature input ``stable_hash`` cannot process (a set has no stable
+    order) makes the stream unverifiable, not the verifier (#1989): the
+    recompute is wrapped so a raise becomes a False instead of a crash."""
+    with SQLiteStorage(":memory:") as store:
+        _make_run(store)
+        primitives = export_evidence(store, "run_1")
+    assert verify_export(primitives) is True
+    tampered = [p.model_dump() for p in primitives]
+    tampered[2]["signature_inputs"] = {"unhashable": {1, 2, 3}}
+    with pytest.raises(TypeError):
+        stable_hash(tampered[2]["signature_inputs"])
+    assert verify_export(tampered) is False
