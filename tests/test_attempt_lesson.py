@@ -654,3 +654,64 @@ def test_render_attempt_lesson_empty_attempt_id_with_falsified() -> None:
     }
     id_lines = render_attempt_lesson(id_only)
     assert id_lines == ["attempt attempt_42"]
+
+
+def test_build_attempt_lesson_shrinks_oversized_scars_within_2048_bytes() -> None:
+    """The adaptive shrink loop must trim scar_action_ids to remain within 2048 bytes (#1966)."""
+    from types import SimpleNamespace
+
+    from continuum.models import (
+        Action,
+        Component,
+        ComponentValidationEntry,
+        StateStatus,
+        StateValidationResult,
+    )
+    from continuum.recovery.summary import _lesson_total_bytes
+
+    report = StateValidationResult(
+        run_id="run_1",
+        statuses=[
+            ComponentValidationEntry(
+                component=Component.EXTERNAL_DEPENDENCY,
+                component_id="dep_1",
+                status=StateStatus.STALE,
+                detail="e" * 900,
+            ),
+            ComponentValidationEntry(
+                component=Component.GOAL,
+                component_id=None,
+                status=StateStatus.STALE,
+                detail="a" * 900,
+            ),
+        ],
+        safe_to_resume=False,
+        reason="goal went stale",
+    )
+    decision = SimpleNamespace(
+        run_id="run_1",
+        rationale=("the goal was not achieved",),
+        validation=SimpleNamespace(report=report),
+        restored=None,
+        uncertain_actions=[
+            Action(run_id="run_1", action_type="shell", action_id="s" * 200) for _ in range(16)
+        ],
+    )
+
+    lesson = build_attempt_lesson(decision)
+    total = _lesson_total_bytes(lesson)
+    assert total <= 2048
+
+    # Case without validation / evidence: oversized scars alone must be trimmed.
+    decision_no_val = SimpleNamespace(
+        run_id="run_1",
+        rationale=("the goal was not achieved",),
+        validation=None,
+        restored=None,
+        uncertain_actions=[
+            Action(run_id="run_1", action_type="shell", action_id="s" * 200) for _ in range(16)
+        ],
+    )
+    lesson_no_val = build_attempt_lesson(decision_no_val)
+    total_no_val = _lesson_total_bytes(lesson_no_val)
+    assert total_no_val <= 2048
