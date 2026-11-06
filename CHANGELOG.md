@@ -10,6 +10,20 @@ Test counts: ~4400 collected on a minimal env.
 
 ### Added
 
+- **Coverage for the dashboard's advisory guards, HITL fallbacks, and POST
+  refusals (#1924).**
+  `tests/test_dashboard.py` and `tests/test_dashboard_hitl.py` now drive the
+  advisory panels (`_advisory_trust_html`, `_liveness_html`, `_pins_html`)
+  through projected and stored versions, unfoldable logs, failing reads, and a
+  pin whose marker is missing from the reconstructed context; render the
+  request_human confirm form with and without pending settle rows; tolerate
+  `read_archived_events` and ledger-read failures; exercise GET /runs/ routing
+  (200 and the 404 for unknown runs); cover `serve_dashboard`'s serve-then-close
+  lifecycle; and refuse POSTs with a negative Content-Length, no Content-Length
+  at all, a truncated oversize body, and a body that exceeds the drain limit.
+  The module goes from 49 missed statements to none under these suites. Tests
+  only, no runtime change.
+
 - **Unit coverage for the ledger-anchored authorization id (#1951).**
   `tests/test_idempotency_ledger_resolution.py` drives
   `resolve_authorization_id(..., ledger=...)` with in-memory ledger stand-ins and
