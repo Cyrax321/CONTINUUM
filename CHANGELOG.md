@@ -10,6 +10,17 @@ Test counts: ~4400 collected on a minimal env.
 
 ### Added
 
+- **Coverage for evidence export observation, record-only checkpoint, and
+  verification failure paths (#1989).**
+  `tests/test_interchange_evidence.py` now exports observation event types
+  (`STATE_VALIDATED`, `PERCEPTION_OBSERVED`, `TOOL_COMPLETED`) and asserts the
+  emitted `Observation` primitive carries `observed_at`, exports a checkpoint
+  record stored without its `STATE_CHECKPOINTED` event through
+  `EvidencePrimitive.for_checkpoint` with contiguous sequence numbers, and
+  drives `verify_export` to False on a broken `prev_hash` link, a
+  `content_hash` that disagrees with the recomputed `stable_hash`, and
+  signature inputs `stable_hash` raises on. Tests only, no runtime change.
+
 - **Unit coverage for the ledger-anchored authorization id (#1951).**
   `tests/test_idempotency_ledger_resolution.py` drives
   `resolve_authorization_id(..., ledger=...)` with in-memory ledger stand-ins and
