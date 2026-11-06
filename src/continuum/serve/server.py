@@ -771,7 +771,17 @@ class SidecarHTTP:
                         {"error": f"request body exceeds {MAX_SIDECAR_BODY_BYTES} bytes"},
                     )
                     return None
-                return self.rfile.read(length) if length else b"{}"
+                if not length:
+                    return b"{}"
+                body = self.rfile.read(length)
+                if len(body) != length:
+                    self.close_connection = True
+                    self._json(
+                        408,
+                        {"error": f"request body incomplete: {len(body)} of {length} bytes"},
+                    )
+                    return None
+                return body
 
             def do_POST(self) -> None:
                 """Route one POST body through the sidecar dispatch."""

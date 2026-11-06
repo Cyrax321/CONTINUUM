@@ -102,9 +102,11 @@ Failed requests return an HTTP error status (4xx or 5xx) with an error payload:
 | `400` | Non-object JSON body. | `body must be a JSON object` |
 | `400` | Invalid `Content-Length`. | `invalid Content-Length: <val>` |
 | `400` | Chunked transfer. | `chunked Transfer-Encoding is not supported` |
+| `400` | Non-UTF-8 request body. | `request body is not UTF-8` |
 | `400` | Invalid parameters. | Reason from `BadParams`. |
 | `403` | Missing or invalid auth token. | `expected shared secret (...)` |
 | `404` | Unknown method name. | `<method>` |
+| `408` | Declared body stalled or incomplete. | `request body timed out after <n>s` or incomplete |
 | `413` | Body exceeds 1 MB limit. | `request body exceeds 1048576 bytes` |
 | `413` | Stream exceeded drain cap. | `request body too large to drain` |
 | `500` | Storage or server error. | Exception details. |

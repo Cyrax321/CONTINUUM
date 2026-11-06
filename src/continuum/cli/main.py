@@ -2898,9 +2898,12 @@ def cmd_import_risks(args: argparse.Namespace, storage: Storage, out: Any, err: 
     # ``--limit 0`` lifts the cap rather than refusing every record: an operator
     # replaying an archived stream knows the batch is bounded by the file itself.
     raw_limit = args.limit
+    if raw_limit is not None and raw_limit < 0:
+        print(f"--limit must be non-negative (got {raw_limit})", file=err)
+        return 1
     if raw_limit is None:
         limit: int | None = DEFAULT_RISK_BATCH_LIMIT
-    elif raw_limit <= 0:
+    elif raw_limit == 0:
         limit = None
     else:
         limit = raw_limit

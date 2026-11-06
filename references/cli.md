@@ -49,7 +49,6 @@ continuum mcp install [--scope project]          # register the MCP server, reso
 continuum mcp remove                             # remove the registration install wrote. mutates
 continuum mcp doctor --timeout 15                 # diagnose host connection failures. read-only
 continuum health <run_id>                        # advisory prefix-trust health check
-continuum policy-review [run_id]                 # advisory recovery-history report by action type
 continuum impact <run_id> --evidence <id>        # downstream impact of an evidence item
 continuum provenance <run_id>                    # show provenance DAG
 continuum evidence-chain <run_id>                # correlate actions with tool observations
@@ -78,7 +77,7 @@ Most commands accept global `--json` **before** the subcommand (e.g. `continuum 
 `gate`, `briefing`, `health`, `impact`, `provenance`, `export-evidence`) never write, so
 they are safe against a live database while an agent is mid-run. Mutating commands (`start`,
 `checkpoint`, `confirm`, `complete`, `fork`, `merge`, `restore`, `compact`, `precompact`, `rewind`,
-`observe`, `reconcile`, `gateway`, `record-plan`, `forget`) say so in their help.
+`observe`, `import-risks`, `reconcile`, `gateway`, `record-plan`, `forget`) say so in their help.
 
 `resume` and `watch` are not in that list: they append to the event log when the run is
 already parked, never while an agent is mid-run and healthy. `resume` records its webhook

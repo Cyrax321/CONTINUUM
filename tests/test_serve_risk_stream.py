@@ -224,6 +224,25 @@ def test_a_record_past_the_record_cap_is_refused_without_a_parse(store: SQLiteSt
     assert summary["dropped_by_reason"] == {"oversized_record": 1}
 
 
+def test_a_mapping_past_the_record_cap_is_dropped_as_oversized(store: SQLiteStorage) -> None:
+    run_id = _run(store)
+    oversized_mapping = {"trigger": "loop", "detail": "x" * (MAX_RISK_RECORD_BYTES + 1024)}
+
+    summary = ingest_risk_stream(store, run_id, [oversized_mapping, GOOD])
+
+    assert summary["accepted"] == 1
+    assert summary["dropped_by_reason"] == {"oversized_record": 1}
+
+
+def test_numeric_zero_ts_is_preserved_not_replaced_by_now(store: SQLiteStorage) -> None:
+    run_id = _run(store)
+    summary = ingest_risk_stream(store, run_id, [{"trigger": "loop", "ts": 0}])
+
+    assert summary["accepted"] == 1
+    event = risk_events(store, run_id)[0]
+    assert "1970-01-01" in event.payload["ts"]
+
+
 def test_no_limit_takes_the_whole_batch(store: SQLiteStorage) -> None:
     run_id = _run(store)
     feed = [json.dumps(GOOD)] * 3
@@ -622,6 +641,35 @@ def test_cli_reads_a_stream_from_stdin(cli_db: str) -> None:
 
     assert code == 0, err
     assert json.loads(out)["accepted"] == 2
+
+
+class _StdinWithBuffer(io.StringIO):
+    def __init__(self, data: bytes) -> None:
+        super().__init__()
+        self.buffer = io.BytesIO(data)
+
+
+def test_cli_stdin_with_a_binary_buffer_drops_an_undecodable_line(cli_db: str) -> None:
+    stdin = _StdinWithBuffer(
+        b'{"trigger": "loop"}\n' + BINARY + b"\n" + b'{"trigger": "meltdown"}\n'
+    )
+
+    code, out, err = _run_cli(["--db", cli_db, "import-risks", "r1", "--json"], stdin=stdin)
+
+    assert code == 0, err
+    summary = json.loads(out)
+    assert summary["accepted"] == 2
+    assert summary["dropped_by_reason"] == {"undecodable_utf8": 1}
+
+
+def test_cli_rejects_negative_limit(cli_db: str) -> None:
+    stdin = io.StringIO('{"trigger": "loop"}\n')
+    code, _out, err = _run_cli(
+        ["--db", cli_db, "import-risks", "r1", "--limit", "-1"],
+        stdin=stdin,
+    )
+    assert code == 1
+    assert "--limit must be non-negative" in err
 
 
 def test_cli_text_mode_still_drops_a_torn_line(cli_db: str) -> None:

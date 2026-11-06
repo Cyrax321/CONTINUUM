@@ -414,7 +414,13 @@ def _validated_risk_payload(payload: Any) -> dict[str, Any]:
         # probe reporting when it saw the anomaly must not have its timestamp
         # replaced by server now, and neither spelling should be dropped
         # (issue #1075).
-        ts=payload.get("ts") or payload.get("timestamp") or _now_iso(),
+        ts=(
+            payload["ts"]
+            if payload.get("ts") is not None
+            else payload["timestamp"]
+            if payload.get("timestamp") is not None
+            else _now_iso()
+        ),
     )
     event_payload: dict[str, Any] = {
         "trigger": schema.trigger,
@@ -481,6 +487,9 @@ def _decode_record(record: Any) -> dict[str, Any] | None:
     than that something did.
     """
     if isinstance(record, Mapping):
+        size = len(json.dumps(dict(record), default=str).encode("utf-8"))
+        if size > MAX_RISK_RECORD_BYTES:
+            raise OversizedRecord(f"{size} bytes exceeds {MAX_RISK_RECORD_BYTES}")
         return dict(record)
     if isinstance(record, (bytes, bytearray, memoryview)):
         raw = bytes(record)
