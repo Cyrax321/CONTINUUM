@@ -819,6 +819,48 @@ def test_fold_action_events_skips_records_with_no_action_body() -> None:
     assert fold_action_events(events) == {}
 
 
+def test_fold_action_events_does_not_demote_completed_action() -> None:
+    """A later STARTED or UNKNOWN snapshot must not overwrite a COMPLETED action (#1972)."""
+    completed_act = Action(
+        run_id="r1",
+        action_type="write",
+        status=ActionStatus.COMPLETED,
+    )
+    started_act = Action(
+        run_id="r1",
+        action_type="write",
+        status=ActionStatus.STARTED,
+    )
+    unknown_act = Action(
+        run_id="r1",
+        action_type="write",
+        status=ActionStatus.UNKNOWN,
+    )
+    events = [
+        Event.model_construct(
+            run_id="r1",
+            sequence=1,
+            type=EventType.ACTION_RECORDED,
+            payload={"key": "k-race", "action": completed_act},
+        ),
+        Event.model_construct(
+            run_id="r1",
+            sequence=2,
+            type=EventType.ACTION_RECORDED,
+            payload={"key": "k-race", "action": started_act},
+        ),
+        Event.model_construct(
+            run_id="r1",
+            sequence=3,
+            type=EventType.ACTION_RECORDED,
+            payload={"key": "k-race", "action": unknown_act},
+        ),
+    ]
+
+    folded = fold_action_events(events)
+    assert folded["k-race"].status is ActionStatus.COMPLETED
+
+
 def test_a_non_dict_event_payload_is_treated_as_uncorrelated() -> None:
     """A tool event whose payload is not a mapping correlates nothing.
 
