@@ -823,6 +823,51 @@ def test_registry_predicate_change_invalidates_prior_pin_confirmation(
     assert "predicate digest mismatch" in pin_entry.detail
 
 
+def test_registry_change_does_not_drop_goal_progress_confirmations(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Modifying constraints.json must not drop human confirmation of goal and progress (#1967)."""
+    constraints_path = tmp_path / ".continuum" / "constraints.json"
+    constraints_path.parent.mkdir(parents=True, exist_ok=True)
+    spec_data = [
+        {
+            "id": "c1",
+            "level": "soft",
+            "predicate": "initial predicate",
+            "scope": ["*"],
+        }
+    ]
+    constraints_path.write_text(json.dumps({"constraints": spec_data}), encoding="utf-8")
+    monkeypatch.setattr("continuum.security.constraints.DEFAULT_CONSTRAINTS_PATH", constraints_path)
+
+    db = str(tmp_path / "goal_prog_persist.db")
+    storage = SQLiteStorage(db)
+    run_id = "run_persist"
+    storage.create_run(Run(run_id=run_id, goal="test goal"))
+    storage.append_event(
+        run_id, EventType.RUN_STARTED, {"goal": "test goal"}, source=Origin.EXTERNAL_AGENT
+    )
+
+    reg = load_constraints(constraints_path, asserted_by=Origin.DETERMINISTIC)
+    storage.append_event(
+        run_id,
+        EventType.REVIEW_CONFIRMED,
+        {"components": ["goal", "progress"], "registry_digest": reg.digest},
+        source=Origin.HUMAN,
+    )
+
+    engine = RecoveryEngine(storage)
+    d1 = engine.assess(run_id)
+    assert d1.mode is RecoveryMode.RESUME
+
+    # Modify constraints.json with an unrelated edit
+    spec_data[0]["predicate"] = "updated predicate text"
+    constraints_path.write_text(json.dumps({"constraints": spec_data}), encoding="utf-8")
+
+    d2 = engine.assess(run_id)
+    assert d2.mode is RecoveryMode.RESUME
+
+
 def test_untrusted_verification_event_rejected(tmp_path: Path, monkeypatch) -> None:
     """An agent-originated CONSTRAINT_PINS_VERIFIED event with verified: true cannot clear review."""
     monkeypatch.setattr(
