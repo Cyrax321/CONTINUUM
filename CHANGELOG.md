@@ -281,6 +281,14 @@ Test counts: ~4400 collected on a minimal env.
   are configured.
 ### Fixed
 
+- **Unreadable-registry guidance command and constraint ID prefix matching (#1969, #1970).**
+  `human_steps_for` in `src/continuum/recovery/guidance.py` now matches the unreadable
+  registry sentinel strictly by equality (`step.target == "registry"`), preventing
+  constraint pin IDs that begin with `registry` (e.g. `registry_write_guard`) from being
+  misidentified as an unreadable constraints file. The rerun guidance instruction now
+  directs the operator to `continuum validate {run_id}` instead of the nonexistent `assess`
+  subcommand.
+
 - **The daemon's active-run probe and detached startup deadline work on
   server-backed storage (#1855).** The probe gated on `Path(db).exists()`,
   which is never true for a `postgresql://` URL, so the daemon silently bound
