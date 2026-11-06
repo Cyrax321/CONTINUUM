@@ -10,6 +10,17 @@ Test counts: ~4400 collected on a minimal env.
 
 ### Added
 
+- **Coverage for EnvironmentDiff properties, rendering, and diff_environments
+  edge cases (#1991).**
+  New `tests/test_environment_diff.py` asserts `ResourceDelta.breaking` and
+  `render()` across all five change variants, the `EnvironmentDiff` filtered
+  subsets (`changed`, `unknown`, `breaking`, `stable`), `for_resource` lookup,
+  and all three `render()` branches, and drives `diff_environments` through
+  missing snapshots, added and removed resources, `UNKNOWN_VERSION` metadata
+  reason precedence, resources with no version or checksum on either side, and
+  checksum-preferred-over-version identity. The module goes from 48% to full
+  statement and branch coverage under this file. Tests only, no runtime change.
+
 - **Unit coverage for the ledger-anchored authorization id (#1951).**
   `tests/test_idempotency_ledger_resolution.py` drives
   `resolve_authorization_id(..., ledger=...)` with in-memory ledger stand-ins and
