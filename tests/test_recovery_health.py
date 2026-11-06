@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -24,6 +25,9 @@ from continuum.recovery.health import (
     DEFAULT_PHASE_SCOPES,
     CadenceContract,
     LivenessResult,
+    _has_open_claim,
+    _last_event_ts,
+    advisory_for_storage,
     advisory_text,
     evaluate,
     load_cadence_contract,
@@ -321,3 +325,112 @@ def test_advisory_text_ok_mentions_ok() -> None:
 def test_advisory_text_defaults_phase_to_otherwise() -> None:
     text = advisory_text({"breached": False, "silence_seconds": 1.0, "threshold_seconds": 60})
     assert "otherwise" in text
+
+
+
+# --------------------------------------------------------------------------- #
+# _last_event_ts, _has_open_claim, and advisory_for_storage fallbacks
+
+
+class _DummyEvent:
+    def __init__(self, ts: datetime) -> None:
+        self.timestamp = ts
+
+
+class _RaisingStorage:
+    def read_events(self, run_id: str) -> list[Any]:
+        raise RuntimeError("storage read failure")
+
+
+class _EmptyStorage:
+    def read_events(self, run_id: str) -> list[Any]:
+        return []
+
+
+class _EventsStorage:
+    def __init__(self, events: list[Any]) -> None:
+        self._events = events
+
+    def read_events(self, run_id: str) -> list[Any]:
+        return self._events
+
+
+def test_last_event_ts_raises_returns_none() -> None:
+    assert _last_event_ts(_RaisingStorage(), "run-1") is None
+
+
+def test_last_event_ts_empty_returns_none() -> None:
+    assert _last_event_ts(_EmptyStorage(), "run-1") is None
+
+
+def test_last_event_ts_valid_returns_timestamp() -> None:
+    event_time = datetime(2026, 1, 1, 12, 34, 56, tzinfo=UTC)
+    storage = _EventsStorage([_DummyEvent(event_time)])
+    assert _last_event_ts(storage, "run-1") == event_time
+
+
+def test_has_open_claim_raises_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    def mock_ledger(storage: Any, run_id: str) -> Any:
+        raise RuntimeError("ledger failure")
+
+    monkeypatch.setattr("continuum.actions.ledger.ActionLedger", mock_ledger)
+    assert _has_open_claim(object(), "run-1") is False
+
+
+def test_has_open_claim_pending_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeLedgerWithPending:
+        def __init__(self, storage: Any, run_id: str) -> None:
+            pass
+
+        def pending(self) -> list[str]:
+            return ["claim-1"]
+
+    monkeypatch.setattr("continuum.actions.ledger.ActionLedger", FakeLedgerWithPending)
+    assert _has_open_claim(object(), "run-1") is True
+
+
+def test_has_open_claim_pending_empty_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeLedgerEmpty:
+        def __init__(self, storage: Any, run_id: str) -> None:
+            pass
+
+        def pending(self) -> list[str]:
+            return []
+
+    monkeypatch.setattr("continuum.actions.ledger.ActionLedger", FakeLedgerEmpty)
+    assert _has_open_claim(object(), "run-1") is False
+
+
+def test_advisory_for_storage_load_cadence_contract_raises_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def mock_load_contract() -> Any:
+        raise RuntimeError("contract file missing")
+
+    monkeypatch.setattr("continuum.recovery.health.load_cadence_contract", mock_load_contract)
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    res = advisory_for_storage(_EmptyStorage(), "run-1", now=now)
+    assert res["breached"] is False
+    assert res["silence_seconds"] is None
+    assert res["threshold_seconds"] == DEFAULT_MAX_SILENCE_SECONDS
+
+
+def test_advisory_for_storage_evaluate_raises_returns_fallback_dict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def mock_evaluate(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError("eval failed")
+
+    monkeypatch.setattr("continuum.recovery.health.evaluate", mock_evaluate)
+    res = advisory_for_storage(_EmptyStorage(), "run-1")
+    assert res == {"breached": False, "silence_seconds": None, "threshold_seconds": None}
+
+
+def test_advisory_for_storage_success() -> None:
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    storage = _EventsStorage([_DummyEvent(t0)])
+    res = advisory_for_storage(storage, "run-1", now=t0 + timedelta(seconds=15))
+    assert res["breached"] is False
+    assert res["silence_seconds"] == 15.0
+    assert res["last_event_ts"] == t0.isoformat()
+    assert res["now"] == (t0 + timedelta(seconds=15)).isoformat()
