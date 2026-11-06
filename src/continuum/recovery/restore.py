@@ -105,7 +105,6 @@ def _numeric_anchor(
     return None
 
 
-
 def approve_restore(
     storage: Storage,
     run_id: str,

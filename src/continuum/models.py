@@ -19,22 +19,19 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, ClassVar, Literal
 
+import pydantic
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from continuum.security.hashing import make_id, stable_hash
 
 #: The recovery-contract compatibility version this build speaks (issue #764).
-#:
-#: It names the field set a sealed contract's integrity hash covers, and it is
-#: carried on every contract so a verifier can pick the right digest input
-#: without guessing. See ``continuum.recovery.contract`` for the version table
-#: and the forward/backward compatibility rules. Bump it only when a field
-#: changes whether it is hash-covered, never for a content change.
+#: Names the field set an integrity hash covers so verifiers pick digest inputs
+#: without guessing. Bump only when a field changes whether it is hash-covered.
 CONTRACT_VERSION = 1
 
 __all__ = [
@@ -456,6 +453,17 @@ class Approval(BaseModel):
     granted_by: str | None = None
     expires_at: datetime | None = None
     reason: str | None = None
+    #: Parked for deferred review (issue #1410). Defaults to False because
+    #: every approval written before the review queue existed is unparked.
+    parked: bool = False
+
+    @pydantic.model_serializer(mode="wrap")
+    def _omit_default_parked(self, handler: Callable[[Any], dict[str, Any]]) -> dict[str, Any]:
+        """Keep ``parked`` out of serialised body while False for hash stability."""
+        data = dict(handler(self))
+        if not self.parked:
+            data.pop("parked", None)
+        return data
 
 
 class ExternalDependency(BaseModel):
@@ -473,16 +481,11 @@ class ExternalDependency(BaseModel):
     provenance: Provenance = Field(default_factory=Provenance)
 
 
-# --------------------------------------------------------------------------- #
 # Constraint pins (issues #391, #416)
-# --------------------------------------------------------------------------- #
 
 #: A constraint id is a machine label, never prose: 1 to 128 characters from
-#: ASCII letters, digits and ``.`` ``_`` ``:`` ``-``. The tight charset and
-#: bound are deliberate. Hashing exists so the constraint text is never
-#: stored, which leaves the id as the only free-text-shaped field on the
-#: event; restricting it to labels keeps that field unusable as a side
-#: channel for the very text the hash replaces.
+#: ASCII letters, digits and ``.`` ``_`` ``:`` ``-``. Hashing keeps the text out
+#: of the event; the id label cannot be used as a side channel.
 _CONSTRAINT_ID_PATTERN = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 
 #: Digests are recorded exactly as hashlib produces them: 64 lowercase hex
@@ -871,9 +874,7 @@ class TrajectoryReport(BaseModel):
         return self.report_id == self.legacy_digest(run_id)[: len(self.report_id)]
 
 
-# --------------------------------------------------------------------------- #
 # Risk observation (issue #303, #1421)
-# --------------------------------------------------------------------------- #
 
 #: Bounds on a monitor's diagnostic detail. Monitors vary wildly in what they
 #: report, so the field is free-form but bounded, the same trade every other
@@ -1279,9 +1280,7 @@ class SemanticState(BaseModel):
         return frozenset(cited - known)
 
 
-# --------------------------------------------------------------------------- #
 # Action ledger
-# --------------------------------------------------------------------------- #
 
 
 class ConsumedInputs(BaseModel):
