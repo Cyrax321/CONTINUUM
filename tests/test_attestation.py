@@ -82,9 +82,15 @@ def test_sign_chain_rejects_non_ed25519_private_key() -> None:
 
 
 def test_verify_rejects_altered_algorithm() -> None:
+    import base64
+
+    from continuum.security.attestation import _payload_bytes
+
     priv_pem, _pub_pem = generate_keypair()
     attest = sign_chain(priv_pem, "run_abc", 42, "abc123")
     altered = {**attest.to_dict(), "algorithm": "rsa+sha256"}
+    priv = serialization.load_pem_private_key(priv_pem.encode("ascii"), password=None)
+    altered["signature"] = base64.b64encode(priv.sign(_payload_bytes(altered))).decode("ascii")
     assert verify_attestation(altered) is False
 
 
@@ -107,6 +113,8 @@ def test_verify_invalid_workload_identity_dict_falls_back_to_none() -> None:
     )
     assert verify_attestation(attest, require_workload_identity=True) is False
     assert verify_attestation(attest, require_workload_identity=False) is True
+    unbound_attest = sign_chain(priv_pem, "run_abc", 42, "abc123")
+    assert verify_attestation(unbound_attest, require_workload_identity=True) is False
 
 
 def test_verify_expected_workload_identity_object_and_string() -> None:
