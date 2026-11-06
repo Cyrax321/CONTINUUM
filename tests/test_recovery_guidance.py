@@ -291,4 +291,27 @@ def test_mcp_resume_includes_human_steps(db: str, tmp_path: Path) -> None:
     assert isinstance(payload.get("human_steps"), list)
 
 
+def test_unreadable_registry_guidance_suggests_continuum_validate() -> None:
+    """An unreadable registry guidance step must name `continuum validate`, not assess (#1969)."""
+    from types import SimpleNamespace
+
+    from continuum.models import RecoveryMode
+    from continuum.recovery.planner import RepairKind, RepairPlan, RepairStep
+
+    plan = RepairPlan(
+        steps=[
+            RepairStep(
+                kind=RepairKind.HUMAN_REVIEW,
+                target="registry",
+                reason="unreadable constraints registry file",
+                requires_human=True,
+            )
+        ]
+    )
+    decision = SimpleNamespace(mode=RecoveryMode.REQUEST_HUMAN, plan=plan, uncertain_actions=())
+    steps = human_steps_for(decision, run_id="run_test")
+    assert any("continuum validate run_test" in s for s in steps)
+    assert not any("continuum assess" in s for s in steps)
+
+
 import os  # noqa: E402
