@@ -101,6 +101,7 @@ def test_google_namespace_and_cloud_version_suffix_normalization(
 ) -> None:
     gcp_file = tmp_path / "gcp.py"
     gcp_file.write_text(
+        "from google import cloud\n"
         "from google.cloud import storage\n"
         "from google.cloud import pubsub_v1\n"
         "from google import protobuf\n"
@@ -112,6 +113,7 @@ def test_google_namespace_and_cloud_version_suffix_normalization(
     graph = DependencyGraph(
         tmp_path,
         requirements=[
+            "google-cloud",
             "google-cloud-storage",
             "google-cloud-pubsub",
             "protobuf",
@@ -121,11 +123,13 @@ def test_google_namespace_and_cloud_version_suffix_normalization(
 
     owners = graph.owner_of(gcp_file)
     assert owners == {
+        "google-cloud",
         "google-cloud-storage",
         "google-cloud-pubsub",
         "protobuf",
         "google-cloud-secret-manager",
     }
+    assert graph.files_using("google-cloud") == {gcp_file}
     assert graph.files_using("google-cloud-pubsub") == {gcp_file}
     assert graph.files_using("protobuf") == {gcp_file}
     assert graph.third_party_imports(gcp_file) == {"google.cloud.bigquery"}
