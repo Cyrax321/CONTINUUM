@@ -274,6 +274,42 @@ Test counts: ~4400 collected on a minimal env.
   are configured.
 ### Fixed
 
+- **Completed actions preserved against clobbering by racing claims (#1972).**
+  When racing claimants resolve an in-flight action, losing claimants
+  previously appended an UNKNOWN snapshot without checking if the log had
+  moved, clobbering the winner's completion in `fold_action_events`.
+  Passes `expected_sequence` to the CAS append in the uncertain branch, and
+  ensures `fold_action_events` never demotes a `COMPLETED` action.
+
+- **Constraints recovery commands and target matching precision (#1969, #1970).**
+  `human_steps_for` previously instructed operators to run the non-existent
+  `continuum assess` command instead of `continuum validate` when the
+  constraints registry was unreadable (#1969). Additionally, matching
+  `step.target` by prefix captured constraint pins whose identifiers started
+  with 'registry' (#1970). Updates the command hint to `continuum validate` and
+  matches the registry target by exact equality.
+
+- **Adaptive shrink loop trims scar action identifiers to maintain 2048-byte cap (#1966).**
+  `build_attempt_lesson` previously neglected to trim `scar_action_ids` during
+  the adaptive shrink loop, leading to infinite loops when fields and evidence
+  were already empty, or returning lessons exceeding the 2048-byte budget.
+  Caps `scar_action_ids` per item at ingestion, trims the scars list during
+  shrinking, and ensures single-item evidence trims decrease to empty.
+
+- **Preserve goal and progress human confirmations across constraint edits (#1967).**
+  When evaluating human confirmations following modifications to
+  `.continuum/constraints.json`, `RecoveryEngine` previously dropped all
+  confirmed components including goal and progress if the registry digest
+  changed. Restricts confirmation invalidation to pin and constraints scopes
+  so verified non-pin components persist across constraint updates.
+
+- **Plan component validation and rewind snapshot failure coverage (#1950, #1973).**
+  Added test coverage for `StateValidator._check_plan` across empty step ids,
+  duplicate step ids, dangling `depends_on` references, self-dependencies,
+  and multi-node dependency cycle detection (#1973). Added full branch coverage
+  in `tests/test_rewind_file_snapshot_failures.py` covering rewind target-lookup
+  fall-throughs, observation filtering, missing-file triage, and fallback paths (#1950).
+
 - **The daemon's active-run probe and detached startup deadline work on
   server-backed storage (#1855).** The probe gated on `Path(db).exists()`,
   which is never true for a `postgresql://` URL, so the daemon silently bound
