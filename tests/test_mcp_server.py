@@ -269,6 +269,53 @@ async def test_record_plan_upserts_units_and_rejects_bad_payloads(
             },
             context=_ctx(TEST_CLIENT),
         )
+    with pytest.raises(ToolError, match="each unit must be an object"):
+        server._tool_manager._tools["continuum_record_plan"].fn(
+            "run_1",
+            "plan-a",
+            ["not-an-object"],
+            ctx=_ctx(TEST_CLIENT),
+        )
+    with pytest.raises(ToolError, match="unit id must be non-empty"):
+        await server.call_tool(
+            "continuum_record_plan",
+            {
+                "run_id": "run_1",
+                "plan_id": "plan-a",
+                "units": [{"id": "   ", "title": "a"}],
+            },
+            context=_ctx(TEST_CLIENT),
+        )
+    with pytest.raises(ToolError, match="title must be a string"):
+        await server.call_tool(
+            "continuum_record_plan",
+            {
+                "run_id": "run_1",
+                "plan_id": "plan-a",
+                "units": [{"id": "u1", "title": 123}],
+            },
+            context=_ctx(TEST_CLIENT),
+        )
+    with pytest.raises(ToolError, match="depends_on must be a list"):
+        await server.call_tool(
+            "continuum_record_plan",
+            {
+                "run_id": "run_1",
+                "plan_id": "plan-a",
+                "units": [{"id": "u1", "title": "a", "depends_on": "u0"}],
+            },
+            context=_ctx(TEST_CLIENT),
+        )
+    with pytest.raises(ToolError, match="depends_on entries must be non-empty strings"):
+        await server.call_tool(
+            "continuum_record_plan",
+            {
+                "run_id": "run_1",
+                "plan_id": "plan-a",
+                "units": [{"id": "u1", "title": "a", "depends_on": ["   "]}],
+            },
+            context=_ctx(TEST_CLIENT),
+        )
 
 
 @pytest.mark.asyncio
