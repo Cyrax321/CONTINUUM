@@ -8,8 +8,13 @@ import sys
 from pathlib import Path
 
 from continuum.events import EventType
-from continuum.models import Run
-from continuum.provenance.graph import build_provenance_graph, downstream_of
+from continuum.models import Origin, Run, StateStatus
+from continuum.provenance.graph import (
+    ProvenanceGraph,
+    ProvenanceNode,
+    build_provenance_graph,
+    downstream_of,
+)
 from continuum.storage.sqlite import SQLiteStorage
 
 #: The worktree's src, so the subprocess imports the tree under test rather
@@ -219,3 +224,196 @@ def test_invalidation_of_an_unknown_decision_leaves_the_graph_alone():
 
     assert len(graph.nodes) == 1
     assert next(iter(graph.nodes.values())).status.value == "valid"
+
+
+def _node(event_id: str, etype: EventType, payload: dict[str, object]) -> ProvenanceNode:
+    """Build a bare node without going through storage (label tests)."""
+    return ProvenanceNode(
+        event_id=event_id,
+        sequence=1,
+        type=etype,
+        origin=Origin.DETERMINISTIC,
+        status=StateStatus.VALID,
+        payload=payload,
+    )
+
+
+def test_node_label_prefers_each_payload_id_in_order():
+    """``label`` falls back evidence -> finding -> decision -> action -> event prefix."""
+    assert _node("ev-1", EventType.EVIDENCE_ADDED, {"evidence_id": "ev1"}).label == (
+        "EVIDENCE_ADDED:ev1"
+    )
+    assert _node("f-1", EventType.FINDING_ADDED, {"finding_id": "f1"}).label == ("FINDING_ADDED:f1")
+    assert _node("d-1", EventType.DECISION_CREATED, {"decision_id": "dec1"}).label == (
+        "DECISION_CREATED:dec1"
+    )
+    assert _node("a-1", EventType.ACTION_RECORDED, {"action_id": "act1"}).label == (
+        "ACTION_RECORDED:act1"
+    )
+
+
+def test_node_label_falls_back_to_the_event_id_prefix():
+    """With no known payload id, the label degrades to the first 8 hex chars."""
+    node = _node("abcdef0123456789", EventType.EVIDENCE_ADDED, {})
+    assert node.label == "EVIDENCE_ADDED:abcdef01"
+
+
+def test_node_label_cascade_prefers_the_earlier_key():
+    """The cascade is ordered: evidence_id wins over finding_id, and so on."""
+    assert _node(
+        "e-1", EventType.DECISION_CREATED, {"evidence_id": "ev9", "finding_id": "f9"}
+    ).label == ("DECISION_CREATED:ev9")
+    assert _node(
+        "e-1", EventType.DECISION_CREATED, {"decision_id": "dec9", "action_id": "act9"}
+    ).label == ("DECISION_CREATED:dec9")
+
+
+def test_add_edge_and_downstream_ignore_unknown_ids():
+    """``add_edge`` silently drops unknown ids; ``downstream`` returns [] for them."""
+    graph = ProvenanceGraph()
+    graph.add_node(_node("n1", EventType.EVIDENCE_ADDED, {"evidence_id": "ev1"}))
+    graph.add_node(_node("n2", EventType.FINDING_ADDED, {"finding_id": "f1"}))
+
+    # Both ids unknown: no error, no edge recorded.
+    graph.add_edge("unknown_parent", "unknown_child")
+    assert graph.edges == {"n1": [], "n2": []}
+    assert graph.reverse_edges == {"n1": [], "n2": []}
+
+    # Half-known ids are dropped too, in both directions (branch coverage of the
+    # ``or`` guard: unknown parent, and unknown child).
+    graph.add_edge("unknown_parent", "n2")
+    graph.add_edge("n1", "unknown_child")
+    assert graph.edges == {"n1": [], "n2": []}
+    assert graph.reverse_edges == {"n1": [], "n2": []}
+
+    # A known pair still links, proving the guards did not over-suppress.
+    graph.add_edge("n1", "n2")
+    assert graph.edges["n1"] == ["n2"]
+    assert graph.reverse_edges["n2"] == ["n1"]
+
+    # Re-adding the same edge is idempotent: no duplicate entries either way.
+    graph.add_edge("n1", "n2")
+    assert graph.edges["n1"] == ["n2"]
+    assert graph.reverse_edges["n2"] == ["n1"]
+
+    # downstream of an unknown id returns [] rather than raising.
+    assert graph.downstream("unknown_id") == []
+
+
+def test_subagent_spawn_and_complete_updates_the_span():
+    """SUBAGENT_SPAWNED opens a span; SUBAGENT_COMPLETED closes it with a summary."""
+    storage = SQLiteStorage(":memory:")
+    run_id = "run_subagent_ok"
+    storage.create_run(Run(run_id=run_id, goal="delegate"))
+    storage.append_event(
+        run_id,
+        EventType.SUBAGENT_SPAWNED,
+        {"subagent_run_id": "sub_run_1", "task_description": "summarize the ledger"},
+    )
+    storage.append_event(
+        run_id,
+        EventType.SUBAGENT_COMPLETED,
+        {"subagent_run_id": "sub_run_1", "result_summary": "summarized 12 events"},
+    )
+
+    graph = build_provenance_graph(storage.read_events(run_id))
+
+    assert len(graph.subagent_spans) == 1
+    span = graph.subagent_spans[0]
+    assert span["parent_run_id"] == run_id
+    assert span["subagent_run_id"] == "sub_run_1"
+    assert span["task_description"] == "summarize the ledger"
+    assert span["status"] == "completed"
+    assert span["result_summary"] == "summarized 12 events"
+
+
+def test_subagent_spawn_and_fail_marks_the_span_failed():
+    """SUBAGENT_FAILED flips the matching span to ``failed`` and keeps the summary."""
+    storage = SQLiteStorage(":memory:")
+    run_id = "run_subagent_fail"
+    storage.create_run(Run(run_id=run_id, goal="delegate"))
+    storage.append_event(
+        run_id,
+        EventType.SUBAGENT_SPAWNED,
+        {"subagent_run_id": "sub_run_2", "task_description": "rebase the plan"},
+    )
+    storage.append_event(
+        run_id,
+        EventType.SUBAGENT_FAILED,
+        {"subagent_run_id": "sub_run_2", "result_summary": "context budget exhausted"},
+    )
+
+    graph = build_provenance_graph(storage.read_events(run_id))
+
+    assert len(graph.subagent_spans) == 1
+    span = graph.subagent_spans[0]
+    assert span["status"] == "failed"
+    assert span["result_summary"] == "context budget exhausted"
+
+
+def test_subagent_completion_without_a_matching_span_is_ignored():
+    """A completion for an unspawned subagent must not invent or edit a span."""
+    storage = SQLiteStorage(":memory:")
+    run_id = "run_subagent_orphan"
+    storage.create_run(Run(run_id=run_id, goal="delegate"))
+    storage.append_event(
+        run_id,
+        EventType.SUBAGENT_SPAWNED,
+        {"subagent_run_id": "sub_run_active", "task_description": "still running"},
+    )
+    storage.append_event(
+        run_id,
+        EventType.SUBAGENT_COMPLETED,
+        {"subagent_run_id": "never_spawned", "result_summary": "late to the party"},
+    )
+
+    graph = build_provenance_graph(storage.read_events(run_id))
+
+    # The stray completion did not match, so the active span is untouched.
+    assert len(graph.subagent_spans) == 1
+    span = graph.subagent_spans[0]
+    assert span["subagent_run_id"] == "sub_run_active"
+    assert span["status"] == "active"
+    assert "result_summary" not in span
+
+
+def test_precompact_hook_records_compaction_metadata():
+    """A PRECOMPACT_HOOK event is tracked with its retention accounting."""
+    storage = SQLiteStorage(":memory:")
+    run_id = "run_compact"
+    storage.create_run(Run(run_id=run_id, goal="long horizon"))
+    storage.append_event(
+        run_id,
+        EventType.PRECOMPACT_HOOK,
+        {
+            "retained_events": 20,
+            "compacted_events": 130,
+            "summary": "kept the last 20 events and the plan",
+        },
+    )
+
+    graph = build_provenance_graph(storage.read_events(run_id))
+
+    assert len(graph.compactions) == 1
+    entry = graph.compactions[0]
+    assert entry["sequence"] == 1
+    assert entry["retained_events"] == 20
+    assert entry["compacted_events"] == 130
+    assert entry["summary"] == "kept the last 20 events and the plan"
+    assert entry["event_id"]
+
+
+def test_precompact_hook_defaults_are_none_when_payload_omits_them():
+    """Missing accounting keys surface as None rather than raising."""
+    storage = SQLiteStorage(":memory:")
+    run_id = "run_compact_sparse"
+    storage.create_run(Run(run_id=run_id, goal="long horizon"))
+    storage.append_event(run_id, EventType.PRECOMPACT_HOOK, {})
+
+    graph = build_provenance_graph(storage.read_events(run_id))
+
+    assert len(graph.compactions) == 1
+    entry = graph.compactions[0]
+    assert entry["retained_events"] is None
+    assert entry["compacted_events"] is None
+    assert entry["summary"] is None
