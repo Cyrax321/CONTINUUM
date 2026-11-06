@@ -8,6 +8,8 @@ CONTINUUM_DASHBOARD_TOKEN must be set or every POST is refused.
 
 from __future__ import annotations
 
+import http.client
+import socket
 import threading
 import urllib.error
 import urllib.parse
@@ -17,10 +19,17 @@ from pathlib import Path
 import pytest
 
 from continuum.actions import ActionLedger
-from continuum.dashboard.app import make_dashboard_server
+from continuum.dashboard.app import MAX_DASHBOARD_BODY, make_dashboard_server
 from continuum.events import EventType
 from continuum.models import Origin, Run
 from continuum.storage import SQLiteStorage
+
+
+def _recv_until_close(sock: socket.socket) -> bytes:
+    chunks = []
+    while chunk := sock.recv(4096):
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 @pytest.fixture(autouse=True)
@@ -294,6 +303,80 @@ def test_unknown_post_route_maps_to_404(db: str, addr: str) -> None:
         },
     )
     assert status == 404
+
+
+# --- malformed request framing (#1924) --------------------------------------------- #
+
+
+def test_negative_content_length_is_refused_with_400(db: str, addr: str) -> None:
+    """A negative Content-Length is malformed framing: 400 with the reason in the
+    body, and the connection is closed because the body was never trusted. No
+    body bytes are sent: the refusal happens before the handler reads, and
+    unread bytes would make the close arrive as an abort on Windows."""
+    conn = http.client.HTTPConnection(addr, timeout=10)
+    conn.request("POST", "/action/confirm", body=b"", headers={"Content-Length": "-1"})
+    resp = conn.getresponse()
+    body = resp.read().decode()
+    conn.close()
+    assert resp.status == 400
+    assert "malformed Content-Length" in body
+    assert "Content-Length must be non-negative" in body
+
+
+def test_bodyless_post_without_content_length_reads_as_empty(db: str, addr: str) -> None:
+    """No Content-Length header reads as a zero-length body, so the request
+    still routes: the empty run id fails inside the handler and the run refuses
+    itself with the 400 page rather than a silent 200. Raw socket because
+    http.client would add its own Content-Length: 0."""
+    host, port = addr.split(":")
+    request = (
+        b"POST /action/confirm HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Dashboard-Token: op-secret\r\n\r\n"
+    )
+    with socket.create_connection((host, int(port)), timeout=20) as sock:
+        sock.sendall(request)
+        response = _recv_until_close(sock)
+    assert b"400 Bad Request" in response
+
+
+def test_truncated_oversize_body_is_drained_and_refused_with_413(db: str, addr: str) -> None:
+    """An oversize body the client stops writing mid-way: the drain loop must
+    hit EOF, break out, and answer 413 rather than hang waiting for bytes that
+    will never arrive."""
+    host, port = addr.split(":")
+    advertised = 2 * 1024 * 1024
+    request = (
+        f"POST /action/reconcile HTTP/1.1\r\nHost: {host}\r\nContent-Length: {advertised}\r\n\r\n"
+    ).encode() + b"x" * 65536
+    with socket.create_connection((host, int(port)), timeout=20) as sock:
+        sock.sendall(request)
+        sock.shutdown(socket.SHUT_WR)
+        response = _recv_until_close(sock)
+    assert b"413 Body too large" in response
+    assert b"request body exceeds" in response
+
+
+def test_drain_limit_answers_413_before_the_body_is_consumed(
+    db: str,
+    addr: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A body that outruns the drain ceiling is refused while draining, not read
+    to exhaustion: the limit is what keeps a hostile client from making the
+    server buffer unbounded data."""
+    monkeypatch.setattr("continuum.dashboard.app.DASHBOARD_DRAIN_LIMIT_BYTES", 100_000)
+    body = b"x" * (MAX_DASHBOARD_BODY + 65536)
+    conn = http.client.HTTPConnection(addr, timeout=20)
+    conn.request(
+        "POST",
+        "/action/reconcile",
+        body=body,
+        headers={"Content-Length": str(len(body))},
+    )
+    resp = conn.getresponse()
+    data = resp.read().decode(errors="ignore")
+    conn.close()
+    assert resp.status == 413
+    assert "too large to drain" in data
 
 
 EOF_MARK = None
