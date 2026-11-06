@@ -49,7 +49,7 @@ flowchart TB
     %% ---------- durable core ----------
     subgraph core["Durable core: one hash-chained log"]
         direction LR
-        elog[("Event log<br/>events.py, 57 event types")]
+        elog[("Event log<br/>events.py, 60 event types")]
         state["State engine<br/>state/, project and staleness validation"]
         ckpt["Checkpoint manager<br/>checkpoint/, 6 policies, RECOVERY anchors"]
         rec["Recovery engine<br/>recovery/, 7 modes, sealed contract"]

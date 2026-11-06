@@ -107,6 +107,8 @@ def reconcile_action(
     *,
     occurred: bool,
     external_id: str | None = None,
+    reviewer: str = "dashboard-operator",
+    complexity: str = "high",
 ) -> None:
     """Settle one uncertain side effect from real-world evidence (issue #29).
 
@@ -123,6 +125,8 @@ def reconcile_action(
         occurred=occurred,
         external_id=external_id,
         note="settled from the dashboard",
+        reviewer=reviewer,
+        complexity=complexity,
     )
 
 

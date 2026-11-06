@@ -73,7 +73,7 @@
 </div>
 <div class="stats">
   <div class="pill"><b>153</b> modules</div>
-  <div class="pill"><b>57</b> EventType members</div>
+  <div class="pill"><b>60</b> EventType members</div>
   <div class="pill"><b>schema v6</b></div>
   <div class="pill"><b>13</b> MCP tools</div>
   <div class="pill"><b>242</b> test files</div>
@@ -91,9 +91,9 @@
 
   <!-- TITLE -->
   <text x="48" y="42" style="font-size:11.5px;font-weight:800;letter-spacing:1.8px;fill:var(--accent);">CONTINUUM - SYSTEM ARCHITECTURE</text>
-  <text x="48" y="62" class="sub">One library (src/continuum, 153 modules) - all modules append to and replay one hash-chained log.</text>
-  <text x="1232" y="42" text-anchor="end" class="mono">schema v6 - 57 event types - 13 MCP tools</text>
-  <text x="1232" y="58" text-anchor="end" class="mono">153 modules - 242 test files</text>
+  <text x="48" y="62" class="sub">One library (src/continuum, 154 modules) - all modules append to and replay one hash-chained log.</text>
+  <text x="1232" y="42" text-anchor="end" class="mono">schema v6 - 60 event types - 13 MCP tools</text>
+  <text x="1232" y="58" text-anchor="end" class="mono">154 modules - 243 test files</text>
 
   <!-- ROW 1: AGENTS -->
   <rect class="band" x="40" y="78" width="1200" height="108" rx="14"/>
@@ -210,7 +210,7 @@
   <rect x="68" y="560" width="88" height="18" rx="5" fill="var(--accent)" opacity="0.85"/>
   <text x="112" y="572" text-anchor="middle" class="badge">APPEND-ONLY</text>
   <text x="92"  y="598" class="hub">EVENT LOG - events.py</text>
-  <text x="92"  y="617" class="hubS">hash-chained - 57 event types - SCHEMA_VERSION 6 - verify() - trusted_through - blobs offloaded to content-addressed store</text>
+  <text x="92"  y="617" class="hubS">hash-chained - 60 event types - SCHEMA_VERSION 6 - verify() - trusted_through - blobs offloaded to content-addressed store</text>
   <text x="1192" y="605" text-anchor="end" class="hubS" style="fill:#3E5E72;">one log - many projections</text>
   <path class="edgeP" d="M488,518 L488,560" marker-end="url(#arrP)"/>
   <text x="503" y="545" class="elbl">append TOOL_COMPLETED</text>
@@ -332,7 +332,7 @@
 </figure>
 <p class="provenance">
   <b>Figures are read from the code, not the README.</b>
-  57 <code>EventType</code> members, schema v6, and 13 MCP tools were counted from <code>src/continuum/</code>;
+  60 <code>EventType</code> members, schema v6, and 13 MCP tools were counted from <code>src/continuum/</code>;
   153 modules confirmed; 242 test files confirmed in <code>tests/</code>.
   New since the last diagram: blob offload store (<code>storage/blob.py</code>), transparent rehydration, deep integrity verify,
   <code>RiskObservedPayload</code> schema and projection, per-dependency recovery budgets, <code>ActionReconciler</code> plugins,

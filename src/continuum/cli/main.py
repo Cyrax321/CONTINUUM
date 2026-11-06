@@ -1337,15 +1337,33 @@ def cmd_health(args: argparse.Namespace, storage: Storage, out: Any, err: Any) -
     except Exception:
         trajectory_payload = None
         trajectory_text = ""
+    # Reviewer fatigue (issue #1411): advisory only, same rule as the score
+    # above. A warning here never gates a resume, because blocking a fast
+    # approval would deadlock the emergency operation that needed it; the
+    # warning is what an operator reads, and the evidence stays in the log.
+    fatigue_payload = None
+    fatigue_text = ""
+    try:
+        from continuum.recovery.fatigue import advisory_text, fatigue_advisory
+
+        fatigue_payload = fatigue_advisory(storage, run_id)
+        rendered_fatigue = advisory_text(fatigue_payload)
+        if rendered_fatigue:
+            fatigue_text = "\n" + rendered_fatigue
+    except Exception as exc:
+        fatigue_payload = {"status": "unavailable", "error": str(exc)}
+        fatigue_text = f"\nReviewer fatigue: unavailable ({exc})."
     payload = {"run_id": run_id, "advisory": advisory}
     if trajectory_payload is not None:
         payload["trajectory_report"] = trajectory_payload
+    if fatigue_payload is not None:
+        payload["reviewer_fatigue"] = fatigue_payload
     _emit(
         payload,
         f"trust_score: {advisory['trust_score']} "
         f"(role={advisory['breakdown']['role']} "
         f"goal={advisory['breakdown']['goal']} "
-        f"evidence={advisory['breakdown']['evidence']})" + trajectory_text,
+        f"evidence={advisory['breakdown']['evidence']})" + trajectory_text + fatigue_text,
         as_json=args.json,
         stream=out,
         palette=getattr(args, "_palette", None),
