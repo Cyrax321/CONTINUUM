@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -13,11 +15,13 @@ from continuum.checkpoint import (
     IntervalPolicy,
     ManualPolicy,
     SemanticPolicy,
+    clear_resume_pointer,
 )
 from continuum.events import EventType
-from continuum.models import Goal, Run, SemanticState, utcnow
+from continuum.models import Goal, Run, SemanticState, StateStatus, utcnow
 from continuum.state.semantic import project
 from continuum.storage import SQLiteStorage
+from continuum.storage.base import CorruptedRecord
 
 
 @pytest.fixture
@@ -349,3 +353,253 @@ def test_checkpoint_verify_detects_tampered_hash(store: SQLiteStorage) -> None:
     # Tampering with None also fails (covers the unset case)
     tampered_none = cp.model_copy(update={"integrity_hash": None})
     assert not tampered_none.verify()
+
+
+# --- resume pointer clearing ----------------------------------------------- #
+
+
+def test_clear_resume_pointer_missing_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    resume_path = tmp_path / "resume.json"
+    monkeypatch.setattr("continuum.checkpoint.manager.RESUME_JSON", str(resume_path))
+    assert clear_resume_pointer("run_1") is False
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "not-valid-json",
+        "[1, 2, 3]",
+        '"a bare string"',
+        "123",
+        "null",
+    ],
+)
+def test_clear_resume_pointer_unreadable_or_nondict_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str
+) -> None:
+    resume_path = tmp_path / "resume.json"
+    resume_path.write_text(content, encoding="utf-8")
+    monkeypatch.setattr("continuum.checkpoint.manager.RESUME_JSON", str(resume_path))
+    assert clear_resume_pointer("run_1") is False
+    assert resume_path.exists()
+
+
+def test_clear_resume_pointer_foreign_run_id_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resume_path = tmp_path / "resume.json"
+    resume_path.write_text(json.dumps({"run_id": "run_other"}), encoding="utf-8")
+    monkeypatch.setattr("continuum.checkpoint.manager.RESUME_JSON", str(resume_path))
+    assert clear_resume_pointer("run_1") is False
+    assert resume_path.exists()
+
+
+def test_clear_resume_pointer_unlink_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resume_path = tmp_path / "resume.json"
+    resume_path.write_text(json.dumps({"run_id": "run_1"}), encoding="utf-8")
+    monkeypatch.setattr("continuum.checkpoint.manager.RESUME_JSON", str(resume_path))
+
+    def mock_unlink(self: Path) -> None:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "unlink", mock_unlink)
+    assert clear_resume_pointer("run_1") is False
+    assert resume_path.exists()
+
+
+def test_clear_resume_pointer_matching_run_id_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resume_path = tmp_path / "resume.json"
+    resume_path.write_text(json.dumps({"run_id": "run_1"}), encoding="utf-8")
+    monkeypatch.setattr("continuum.checkpoint.manager.RESUME_JSON", str(resume_path))
+    assert clear_resume_pointer("run_1") is True
+    assert not resume_path.exists()
+
+
+# --- corruption degradation and clean prefix -------------------------------- #
+
+
+def test_mark_corruption_refusal_already_invalid() -> None:
+    from continuum.checkpoint.manager import _mark_corruption_refusal
+
+    existing = SemanticState(
+        run_id="run_1",
+        goal=Goal(description="test"),
+        status=StateStatus.INVALID,
+        unprojectable_at_sequence=3,
+        unprojectable_event_type="action_recorded",
+        unprojectable_reason="earlier break",
+    )
+    refusal = CorruptedRecord("corrupted event record", sequence=10)
+    res = _mark_corruption_refusal(existing, refusal)
+    assert res is existing
+    assert res.unprojectable_at_sequence == 3
+    assert res.unprojectable_reason == "earlier break"
+
+
+def test_mark_corruption_refusal_multiline_reason() -> None:
+    from continuum.checkpoint.manager import _mark_corruption_refusal
+
+    state = SemanticState(run_id="run_1", goal=Goal(description="test"))
+    refusal = CorruptedRecord("line 1 error\nline 2 trace\nline 3 context", sequence=7)
+    res = _mark_corruption_refusal(state, refusal)
+    assert res.status is StateStatus.INVALID
+    assert res.unprojectable_at_sequence == 7
+    assert res.unprojectable_event_type == "unreadable"
+    assert res.unprojectable_reason == "corrupted event record: line 1 error"
+
+
+def test_clean_prefix_raises_when_sequence_is_none(store: SQLiteStorage) -> None:
+    manager = CheckpointManager(store)
+    refusal = CorruptedRecord("unsequenced corruption", sequence=None)
+    with pytest.raises(CorruptedRecord, match="unsequenced corruption"):
+        manager._clean_prefix("run_1", after_sequence=0, refusal=refusal)
+
+
+def test_restore_without_checkpoint_corrupted_record_degrade_and_raise(
+    store: SQLiteStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    advance(store, 2)
+    original_read = store.read_events
+
+    def mock_read(
+        run_id: str, after_sequence: int = 0, upto: int | None = None, **kwargs: Any
+    ) -> list[Any]:
+        if upto is None:
+            raise CorruptedRecord("corrupted record at 3\nextra info", sequence=3)
+        return original_read(run_id, after_sequence=after_sequence, upto=upto, **kwargs)
+
+    monkeypatch.setattr(store, "read_events", mock_read)
+    manager = CheckpointManager(store)
+
+    with pytest.raises(CorruptedRecord):
+        manager.restore("run_1", on_unprojectable="raise")
+
+    restored = manager.restore("run_1", on_unprojectable="degrade")
+    assert restored.replayed is True
+    assert restored.state.status is StateStatus.INVALID
+    assert restored.state.unprojectable_at_sequence == 3
+    assert restored.state.unprojectable_reason == "corrupted event record: corrupted record at 3"
+
+
+def test_restore_without_checkpoint_corrupted_record_empty_prefix_raises(
+    store: SQLiteStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def mock_read(
+        run_id: str, after_sequence: int = 0, upto: int | None = None, **kwargs: Any
+    ) -> list[Any]:
+        if upto is None:
+            raise CorruptedRecord("corrupted record at 1", sequence=1)
+        return []
+
+    monkeypatch.setattr(store, "read_events", mock_read)
+    manager = CheckpointManager(store)
+    with pytest.raises(CorruptedRecord, match="corrupted record at 1"):
+        manager.restore("run_1", on_unprojectable="degrade")
+
+
+def test_restore_with_checkpoint_corrupted_record_degrade_and_raise(
+    store: SQLiteStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = CheckpointManager(store)
+    advance(store, 2)
+    manager.checkpoint("run_1")
+    advance(store, 3)
+
+    original_read = store.read_events
+
+    # Case 1: corruption at sequence 5 (immediately after checkpoint cursor 4, so no readable pending work)
+    def mock_read_no_pending(
+        run_id: str, after_sequence: int = 0, upto: int | None = None, **kwargs: Any
+    ) -> list[Any]:
+        if after_sequence > 0 and upto is None:
+            raise CorruptedRecord("bad pending record", sequence=5)
+        return original_read(run_id, after_sequence=after_sequence, upto=upto, **kwargs)
+
+    monkeypatch.setattr(store, "read_events", mock_read_no_pending)
+
+    with pytest.raises(CorruptedRecord):
+        manager.restore("run_1", on_unprojectable="raise")
+
+    # on_unprojectable="degrade" with no readable pending events marks refusal on checkpoint.state
+    restored_no_pending = manager.restore("run_1", replay=True, on_unprojectable="degrade")
+    assert restored_no_pending.replayed is False
+    assert restored_no_pending.pending_events == 0
+    assert restored_no_pending.state.status is StateStatus.INVALID
+    assert restored_no_pending.state.unprojectable_at_sequence == 5
+
+    # Case 2: corruption at sequence 6 (sequence 5 is readable, so incremental replay occurs)
+    def mock_read_with_pending(
+        run_id: str, after_sequence: int = 0, upto: int | None = None, **kwargs: Any
+    ) -> list[Any]:
+        if after_sequence > 0 and upto is None:
+            raise CorruptedRecord("bad pending record at 6", sequence=6)
+        return original_read(run_id, after_sequence=after_sequence, upto=upto, **kwargs)
+
+    monkeypatch.setattr(store, "read_events", mock_read_with_pending)
+
+    # replay=False stops at checkpoint state without incremental projection
+    restored_no_replay = manager.restore("run_1", replay=False, on_unprojectable="degrade")
+    assert restored_no_replay.replayed is False
+    assert restored_no_replay.state.status is StateStatus.INVALID
+    assert restored_no_replay.state.unprojectable_at_sequence == 6
+
+    # replay=True replays sequence 5 incrementally then marks refusal
+    restored_replayed = manager.restore("run_1", replay=True, on_unprojectable="degrade")
+    assert restored_replayed.replayed is True
+    assert restored_replayed.pending_events == 1
+    assert restored_replayed.state.status is StateStatus.INVALID
+    assert restored_replayed.state.unprojectable_at_sequence == 6
+
+
+# --- pruning normalization -------------------------------------------------- #
+
+
+def test_prune_clamps_keep_to_minimum_one(store: SQLiteStorage) -> None:
+    manager = CheckpointManager(store)
+    advance(store, 1)
+    cp1 = manager.checkpoint("run_1")
+    advance(store, 1)
+    cp2 = manager.checkpoint("run_1")
+    advance(store, 1)
+    cp3 = manager.checkpoint("run_1")
+
+    deleted = manager.prune("run_1", keep=0)
+    assert deleted == [cp1.checkpoint_id, cp2.checkpoint_id]
+    remaining = manager.history("run_1")
+    assert len(remaining) == 1
+    assert remaining[0].checkpoint_id == cp3.checkpoint_id
+
+
+def test_prune_noop_when_history_smaller_than_keep(store: SQLiteStorage) -> None:
+    manager = CheckpointManager(store)
+    advance(store, 1)
+    manager.checkpoint("run_1")
+    assert manager.prune("run_1", keep=5) == []
+
+
+def test_prune_preserves_anchor_triggers(store: SQLiteStorage) -> None:
+    manager = CheckpointManager(store)
+    advance(store, 1)
+    cp_milestone = manager.checkpoint("run_1", trigger=CheckpointTrigger.MILESTONE)
+    advance(store, 1)
+    cp_recovery = manager.checkpoint("run_1", trigger=CheckpointTrigger.RECOVERY)
+    advance(store, 1)
+    cp_compaction = manager.checkpoint("run_1", trigger=CheckpointTrigger.COMPACTION)
+    advance(store, 1)
+    cp_latest = manager.checkpoint("run_1", trigger=CheckpointTrigger.MANUAL)
+
+    deleted = manager.prune("run_1", keep=1, keep_anchors=True)
+    assert deleted == [cp_milestone.checkpoint_id]
+    remaining_ids = {c.checkpoint_id for c in manager.history("run_1")}
+    assert cp_recovery.checkpoint_id in remaining_ids
+    assert cp_compaction.checkpoint_id in remaining_ids
+    assert cp_latest.checkpoint_id in remaining_ids
+    assert cp_milestone.checkpoint_id not in remaining_ids
+
+    deleted_more = manager.prune("run_1", keep=1, keep_anchors=False)
+    assert set(deleted_more) == {cp_recovery.checkpoint_id, cp_compaction.checkpoint_id}
+    assert [c.checkpoint_id for c in manager.history("run_1")] == [cp_latest.checkpoint_id]

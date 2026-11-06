@@ -10,6 +10,12 @@ Test counts: ~4400 collected on a minimal env.
 
 ### Added
 
+- **Coverage for checkpoint manager maintenance and recovery degradation (#1987).**
+  `tests/test_checkpoint_manager.py` now covers `clear_resume_pointer` error and
+  success branches, `_mark_corruption_refusal` handling of multiline and existing
+  refusals, `_clean_prefix` sequence validation, `restore` degraded and raising paths
+  under `CorruptedRecord` storage faults, and `prune` normalization with anchor preservation.
+
 - **Unit coverage for the ledger-anchored authorization id (#1951).**
   `tests/test_idempotency_ledger_resolution.py` drives
   `resolve_authorization_id(..., ledger=...)` with in-memory ledger stand-ins and
