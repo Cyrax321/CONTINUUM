@@ -118,9 +118,20 @@ def fold_action_events(events: Any) -> dict[str, Action]:
             act_dict = dict(raw_action)
             if "correlation_id" not in act_dict and "correlation_id" in payload:
                 act_dict["correlation_id"] = payload["correlation_id"]
-            actions[key] = Action.model_validate(act_dict)
+            action = Action.model_validate(act_dict)
         elif isinstance(raw_action, Action):
-            actions[key] = raw_action
+            action = raw_action
+        else:
+            continue
+
+        existing = actions.get(key)
+        if (
+            existing is not None
+            and existing.status is ActionStatus.COMPLETED
+            and action.status in (ActionStatus.STARTED, ActionStatus.UNKNOWN)
+        ):
+            continue
+        actions[key] = action
     return actions
 
 
@@ -1653,7 +1664,7 @@ class ActionLedger:
                     update={"status": ActionStatus.UNKNOWN, "side_effect_uncertain": True}
                 )
                 with suppress(ConcurrentWriteError):
-                    self._record(key, uncertain)
+                    self._record(key, uncertain, expected_sequence=resolved.head_sequence)
                 raise UnknownSideEffect(
                     f"action {existing.action_type!r} (key {key[:12]}...) was interrupted before its "
                     f"outcome was recorded; the side effect may or may not have occurred. "
