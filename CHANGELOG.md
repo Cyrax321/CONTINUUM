@@ -10,6 +10,13 @@ Test counts: ~4400 collected on a minimal env.
 
 ### Added
 
+- **Unit coverage for the provenance graph's tracking and label fallbacks (#1988).**
+  `tests/test_provenance_graph.py` now drives `ProvenanceNode.label` against the
+  evidence/finding/decision/action payload cascade and the `event_id[:8]`
+  fallback, exercises `add_edge`/`downstream` guards on unknown ids, and folds
+  `SUBAGENT_SPAWNED` -> `SUBAGENT_COMPLETED`/`SUBAGENT_FAILED` spans plus
+  `PRECOMPACT_HOOK` compaction records. Tests only, no runtime change.
+
 - **Unit coverage for the ledger-anchored authorization id (#1951).**
   `tests/test_idempotency_ledger_resolution.py` drives
   `resolve_authorization_id(..., ledger=...)` with in-memory ledger stand-ins and

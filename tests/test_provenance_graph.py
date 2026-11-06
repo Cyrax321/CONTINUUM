@@ -8,8 +8,13 @@ import sys
 from pathlib import Path
 
 from continuum.events import EventType
-from continuum.models import Run
-from continuum.provenance.graph import build_provenance_graph, downstream_of
+from continuum.models import Origin, Run
+from continuum.provenance.graph import (
+    ProvenanceGraph,
+    ProvenanceNode,
+    build_provenance_graph,
+    downstream_of,
+)
 from continuum.storage.sqlite import SQLiteStorage
 
 #: The worktree's src, so the subprocess imports the tree under test rather
@@ -219,3 +224,139 @@ def test_invalidation_of_an_unknown_decision_leaves_the_graph_alone():
 
     assert len(graph.nodes) == 1
     assert next(iter(graph.nodes.values())).status.value == "valid"
+
+
+def test_node_label_prefers_payload_ids_over_event_id():
+    """The label cascade picks a domain id when the payload carries one (#1988)."""
+    base = {"event_id": "evt_abcdef123456", "sequence": 1, "origin": Origin.DETERMINISTIC}
+    variants = [
+        ({"evidence_id": "ev1"}, "EVIDENCE_ADDED:ev1"),
+        ({"finding_id": "f1"}, "EVIDENCE_ADDED:f1"),
+        ({"decision_id": "dec1"}, "EVIDENCE_ADDED:dec1"),
+        ({"action_id": "act1"}, "EVIDENCE_ADDED:act1"),
+        ({}, "EVIDENCE_ADDED:evt_abcd"),  # event_id[:8] fallback
+    ]
+    for payload, expected in variants:
+        node = ProvenanceNode(
+            event_id=base["event_id"],
+            sequence=base["sequence"],
+            type=EventType.EVIDENCE_ADDED,
+            origin=base["origin"],
+            payload=payload,
+        )
+        assert node.label == expected, f"payload={payload}"
+
+
+def test_node_label_uses_the_first_present_payload_id():
+    """When several ids are present the cascade order is evidence > finding > decision > action."""
+    node = ProvenanceNode(
+        event_id="evt_abcdef123456",
+        sequence=1,
+        type=EventType.ACTION_RECORDED,
+        origin=Origin.DETERMINISTIC,
+        payload={
+            "evidence_id": "ev1",
+            "finding_id": "f1",
+            "decision_id": "dec1",
+            "action_id": "act1",
+        },
+    )
+    assert node.label == "ACTION_RECORDED:ev1"
+
+
+def test_add_edge_and_downstream_ignore_unknown_ids():
+    """Edges between unknown nodes are dropped and unknown starts traverse nothing (#1988)."""
+    graph = ProvenanceGraph()
+    graph.add_edge("ghost_parent", "ghost_child")
+    assert graph.edges == {}
+    assert graph.reverse_edges == {}
+    assert graph.downstream("unknown_id") == []
+    # A known parent paired with an unknown child is ignored the same way.
+    graph.add_node(
+        ProvenanceNode(
+            event_id="evt_known",
+            sequence=1,
+            type=EventType.EVIDENCE_ADDED,
+            origin=Origin.DETERMINISTIC,
+        )
+    )
+    graph.add_edge("evt_known", "ghost_child")
+    assert graph.edges.get("evt_known") == []
+    assert graph.downstream("evt_known") == []
+
+
+def test_subagent_span_spawned_then_completed():
+    """A completed subagent span carries the parent link and result summary (#1988)."""
+    storage = SQLiteStorage(":memory:")
+    run_id = "run_subagent_completed"
+    storage.create_run(Run(run_id=run_id, goal="delegate"))
+    storage.append_event(
+        run_id,
+        EventType.SUBAGENT_SPAWNED,
+        {"subagent_run_id": "run_sub_1", "task_description": "scan the logs"},
+    )
+    storage.append_event(
+        run_id,
+        EventType.SUBAGENT_COMPLETED,
+        {"subagent_run_id": "run_sub_1", "result_summary": "found 3 anomalies"},
+    )
+
+    graph = build_provenance_graph(storage.read_events(run_id))
+
+    assert len(graph.subagent_spans) == 1
+    span = graph.subagent_spans[0]
+    assert span["subagent_run_id"] == "run_sub_1"
+    assert span["parent_run_id"] == run_id
+    assert span["task_description"] == "scan the logs"
+    assert span["status"] == "completed"
+    assert span["result_summary"] == "found 3 anomalies"
+
+
+def test_subagent_span_spawned_then_failed():
+    """A failed subagent span is marked failed and keeps no result summary (#1988)."""
+    storage = SQLiteStorage(":memory:")
+    run_id = "run_subagent_failed"
+    storage.create_run(Run(run_id=run_id, goal="delegate"))
+    storage.append_event(
+        run_id,
+        EventType.SUBAGENT_SPAWNED,
+        {"subagent_run_id": "run_sub_2", "task_description": "retry the push"},
+    )
+    storage.append_event(
+        run_id,
+        EventType.SUBAGENT_FAILED,
+        {"subagent_run_id": "run_sub_2"},
+    )
+
+    graph = build_provenance_graph(storage.read_events(run_id))
+
+    assert len(graph.subagent_spans) == 1
+    span = graph.subagent_spans[0]
+    assert span["status"] == "failed"
+    assert span["result_summary"] is None
+
+
+def test_precompact_hook_records_compaction_details():
+    """A PRECOMPACT_HOOK folds into graph.compactions with its metadata (#1988)."""
+    storage = SQLiteStorage(":memory:")
+    run_id = "run_precompact"
+    storage.create_run(Run(run_id=run_id, goal="compact"))
+    hook = storage.append_event(
+        run_id,
+        EventType.PRECOMPACT_HOOK,
+        {
+            "retained_events": 20,
+            "compacted_events": 180,
+            "summary": "kept the last 20 events",
+        },
+    )
+
+    graph = build_provenance_graph(storage.read_events(run_id))
+
+    assert len(graph.compactions) == 1
+    compaction = graph.compactions[0]
+    assert compaction["event_id"] == hook.event_id
+    assert compaction["sequence"] == hook.sequence
+    assert compaction["retained_events"] == 20
+    assert compaction["compacted_events"] == 180
+    assert compaction["summary"] == "kept the last 20 events"
