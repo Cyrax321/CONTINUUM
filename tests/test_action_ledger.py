@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from decimal import Decimal
 from typing import Any
 
@@ -1729,3 +1729,103 @@ def test_folded_action_cache_invalidates_on_non_contiguous_record(
     assert writer1._folded_cache is None
     # Subsequent read re-folds all records cleanly
     assert writer1.get("k_intervene") is not None
+
+
+def _count_stream_reads(store: SQLiteStorage) -> tuple[dict[str, int], Callable[[], None]]:
+    counts = {"archived": 0, "live": 0}
+    orig_arch, orig_live = store.read_archived_events, store.read_events
+
+    def arch(run_id: str, **kwargs: Any) -> Any:
+        counts["archived"] += 1
+        return orig_arch(run_id, **kwargs)
+
+    def live(run_id: str, *args: Any, **kwargs: Any) -> Any:
+        counts["live"] += 1
+        return orig_live(run_id, *args, **kwargs)
+
+    store.read_archived_events = arch  # type: ignore[method-assign]
+    store.read_events = live  # type: ignore[method-assign]
+
+    def restore() -> None:
+        store.read_archived_events = orig_arch  # type: ignore[method-assign]
+        store.read_events = orig_live  # type: ignore[method-assign]
+
+    return counts, restore
+
+
+def test_interleaved_non_action_event_never_touches_the_archive(store: SQLiteStorage) -> None:
+    """``last_sequence`` advances on every event, the fold consumes only actions.
+
+    A tool call, decision or checkpoint annotation appended between claims
+    must not re-fold the run's whole archive plus live stream (issue #2023):
+    only the tail past the last fold changes, and a tail of non-action
+    events changes nothing.
+    """
+    ledger = ActionLedger(store, "run_1")
+    outcome = ledger.claim("github.create_issue", {"title": "Issue 1"})
+    ledger.complete(outcome.key, external_id="101")
+    ledger.get(outcome.key)  # warm: last full fold over both streams
+
+    counts, restore = _count_stream_reads(store)
+    try:
+        store.append_event("run_1", EventType.TOOL_CALLED, {"tool": "web"})
+        folded = ledger.folded()
+        assert folded[outcome.key].status is ActionStatus.COMPLETED
+        # The tail read is the only stream read: the archive is untouched
+        # and nothing was re-folded.
+        assert counts["archived"] == 0
+        assert counts["live"] == 1
+        again = ledger.folded()
+        assert again is folded  # cache retained, merged in place
+        assert counts["archived"] == 0
+    finally:
+        restore()
+
+
+def test_cached_fold_sees_a_claim_recorded_after_interleaved_events(
+    store: SQLiteStorage,
+) -> None:
+    """A tail-folded cache must still notice other writers' claims (issue #2023)."""
+    writer1 = ActionLedger(store, "run_1")
+    outcome1 = writer1.claim("github.create_issue", {"title": "A"})
+    writer1.complete(outcome1.key, external_id="101")
+    assert writer1.get(outcome1.key) is not None
+
+    # An agent decision lands between the two claims.
+    store.append_event("run_1", EventType.DECISION_CREATED, {"name": "d"})
+    writer2 = ActionLedger(store, "run_1")
+    outcome2 = writer2.claim("github.create_issue", {"title": "B"})
+    writer2.complete(outcome2.key, external_id="102")
+
+    action2 = writer1.get(outcome2.key)
+    assert action2 is not None
+    assert action2.status is ActionStatus.COMPLETED
+    assert action2.external_id == "102"
+
+
+def test_compaction_between_folds_forces_a_full_rebuild(store: SQLiteStorage) -> None:
+    """Relocated rows are in the archive only, so the tail fold must not fire.
+
+    When compaction moves rows appended after the last fold (here the tool
+    call) into ``events_archive``, the live tail alone cannot be the delta:
+    a tail-only fold would drop action records settled in that window and
+    exactly-once would quietly reset (issue #2023).
+    """
+    ledger = ActionLedger(store, "run_1")
+    outcome = ledger.claim("github.create_issue", {"title": "A"})
+    ledger.complete(outcome.key, external_id="101")
+    assert ledger.get(outcome.key) is not None
+    store.append_event("run_1", EventType.TOOL_CALLED, {"tool": "web"})
+
+    counts, restore = _count_stream_reads(store)
+    try:
+        store.compact_run("run_1", through_sequence=store.last_sequence("run_1"))
+        # Compaction's own full-history projection re-read the archive; reset
+        # so only the ledger's own rebuild is pinned here.
+        counts["archived"] = 0
+        counts["live"] = 0
+        folded = ledger.folded()
+        assert counts["archived"] == 1  # the gap was noticed and rebuilt fully
+        assert folded[outcome.key].status is ActionStatus.COMPLETED
+    finally:
+        restore()
