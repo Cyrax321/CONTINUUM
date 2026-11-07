@@ -230,3 +230,160 @@ class TestWrapToolAndStartRun:
 
         with pytest.raises(ValueError, match="does not begin with RUN_STARTED"):
             adapter.start_run(goal="late entry", run_id="r_backfill")
+
+
+@pytest.mark.skipif(not langchain_available, reason="langchain-core not installed")
+class TestCheckpointNodeAndStateExtraction:
+    """The checkpoint node's arms and the two state converters (issue #1986).
+
+    ``checkpoint_node`` carries three distinct arms: an unidentified state
+    returns untouched, a run with no event log gets its state extracted from
+    the dict fields, and a run whose log already carries work gets the
+    authoritative projection. This class also drives the converter hook
+    (``state_to_semantic``), the default extractor, and
+    ``assess_langchain_recovery`` direct to the recovery engine.
+    """
+
+    def test_checkpoint_node_returns_an_unidentified_state_unchanged(
+        self, store: SQLiteStorage
+    ) -> None:
+        """No ``continuum_run_id`` means nothing is claimed, written or thrown."""
+        from continuum.adapters.langchain import LangChainAgentAdapter
+
+        adapter = LangChainAgentAdapter(store)
+        state = {"other_field": 123}
+        assert adapter.checkpoint_node(state) is state
+        assert list(store.list_runs()) == []
+
+    def test_checkpoint_node_on_a_fresh_run_extracts_from_the_state_dict(
+        self, store: SQLiteStorage, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A run without events has no projection; the dict is the only truth."""
+        from continuum.adapters.langchain import LangChainAgentAdapter
+        from continuum.models import Run, SemanticState
+
+        store.create_run(Run(run_id="r_fresh", goal="original"))
+        adapter = LangChainAgentAdapter(store)
+        seen: list[tuple[str, SemanticState, str]] = []
+        monkeypatch.setattr(
+            adapter,
+            "capture_state",
+            lambda run_id, semantic_state, *, reason: seen.append((run_id, semantic_state, reason)),
+            raising=False,
+        )
+        state = {
+            "continuum_run_id": "r_fresh",
+            "goal": "carry the patients",
+            "completed_count": 2,
+            "total_count": 5,
+        }
+        returned = adapter.checkpoint_node(state)
+        assert returned is state
+        assert [run_id for run_id, _, _ in seen] == ["r_fresh"]
+        assert [reason for _, _, reason in seen] == ["langchain checkpoint node"]
+        assert seen[0][1].goal.description == "carry the patients"
+        assert seen[0][1].progress.completed == 2
+        assert seen[0][1].progress.total == 5
+
+    def test_checkpoint_node_on_a_run_with_events_projects_the_log(
+        self, store: SQLiteStorage
+    ) -> None:
+        """Once the log carries work, projection is the source of truth."""
+        from continuum.adapters.langchain import LangChainAgentAdapter
+        from continuum.events import EventType
+
+        adapter = LangChainAgentAdapter(store)
+        run = adapter.start_run(goal="project me")
+
+        state = {"continuum_run_id": run.run_id, "goal": "stale dict goal"}
+        returned = adapter.checkpoint_node(state)
+        assert returned is state
+        checkpointed = list(store.read_events(run.run_id))
+        assert checkpointed[-1].type is EventType.STATE_CHECKPOINTED
+        assert checkpointed[-1].payload["reason"] == "langchain checkpoint node"
+
+    def test_extract_semantic_state_prefers_the_custom_converter(
+        self, store: SQLiteStorage
+    ) -> None:
+        """The injected ``state_to_semantic`` hook replaces the default."""
+        from continuum.adapters.langchain import LangChainAgentAdapter
+        from continuum.models import Goal, SemanticState
+
+        marker = SemanticState(run_id="r_custom", goal=Goal(description="custom"))
+        adapter = LangChainAgentAdapter(store, state_to_semantic=lambda state: marker)
+        assert adapter.extract_semantic_state({"goal": "ignored"}) is marker
+
+    def test__extract_semantic_state_defaults_each_field(self, store: SQLiteStorage) -> None:
+        """Missing fields fall back per field, not as a whole."""
+        from continuum.adapters.langchain import LangChainAgentAdapter
+
+        adapter = LangChainAgentAdapter(store)
+        semantic = adapter._extract_semantic_state({})
+        assert semantic.run_id == "unknown"
+        assert semantic.goal.description == "LangChain agent task"
+        assert semantic.progress.completed == 0
+        assert semantic.progress.total is None
+
+    def test__extract_semantic_state_parses_counts_from_the_dict(
+        self, store: SQLiteStorage
+    ) -> None:
+        from continuum.adapters.langchain import LangChainAgentAdapter
+
+        adapter = LangChainAgentAdapter(store)
+        semantic = adapter._extract_semantic_state(
+            {"goal": "ship it", "completed_count": "2", "total_count": 5}
+        )
+        assert semantic.run_id == "unknown"
+        assert semantic.goal.description == "ship it"
+        assert semantic.progress.completed == 2
+        assert semantic.progress.total == 5
+
+    def test_start_run_backfills_run_started_on_an_empty_log(self, store: SQLiteStorage) -> None:
+        """The empty-log branch must seed the event projection needs."""
+        from continuum.adapters.langchain import LangChainAgentAdapter
+        from continuum.events import EventType
+
+        adapter = LangChainAgentAdapter(store)
+        run = adapter.start_run(goal="fresh start")
+        events = store.read_events(run.run_id)
+        assert [e.type for e in events] == [EventType.RUN_STARTED]
+        assert events[0].payload["goal"] == "fresh start"
+
+    def test_start_run_accepts_a_run_whose_first_event_sits_in_the_archive(
+        self, store: SQLiteStorage
+    ) -> None:
+        """After compaction the first event lives in the archive only.
+
+        The log begins with ``RUN_STARTED``, which under one of its later
+        versions gets compacted into ``events_archive``. ``start_run`` must
+        still honour it (no backfill, no refusal) rather than fail the run
+        whose history it can no longer see in the live stream.
+        """
+        from continuum.adapters.langchain import LangChainAgentAdapter
+        from continuum.events import EventType
+        from continuum.models import Origin
+
+        adapter = LangChainAgentAdapter(store)
+        run = adapter.start_run(goal="compacted history")
+        store.append_event(
+            run.run_id, EventType.TASK_UPDATED, {"completed": 1}, source=Origin.DETERMINISTIC
+        )
+        store.compact_run(
+            run.run_id, through_sequence=store.last_sequence(run.run_id)
+        )  # compacts RUN_STARTED and the task update behind a fresh anchor
+        assert not [e for e in store.read_events(run.run_id) if e.type is EventType.RUN_STARTED]
+
+        reopened = adapter.start_run(goal="reopen", run_id=run.run_id)
+        assert reopened.run_id == run.run_id
+        assert not [e for e in store.read_events(run.run_id) if e.type is EventType.RUN_STARTED]
+
+    def test_assess_langchain_recovery_returns_a_decision(self, store: SQLiteStorage) -> None:
+        """The helper delegates straight to the recovery engine."""
+        from continuum.adapters.langchain import LangChainAgentAdapter
+        from continuum.recovery.engine import RecoveryDecision
+
+        adapter = LangChainAgentAdapter(store)
+        run = adapter.start_run(goal="assess me")
+        decision = adapter.assess_langchain_recovery(run.run_id)
+        assert isinstance(decision, RecoveryDecision)
+        assert decision.safe is True

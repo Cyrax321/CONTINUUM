@@ -10,6 +10,18 @@ Test counts: ~4400 collected on a minimal env.
 
 ### Added
 
+- **Unit coverage for the LangChain adapter's checkpoint node arms and state
+  converters (#1986).** `tests/test_adapters_langchain.py` now drives
+  `checkpoint_node`'s unidentified-state early return, its fresh-run arm
+  extracting the state from the dict fields, its run-with-events arm
+  projecting the log and capturing the checkpoint, the custom
+  `state_to_semantic` hook, the default extractor's per-field defaults and
+  count parsing, `start_run`'s empty-log backfill and its
+  archive-first-event acceptance after compaction, and
+  `assess_langchain_recovery`. Tests only, no runtime change.
+
+### Added
+
 - **Unit coverage for the ledger-anchored authorization id (#1951).**
   `tests/test_idempotency_ledger_resolution.py` drives
   `resolve_authorization_id(..., ledger=...)` with in-memory ledger stand-ins and
