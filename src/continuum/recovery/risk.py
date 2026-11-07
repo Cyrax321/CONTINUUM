@@ -158,13 +158,21 @@ def signals_from_events(events: Iterable[Any]) -> list[RiskSignal]:
 #: substring test, which is how an unrelated verified step ("already
 #: refactored the retry budget") beat one carrying real evidence. The
 #: optional ``(?:s|ing)?`` keeps "searching", "findings" and "gathering"
-#: legible without re-opening the substring hazard.
+#: legible without re-opening the substring hazard. ``step_id`` values are
+#: split on ``_``, ``-`` and ``.`` before this pattern is applied
+#: (issue #2022): the boundaries here cannot fire between a letter and
+#: those separators, so an unsplit id like ``fetch_user_profile`` would
+#: never match.
 _FACT_GATHERING_RE = re.compile(
     r"\b(gather|fact|facts|evidence|collect|query|fetch|search|read|check"
     r"|inspect|observe|probe|find|finding|findings|investigate|lookup)"
     r"(?:s|ing)?\b",
     re.IGNORECASE,
 )
+
+#: Identifier separators split out of ``step_id`` values before the
+#: fact-gathering vocabulary is matched (issue #2022).
+_STEP_ID_SEPARATORS = re.compile(r"[._-]+")
 
 _EXPLICIT_ANCHOR_KEYS = ("last_verified_step", "fact_gathering_step", "rollback_target")
 
@@ -200,11 +208,13 @@ def _candidates_before_cascade(plan: list[PlanStep], trigger_step_id: str | None
 
     Without a trigger there is no cascade boundary to respect, so every step
     is a candidate. With one, a step qualifies by being recorded before the
-    trigger step's last update (``provenance.source_sequence``), by depending
-    into it through the ``depends_on`` graph, or by sitting before it in the
-    stored list. The list alone is the weakest of the three: it is a
-    ``step_id`` sort, not execution order, and survives only for plans whose
-    events carry no sequence and no dependencies.
+    trigger step's last update (``provenance.source_sequence``) or by
+    depending into it through the ``depends_on`` graph. The stored list that
+    others may sit before in is the weakest signal of the three: it is a
+    ``step_id`` sort, not execution order (issue #1423 review), so it survives
+    only where the events carry no sequence and no dependencies to compare
+    (issue #2021): a step recorded after the cascade must not reach the
+    rollback guidance just because its id sorts ahead of the trigger's.
     """
     if trigger_step_id is None:
         return list(plan)
@@ -222,8 +232,15 @@ def _candidates_before_cascade(plan: list[PlanStep], trigger_step_id: str | None
         if index == trigger_index:
             continue
         sequence = step.provenance.source_sequence
-        recorded_earlier = sequence is not None and boundary is not None and sequence < boundary
-        if index < trigger_index or step.step_id in ancestors or recorded_earlier:
+        # The trigger depends on this step, directly or transitively: the
+        # plan's own record puts it before the cascade.
+        if step.step_id in ancestors:
+            candidates.append(step)
+            continue
+        if sequence is not None and boundary is not None:
+            if sequence < boundary:
+                candidates.append(step)
+        elif index < trigger_index:
             candidates.append(step)
     return candidates
 
@@ -268,11 +285,20 @@ def locate_last_fact_gathering_step(
 
     candidates = _candidates_before_cascade(list(state.plan or ()), trigger_step_id)
     verified_kinds = _verified_kinds()
+    # The id half of the searched text is split on its separator characters
+    # before matching (issue #2022): ``step_id`` values are written in
+    # ``snake_case`` and ``kebab-case``, and ``_`` is a word character in
+    # Python regexes, so no \b boundary ever fires between a letter and an
+    # underscore. Splitting keeps the whole-token guarantee of the pattern
+    # below (nothing matches inside "already" or "thread") while making the
+    # id itself legible to it.
     factual = [
         s
         for s in candidates
         if s.status in verified_kinds
-        and _FACT_GATHERING_RE.search(f"{s.step_id} {s.description}".lower())
+        and _FACT_GATHERING_RE.search(
+            f"{_STEP_ID_SEPARATORS.sub(' ', s.step_id)} {s.description}".lower()
+        )
     ]
     if factual:
         best = max(

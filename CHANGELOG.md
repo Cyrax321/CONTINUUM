@@ -281,6 +281,26 @@ Test counts: ~4400 collected on a minimal env.
   are configured.
 ### Fixed
 
+- **The meltdown rollback anchor can no longer name a step recorded after the
+  cascade (#2021).** `_candidates_before_cascade` admitted a plan step through
+  the positional test (`index < trigger_index`) even when both the step and
+  the trigger carried `provenance.source_sequence`, but the stored plan is a
+  `step_id` sort, not execution order: a step recorded after the cascade
+  qualified whenever its id sorted ahead of the trigger's, and the ranking
+  then preferred its later sequence. The positional test now applies only to
+  plans whose events carry no sequence, where the stored order is all there
+  is; with sequences present, `recorded_earlier` and the `depends_on`
+  ancestor closure are the only admission signals.
+
+- **Fact-gathering steps named in snake_case or kebab-case ids are now legible
+  to the meltdown rollback anchor (#2022).** `_FACT_GATHERING_RE` is matched
+  with `\b` boundaries, and `_` is a word character in Python regexes, so no
+  boundary can fire between a letter and an underscore: `fetch_user_profile`,
+  `step_query_db` and `z_fetch` never matched, leaving the description as the
+  only matching half. Step ids are split on separators before matching, which
+  keeps the whole-token guarantee (nothing matches inside "already" or
+  "thread") while making the id itself readable to the pattern.
+
 - **The daemon's active-run probe and detached startup deadline work on
   server-backed storage (#1855).** The probe gated on `Path(db).exists()`,
   which is never true for a `postgresql://` URL, so the daemon silently bound

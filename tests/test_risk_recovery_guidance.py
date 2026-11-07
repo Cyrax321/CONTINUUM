@@ -394,6 +394,68 @@ def test_meltdown_locates_the_anchor_via_recorded_sequence() -> None:
     assert fact == "z_fetch"
 
 
+def test_meltdown_never_rolls_back_to_a_step_recorded_after_the_cascade() -> None:
+    # The stored plan is a step_id sort, not execution order. Here the true
+    # pre-cascade anchor (``m_fetch_before``, seq 50) sorts AFTER a step that
+    # ran AFTER the cascade (``a_fetch_after``, seq 200), so the positional
+    # admission test used to let the post-cascade step in and the ranking
+    # then preferred its later sequence, naming work that postdates the
+    # failure as the rollback point (issue #2021).
+    state = _state(
+        _step(
+            "a_fetch_after",
+            "fetch new data",
+            PlanStepStatus.VERIFIED,
+            evidence=["ev_1"],
+            source_sequence=200,
+        ),
+        _step(
+            "m_fetch_before",
+            "load customer rows",
+            PlanStepStatus.VERIFIED,
+            evidence=["ev_2"],
+            source_sequence=50,
+        ),
+        _step("z_cascade", "fan out the writes", PlanStepStatus.IN_PROGRESS, source_sequence=100),
+    )
+    fact = locate_last_fact_gathering_step(state, trigger_step_id="z_cascade")
+    assert fact == "m_fetch_before"
+
+
+def test_meltdown_matches_fact_work_named_in_snake_case_ids() -> None:
+    # ``_`` is a word character in Python regexes, so no \b boundary fires
+    # between a letter and an underscore: a verified step whose id says
+    # fetch_user_profile was invisible to the anchor unless its description
+    # happened to repeat the vocabulary (issue #2022).
+    for sid in (
+        "fetch_user_profile",
+        "step_query_db",
+        "z_fetch",
+        "fetch-report-15",
+        "inspect.cache",
+    ):
+        state = _state(
+            _step(sid, "load customer rows", PlanStepStatus.VERIFIED),
+            _step("z_cascade", "cascade", PlanStepStatus.IN_PROGRESS),
+        )
+        # Both ids sort independently of execution order here; only the
+        # trigger boundary matters, so the candidates come out either way.
+        fact = locate_last_fact_gathering_step(state, trigger_step_id="z_cascade")
+        assert fact == sid, sid
+
+
+def test_meltdown_id_splitting_keeps_the_whole_token_guarantee() -> None:
+    # Splitting separators in ids must not reopen the substring hazard the
+    # \b guards were added for (issue #1423 review): "already_refactored"
+    # still does not read as a fact-gathering step.
+    for sid in ("already_refactored", "thread_cleanup", "pre_reader_gate"):
+        state = _state(
+            _step(sid, "rewound the retry budget", PlanStepStatus.VERIFIED),
+            _step("z_cascade", "cascade", PlanStepStatus.IN_PROGRESS),
+        )
+        assert locate_last_fact_gathering_step(state, trigger_step_id="z_cascade") is None, sid
+
+
 def test_meltdown_never_admits_an_unverified_fact_step() -> None:
     # A fact-gathering step that is still in progress is not the last
     # *verified* one, even when it already carries evidence. Nothing honest
