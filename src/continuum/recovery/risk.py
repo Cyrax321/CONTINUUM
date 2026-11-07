@@ -158,7 +158,10 @@ def signals_from_events(events: Iterable[Any]) -> list[RiskSignal]:
 #: substring test, which is how an unrelated verified step ("already
 #: refactored the retry budget") beat one carrying real evidence. The
 #: optional ``(?:s|ing)?`` keeps "searching", "findings" and "gathering"
-#: legible without re-opening the substring hazard.
+#: legible without re-opening the substring hazard. Step ids go through
+#: :func:`_id_terms` first, so the tokens they spell across ``_``, ``-`` and
+#: ``.`` match too (#2022), while identically-joined substrings inside one
+#: token ("already", "thread") still never do.
 _FACT_GATHERING_RE = re.compile(
     r"\b(gather|fact|facts|evidence|collect|query|fetch|search|read|check"
     r"|inspect|observe|probe|find|finding|findings|investigate|lookup)"
@@ -167,6 +170,20 @@ _FACT_GATHERING_RE = re.compile(
 )
 
 _EXPLICIT_ANCHOR_KEYS = ("last_verified_step", "fact_gathering_step", "rollback_target")
+
+
+def _id_terms(step_id: str) -> str:
+    """A step id with its separator runs replaced by spaces (issue #2022).
+
+    Plan ids are snake_case, so ``fetch_user_profile`` names its fact work
+    through the separators. Left as-is, the whole-token anchors below never
+    fire inside one: ``_`` is a word character in Python regexes, so no
+    boundary falls between a letter and an underscore. Only the id half of
+    the searched text goes through this; the description is prose and passes
+    through unchanged, which keeps the whole-token guard that stops "already"
+    and "thread" reading as "read" (issue #1423) intact.
+    """
+    return re.sub(r"[_.\-]+", " ", step_id)
 
 
 def _verified_kinds() -> frozenset[PlanStepStatus]:
@@ -204,7 +221,12 @@ def _candidates_before_cascade(plan: list[PlanStep], trigger_step_id: str | None
     into it through the ``depends_on`` graph, or by sitting before it in the
     stored list. The list alone is the weakest of the three: it is a
     ``step_id`` sort, not execution order, and survives only for plans whose
-    events carry no sequence and no dependencies.
+    events carry no sequence and no dependencies. Where the trigger carries a
+    sequence or a dependency graph, those are the ordering signals and the
+    positional branch must stay out of it: admitted positionally, a step
+    recorded *after* the cascade still sorts before the trigger and would be
+    ranked into the anchor (issue #2021), rolling the operator back to work
+    that postdates the failure.
     """
     if trigger_step_id is None:
         return list(plan)
@@ -216,14 +238,22 @@ def _candidates_before_cascade(plan: list[PlanStep], trigger_step_id: str | None
     if trigger_index is None:
         return list(plan)
     boundary = plan[trigger_index].provenance.source_sequence
-    ancestors = _ancestors({s.step_id: s for s in plan}, trigger_step_id)
+    plan_by_id = {s.step_id: s for s in plan}
+    ancestors = _ancestors(plan_by_id, trigger_step_id)
+    # The stored order is usable as an ordering signal only when neither the
+    # sequence nor the dependency graph says anything at all.
+    positional_ok = boundary is None and not ancestors
     candidates: list[PlanStep] = []
     for index, step in enumerate(plan):
         if index == trigger_index:
             continue
         sequence = step.provenance.source_sequence
         recorded_earlier = sequence is not None and boundary is not None and sequence < boundary
-        if index < trigger_index or step.step_id in ancestors or recorded_earlier:
+        if (
+            (positional_ok and index < trigger_index)
+            or step.step_id in ancestors
+            or recorded_earlier
+        ):
             candidates.append(step)
     return candidates
 
@@ -247,7 +277,8 @@ def locate_last_fact_gathering_step(
 
     Explicit anchors the monitor names in ``detail`` win first; the plan is
     then scanned. A plan step qualifies only when it is verified or completed
-    and matches the fact-gathering vocabulary on whole tokens, ranked by
+    and matches the fact-gathering vocabulary on whole tokens, read over the
+    id's separator-split terms and over the description, ranked by
     (carries evidence, recorded later, stored later) so the *last* verified
     fact-gathering step wins. Anything weaker is not a safe rollback point and
     is deliberately not named: unverified or non-factual steps, arbitrary
@@ -272,7 +303,7 @@ def locate_last_fact_gathering_step(
         s
         for s in candidates
         if s.status in verified_kinds
-        and _FACT_GATHERING_RE.search(f"{s.step_id} {s.description}".lower())
+        and _FACT_GATHERING_RE.search(f"{_id_terms(s.step_id)} {s.description}".lower())
     ]
     if factual:
         best = max(

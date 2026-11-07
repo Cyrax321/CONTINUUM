@@ -331,6 +331,29 @@ def test_meltdown_keyword_matching_uses_word_boundaries() -> None:
     assert plan.steps[0].target == "step_baseline"
 
 
+@pytest.mark.parametrize(
+    "step_id",
+    [
+        pytest.param("fetch_user_profile", id="underscore"),
+        pytest.param("step-query-db", id="dash"),
+        pytest.param("z_fetch", id="leading-suffix"),
+        pytest.param("gather.user.stats", id="dot"),
+    ],
+)
+def test_meltdown_reads_fact_words_in_separated_step_ids(step_id: str) -> None:
+    # Plan ids are snake_case and friends, so "fetch_user_profile" names its
+    # fact-gathering work through the separators. A whole-token regex that
+    # treats `_` as part of a word never fires inside one (issue #2022), so
+    # the id never helped the anchor and a differently-worded description
+    # left the step invisible.
+    state = _state(
+        _step(step_id, "load customer rows", PlanStepStatus.VERIFIED, evidence=["ev_1"]),
+        _step("step_cascade", "fan out the writes", PlanStepStatus.IN_PROGRESS),
+    )
+    fact = locate_last_fact_gathering_step(state, trigger_step_id="step_cascade")
+    assert fact == step_id
+
+
 def test_meltdown_ranks_evidence_over_position() -> None:
     # Two fact-gathering steps: the earlier one carries evidence, the later
     # one does not. Evidence outranks position, so the earlier one wins.
@@ -392,6 +415,38 @@ def test_meltdown_locates_the_anchor_via_recorded_sequence() -> None:
     )
     fact = locate_last_fact_gathering_step(state, trigger_step_id="a_cascade")
     assert fact == "z_fetch"
+
+
+def test_meltdown_never_anchors_on_a_step_recorded_after_the_cascade() -> None:
+    # Execution order: m_fetch_before (seq 50) -> z_cascade (seq 100) ->
+    # a_fetch_after (seq 200). ``plan_upsert`` stores the plan sorted by
+    # ``step_id``, so a_fetch_after sits at index 0, ahead of the trigger:
+    # admitted by the positional branch, it then beat the true pre-cascade
+    # step in the ranking on its higher sequence, and the guidance rolled the
+    # operator back to work that postdates the failure. Where the plan carries
+    # sequences, those — not the stored order — are the ordering signal, so
+    # the positional branch must stay out of it (issue #2021).
+    state = _state(
+        _step(
+            "a_fetch_after",
+            "load fresh snapshots",
+            PlanStepStatus.VERIFIED,
+            evidence=["ev_3"],
+            source_sequence=200,
+        ),
+        _step(
+            "m_fetch_before",
+            "load customer rows",
+            PlanStepStatus.VERIFIED,
+            evidence=["ev_2"],
+            source_sequence=50,
+        ),
+        _step("z_cascade", "fan out the writes", PlanStepStatus.IN_PROGRESS, source_sequence=100),
+    )
+    plan = plan_repairs(
+        risk_events=[RiskSignal("meltdown", "z_cascade", "ep_cascade_1")], state=state
+    )
+    assert plan.steps[0].target == "m_fetch_before"
 
 
 def test_meltdown_never_admits_an_unverified_fact_step() -> None:

@@ -281,6 +281,30 @@ Test counts: ~4400 collected on a minimal env.
   are configured.
 ### Fixed
 
+- **The meltdown rollback anchor never names a step recorded after the
+  cascade (#2021).** `plan_upsert` stores the plan sorted by `step_id`, so a
+  step's position is alphabetical, not execution order. The positional branch
+  of the candidate gate nevertheless fired whenever that sort placed a step
+  ahead of the trigger, admitting work recorded *after* the cascade, and the
+  ranking then preferred it on its higher `source_sequence` — the guidance
+  rolled an operator back to work that postdated the failure. The positional
+  test now applies only to plans whose events carry neither a
+  `source_sequence` nor a `depends_on` graph: the case it was documented to
+  exist for. Where either signal is present, the sequence comparison and the
+  ancestor closure are the ordering, alone.
+
+- **The meltdown rollback anchor reads fact words in snake_case step ids
+  (#2022).** `_FACT_GATHERING_RE` is anchored with word boundaries, but `_`
+  is a word character in Python regexes, so no boundary can fall between a
+  letter and an underscore: an id like `fetch_user_profile` or
+  `step_query_db` never matched, no matter how plainly it names fact
+  gathering, and a step whose description words things differently stayed
+  invisible. The id half of the searched text is now read with its
+  separator runs (`_`, `-`, `.`) split into spaces, so the whole-token
+  guarantee holds and the id is legible. The description passes through
+  unchanged, which keeps the substring guard that stops "already" and
+  "thread" reading as "read" (issue #1423) intact.
+
 - **The daemon's active-run probe and detached startup deadline work on
   server-backed storage (#1855).** The probe gated on `Path(db).exists()`,
   which is never true for a `postgresql://` URL, so the daemon silently bound
