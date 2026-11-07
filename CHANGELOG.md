@@ -281,6 +281,19 @@ Test counts: ~4400 collected on a minimal env.
   are configured.
 ### Fixed
 
+- **A non-action event appended between claims no longer forces the action
+  ledger to re-fold the run (#2023).** `_replay` served the fold cache only
+  when `last_sequence` matched the cached head, but the head advances on
+  every appended event while the fold consumes only action events, so in a
+  realistic stream where the agent interleaves tool calls, decisions and
+  checkpoint annotations between its actions, the cache never hit and every
+  claim re-read and re-folded the archive plus live tail. When the events
+  appended past the cached head are still all live and contiguous from it,
+  the tail alone is now folded and merged into the cache; a gap against the
+  log head (compaction relocated rows into the archive between folds) forces
+  the full rebuild, so relocated rows can never leave the cache silently
+  stale.
+
 - **The daemon's active-run probe and detached startup deadline work on
   server-backed storage (#1855).** The probe gated on `Path(db).exists()`,
   which is never true for a `postgresql://` URL, so the daemon silently bound

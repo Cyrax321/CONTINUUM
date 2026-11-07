@@ -704,13 +704,52 @@ class ActionLedger:
         effect could fire a second time. Both streams are already sequence-
         sorted, so they merge linearly instead of paying a re-sort on this
         hot path.
+
+        The fold cache keeps this cheap across reads (issue #1857), but
+        ``last_sequence`` advances on every appended event while the fold
+        consumes only action events (issue #2023): in any realistic stream,
+        where the agent interleaves tool calls, decisions and checkpoint
+        annotations between its actions, a head-only cache test re-folded the
+        run's whole history after every one of them. When the events appended
+        past the cached head are still all live and contiguous from it, the
+        tail alone is folded and merged into the cache; a gap against the log
+        head (compaction relocated rows into the archive) forces the full
+        rebuild, so relocating rows can never leave the cache silently stale.
         """
         head = self.storage.last_sequence(self.run_id)
         if self._folded_cache is not None and not refresh and head == self._cache_head:
             return self._folded_cache
+        if self._folded_cache is not None and not refresh and self._merge_tail_into_cache(head):
+            return self._folded_cache
         self._folded_cache = fold_action_events(self._merged_events())
         self._cache_head = head
         return self._folded_cache
+
+    def _merge_tail_into_cache(self, head: int) -> bool:
+        """Fold the events appended past the cached head into the cache, or refold.
+
+        Nothing below ``self._cache_head`` changed since the cache was built
+        (log rows are immutable and compaction only relocates them), so the
+        cache is exactly the fold over all rows up to it and only the tail can
+        change the answer. The tail is read from the live stream alone, which
+        is trustworthy as the whole delta only when it covers every sequence
+        between the cached head and the log head: a missing row means a
+        compaction moved it into ``events_archive`` between folds, so its
+        action events would disappear from a tail-only fold and the caller
+        must fold both streams fully. Returns whether the tail was consumed.
+        """
+        cached_head = self._cache_head
+        tail = list(self.storage.read_events(self.run_id, after_sequence=cached_head))
+        covers_head = (
+            bool(tail) and tail[0].sequence == cached_head + 1 and tail[-1].sequence == head
+        )
+        if not covers_head:
+            return False
+        tail_actions = fold_action_events(tail)
+        if tail_actions:
+            self._folded_cache.update(tail_actions)
+        self._cache_head = head
+        return True
 
     def folded(self) -> dict[str, Action]:
         """Public view of the ``key -> newest action`` fold, archive included."""
