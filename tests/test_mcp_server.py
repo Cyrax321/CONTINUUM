@@ -271,6 +271,122 @@ async def test_record_plan_upserts_units_and_rejects_bad_payloads(
         )
 
 
+# --- bounded reasoning summaries (issue #235) ------------------------------ #
+
+
+@pytest.mark.asyncio
+async def test_record_summary_stores_the_summary_and_stamps_provenance(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """A summary lands as one REASONING_SUMMARY event, provenance clamped."""
+    server, ctx = server_ctx
+    await seed_run(server)
+    summary = {
+        "plan_stack": ["fix the fold cache", "re-check the anchor"],
+        "decisions": [{"what": "drop the positional branch", "why": "it names post-cascade work"}],
+        "open_questions": ["does the pg engine see the same tail?"],
+        "working_set": ["src/continuum/actions/ledger.py"],
+        "note": "two defects left",
+    }
+    payload = await call(
+        server,
+        "continuum_record_summary",
+        run_id="run_1",
+        plan_stack=summary["plan_stack"],
+        decisions=summary["decisions"],
+        open_questions=summary["open_questions"],
+        working_set=summary["working_set"],
+        note=summary["note"],
+        pinning={"model_id": "atria-dawn", "policy_version": "42"},
+    )
+
+    assert payload["recorded"] is True
+    assert payload["run_id"] == "run_1"
+    assert payload["bytes"] == len(json.dumps(summary, ensure_ascii=False))
+
+    events = [e for e in ctx.storage.read_events("run_1") if e.type is EventType.REASONING_SUMMARY]
+    assert len(events) == 1, f"expected one REASONING_SUMMARY event, got {len(events)}"
+    event = events[0]
+    assert event.sequence == payload["sequence"]
+    assert event.source is Origin.EXTERNAL_AGENT
+    assert event.payload["derived_origin"] == "external_agent"
+    assert event.payload["summary"] == summary
+    # Pinning is normalized before it is stored, not passed through raw.
+    assert event.payload["pinning"] == {"model_id": "atria-dawn", "policy_version": "42"}
+
+
+@pytest.mark.asyncio
+async def test_record_summary_refuses_an_oversized_payload(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """The cap is what keeps a summary a summary (issue #235)."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, ctx = server_ctx
+    await seed_run(server)
+    with pytest.raises(ToolError, match=r"is \d+ chars; cap is 4096"):
+        await call(
+            server,
+            "continuum_record_summary",
+            run_id="run_1",
+            note="draft notes " * 500,
+        )
+
+    # A refused summary writes nothing.
+    assert not [
+        e for e in ctx.storage.read_events("run_1") if e.type is EventType.REASONING_SUMMARY
+    ]
+
+
+@pytest.mark.asyncio
+async def test_record_summary_defaults_the_fields_the_caller_omits(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """Anything not supplied is an empty collection, and no pinning means none."""
+    server, ctx = server_ctx
+    await seed_run(server)
+    payload = await call(server, "continuum_record_summary", run_id="run_1", note="first word")
+
+    assert payload["recorded"] is True
+    assert payload["run_id"] == "run_1"
+    (event,) = [
+        e for e in ctx.storage.read_events("run_1") if e.type is EventType.REASONING_SUMMARY
+    ]
+    assert event.payload["summary"] == {
+        "plan_stack": [],
+        "decisions": [],
+        "open_questions": [],
+        "working_set": [],
+        "note": "first word",
+    }
+    # No pinning supplied means no pinning stored.
+    assert "pinning" not in event.payload
+
+
+@pytest.mark.asyncio
+async def test_record_summary_reports_an_honest_byte_count(
+    server_ctx: tuple[Any, Any],
+) -> None:
+    """``bytes`` is the serialized size the cap was measured against."""
+    server, _ = server_ctx
+    await seed_run(server)
+    payload = await call(
+        server,
+        "continuum_record_summary",
+        run_id="run_1",
+        plan_stack=["one"],
+        open_questions=["two"],
+    )
+    expected = {
+        "plan_stack": ["one"],
+        "decisions": [],
+        "open_questions": ["two"],
+        "working_set": [],
+        "note": "",
+    }
+    assert payload["bytes"] == len(json.dumps(expected, ensure_ascii=False))
+
+
 @pytest.mark.asyncio
 async def test_over_total_progress_is_rejected_before_being_written(
     server_ctx: tuple[Any, Any],
