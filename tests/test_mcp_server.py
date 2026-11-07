@@ -11,6 +11,7 @@ is plumbing by comparison.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -30,11 +31,14 @@ from continuum.mcp.authz import (
     CLIENT_TOKENS_ENV_VAR,
     CONFIRM_ENV_VAR,
     AuthorizationPolicy,
+    AuthPolicy,
+    ConfirmPolicy,
 )
 from continuum.mcp.server import (
     DEFAULT_DB,
     ContinuumMCP,
     _open_server_storage,
+    _reject_reused_confirmation_secret,
     build_server,
     main,
     resolve_database,
@@ -628,6 +632,157 @@ async def test_validate_flags_a_changed_dependency(server_ctx: tuple[Any, Any]) 
         e["component"] == "external_dependency" and e["status"] == "conflicted"
         for e in payload["components"]
     )
+
+
+# --- human confirmation over the protocol (issue #201, #394) --------------- #
+#
+# The refusal above is one half of the confirmation gate. The other half is
+# that the gate can be opened deliberately, and that the confirmation it then
+# records names exactly the components the operator asked to confirm.
+
+CONFIRM_SECRET = "operator-confirm-secret"
+
+
+@contextlib.contextmanager
+def _confirming_server() -> Iterator[tuple[Any, Any]]:
+    """A server whose caller may mutate *and* confirm, via the dedicated secret.
+
+    ``continuum_confirm`` fails closed when unconfigured (issue #201); these
+    tests exercise the opened gate, so the context carries its own policy
+    rather than reusing the refusing ``server_ctx`` fixture.
+    """
+    server, ctx = build_server(
+        storage=SQLiteStorage(":memory:"),
+        policy=AuthorizationPolicy([TEST_CLIENT]),
+        confirm_auth=ConfirmPolicy(CONFIRM_SECRET),
+    )
+    try:
+        yield server, ctx
+    finally:
+        ctx.close()
+
+
+async def _confirm(server: Any, **arguments: Any) -> dict[str, Any]:
+    """Call ``continuum_confirm`` presenting the confirmation secret."""
+    result = await server.call_tool(
+        "continuum_confirm", arguments, context=_ctx(TEST_CLIENT, CONFIRM_SECRET)
+    )
+    assert result.content, "continuum_confirm returned no content"
+    return json.loads(result.content[0].text)
+
+
+def _confirmed_components(ctx: Any, run_id: str = "run_1") -> list[str]:
+    """The components of the one REVIEW_CONFIRMED event on the run, so far."""
+    events = [e for e in ctx.storage.read_events(run_id) if e.type is EventType.REVIEW_CONFIRMED]
+    assert len(events) == 1, f"expected one REVIEW_CONFIRMED event, got {len(events)}"
+    assert events[0].source is Origin.HUMAN
+    return list(events[0].payload["components"])
+
+
+@pytest.mark.asyncio
+async def test_confirming_without_the_secret_still_refuses(server_ctx: tuple[Any, Any]) -> None:
+    """The dedicated secret is required even on an otherwise-mutating session."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, _ = server_ctx
+    with pytest.raises(ToolError, match="CONTINUUM_MCP_CONFIRM_TOKEN"):
+        await server.call_tool(
+            "continuum_confirm",
+            {"run_id": "run_1"},
+            context=_ctx(TEST_CLIENT, "the-wrong-secret"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_confirming_records_both_components_by_default() -> None:
+    """``scope=None`` confirms the whole self-report, both components."""
+    with _confirming_server() as (server, ctx):
+        await seed_run(server)
+        payload = await _confirm(server, run_id="run_1")
+
+        assert payload["run_id"] == "run_1"
+        assert "mode" in payload and "safe" in payload
+        assert _confirmed_components(ctx) == ["goal", "progress"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scope", "components"),
+    [
+        pytest.param("goal", ["goal"], id="single-string"),
+        pytest.param(["progress"], ["progress"], id="list"),
+        pytest.param(("progress",), ["progress"], id="tuple"),
+        pytest.param(["Goal", " PROGRESS "], ["goal", "progress"], id="normalized"),
+        pytest.param("", ["goal", "progress"], id="empty-string-is-full"),
+        pytest.param([], ["goal", "progress"], id="empty-iterable-is-full"),
+    ],
+)
+async def test_confirming_normalizes_the_scope(scope: Any, components: list[str]) -> None:
+    """A partial scope confirms only that part; emptiness means both (#394)."""
+    with _confirming_server() as (server, ctx):
+        await seed_run(server)
+        await _confirm(server, run_id="run_1", scope=scope)
+        assert _confirmed_components(ctx) == components
+
+
+@pytest.mark.asyncio
+async def test_confirming_rejects_an_unknown_scope_component() -> None:
+    """A scope naming anything but goal/progress refuses rather than ignoring."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    with _confirming_server() as (server, ctx):
+        await seed_run(server)
+        with pytest.raises(ToolError, match=r"scope must be one of \['goal', 'progress'\]"):
+            await _confirm(server, run_id="run_1", scope=["goal", "invalid"])
+
+        # Nothing was recorded for a refused confirmation.
+        assert not [
+            e for e in ctx.storage.read_events("run_1") if e.type is EventType.REVIEW_CONFIRMED
+        ]
+
+
+@pytest.mark.asyncio
+async def test_confirming_returns_the_resume_verdict() -> None:
+    """Confirmation answers with the verdict a resume would now give."""
+    with _confirming_server() as (server, _):
+        await seed_run(server)
+        payload = await _confirm(server, run_id="run_1")
+
+        assert payload["mode"] == RecoveryMode.RESUME.value
+        assert payload["safe"] is True
+        assert payload["run_id"] == "run_1"
+
+
+# --- the confirmation credential must stay its own (issue #201) ------------ #
+
+
+def test_a_reused_session_secret_fails_at_startup() -> None:
+    """One secret for mutating and confirming protections empty."""
+    with pytest.raises(ValueError, match="must be distinct from every mutating credential"):
+        _reject_reused_confirmation_secret(
+            AuthPolicy("shared-secret"), ConfirmPolicy("shared-secret")
+        )
+
+
+def test_a_reused_client_token_fails_at_startup() -> None:
+    """A per-client mutating credential equal to the confirm token counts too."""
+    with pytest.raises(ValueError, match="pytest-client"):
+        _reject_reused_confirmation_secret(
+            AuthPolicy(None, tokens={TEST_CLIENT: "shared-secret"}),
+            ConfirmPolicy("shared-secret"),
+        )
+
+
+def test_distinct_credentials_start_cleanly() -> None:
+    """Distinct secrets protect each other; startup reports nothing."""
+    _reject_reused_confirmation_secret(
+        AuthPolicy("mutating-secret"), ConfirmPolicy("confirm-secret")
+    )
+
+
+def test_an_unconfigured_confirm_gate_skips_the_credential_check() -> None:
+    """Nothing to collide with while confirmation stays disabled."""
+    _reject_reused_confirmation_secret(AuthPolicy("shared-secret"), ConfirmPolicy())
 
 
 # --- environment declared through the protocol ----------------------------- #
